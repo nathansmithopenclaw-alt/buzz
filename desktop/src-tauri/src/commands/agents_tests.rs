@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::agents_nsec::managed_agent_nsec_from_records;
 use crate::managed_agents::AgentDefinition;
 
 fn bare_agent_record(
@@ -88,6 +89,36 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
+}
+
+#[test]
+fn managed_agent_nsec_reveal_validates_pubkey_and_returns_nsec() {
+    let keys = nostr::Keys::generate();
+    let mut record = bare_agent_record(None, None, None);
+    record.pubkey = keys.public_key().to_hex();
+    record.private_key_nsec = keys.secret_key().to_bech32().unwrap();
+
+    let revealed =
+        managed_agent_nsec_from_records(&[record], &keys.public_key().to_bech32().unwrap())
+            .expect("reveal managed-agent key");
+
+    assert_eq!(
+        nostr::Keys::parse(&revealed).unwrap().public_key(),
+        keys.public_key()
+    );
+}
+
+#[test]
+fn managed_agent_nsec_reveal_rejects_mismatched_stored_key() {
+    let requested = nostr::Keys::generate();
+    let wrong = nostr::Keys::generate();
+    let mut record = bare_agent_record(None, None, None);
+    record.pubkey = requested.public_key().to_hex();
+    record.private_key_nsec = wrong.secret_key().to_bech32().unwrap();
+    let requested_pubkey = record.pubkey.clone();
+
+    let error = managed_agent_nsec_from_records(&[record], &requested_pubkey).unwrap_err();
+    assert!(error.contains("does not match"), "got: {error}");
 }
 
 /// Auto-archive uses the same NIP-IA wire builder as the explicit GUI action,

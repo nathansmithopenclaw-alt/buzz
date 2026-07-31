@@ -258,6 +258,11 @@ impl RespondToArg {
 
 #[derive(Subcommand)]
 pub enum AgentsCmd {
+    /// Reveal a locally managed agent's nsec (requires owner authorization)
+    GetNsec {
+        /// Managed agent public key (hex or npub)
+        pubkey: String,
+    },
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
     DraftCreate {
         /// Current channel UUID; the new agent is added here after save
@@ -302,6 +307,12 @@ pub enum AgentsCmd {
         model: Option<String>,
         #[arg(long, value_enum)]
         respond_to: Option<RespondToArg>,
+        /// Maximum concurrent agent turns (1-32)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=32))]
+        parallelism: Option<u32>,
+        /// Comma-separated instance names; pass an empty value to clear the pool
+        #[arg(long)]
+        instance_name_pool: Option<String>,
     },
     /// Submit a NIP-IA archive request for an identity (kind 9035)
     #[command(
@@ -1948,6 +1959,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "get-nsec",
                 "unarchive"
             ]
         );
@@ -2074,7 +2086,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

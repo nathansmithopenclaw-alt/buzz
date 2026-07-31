@@ -6,6 +6,13 @@ import type { Channel, CreateManagedAgentResponse } from "@/shared/api/types";
 
 type TargetChannel = Pick<Channel, "id" | "name">;
 
+export function shouldPresentCreatedAgent(
+  revealSecret: boolean,
+  attachmentFailed: boolean,
+) {
+  return revealSecret || attachmentFailed;
+}
+
 /**
  * Keeps agent creation successful even when the follow-up channel attachment
  * fails, and retries only that attachment rather than recreating the agent.
@@ -43,13 +50,18 @@ export function useCreatedAgentChannelAttachment() {
   async function presentCreatedAgent(
     created: CreateManagedAgentResponse,
     targetChannel?: TargetChannel | null,
+    revealSecret = true,
   ) {
     setAttachmentFailure(null);
     targetChannelRef.current = null;
     if (!created.spawnError && targetChannel) {
       await attach(created, targetChannel);
     }
-    setCreatedAgent({ ...created });
+    if (
+      shouldPresentCreatedAgent(revealSecret, targetChannelRef.current !== null)
+    ) {
+      setCreatedAgent({ ...created });
+    }
   }
 
   async function retryAttachment() {

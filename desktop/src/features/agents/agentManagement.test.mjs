@@ -4,8 +4,9 @@ import test from "node:test";
 import {
   AGENT_MANAGEMENT_REQUEST,
   createInputFromRequest,
-  requestTargetsEditablePersona,
   parseAgentManagementRequest,
+  requestTargetsEditablePersona,
+  updateInputFromRequest,
 } from "./agentManagement.ts";
 
 const CHANNEL_ID = "7c07e659-3610-42f4-9a5e-1e9973c09da9";
@@ -76,6 +77,19 @@ test("rejects invalid create behavior values", () => {
   }
 });
 
+test("rejects invalid optional create text instead of silently dropping it", () => {
+  for (const [field, value] of [
+    ["runtime", 42],
+    ["provider", null],
+    ["model", {}],
+    ["model", "   "],
+  ]) {
+    const payload = createPayload();
+    payload.request[field] = value;
+    assert.equal(parseAgentManagementRequest(payload), null);
+  }
+});
+
 test("requires the originating channel for profile updates", () => {
   const payload = {
     type: AGENT_MANAGEMENT_REQUEST,
@@ -103,6 +117,91 @@ test("uses an agent's current name, never an internal profile ID", () => {
   };
 
   assert.deepEqual(parseAgentManagementRequest(payload), payload);
+});
+
+test("parses and maps parallelism plus instance name pool updates", () => {
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-update-behavior",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      parallelism: 6,
+      namePool: ["Alpha", "Beta"],
+    },
+  };
+  const parsed = parseAgentManagementRequest(payload);
+  assert.ok(parsed && parsed.action === "update");
+
+  assert.deepEqual(
+    updateInputFromRequest(parsed, {
+      id: "persona-1",
+      displayName: "Review helper",
+      systemPrompt: "Review changes.",
+      namePool: ["Old"],
+      behavior: {
+        respondTo: "owner-only",
+        respondToAllowlist: ["owner"],
+        parallelism: 2,
+      },
+    }),
+    {
+      id: "persona-1",
+      displayName: "Review helper",
+      systemPrompt: "Review changes.",
+      runtime: undefined,
+      provider: undefined,
+      model: undefined,
+      namePool: ["Alpha", "Beta"],
+      behavior: {
+        respondTo: "owner-only",
+        respondToAllowlist: ["owner"],
+        parallelism: 6,
+      },
+    },
+  );
+});
+
+test("accepts an empty instance name pool to clear it", () => {
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-clear-name-pool",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      namePool: [],
+    },
+  };
+
+  assert.deepEqual(parseAgentManagementRequest(payload), payload);
+});
+
+test("rejects invalid optional update text instead of silently dropping it", () => {
+  for (const [field, value] of [
+    ["displayName", false],
+    ["systemPrompt", null],
+    ["runtime", 42],
+    ["provider", []],
+    ["model", "   "],
+    ["parallelism", 0],
+    ["parallelism", 33],
+    ["namePool", "Alpha, Beta"],
+    ["namePool", ["Alpha", "   "]],
+  ]) {
+    const payload = {
+      type: AGENT_MANAGEMENT_REQUEST,
+      action: "update",
+      requestId: "request-invalid-update-text",
+      request: {
+        channelId: CHANNEL_ID,
+        agentName: "Review helper",
+        [field]: value,
+      },
+    };
+    assert.equal(parseAgentManagementRequest(payload), null);
+  }
 });
 
 test("allows agents to update only personal, editable profiles", () => {

@@ -29,6 +29,10 @@ export async function getNsec(): Promise<string> {
   return invokeTauri<string>("get_nsec");
 }
 
+export async function getManagedAgentNsec(pubkey: string): Promise<string> {
+  return invokeTauri<string>("get_managed_agent_nsec", { pubkey });
+}
+
 export async function importIdentity(
   nsec: string,
   password?: string,

@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   createInputFromRequest,
   requestTargetsEditablePersona,
+  updateInputFromRequest,
   type AgentManagementRequest,
 } from "./agentManagement";
 import { subscribeAgentManagementRequests } from "./observerRelayStore";
@@ -39,30 +40,6 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-
-function updateInputFromRequest(
-  request: Extract<AgentManagementRequest, { action: "update" }>,
-  current: UpdatePersonaInput,
-): UpdatePersonaInput {
-  const changes = request.request;
-  return {
-    ...current,
-    displayName: changes.displayName ?? current.displayName,
-    systemPrompt: changes.systemPrompt ?? current.systemPrompt,
-    runtime: changes.runtime ?? current.runtime,
-    provider: changes.provider ?? current.provider,
-    model: changes.model ?? current.model,
-    ...(changes.respondTo
-      ? {
-          behavior: {
-            respondTo: changes.respondTo,
-            respondToAllowlist: [],
-            parallelism: current.behavior?.parallelism,
-          },
-        }
-      : {}),
-  };
-}
 
 export function useAgentManagement() {
   const queryClient = useQueryClient();
@@ -203,6 +180,7 @@ export function useAgentManagement() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
+    revealSecret = true,
   ): Promise<boolean> {
     if (request?.action !== "create" || "id" in input) {
       return false;
@@ -241,10 +219,14 @@ export function useAgentManagement() {
         const targetChannel = (channelsQuery.data ?? []).find(
           (channel) => channel.id === request.request.channelId,
         );
-        await createdAgentAttachment.presentCreatedAgent(created, {
-          id: request.request.channelId,
-          name: targetChannel?.name ?? "this channel",
-        });
+        await createdAgentAttachment.presentCreatedAgent(
+          created,
+          {
+            id: request.request.channelId,
+            name: targetChannel?.name ?? "this channel",
+          },
+          revealSecret,
+        );
       }
 
       await Promise.all([
@@ -320,7 +302,12 @@ export function useAgentManagement() {
   const autoApproveCreate = React.useEffectEvent(
     async (requestId: string, input: CreatePersonaInput): Promise<void> => {
       if (request?.requestId !== requestId) return;
-      const submitted = await submitCreate(input, "definition_start", null);
+      const submitted = await submitCreate(
+        input,
+        "definition_start",
+        null,
+        false,
+      );
       if (!submitted && pendingRequestId.current === requestId) {
         setFailedAutoApprovalRequestId(requestId);
       }

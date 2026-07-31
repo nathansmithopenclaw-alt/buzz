@@ -1,7 +1,8 @@
 use buzz_core::kind::KIND_IA_ARCHIVED_LIST;
 use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identity_request};
-use nostr::PublicKey;
+use nostr::{Keys, PublicKey, ToBech32};
 use serde_json::json;
+use std::collections::HashMap;
 
 use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
 use crate::client::BuzzClient;
@@ -11,6 +12,15 @@ use crate::{AgentsCmd, RespondToArg};
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
+        AgentsCmd::GetNsec { pubkey } => {
+            let owner = require_owner(client)?;
+            let target = PublicKey::parse(pubkey.trim())
+                .map_err(|e| CliError::Usage(format!("invalid agent pubkey: {e}")))?;
+            let secrets = read_desktop_secret_blob()?;
+            let nsec = managed_agent_nsec_from_secrets(&secrets, &owner, &target)?;
+            println!("{nsec}");
+            Ok(())
+        }
         AgentsCmd::DraftCreate {
             channel,
             display_name,
@@ -62,6 +72,8 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             provider,
             model,
             respond_to,
+            parallelism,
+            instance_name_pool,
         } => {
             let owner = require_owner(client)?;
             let built = build_update(
@@ -76,6 +88,8 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     provider,
                     model,
                     respond_to: respond_to.map(RespondToArg::to_wire),
+                    parallelism,
+                    name_pool: instance_name_pool,
                 },
             )?;
             let response = client.publish_ephemeral_event(built.event).await?;
@@ -161,8 +175,62 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
     }
 }
 
-/// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by
-/// the `draft-create` and `draft-update` paths.
+const DESKTOP_KEYRING_SERVICE: &str = "buzz-desktop";
+const DESKTOP_KEYRING_BLOB_KEY: &str = "secrets";
+const DESKTOP_IDENTITY_KEY: &str = "identity";
+
+fn read_desktop_secret_blob() -> Result<HashMap<String, String>, CliError> {
+    let service = std::env::var("BUZZ_DEV_KEYRING_SERVICE")
+        .ok()
+        .filter(|value| value == "buzz-desktop-dev" || value.starts_with("buzz-desktop-dev."))
+        .unwrap_or_else(|| DESKTOP_KEYRING_SERVICE.to_string());
+    let entry = keyring::Entry::new(&service, DESKTOP_KEYRING_BLOB_KEY)
+        .map_err(|e| CliError::Other(format!("desktop keyring entry: {e}")))?;
+    let raw = entry.get_password().map_err(|e| match e {
+        keyring::Error::NoEntry => CliError::NotFound("desktop keyring is empty".into()),
+        other => CliError::Other(format!("desktop keyring read: {other}")),
+    })?;
+    serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("desktop keyring data is invalid: {e}")))
+}
+
+fn managed_agent_nsec_from_secrets(
+    secrets: &HashMap<String, String>,
+    owner: &PublicKey,
+    target: &PublicKey,
+) -> Result<String, CliError> {
+    let identity_nsec = secrets
+        .get(DESKTOP_IDENTITY_KEY)
+        .ok_or_else(|| CliError::Auth("desktop owner identity is unavailable".into()))?;
+    let identity = Keys::parse(identity_nsec)
+        .map_err(|e| CliError::Auth(format!("desktop owner identity is invalid: {e}")))?;
+    if identity.public_key() != *owner {
+        return Err(CliError::Auth(
+            "BUZZ_AUTH_TAG owner does not match this Desktop identity".into(),
+        ));
+    }
+
+    let target_hex = target.to_hex();
+    let nsec = secrets
+        .get(&format!("agent:{target_hex}"))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CliError::NotFound(format!("managed agent {target_hex} has no stored key"))
+        })?;
+    let keys = Keys::parse(nsec)
+        .map_err(|e| CliError::Other(format!("stored managed-agent key is invalid: {e}")))?;
+    if keys.public_key() != *target {
+        return Err(CliError::Other(
+            "stored managed-agent key does not match the requested pubkey".into(),
+        ));
+    }
+    keys.secret_key()
+        .to_bech32()
+        .map_err(|e| CliError::Other(format!("encode managed-agent nsec: {e}")))
+}
+
+/// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used by agent
+/// management requests, including owner-gated local key retrieval.
 fn require_owner(client: &BuzzClient) -> Result<PublicKey, CliError> {
     let hex = client
         .auth_tag_owner_hex()
@@ -724,5 +792,55 @@ mod tests {
             .expect("sign");
         let result = verify_archived_event(&event, &self_hex).expect("should pass");
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn local_nsec_reveal_requires_matching_desktop_owner() {
+        let desktop_owner = Keys::generate();
+        let other_owner = Keys::generate();
+        let agent = Keys::generate();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            DESKTOP_IDENTITY_KEY.to_string(),
+            desktop_owner.secret_key().to_bech32().unwrap(),
+        );
+        secrets.insert(
+            format!("agent:{}", agent.public_key().to_hex()),
+            agent.secret_key().to_bech32().unwrap(),
+        );
+
+        let error = managed_agent_nsec_from_secrets(
+            &secrets,
+            &other_owner.public_key(),
+            &agent.public_key(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match this Desktop"));
+    }
+
+    #[test]
+    fn local_nsec_reveal_returns_only_the_requested_agent_key() {
+        let desktop_owner = Keys::generate();
+        let agent = Keys::generate();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            DESKTOP_IDENTITY_KEY.to_string(),
+            desktop_owner.secret_key().to_bech32().unwrap(),
+        );
+        secrets.insert(
+            format!("agent:{}", agent.public_key().to_hex()),
+            agent.secret_key().to_bech32().unwrap(),
+        );
+
+        let revealed = managed_agent_nsec_from_secrets(
+            &secrets,
+            &desktop_owner.public_key(),
+            &agent.public_key(),
+        )
+        .expect("owner-authorized reveal");
+        assert_eq!(
+            Keys::parse(&revealed).unwrap().public_key(),
+            agent.public_key()
+        );
     }
 }

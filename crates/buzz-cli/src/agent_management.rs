@@ -8,6 +8,7 @@ use crate::error::CliError;
 
 const REQUEST_KIND: &str = "agent_management_request";
 const MAX_NAME_CHARS: usize = 120;
+const MAX_NAME_POOL_ENTRIES: usize = 100;
 const MAX_PROMPT_CHARS: usize = 20_000;
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,6 +46,33 @@ pub struct UpdateAgentDraft {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_pool: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidatedUpdateAgentDraft {
+    channel_id: String,
+    agent_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    respond_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallelism: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_pool: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +120,24 @@ fn required(value: String, label: &str, max: usize) -> Result<String, CliError> 
 
 fn optional(value: Option<String>, label: &str) -> Result<Option<String>, CliError> {
     value.map(|value| required(value, label, 300)).transpose()
+}
+
+fn optional_name_pool(value: Option<String>) -> Result<Option<Vec<String>>, CliError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let names = value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| required(name.to_owned(), "instance name", MAX_NAME_CHARS))
+        .collect::<Result<Vec<_>, _>>()?;
+    if names.len() > MAX_NAME_POOL_ENTRIES {
+        return Err(CliError::Usage(format!(
+            "instance-name-pool has too many names (max {MAX_NAME_POOL_ENTRIES})"
+        )));
+    }
+    Ok(Some(names))
 }
 
 fn build<T: Serialize>(
@@ -190,7 +236,15 @@ pub fn build_update(
             "respond-to must be owner-only or anyone".into(),
         ));
     }
-    let request = UpdateAgentDraft {
+    if draft
+        .parallelism
+        .is_some_and(|parallelism| !(1..=32).contains(&parallelism))
+    {
+        return Err(CliError::Usage(
+            "parallelism must be between 1 and 32".into(),
+        ));
+    }
+    let request = ValidatedUpdateAgentDraft {
         channel_id: channel_id.clone(),
         agent_name: required(draft.agent_name, "agent name", MAX_NAME_CHARS)?,
         display_name: optional(draft.display_name, "display name")?,
@@ -202,6 +256,8 @@ pub fn build_update(
         provider: optional(draft.provider, "provider")?,
         model: optional(draft.model, "model")?,
         respond_to,
+        parallelism: draft.parallelism,
+        name_pool: optional_name_pool(draft.name_pool)?,
     };
     if request.display_name.is_none()
         && request.system_prompt.is_none()
@@ -209,6 +265,8 @@ pub fn build_update(
         && request.provider.is_none()
         && request.model.is_none()
         && request.respond_to.is_none()
+        && request.parallelism.is_none()
+        && request.name_pool.is_none()
     {
         return Err(CliError::Usage(
             "include at least one field to update".into(),
@@ -321,10 +379,70 @@ mod tests {
                 provider: None,
                 model: None,
                 respond_to: None,
+                parallelism: None,
+                name_pool: None,
             },
         )
         .unwrap_err();
         assert!(error.to_string().contains("at least one field"));
+    }
+
+    #[test]
+    fn update_serializes_parallelism_and_instance_name_pool() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let built = build_update(
+            &agent,
+            &owner.public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Scout".into(),
+                display_name: None,
+                system_prompt: None,
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: None,
+                parallelism: Some(6),
+                name_pool: Some("Alpha, Beta".into()),
+            },
+        )
+        .unwrap();
+
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        let request = &payload["payload"]["request"];
+        assert_eq!(request["parallelism"], 6);
+        assert_eq!(request["namePool"], serde_json::json!(["Alpha", "Beta"]));
+        assert!(request.get("envVars").is_none());
+    }
+
+    #[test]
+    fn update_can_clear_instance_name_pool() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let built = build_update(
+            &agent,
+            &owner.public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Scout".into(),
+                display_name: None,
+                system_prompt: None,
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: None,
+                parallelism: None,
+                name_pool: Some(String::new()),
+            },
+        )
+        .unwrap();
+
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(
+            payload["payload"]["request"]["namePool"],
+            serde_json::json!([])
+        );
     }
 
     #[test]

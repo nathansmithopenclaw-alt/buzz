@@ -517,6 +517,12 @@ export function subscribeAgentManagementRequests(
   listener: (agentPubkey: string, request: AgentManagementRequest) => void,
 ) {
   agentManagementListeners.add(listener);
+  // Management requests are relay-ephemeral. Open the owner-scoped observer
+  // subscription as soon as the app-level management surface mounts, even
+  // when no managed-agent screen or session has supplied an ingestion list
+  // yet. The existing known-agent and channel-membership gates still decide
+  // whether a received request is trusted and actionable.
+  void ensureRelayObserverSubscription();
   return () => {
     agentManagementListeners.delete(listener);
   };
