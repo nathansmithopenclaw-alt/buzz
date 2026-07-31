@@ -262,6 +262,7 @@ test("first-event request resolves null when EOSE arrives without an event", asy
 
 test("production CLOSED handler removes terminal live subscriptions", () => {
   let readyCalls = 0;
+  const terminalMessages = [];
   const subscriptions = new Map([
     [
       "live-1",
@@ -269,6 +270,7 @@ test("production CLOSED handler removes terminal live subscriptions", () => {
         mode: "live",
         filter: { kinds: [9], limit: 50 },
         onEvent: () => {},
+        onTerminalClosed: (message) => terminalMessages.push(message),
         resolveReady: () => {
           readyCalls += 1;
         },
@@ -283,6 +285,7 @@ test("production CLOSED handler removes terminal live subscriptions", () => {
   });
   assert.equal(subscriptions.has("live-1"), false);
   assert.equal(readyCalls, 1);
+  assert.deepEqual(terminalMessages, ["restricted: access revoked"]);
 });
 
 // ── Rate-limited CLOSED core behaviour (F5) ───────────────────────────────────

@@ -135,6 +135,7 @@ type AppSidebarProps = {
   ) => void;
   onMarkAllChannelsRead: () => void;
   onBrowseChannels?: (onCreated?: (channelId: string) => void) => void;
+  onRefreshChannels?: () => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onUpdateCommunity: (
     id: string,
@@ -207,6 +208,7 @@ export function AppSidebar({
   onMarkChannelRead,
   onMarkAllChannelsRead,
   onBrowseChannels,
+  onRefreshChannels,
   onOpenDm,
   onUpdateCommunity,
   onRemoveCommunity,
@@ -745,6 +747,7 @@ export function AppSidebar({
                       listTestId="stream-list"
                       quickCreateLabel="Browse channels"
                       onQuickCreateClick={() => onBrowseChannels?.()}
+                      onRefresh={onRefreshChannels}
                       showQuickCreate
                       onMarkAllRead={onMarkAllChannelsRead}
                       onMarkChannelRead={onMarkChannelRead}

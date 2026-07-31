@@ -476,7 +476,6 @@ export function AppShell() {
     setSearchFocusRequest((request) => request + 1);
     void refetchChannels();
   }, [refetchChannels]);
-
   const handleBrowseChannelJoin = React.useCallback(
     async (channelId: string) => {
       await joinChannel(channelId);
@@ -867,6 +866,7 @@ export function AppShell() {
                             onMarkChannelRead={markChannelRead}
                             onMarkChannelUnread={markChannelUnread}
                             onBrowseChannels={handleOpenBrowseChannels}
+                            onRefreshChannels={() => void refetchChannels()}
                             onOpenDm={async ({ pubkeys }) => {
                               const directMessage =
                                 await openDmMutation.mutateAsync({

@@ -16,6 +16,7 @@ import {
   getTextPayload,
   type ConnectionState,
   type PendingEvent,
+  type RelayLiveSubscriptionOptions,
   type RelaySubscription,
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
@@ -405,14 +406,13 @@ export class RelayClient {
   async subscribeToAllStreamMessages(onEvent: (event: RelayEvent) => void) {
     return this.subscribe(buildGlobalStreamFilter(50), onEvent);
   }
-
   async subscribeLive(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
+    options?: RelayLiveSubscriptionOptions,
   ) {
-    return this.subscribe(filter, onEvent);
+    return this.subscribe(filter, onEvent, options);
   }
-
   async subscribeToChannelMentionEvents(
     channelId: string,
     pubkey: string,
@@ -580,13 +580,12 @@ export class RelayClient {
       throw connectionError;
     }
   }
-
   private async subscribe(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
+    options?: RelayLiveSubscriptionOptions,
   ) {
     await this.ensureConnected();
-
     const subId = `live-${crypto.randomUUID()}`;
     let resolveReady = () => {
       return;
@@ -605,6 +604,7 @@ export class RelayClient {
       mode: "live",
       filter,
       onEvent,
+      onTerminalClosed: options?.onTerminalClosed,
       resolveReady,
     });
 

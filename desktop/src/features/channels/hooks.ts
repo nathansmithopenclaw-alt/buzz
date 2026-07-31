@@ -214,6 +214,7 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
     staleTime: 60_000,
     refetchInterval: 60_000,
     refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
 }
 

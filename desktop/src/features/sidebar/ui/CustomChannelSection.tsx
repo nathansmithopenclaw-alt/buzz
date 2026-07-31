@@ -7,6 +7,7 @@ import {
   EllipsisVertical,
   Pencil,
   Plus,
+  RefreshCw,
   Trash2,
 } from "lucide-react";
 
@@ -128,6 +129,7 @@ export function SectionActionsMenu({
   browseLabel,
   onCreate,
   createLabel,
+  onRefresh,
   onNewMessage,
   newMessageLabel,
   onRenameSection,
@@ -149,6 +151,7 @@ export function SectionActionsMenu({
   browseLabel?: string;
   onCreate?: () => void;
   createLabel?: string;
+  onRefresh?: () => void;
   onNewMessage?: () => void;
   newMessageLabel?: string;
   onRenameSection?: () => void;
@@ -211,6 +214,12 @@ export function SectionActionsMenu({
           <DropdownMenuItem onSelect={() => deferMenuAction(onCreate)}>
             <Plus className="h-4 w-4" />
             <span>{createLabel ?? "Create channel"}</span>
+          </DropdownMenuItem>
+        ) : null}
+        {onRefresh ? (
+          <DropdownMenuItem onSelect={() => deferMenuAction(onRefresh)}>
+            <RefreshCw className="h-4 w-4" />
+            <span>Refresh channels</span>
           </DropdownMenuItem>
         ) : null}
         {showSectionManagement ? (
@@ -346,6 +355,7 @@ export function ChannelGroupSection({
   onBrowseClick,
   onCreateClick,
   onQuickCreateClick,
+  onRefresh,
   quickCreateLabel,
   showQuickCreate,
   onMarkAllRead,
@@ -391,6 +401,7 @@ export function ChannelGroupSection({
    * "Add channel" search-and-create browser instead of the bare create form.
    */
   onQuickCreateClick?: () => void;
+  onRefresh?: () => void;
   /** Overrides the quick-create button's aria-label/tooltip. */
   quickCreateLabel?: string;
   showQuickCreate?: boolean;
@@ -521,6 +532,7 @@ export function ChannelGroupSection({
               browseLabel={browseLabel}
               onCreate={onCreateClick}
               createLabel={createLabel}
+              onRefresh={onRefresh}
               sortMode={sortMode}
               onSortModeChange={onSortModeChange}
             />

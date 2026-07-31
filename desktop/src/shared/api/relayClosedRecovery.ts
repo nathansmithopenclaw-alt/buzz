@@ -80,8 +80,14 @@ function recoverLiveSubscriptionFromClosed({
 
   if (closedClass === "terminal") {
     // Auth/access/filter failure — permanently remove the subscription so it
-    // doesn't silently loop.
+    // doesn't silently loop. Notify the owner so critical subscriptions can
+    // re-arm when their surrounding state or connection changes.
     subscriptions.delete(subId);
+    try {
+      subscription.onTerminalClosed?.(message);
+    } catch (error) {
+      console.error("Terminal CLOSED subscription callback failed", error);
+    }
     return;
   }
 

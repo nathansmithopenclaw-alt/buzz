@@ -38,6 +38,10 @@ export type RelaySubscriptionFilter = {
   until?: number;
 } & Partial<Record<`#${string}`, string[]>>;
 
+export type RelayLiveSubscriptionOptions = {
+  onTerminalClosed?: (message: string) => void;
+};
+
 type HistorySubscription = {
   mode: "history";
   events: RelayEvent[];
@@ -62,6 +66,7 @@ type LiveSubscription = {
   lastSeenCreatedAt?: number;
   closedRetryAttempt?: number;
   closedRetryTimeout?: number;
+  onTerminalClosed?: (message: string) => void;
 };
 
 export type PendingEvent = {
