@@ -1352,6 +1352,24 @@ async fn resume_workflow_after_approval(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // A resumed run must be running before the next step executes. In
+    // particular, a second request_approval step can only atomically suspend a
+    // run whose current status is `running`.
+    if let Err(e) = db
+        .update_workflow_run(
+            community_id,
+            run_id,
+            RunStatus::Running,
+            run.current_step,
+            &run.execution_trace,
+            None,
+        )
+        .await
+    {
+        tracing::error!("resume_workflow: failed to mark run {run_id} running: {e}");
+        return;
+    }
+
     // Execute remaining steps
     let existing_trace = run.execution_trace.as_array().cloned();
     let result = buzz_workflow::executor::execute_from_step(

@@ -13,6 +13,9 @@ use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
+mod approval;
+pub use approval::{build_approval_deny, build_approval_grant};
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
@@ -832,24 +835,13 @@ pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String>
     Ok(EventBuilder::new(Kind::Custom(46020), "").tags(tags))
 }
 
-/// Kind 46030 — grant an approval token (with optional note).
-pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
-    Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
-}
-
-/// Kind 46031 — deny an approval token (with optional note).
-pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
-    Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
-}
-
 // ── Transport ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use nostr::Keys;
+
     #[test]
     fn channel_builders_reject_hash_only_names() {
         let channel_id = Uuid::new_v4();

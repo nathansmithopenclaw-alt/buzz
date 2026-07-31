@@ -979,6 +979,64 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     Ok(())
 }
 
+/// Atomically create a pending approval and transition its run to
+/// `waiting_approval` at the suspending step.
+pub async fn suspend_workflow_run_for_approval(
+    pool: &PgPool,
+    params: CreateApprovalParams<'_>,
+    trace: &serde_json::Value,
+) -> Result<()> {
+    let token_hash = hash_approval_token(params.token);
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO workflow_approvals
+            (community_id, token, workflow_id, run_id, step_id, step_index, approver_spec, status, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+        "#,
+    )
+    .bind(params.community_id.as_uuid())
+    .bind(token_hash)
+    .bind(params.workflow_id)
+    .bind(params.run_id)
+    .bind(params.step_id)
+    .bind(params.step_index)
+    .bind(params.approver_spec)
+    .bind(params.expires_at)
+    .execute(&mut *tx)
+    .await?;
+
+    let affected = sqlx::query(
+        r#"
+        UPDATE workflow_runs
+        SET status = 'waiting_approval',
+            current_step = $1,
+            execution_trace = $2,
+            error_message = NULL,
+            completed_at = NULL
+        WHERE community_id = $3 AND id = $4 AND workflow_id = $5 AND status = 'running'
+        "#,
+    )
+    .bind(params.step_index)
+    .bind(trace)
+    .bind(params.community_id.as_uuid())
+    .bind(params.run_id)
+    .bind(params.workflow_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(DbError::InvalidData(format!(
+            "workflow_run {} was not running for approval suspension",
+            params.run_id
+        )));
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Fetch an approval record by raw token.
 ///
 /// The token is hashed before the DB lookup so plaintext tokens are never
@@ -2300,6 +2358,92 @@ mod tests {
             after_b.status,
             ApprovalStatus::Pending,
             "B's approval must remain pending after A is granted"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn approval_suspension_persists_gate_and_run_atomically() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let workflow_id = Uuid::new_v4();
+        insert_workflow_with_ids(
+            &pool,
+            community,
+            workflow_id,
+            Uuid::new_v4(),
+            "approval-atomic",
+        )
+        .await;
+        let run_id = create_workflow_run(&pool, community, workflow_id, None, None)
+            .await
+            .expect("create run");
+        update_workflow_run(
+            &pool,
+            community,
+            run_id,
+            RunStatus::Running,
+            0,
+            &serde_json::json!([]),
+            None,
+        )
+        .await
+        .expect("start run");
+        let token = Uuid::new_v4().to_string();
+        let trace = serde_json::json!([{"step_id":"gate","status":"waiting_approval"}]);
+        suspend_workflow_run_for_approval(
+            &pool,
+            CreateApprovalParams {
+                community_id: community,
+                token: &token,
+                workflow_id,
+                run_id,
+                step_id: "gate",
+                step_index: 0,
+                approver_spec: "any",
+                expires_at: Utc::now() + chrono::Duration::minutes(5),
+            },
+            &trace,
+        )
+        .await
+        .expect("suspend for approval");
+
+        let run = get_workflow_run(&pool, community, run_id)
+            .await
+            .expect("load run");
+        assert_eq!(run.status, RunStatus::WaitingApproval);
+        assert_eq!(run.execution_trace, trace);
+        let approval = get_approval(&pool, community, &token)
+            .await
+            .expect("load approval");
+        assert_eq!(approval.status, ApprovalStatus::Pending);
+        assert_eq!(approval.run_id, run_id);
+
+        let second = suspend_workflow_run_for_approval(
+            &pool,
+            CreateApprovalParams {
+                community_id: community,
+                token: &Uuid::new_v4().to_string(),
+                workflow_id,
+                run_id,
+                step_id: "other",
+                step_index: 1,
+                approver_spec: "any",
+                expires_at: Utc::now() + chrono::Duration::minutes(5),
+            },
+            &trace,
+        )
+        .await;
+        assert!(
+            second.is_err(),
+            "a non-running run must not mint another gate"
+        );
+        assert_eq!(
+            get_run_approvals(&pool, community, workflow_id, run_id)
+                .await
+                .unwrap()
+                .len(),
+            1
         );
     }
 

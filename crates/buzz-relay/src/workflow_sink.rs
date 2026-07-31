@@ -8,11 +8,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED};
 use buzz_core::tenant::CommunityId;
-use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
+use buzz_workflow::action_sink::{ActionSink, ActionSinkError, ApprovalRequestEvent};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
+use sha2::{Digest, Sha256};
 use tracing::info;
 use uuid::Uuid;
 
@@ -362,6 +363,100 @@ impl ActionSink for RelayActionSink {
             Ok(event_id_hex)
         })
     }
+
+    fn request_approval<'a>(
+        &'a self,
+        request: ApprovalRequestEvent<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + 'a>> {
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+            let host = state
+                .db
+                .lookup_community_host(request.community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {} is not mapped to a host",
+                        request.community_id
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(request.community_id, host);
+
+            let owner = nostr::PublicKey::from_hex(request.owner_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid workflow owner pubkey: {e}"))
+            })?;
+            let recipient = if request.approver_spec == "any" {
+                owner
+            } else {
+                nostr::PublicKey::from_hex(request.approver_spec).map_err(|e| {
+                    ActionSinkError::InvalidInput(format!("invalid approver pubkey: {e}"))
+                })?
+            };
+            let token_hash = hex::encode(Sha256::digest(request.token.as_bytes()));
+            let mut tags = vec![
+                Tag::parse(["d", token_hash.as_str()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("d tag: {e}")))?,
+                Tag::parse(["token", request.token])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("token tag: {e}")))?,
+                Tag::parse(["p", recipient.to_hex().as_str()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                Tag::parse(["workflow", request.workflow_id.to_string().as_str()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+                Tag::parse(["run", request.run_id.to_string().as_str()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("run tag: {e}")))?,
+                Tag::parse(["step", request.step_id])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("step tag: {e}")))?,
+                Tag::parse([
+                    "expiration",
+                    request.expires_at.timestamp().to_string().as_str(),
+                ])
+                .map_err(|e| ActionSinkError::EventBuild(format!("expires tag: {e}")))?,
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+            ];
+            if let Some(channel_id) = request.channel_id {
+                tags.push(
+                    Tag::parse(["h", channel_id.to_string().as_str()])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                );
+            }
+
+            let event = EventBuilder::new(
+                Kind::from(KIND_WORKFLOW_APPROVAL_REQUESTED as u16),
+                request.message,
+            )
+            .tags(tags)
+            .sign_with_keys(&state.relay_keypair)
+            .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+            let event_id = event.id.to_hex();
+            let (stored_event, inserted) = state
+                .db
+                .insert_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    request.channel_id,
+                    None,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    request.owner_pubkey,
+                    None,
+                )
+                .await;
+            }
+            Ok(event_id)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -707,5 +802,61 @@ mod integration_tests {
             p_tag_targets.contains(&agent_hex.as_str()),
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_approval_request_publishes_capability_and_hash() {
+        let state = test_state().await;
+        let owner = nostr::Keys::generate();
+        let approver = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let approver_hex = approver.public_key().to_hex();
+        let host = format!("wf-approval-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(record) => record.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        let token = uuid::Uuid::new_v4().to_string();
+        let expected_hash = hex::encode(Sha256::digest(token.as_bytes()));
+        let sink = RelayActionSink::new(&state);
+        let event_id = sink
+            .request_approval(ApprovalRequestEvent {
+                community_id: community,
+                channel_id: None,
+                workflow_id: uuid::Uuid::new_v4(),
+                run_id: uuid::Uuid::new_v4(),
+                step_id: "gate",
+                token: &token,
+                approver_spec: &approver_hex,
+                owner_pubkey: &owner_hex,
+                message: "Approve release?",
+                expires_at: Utc::now() + chrono::Duration::minutes(5),
+            })
+            .await
+            .expect("publish approval request");
+        let event_id = nostr::EventId::from_hex(&event_id).unwrap();
+        let stored = state
+            .db
+            .get_event_by_id(community, event_id.as_bytes())
+            .await
+            .expect("query event")
+            .expect("event persisted");
+        let tags: Vec<Vec<String>> = stored
+            .event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert_eq!(stored.event.kind, Kind::Custom(46010));
+        assert_eq!(stored.event.content, "Approve release?");
+        assert!(tags.contains(&vec!["d".into(), expected_hash]));
+        assert!(tags.contains(&vec!["token".into(), token]));
+        assert!(tags.contains(&vec!["p".into(), approver_hex]));
     }
 }

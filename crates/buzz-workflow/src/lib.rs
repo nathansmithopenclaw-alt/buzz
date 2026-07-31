@@ -35,7 +35,7 @@ pub mod error;
 pub mod executor;
 pub mod schema;
 
-pub use action_sink::{ActionSink, ActionSinkError};
+pub use action_sink::{ActionSink, ActionSinkError, ApprovalRequestEvent};
 pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
@@ -46,7 +46,7 @@ use std::sync::OnceLock;
 
 use buzz_core::kind::{event_kind_u32, is_workflow_execution_kind, KIND_REACTION};
 use buzz_core::tenant::CommunityId;
-use buzz_db::workflow::RunStatus;
+use buzz_db::workflow::{ApprovalStatus, CreateApprovalParams, RunStatus};
 use buzz_db::Db;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -223,35 +223,83 @@ impl WorkflowEngine {
             Ok(result) => {
                 let mut full_trace = prefix;
                 full_trace.extend(result.trace);
-                let trace_json = serde_json::Value::Array(full_trace);
                 let step_count = result.step_index as i32;
 
-                if result.approval_token.is_some() {
-                    // Approval gates are not yet implemented (WF-08).
-                    // Fail explicitly rather than creating unreachable WaitingApproval rows.
-                    tracing::warn!(
-                        run_id = %run_id,
-                        step_index = result.step_index,
-                        "Workflow hit approval gate — not yet implemented, marking as failed"
-                    );
-                    if let Err(e) = self
-                        .db
-                        .update_workflow_run(
-                            community_id,
-                            run_id,
-                            RunStatus::Failed,
-                            step_count,
-                            &trace_json,
-                            Some("approval gates not yet implemented — see WF-08"),
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
-                        );
+                if let Some(approval) = result.approval {
+                    full_trace.push(serde_json::json!({
+                        "step_id": approval.step_id.clone(),
+                        "status": "waiting_approval",
+                    }));
+                    let trace_json = serde_json::Value::Array(full_trace);
+                    let setup = async {
+                        let run = self.db.get_workflow_run(community_id, run_id).await?;
+                        let workflow = self.db.get_workflow(community_id, run.workflow_id).await?;
+                        self.db
+                            .suspend_workflow_run_for_approval(
+                                CreateApprovalParams {
+                                    community_id,
+                                    token: &approval.token,
+                                    workflow_id: workflow.id,
+                                    run_id,
+                                    step_id: &approval.step_id,
+                                    step_index: step_count,
+                                    approver_spec: &approval.approver_spec,
+                                    expires_at: approval.expires_at,
+                                },
+                                &trace_json,
+                            )
+                            .await?;
+
+                        let owner_pubkey = hex::encode(&workflow.owner_pubkey);
+                        self.action_sink()?
+                            .request_approval(ApprovalRequestEvent {
+                                community_id,
+                                channel_id: workflow.channel_id,
+                                workflow_id: workflow.id,
+                                run_id,
+                                step_id: &approval.step_id,
+                                token: &approval.token,
+                                approver_spec: &approval.approver_spec,
+                                owner_pubkey: &owner_pubkey,
+                                message: &approval.message,
+                                expires_at: approval.expires_at,
+                            })
+                            .await?;
+                        Ok::<(), WorkflowError>(())
+                    }
+                    .await;
+
+                    if let Err(e) = setup {
+                        tracing::error!(run_id = %run_id, "Failed to suspend workflow for approval: {e}");
+                        let _ = self
+                            .db
+                            .update_approval(
+                                community_id,
+                                &approval.token,
+                                ApprovalStatus::Denied,
+                                None,
+                                Some("approval request publication failed"),
+                            )
+                            .await;
+                        if let Err(db_err) = self
+                            .db
+                            .update_workflow_run(
+                                community_id,
+                                run_id,
+                                RunStatus::Failed,
+                                step_count,
+                                &trace_json,
+                                Some(&format!("approval request setup failed: {e}")),
+                            )
+                            .await
+                        {
+                            tracing::error!(run_id = %run_id, "Failed to mark approval run failed: {db_err}");
+                        }
+                    } else {
+                        tracing::info!(run_id = %run_id, step_index = step_count, "Workflow waiting for approval");
                     }
                 } else {
+                    let trace_json = serde_json::Value::Array(full_trace);
                     tracing::info!(run_id = %run_id, "Workflow run completed");
                     if let Err(e) = self
                         .db

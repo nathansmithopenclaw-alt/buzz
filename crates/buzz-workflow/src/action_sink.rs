@@ -7,6 +7,32 @@ use std::future::Future;
 use std::pin::Pin;
 
 use buzz_core::tenant::CommunityId;
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
+
+/// Data needed to publish a workflow approval request event.
+pub struct ApprovalRequestEvent<'a> {
+    /// Community that owns the workflow run.
+    pub community_id: CommunityId,
+    /// Channel that scopes the workflow, when present.
+    pub channel_id: Option<Uuid>,
+    /// Workflow identifier.
+    pub workflow_id: Uuid,
+    /// Run identifier.
+    pub run_id: Uuid,
+    /// Step identifier.
+    pub step_id: &'a str,
+    /// Raw approval capability token.
+    pub token: &'a str,
+    /// Normalized approver spec (`any` or a pubkey).
+    pub approver_spec: &'a str,
+    /// Workflow owner pubkey, used as the notification recipient for `any`.
+    pub owner_pubkey: &'a str,
+    /// Human-readable prompt.
+    pub message: &'a str,
+    /// Request expiry.
+    pub expires_at: DateTime<Utc>,
+}
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -66,4 +92,10 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Publish a relay-authored kind-46010 approval request.
+    fn request_approval<'a>(
+        &'a self,
+        request: ApprovalRequestEvent<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + 'a>>;
 }

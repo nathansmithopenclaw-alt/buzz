@@ -549,7 +549,7 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 
 **Concurrency:** `Arc<Semaphore>` with 100 permits. `try_acquire()` — returns `CapacityExceeded` immediately rather than queuing.
 
-**Approval gates:** `request_approval` action returns `StepResult::Suspended` with a generated UUID token, but the engine does not yet persist the token or resume execution — runs that hit an approval gate are marked as failed (🚧 WF-08). `execute_from_step()` exists for future resumption support.
+**Approval gates:** `request_approval` resolves its approver within the workflow channel, atomically stores a hashed capability token while moving the run to `WaitingApproval`, and publishes a relay-authored kind-46010 request. Kind-46030 grant resumes at the following step; kind-46031 deny cancels the run. The raw UUID capability appears only in the request event, while commands reference its SHA-256 hash.
 
 **Cron scheduler:** loop ticks every 60 seconds, evaluates cron expressions with window-based matching, and creates workflow runs for matched triggers. Fully implemented.
 
@@ -823,5 +823,4 @@ These are verified gaps in the current implementation — not design aspirations
 | 2 | **No rate limiting implementation** | `RateLimiter` trait exists in `buzz-auth`. Only implementation is `AlwaysAllowRateLimiter` (test stub, gated behind `#[cfg(any(test, feature = "test-utils"))]`). `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) but none are enforced. |
 | 3 | **No dedicated typing REST endpoint** | Typing indicators (kind 20002) are delivered via both local fan-out and Redis pub/sub (cross-node). There is no REST endpoint to query current typers — `/api/presence` returns online/away status only, not typing state. |
 | 4 | **Huddle recording/tracks not built** | Voice, room lifecycle, and join/leave/end events are wired (see Huddle Audio above). Recording and per-track publishing have reserved kinds but no producer yet. |
-| 5 | **Approval gates not wired end-to-end** | The executor returns `StepResult::Suspended` and the relay has grant/deny API endpoints with DB CRUD, but the engine intercepts before creating `WaitingApproval` rows — runs that hit an approval gate are marked as Failed (🚧 WF-08). |
 | 6 | **Workflow actions partially stubbed** | The `send_dm` and `set_channel_topic` workflow actions are in the schema but return `NotImplemented` — a run that reaches one fails at execution (🚧 WF-07). |

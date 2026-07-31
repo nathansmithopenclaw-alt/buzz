@@ -1912,20 +1912,18 @@ mod workflows {
     }
 
     /// Define a workflow in `channel_id` on `http_base`'s community (kind:30620,
-    /// `h`=channel, content=YAML). Returns the **server-generated** workflow id,
-    /// parsed out of the OK message (`response:{"workflow_id":"…"}`). This id is
-    /// the tenant-scoped handle the trigger door confines: defined under A, it
-    /// only resolves under A.
+    /// `h`=channel, `d`=workflow UUID, content=YAML). Returns the canonical
+    /// workflow id parsed out of the OK message (`response:{"workflow_id":"…"}`).
+    /// This id is the tenant-scoped handle the trigger door confines: defined
+    /// under A, it only resolves under A.
     async fn define_workflow(http_base: &str, keys: &Keys, channel_id: &str, name: &str) -> String {
-        // `h` binds the channel; `name` is required by `handle_workflow_def`
-        // (it rejects "missing workflow name" before parsing YAML). We use the
-        // `name` tag, not `d`: the server *generates* the workflow id, and that
-        // generated id — not any client-supplied `d` — is the handle this row
-        // confines. A `d` tag here would falsely imply the trigger resolves by
-        // client key.
+        // `h` binds the channel; `d` is the canonical idempotent workflow UUID;
+        // `name` is the display name.
+        let workflow_id = uuid::Uuid::new_v4().to_string();
         let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF), workflow_yaml(name))
             .tags(vec![
                 Tag::parse(["h", channel_id]).unwrap(),
+                Tag::parse(["d", workflow_id.as_str()]).unwrap(),
                 Tag::parse(["name", name]).unwrap(),
             ])
             .sign_with_keys(keys)
@@ -2029,16 +2027,6 @@ mod workflows {
     /// assertion goes RED. Restore the `community_id` argument → GREEN. This is
     /// the exact invariant commit `c81b89355` documents at that call site.
     ///
-    /// NOTE — approval-token isolation is a **separate, not-yet-wire-live**
-    /// obligation, deliberately left as a `pending_lane` below. The grant
-    /// handler (`get_approval_by_stored_hash(community, hash)`) is already
-    /// community-scoped, but nothing *mints* a pending approval over the wire:
-    /// the executor's approval gate is an explicit TODO
-    /// (`crates/buzz-workflow/src/lib.rs` — "approval gates not yet implemented,
-    /// see WF-08") and `create_approval` is only reached from unit tests. A
-    /// green end-to-end approval-isolation test therefore cannot be exercised
-    /// today; writing one would violate this file's contract (a green run can
-    /// never be faked by an empty/DB-only body). It lands with WF-08.
     #[tokio::test]
     #[ignore]
     async fn workflow_trigger_is_community_confined() {
@@ -2096,26 +2084,175 @@ mod workflows {
         );
     }
 
-    /// Obligation (approval-token half): an approval token (its stored hash)
-    /// minted under community A cannot be satisfied by a grant on host B, and
-    /// vice versa. The grant resolution is already community-scoped
-    /// (`get_approval_by_stored_hash(community, hash)`), but this half is
-    /// **not wire-live**: nothing mints a pending approval over the wire yet —
-    /// the executor approval gate is an explicit TODO (WF-08), and
-    /// `create_approval` is reached only from unit tests. Left as a precise
-    /// `pending_lane` so the WF-08 owner fills in *their* row; a green run can
-    /// never be faked by a DB-only/empty body. Depends on WF-08 (approval
-    /// minting), **not** buzz-db — the scoping fence it will exercise is
-    /// already landed.
+    /// Obligation (approval-token half): a real approval minted under A cannot
+    /// be satisfied through host B. The positive A grant must resume the run,
+    /// proving the negative arm is tenant confinement rather than a dead token.
     #[tokio::test]
     #[ignore]
     async fn approval_token_is_community_confined() {
-        pending_lane(
-            "WF-08 (approval minting)",
-            "an approval token minted under A cannot be satisfied by a grant on host B — \
-             blocked until the executor approval gate (WF-08) mints pending approvals over \
-             the wire; the get_approval_by_stored_hash(community, hash) fence is already landed",
+        let http_a = to_http(&url_a());
+        let http_b = to_http(&url_b());
+        let keys = Keys::generate();
+        let shared_uuid = uuid::Uuid::new_v4();
+        let chan_a = create_open_channel(&http_a, &keys, shared_uuid).await;
+        let _chan_b = create_open_channel(&http_b, &keys, shared_uuid).await;
+        let name = format!("approval_{}", uuid::Uuid::new_v4().simple());
+        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let yaml = format!(
+            "name: {name}\n\
+             trigger:\n\
+             \x20 on: webhook\n\
+             steps:\n\
+             \x20 - id: gate\n\
+             \x20   action: request_approval\n\
+             \x20   from: {}\n\
+             \x20   message: approve conformance run\n\
+             \x20   timeout: 5m\n\
+             \x20 - id: second_gate\n\
+             \x20   action: request_approval\n\
+             \x20   from: {}\n\
+             \x20   message: approve second gate\n\
+             \x20   timeout: 5m\n\
+             \x20 - id: after\n\
+             \x20   action: send_message\n\
+             \x20   text: approval resumed\n",
+            keys.public_key().to_hex(),
+            keys.public_key().to_hex()
         );
+        let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF), yaml)
+            .tags([
+                Tag::parse(["h", chan_a.as_str()]).unwrap(),
+                Tag::parse(["d", workflow_id.as_str()]).unwrap(),
+                Tag::parse(["name", name.as_str()]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let defined = submit_event(&http_a, &keys, event).await;
+        assert!(defined["accepted"].as_bool().unwrap_or(false), "{defined}");
+        let response = defined["message"]
+            .as_str()
+            .and_then(|m| m.strip_prefix("response:"))
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .expect("workflow definition response");
+        let workflow_id = response["workflow_id"].as_str().expect("workflow id");
+        assert_eq!(
+            trigger_workflow(&http_a, &keys, workflow_id).await["accepted"].as_bool(),
+            Some(true)
+        );
+
+        async fn query_kind_in_channel(
+            base: &str,
+            pubkey: &str,
+            channel: &str,
+            kind: u16,
+        ) -> Vec<serde_json::Value> {
+            reqwest::Client::new()
+                .post(format!("{base}/query"))
+                .header("X-Pubkey", pubkey)
+                .json(&serde_json::json!([{
+                    "kinds": [kind], "#h": [channel], "limit": 20
+                }]))
+                .send()
+                .await
+                .expect("query approvals")
+                .json()
+                .await
+                .expect("approval query json")
+        }
+        let mut approvals = Vec::new();
+        for _ in 0..50 {
+            approvals =
+                query_kind_in_channel(&http_a, &keys.public_key().to_hex(), &chan_a, 46010).await;
+            if !approvals.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            approvals.len(),
+            1,
+            "A must publish one approval request: {approvals:?}"
+        );
+        assert!(
+            query_kind_in_channel(&http_b, &keys.public_key().to_hex(), &chan_a, 46010)
+                .await
+                .is_empty(),
+            "B must not observe A's approval request"
+        );
+        let tags = approvals[0]["tags"].as_array().expect("approval tags");
+        let token = tags
+            .iter()
+            .find(|tag| tag[0] == "token")
+            .and_then(|tag| tag[1].as_str())
+            .expect("raw approval token");
+        let token_hash = tags
+            .iter()
+            .find(|tag| tag[0] == "d")
+            .and_then(|tag| tag[1].as_str())
+            .expect("approval hash");
+        assert!(
+            uuid::Uuid::parse_str(token).is_ok(),
+            "token must be an opaque UUID"
+        );
+
+        async fn grant(base: &str, keys: &Keys, token_hash: &str) -> (reqwest::StatusCode, String) {
+            let event = EventBuilder::new(Kind::Custom(46030), "")
+                .tags([Tag::parse(["d", token_hash]).unwrap()])
+                .sign_with_keys(keys)
+                .unwrap();
+            let response = reqwest::Client::new()
+                .post(format!("{base}/events"))
+                .header("X-Pubkey", keys.public_key().to_hex())
+                .json(&event)
+                .send()
+                .await
+                .expect("grant approval");
+            let status = response.status();
+            let body = response.text().await.expect("grant body");
+            (status, body)
+        }
+        let (b_status, b_body) = grant(&http_b, &keys, token_hash).await;
+        assert_eq!(b_status, reqwest::StatusCode::BAD_REQUEST, "{b_body}");
+        assert!(
+            b_body.contains("approval not found"),
+            "generic B rejection: {b_body}"
+        );
+        let (a_status, a_body) = grant(&http_a, &keys, token_hash).await;
+        assert!(a_status.is_success(), "A grant failed: {a_status} {a_body}");
+
+        let mut second_approvals = Vec::new();
+        for _ in 0..50 {
+            second_approvals =
+                query_kind_in_channel(&http_a, &keys.public_key().to_hex(), &chan_a, 46010).await;
+            if second_approvals.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let second_hash = second_approvals
+            .iter()
+            .flat_map(|event| event["tags"].as_array().into_iter().flatten())
+            .find(|tag| tag[0] == "d" && tag[1].as_str().is_some_and(|value| value != token_hash))
+            .and_then(|tag| tag[1].as_str())
+            .expect("granting the first gate must publish a distinct second gate");
+        let (second_status, second_body) = grant(&http_a, &keys, second_hash).await;
+        assert!(
+            second_status.is_success(),
+            "second A grant failed: {second_status} {second_body}"
+        );
+
+        let mut resumed = false;
+        for _ in 0..50 {
+            resumed = query_kind_in_channel(&http_a, &keys.public_key().to_hex(), &chan_a, 9)
+                .await
+                .iter()
+                .any(|event| event["content"] == "approval resumed");
+            if resumed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(resumed, "A grant must resume the workflow after the gate");
     }
 }
 

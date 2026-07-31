@@ -458,11 +458,82 @@ pub enum StepResult {
     Completed(JsonValue),
     /// Step requests suspension (approval gate). Execution must pause.
     Suspended {
-        /// Token used to resume or reject this approval gate.
-        approval_token: String,
+        /// Complete approval request to persist and publish.
+        approval: PendingApproval,
     },
     /// Step was skipped due to `if:` condition being false.
     Skipped,
+}
+
+/// A resolved approval request produced by a `request_approval` step.
+#[derive(Debug)]
+pub struct PendingApproval {
+    /// Raw capability token. The database stores only its SHA-256 hash.
+    pub token: String,
+    /// Step identifier that requested approval.
+    pub step_id: String,
+    /// Normalized approver: `any` or a 64-character lowercase pubkey.
+    pub approver_spec: String,
+    /// Human-readable approval prompt.
+    pub message: String,
+    /// Absolute expiry for the request.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn resolve_approver_spec(
+    engine: &WorkflowEngine,
+    community_id: CommunityId,
+    run_id: Uuid,
+    from: &str,
+) -> Result<String, WorkflowError> {
+    let spec = from.trim();
+    if spec.eq_ignore_ascii_case("any") {
+        return Ok("any".to_owned());
+    }
+    let bare = spec.strip_prefix('@').unwrap_or(spec);
+    if bare.len() == 64 && bare.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(bare.to_ascii_lowercase());
+    }
+    let name = spec.strip_prefix('@').ok_or_else(|| {
+        WorkflowError::InvalidDefinition(
+            "request_approval.from must be `any`, a pubkey, or an exact @Display Name".into(),
+        )
+    })?;
+    if name.trim().is_empty() {
+        return Err(WorkflowError::InvalidDefinition(
+            "request_approval.from display name cannot be empty".into(),
+        ));
+    }
+
+    let run = engine.db.get_workflow_run(community_id, run_id).await?;
+    let workflow = engine
+        .db
+        .get_workflow(community_id, run.workflow_id)
+        .await?;
+    let channel_id = workflow.channel_id.ok_or_else(|| {
+        WorkflowError::InvalidDefinition(
+            "request_approval.from @Display Name requires a channel-scoped workflow".into(),
+        )
+    })?;
+    let members = engine.db.get_members(community_id, channel_id).await?;
+    let member_keys: Vec<Vec<u8>> = members.into_iter().map(|m| m.pubkey).collect();
+    let users = engine.db.get_users_bulk(community_id, &member_keys).await?;
+    let mut matches = users.into_iter().filter(|user| {
+        user.display_name
+            .as_deref()
+            .is_some_and(|display| display.eq_ignore_ascii_case(name))
+    });
+    let matched = matches.next().ok_or_else(|| {
+        WorkflowError::Unauthorized(
+            "request_approval approver was not found in the workflow channel".into(),
+        )
+    })?;
+    if matches.next().is_some() {
+        return Err(WorkflowError::Unauthorized(
+            "request_approval approver display name is ambiguous".into(),
+        ));
+    }
+    Ok(hex::encode(matched.pubkey))
 }
 
 fn resolve_send_message_channel(
@@ -658,13 +729,25 @@ pub async fn dispatch_action(
                 "RequestApproval from={from} timeout={timeout_str}: {message}"
             );
 
-            let token = generate_approval_token(run_id, step_id);
-
-            // TODO (WF-08): create approval record in DB, emit kind:46010.
-            // For now, return Suspended with the token so the caller can persist state.
+            let timeout_secs = parse_duration_secs(timeout_str)?;
+            let timeout_secs = i64::try_from(timeout_secs).map_err(|_| {
+                WorkflowError::InvalidDefinition("request_approval timeout is too large".into())
+            })?;
+            let expires_at = chrono::Utc::now()
+                .checked_add_signed(chrono::Duration::seconds(timeout_secs))
+                .ok_or_else(|| {
+                    WorkflowError::InvalidDefinition("request_approval timeout is too large".into())
+                })?;
+            let approver_spec = resolve_approver_spec(engine, community_id, run_id, from).await?;
 
             Ok(StepResult::Suspended {
-                approval_token: token,
+                approval: PendingApproval {
+                    token: generate_approval_token(run_id, step_id),
+                    step_id: step_id.to_owned(),
+                    approver_spec,
+                    message: message.to_owned(),
+                    expires_at,
+                },
             })
         }
 
@@ -942,7 +1025,7 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
 pub struct ExecutionResult {
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
-    pub approval_token: Option<String>,
+    pub approval: Option<PendingApproval>,
     /// Index of the step that suspended (or the total step count on completion).
     pub step_index: usize,
     /// Accumulated step outputs at the point of suspension or completion.
@@ -959,10 +1042,10 @@ pub struct ExecutionResult {
 /// 3. Dispatches the action.
 /// 4. Stores the step output for use by later steps.
 ///
-/// On `RequestApproval`: returns `ExecutionResult` with `approval_token = Some(token)`.
+/// On `RequestApproval`: returns `ExecutionResult` with a pending approval.
 /// Caller must persist the approval record and update the run status.
 ///
-/// Returns `ExecutionResult` with `approval_token = None` on normal completion.
+/// Returns `ExecutionResult` with `approval = None` on normal completion.
 ///
 /// Enforces `engine.config.max_concurrent` via a semaphore — returns
 /// [`WorkflowError::CapacityExceeded`] immediately if all permits are taken.
@@ -1183,7 +1266,7 @@ async fn execute_steps(
                 }));
                 step_outputs.insert(step.id.clone(), output);
             }
-            StepResult::Suspended { approval_token } => {
+            StepResult::Suspended { approval } => {
                 info!(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
@@ -1191,7 +1274,7 @@ async fn execute_steps(
                 // Return the token and current state so the caller can persist the
                 // approval record and update the run's execution trace.
                 return Ok(ExecutionResult {
-                    approval_token: Some(approval_token),
+                    approval: Some(approval),
                     step_index: i,
                     step_outputs,
                     trace,
@@ -1209,7 +1292,7 @@ async fn execute_steps(
 
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
-        approval_token: None,
+        approval: None,
         step_index: def.steps.len(),
         step_outputs,
         trace,
