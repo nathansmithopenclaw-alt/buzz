@@ -471,6 +471,7 @@ pub async fn accept(
     state: &std::sync::Arc<crate::state::AppState>,
     event: &Event,
     now: i64,
+    public_scheme: crate::proxy::PublicScheme,
 ) -> Result<buzz_db::push::AcceptLeaseOutcome, AcceptError> {
     const MAX_LEASE_TTL: i64 = 30 * 24 * 60 * 60;
     const ALLOWED_SKEW: i64 = 120;
@@ -491,7 +492,7 @@ pub async fn accept(
     )
     .map_err(|_| "invalid encrypted content".to_string())?;
     let body = parse_plaintext(&plaintext, MAX_PLAINTEXT)?;
-    let origin = canonical_origin(&state.config.relay_url, tenant.host())?;
+    let origin = canonical_origin(public_scheme, tenant.host())?;
     let author_hex = event.pubkey.to_hex();
     let limits = LeaseLimits {
         expected_origin: &origin,
@@ -582,18 +583,14 @@ fn class_rank(class: &str) -> u8 {
     }
 }
 
-fn canonical_origin(relay_url: &str, host: &str) -> Result<String, String> {
-    let scheme = if relay_url.starts_with("wss://") {
-        "wss"
-    } else if relay_url.starts_with("ws://") {
-        "ws"
-    } else {
-        return Err("invalid relay URL".to_string());
-    };
+fn canonical_origin(
+    public_scheme: crate::proxy::PublicScheme,
+    host: &str,
+) -> Result<String, String> {
     if host.is_empty() {
         return Err("invalid tenant host".to_string());
     }
-    Ok(format!("{scheme}://{host}"))
+    Ok(format!("{}://{host}", public_scheme.websocket()))
 }
 
 #[cfg(test)]
@@ -749,15 +746,14 @@ mod tests {
     #[test]
     fn canonical_origin_preserves_server_resolved_authority() {
         assert_eq!(
-            canonical_origin("wss://relay.example", "tenant.example:8443").unwrap(),
+            canonical_origin(crate::proxy::PublicScheme::Https, "tenant.example:8443").unwrap(),
             "wss://tenant.example:8443"
         );
         assert_eq!(
-            canonical_origin("ws://relay.example", "[::1]:3000").unwrap(),
+            canonical_origin(crate::proxy::PublicScheme::Http, "[::1]:3000").unwrap(),
             "ws://[::1]:3000"
         );
-        assert!(canonical_origin("https://relay.example", "tenant.example").is_err());
-        assert!(canonical_origin("wss://relay.example", "").is_err());
+        assert!(canonical_origin(crate::proxy::PublicScheme::Https, "").is_err());
     }
 
     #[test]

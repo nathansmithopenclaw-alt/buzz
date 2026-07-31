@@ -723,6 +723,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         scopes,
         channel_ids,
         conn_id,
+        public_scheme: conn.public_scheme,
     };
 
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
@@ -1385,6 +1386,7 @@ mod tests {
         let conn = Arc::new(crate::connection::ConnectionState {
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::TenantContext::resolved(community_b, "b.example"),
+            public_scheme: crate::proxy::PublicScheme::Http,
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
             auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
                 buzz_auth::AuthContext {

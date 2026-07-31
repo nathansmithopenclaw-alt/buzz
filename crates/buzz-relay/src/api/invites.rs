@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     http::{HeaderMap, StatusCode},
     response::{Html, Json},
 };
@@ -229,6 +229,7 @@ pub async fn accept_policy(
 /// signature + replay for `path`.
 async fn authenticate(
     state: &Arc<AppState>,
+    public_scheme: crate::proxy::PublicScheme,
     headers: &HeaderMap,
     path: &str,
     body: &[u8],
@@ -246,7 +247,7 @@ async fn authenticate(
             )
         })?;
 
-    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
+    let url = bridge::nip98_expected_url(public_scheme, &tenant, path);
     let (pubkey, event_id_bytes) = bridge::verify_bridge_auth_with_options(
         headers,
         "POST",
@@ -266,10 +267,12 @@ async fn authenticate(
 /// tenant host.
 pub async fn mint_invite(
     State(state): State<Arc<AppState>>,
+    Extension(public_scheme): Extension<crate::proxy::PublicScheme>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites", &body).await?;
+    let (tenant, pubkey) =
+        authenticate(&state, public_scheme, &headers, "/api/invites", &body).await?;
 
     // Authz mirrors kind:9030 (add member): owner or admin only.
     let sender_hex = pubkey.to_hex();
@@ -309,13 +312,7 @@ pub async fn mint_invite(
             error => internal_error(&format!("invite mint: {error}")),
         })?;
 
-    // Same TLS-posture logic as nip98_expected_url: wss deployments get an
-    // https landing page URL, ws dev/test deployments get http.
-    let scheme = if state.config.relay_url.trim_start().starts_with("wss://") {
-        "https"
-    } else {
-        "http"
-    };
+    let scheme = public_scheme.http();
 
     tracing::info!(
         community = %tenant.community(),
@@ -346,10 +343,12 @@ pub async fn mint_invite(
 /// code is never fallen back to v1 verification.
 pub async fn claim_invite(
     State(state): State<Arc<AppState>>,
+    Extension(public_scheme): Extension<crate::proxy::PublicScheme>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites/claim", &body).await?;
+    let (tenant, pubkey) =
+        authenticate(&state, public_scheme, &headers, "/api/invites/claim", &body).await?;
 
     if claim_rate_limited(&state, tenant.community(), &pubkey) {
         return Err(api_error(

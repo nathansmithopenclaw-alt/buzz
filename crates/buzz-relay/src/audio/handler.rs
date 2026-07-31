@@ -18,7 +18,7 @@ use std::time::Duration;
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use axum::http::{HeaderMap, StatusCode};
 use axum::{
-    extract::{Path, State, WebSocketUpgrade},
+    extract::{Extension, Path, State, WebSocketUpgrade},
     response::IntoResponse,
 };
 use bytes::Bytes;
@@ -63,6 +63,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// WebSocket upgrade handler for `/huddle/:channel_id/audio`.
 pub async fn ws_audio_handler(
     State(state): State<Arc<AppState>>,
+    Extension(public_scheme): Extension<crate::proxy::PublicScheme>,
     Path(channel_id): Path<Uuid>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -103,7 +104,7 @@ pub async fn ws_audio_handler(
     // checks in the receive loop still distinguish text from binary policy, but
     // they run after tungstenite has assembled a message.
     limit_audio_websocket(ws).on_upgrade(move |socket| {
-        handle_audio_connection(socket, state, tenant, channel_id, permit)
+        handle_audio_connection(socket, state, tenant, public_scheme, channel_id, permit)
     })
 }
 
@@ -145,6 +146,7 @@ async fn handle_audio_connection(
     socket: WebSocket,
     state: Arc<AppState>,
     tenant: TenantContext,
+    public_scheme: crate::proxy::PublicScheme,
     channel_id: Uuid,
     _permit: OwnedSemaphorePermit,
 ) {
@@ -159,7 +161,16 @@ async fn handle_audio_connection(
         community_id,
         cancel.clone(),
         move || async move { check_state.db.is_community_active(community_id).await },
-        move || handle_active_audio_connection(socket, run_state, tenant, channel_id, cancel),
+        move || {
+            handle_active_audio_connection(
+                socket,
+                run_state,
+                tenant,
+                public_scheme,
+                channel_id,
+                cancel,
+            )
+        },
     )
     .await;
 }
@@ -168,6 +179,7 @@ async fn handle_active_audio_connection(
     socket: WebSocket,
     state: Arc<AppState>,
     tenant: TenantContext,
+    public_scheme: crate::proxy::PublicScheme,
     channel_id: Uuid,
     cancel: CancellationToken,
 ) {
@@ -216,7 +228,7 @@ async fn handle_active_audio_connection(
     // Extract NIP-OA auth tag before verify_auth_event consumes the event.
     let auth_tag_json = crate::handlers::auth::extract_auth_tag_json(&auth_msg.event);
 
-    let relay_url = crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant);
+    let relay_url = crate::api::bridge::nip42_expected_relay_url(public_scheme, &tenant);
     let auth_ctx = match state
         .auth
         .verify_auth_event(auth_msg.event, &challenge, &relay_url)

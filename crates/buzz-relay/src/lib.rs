@@ -31,6 +31,8 @@ pub mod metrics;
 pub mod nip11;
 /// NIP-01 client/relay message parsing.
 pub mod protocol;
+/// Trusted reverse-proxy scheme reconstruction for request-bound public URLs.
+pub mod proxy;
 /// Durable NIP-PL matcher and delivery worker.
 pub mod push_runtime;
 /// Axum router construction.

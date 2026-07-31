@@ -83,6 +83,12 @@ pub struct Config {
     pub db_read_pool_size: Option<u32>,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
+    /// TCP peer networks allowed to supply `X-Forwarded-Proto`.
+    ///
+    /// Empty by default: forwarded scheme headers are ignored unless an
+    /// operator explicitly configures the terminating proxy's IP/CIDR through
+    /// `BUZZ_TRUSTED_PROXIES`.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
     pub pairing_relay_url: Option<String>,
     /// Maximum number of concurrent WebSocket connections.
@@ -475,6 +481,33 @@ impl Config {
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
+
+        let trusted_proxies = match std::env::var("BUZZ_TRUSTED_PROXIES") {
+            Ok(raw) => {
+                let mut networks = Vec::new();
+                for entry in raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                {
+                    let network = crate::proxy::parse_trusted_proxy(entry).map_err(|error| {
+                        ConfigError::InvalidValue(format!(
+                            "BUZZ_TRUSTED_PROXIES entry {entry:?} is invalid: {error}"
+                        ))
+                    })?;
+                    if !networks.contains(&network) {
+                        networks.push(network);
+                    }
+                }
+                networks
+            }
+            Err(std::env::VarError::NotPresent) => Vec::new(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_TRUSTED_PROXIES must be valid Unicode".to_string(),
+                ));
+            }
+        };
 
         let pairing_relay_url = std::env::var("BUZZ_PAIRING_RELAY_URL")
             .ok()
@@ -939,6 +972,7 @@ impl Config {
             db_pool_size,
             db_read_pool_size,
             relay_url,
+            trusted_proxies,
             pairing_relay_url,
             max_connections,
             max_concurrent_handlers,
@@ -1009,6 +1043,10 @@ mod tests {
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
         assert_eq!(config.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
+        assert!(
+            config.trusted_proxies.is_empty(),
+            "forwarded headers must default to untrusted"
+        );
         assert!(config.slow_client_grace_limit > 0);
         assert!(
             !config.pubkey_allowlist_enabled,
@@ -1519,6 +1557,28 @@ mod tests {
         assert!(matches!(
             result,
             Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_PAIRING_RELAY_URL")
+        ));
+    }
+
+    #[test]
+    fn trusted_proxies_parse_dedupe_and_reject_invalid_entries() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_TRUSTED_PROXIES", "127.0.0.1, 10.0.0.0/8,127.0.0.1/32");
+        let config = Config::from_env().expect("valid trusted proxy allowlist");
+        assert_eq!(
+            config.trusted_proxies,
+            vec![
+                "127.0.0.1/32".parse().unwrap(),
+                "10.0.0.0/8".parse().unwrap(),
+            ]
+        );
+
+        std::env::set_var("BUZZ_TRUSTED_PROXIES", "loopback");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_TRUSTED_PROXIES");
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_TRUSTED_PROXIES")
         ));
     }
 

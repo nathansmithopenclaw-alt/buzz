@@ -71,6 +71,8 @@ pub enum IngestAuth {
         channel_ids: Option<Vec<Uuid>>,
         /// WebSocket connection identifier.
         conn_id: Uuid,
+        /// Public scheme resolved at the trusted-proxy boundary.
+        public_scheme: crate::proxy::PublicScheme,
     },
     /// HTTP bridge authenticated request (NIP-98 or dev X-Pubkey).
     Http {
@@ -80,6 +82,8 @@ pub enum IngestAuth {
         scopes: Vec<Scope>,
         /// How the HTTP request was authenticated.
         auth_method: HttpAuthMethod,
+        /// Public scheme resolved at the trusted-proxy boundary.
+        public_scheme: crate::proxy::PublicScheme,
     },
 }
 
@@ -100,6 +104,13 @@ impl IngestAuth {
     pub fn scopes(&self) -> &[Scope] {
         match self {
             Self::Nip42 { scopes, .. } | Self::Http { scopes, .. } => scopes,
+        }
+    }
+
+    /// Public transport scheme for scheme-bound event validation.
+    pub fn public_scheme(&self) -> crate::proxy::PublicScheme {
+        match self {
+            Self::Nip42 { public_scheme, .. } | Self::Http { public_scheme, .. } => *public_scheme,
         }
     }
 
@@ -1632,7 +1643,7 @@ async fn ingest_event_inner(
     // Product feedback is sidecarred directly into its private deployment table.
     // It never enters ordinary event storage or subscription fan-out.
     if kind_u32 == KIND_PRODUCT_FEEDBACK {
-        super::product_feedback::handle(tenant, &event, state)
+        super::product_feedback::handle(tenant, &event, state, auth.public_scheme())
             .await
             .map_err(IngestError::Rejected)?;
         // Feedback is a host-resolved, channel-less write. Although its row is
@@ -2259,7 +2270,7 @@ async fn ingest_event_inner(
     }
 
     if kind_u32 == super::push_lease::KIND_PUSH_LEASE {
-        let outcome = super::push_lease::accept(tenant, state, &event, now)
+        let outcome = super::push_lease::accept(tenant, state, &event, now, auth.public_scheme())
             .await
             .map_err(map_push_accept_error)?;
         match outcome {
@@ -2314,7 +2325,7 @@ async fn ingest_event_inner(
         .collect();
     if !imeta_tags.is_empty() {
         let tenant_media_base =
-            crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
+            crate::api::media::media_base_url_for_tenant(auth.public_scheme(), tenant.host());
         crate::api::validate_imeta_tags(&imeta_tags, &tenant_media_base)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
         crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
@@ -2708,6 +2719,7 @@ mod tests {
             pubkey: keys.public_key(),
             scopes: vec![Scope::MessagesWrite],
             auth_method: HttpAuthMethod::Nip98,
+            public_scheme: crate::proxy::PublicScheme::Https,
         };
         let tracer = Arc::new(VecTracer::default());
         let abstract_state = state_for_request(&tenant, auth.pubkey());
@@ -3111,6 +3123,7 @@ mod tests {
             scopes: vec![],
             channel_ids: None,
             conn_id: Uuid::new_v4(),
+            public_scheme: crate::proxy::PublicScheme::Http,
         };
 
         assert_ne!(principal.public_key(), envelope_signer.public_key());
@@ -3128,6 +3141,7 @@ mod tests {
             pubkey: keys.public_key(),
             scopes: vec![],
             auth_method: HttpAuthMethod::Nip98,
+            public_scheme: crate::proxy::PublicScheme::Https,
         };
         assert!(
             http_auth.is_http(),
@@ -3144,6 +3158,7 @@ mod tests {
             scopes: vec![],
             channel_ids: None,
             conn_id: uuid::Uuid::new_v4(),
+            public_scheme: crate::proxy::PublicScheme::Http,
         };
         assert!(
             !ws_auth.is_http(),

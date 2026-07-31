@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Extension, Query, State},
     http::{HeaderMap, HeaderValue},
     response::{IntoResponse, Json, Response},
 };
@@ -23,6 +23,7 @@ pub struct Nip05Query {
 /// No authentication required — public discovery endpoint.
 pub async fn nostr_nip05(
     State(state): State<Arc<AppState>>,
+    Extension(public_scheme): Extension<crate::proxy::PublicScheme>,
     headers: HeaderMap,
     Query(params): Query<Nip05Query>,
 ) -> Response {
@@ -51,8 +52,7 @@ pub async fn nostr_nip05(
             {
                 Ok(Some(user)) => {
                     let hex_pubkey = hex::encode(&user.pubkey);
-                    let relay_url =
-                        relay_url_for_tenant_host(&state.config.relay_url, tenant.host());
+                    let relay_url = relay_url_for_tenant_host(public_scheme, tenant.host());
                     serde_json::json!({
                         "names": { (name): hex_pubkey.clone() },
                         "relays": { (hex_pubkey): [relay_url] }
@@ -99,15 +99,14 @@ pub(crate) fn canonicalize_nip05(raw: &str, expected_host_or_url: &str) -> Resul
 }
 
 /// Build the relay URL advertised in the NIP-05 `relays` map for the bound
-/// tenant. Preserve the deployment scheme from config, but never the configured
-/// host: in a host-per-community deployment the request tenant host is the
-/// relay identity clients must follow back.
-pub(crate) fn relay_url_for_tenant_host(config_relay_url: &str, tenant_host: &str) -> String {
-    let scheme = if config_relay_url.trim_start().starts_with("wss://") {
-        "wss"
-    } else {
-        "ws"
-    };
+/// tenant. Use the request's resolved public scheme, but never a configured or
+/// forwarded host: in a host-per-community deployment the request tenant host
+/// is the relay identity clients must follow back.
+pub(crate) fn relay_url_for_tenant_host(
+    public_scheme: crate::proxy::PublicScheme,
+    tenant_host: &str,
+) -> String {
+    let scheme = public_scheme.websocket();
     format!("{scheme}://{tenant_host}")
 }
 
@@ -130,6 +129,7 @@ pub(crate) fn extract_domain(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::PublicScheme;
 
     #[test]
     fn canonicalize_nip05_accepts_bound_tenant_host_not_config_url() {
@@ -141,13 +141,13 @@ mod tests {
     }
 
     #[test]
-    fn relay_url_for_tenant_host_uses_config_scheme_but_tenant_host() {
+    fn relay_url_for_tenant_host_uses_public_scheme_and_tenant_host() {
         assert_eq!(
-            relay_url_for_tenant_host("wss://config.example", "tenant-b.example"),
+            relay_url_for_tenant_host(PublicScheme::Https, "tenant-b.example"),
             "wss://tenant-b.example"
         );
         assert_eq!(
-            relay_url_for_tenant_host("ws://config.example", "localhost:3100"),
+            relay_url_for_tenant_host(PublicScheme::Http, "localhost:3100"),
             "ws://localhost:3100"
         );
     }

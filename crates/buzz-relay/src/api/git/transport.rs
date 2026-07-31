@@ -131,8 +131,13 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let tenant = crate::tenant::bind_community(&state.db, raw_host)
             .await
             .map_err(|_| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
+        let public_scheme = parts
+            .extensions
+            .get::<crate::proxy::PublicScheme>()
+            .copied()
+            .unwrap_or_else(|| crate::proxy::PublicScheme::from_relay_url(&state.config.relay_url));
         let expected_url = git_expected_url(
-            &state.config.relay_url,
+            public_scheme,
             &tenant,
             parts
                 .uri
@@ -236,15 +241,11 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
 /// signed for community A's URL just because the deployment has one global
 /// `relay_url`.
 fn git_expected_url(
-    config_relay_url: &str,
+    public_scheme: crate::proxy::PublicScheme,
     tenant: &TenantContext,
     path_and_query: &str,
 ) -> Option<String> {
-    let scheme = if config_relay_url.trim_start().starts_with("wss://") {
-        "https"
-    } else {
-        "http"
-    };
+    let scheme = public_scheme.http();
     let repo_path = if let Some((prefix, _query)) = path_and_query.split_once("/info/refs") {
         prefix
     } else if let Some(prefix) = path_and_query.strip_suffix("/git-upload-pack") {
@@ -1918,6 +1919,7 @@ pub fn git_router(state: Arc<AppState>) -> Router {
 mod track_c_tests {
     use super::*;
     use crate::api::git::manifest::Manifest;
+    use crate::proxy::PublicScheme;
     use buzz_core::CommunityId;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::collections::BTreeMap;
@@ -2219,13 +2221,13 @@ mod track_c_tests {
         let tenant_b = tenant("host-b.example", 2);
 
         let url_a = git_expected_url(
-            "wss://config-host.example",
+            PublicScheme::Https,
             &tenant_a,
             "/git/owner/repo/info/refs?service=git-upload-pack",
         )
         .expect("recognized info/refs path");
         let url_b = git_expected_url(
-            "wss://config-host.example",
+            PublicScheme::Https,
             &tenant_b,
             "/git/owner/repo/info/refs?service=git-upload-pack",
         )
@@ -2236,7 +2238,7 @@ mod track_c_tests {
         assert_ne!(url_a, url_b);
 
         let url_a_alt_config = git_expected_url(
-            "wss://different-config.example",
+            PublicScheme::Https,
             &tenant_a,
             "/git/owner/repo/git-upload-pack",
         )
@@ -2255,7 +2257,7 @@ mod track_c_tests {
         let event_json = git_nip98_event_json(&keys, signed_for_a, "GET");
         let tenant_b = tenant("host-b.example", 2);
         let expected_for_b = git_expected_url(
-            "wss://host-a.example",
+            PublicScheme::Https,
             &tenant_b,
             "/git/alice/repo/info/refs?service=git-upload-pack",
         )
@@ -2276,7 +2278,7 @@ mod track_c_tests {
         let event_json = git_nip98_event_json(&keys, signed_for_a, "GET");
         let tenant_a = tenant("host-a.example", 1);
         let expected_for_a = git_expected_url(
-            "wss://different-config.example",
+            PublicScheme::Https,
             &tenant_a,
             "/git/alice/repo/git-upload-pack",
         )

@@ -304,6 +304,7 @@ async fn upload_attribution(
 // bound active parser/storage work, but they do not cap durable bytes stored.
 pub async fn upload_blob(
     State(state): State<Arc<AppState>>,
+    axum::extract::Extension(public_scheme): axum::extract::Extension<crate::proxy::PublicScheme>,
     auth: AuthenticatedUpload,
     headers: HeaderMap,
     body: axum::body::Body,
@@ -399,11 +400,7 @@ pub async fn upload_blob(
         }
     };
 
-    rewrite_descriptor_urls_for_tenant(
-        &mut descriptor,
-        &state.config.relay_url,
-        auth.tenant.host(),
-    );
+    rewrite_descriptor_urls_for_tenant(&mut descriptor, public_scheme, auth.tenant.host());
 
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
@@ -444,23 +441,20 @@ pub async fn upload_blob(
     Ok(Json(descriptor))
 }
 
-pub(crate) fn media_base_url_for_tenant(config_relay_url: &str, tenant_host: &str) -> String {
-    let scheme = if config_relay_url.trim_start().starts_with("wss://")
-        || config_relay_url.trim_start().starts_with("https://")
-    {
-        "https"
-    } else {
-        "http"
-    };
+pub(crate) fn media_base_url_for_tenant(
+    public_scheme: crate::proxy::PublicScheme,
+    tenant_host: &str,
+) -> String {
+    let scheme = public_scheme.http();
     format!("{scheme}://{tenant_host}/media")
 }
 
 fn rewrite_descriptor_urls_for_tenant(
     descriptor: &mut BlobDescriptor,
-    config_relay_url: &str,
+    public_scheme: crate::proxy::PublicScheme,
     tenant_host: &str,
 ) {
-    let base = media_base_url_for_tenant(config_relay_url, tenant_host);
+    let base = media_base_url_for_tenant(public_scheme, tenant_host);
     let ext = descriptor
         .url
         .rsplit_once('.')
@@ -910,6 +904,7 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::PublicScheme;
     use std::sync::Arc;
 
     use axum::{
@@ -1271,11 +1266,11 @@ mod tests {
     #[test]
     fn media_base_url_for_tenant_uses_tenant_host_and_http_scheme() {
         assert_eq!(
-            media_base_url_for_tenant("wss://config.example", "tenant-b.example"),
+            media_base_url_for_tenant(PublicScheme::Https, "tenant-b.example"),
             "https://tenant-b.example/media"
         );
         assert_eq!(
-            media_base_url_for_tenant("ws://config.example", "localhost:3100"),
+            media_base_url_for_tenant(PublicScheme::Http, "localhost:3100"),
             "http://localhost:3100/media"
         );
     }
@@ -1297,7 +1292,7 @@ mod tests {
 
         rewrite_descriptor_urls_for_tenant(
             &mut descriptor,
-            "wss://primary.example",
+            PublicScheme::Https,
             "tenant-b.example",
         );
 

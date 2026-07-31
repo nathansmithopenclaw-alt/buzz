@@ -17,6 +17,7 @@ pub async fn handle(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
+    public_scheme: crate::proxy::PublicScheme,
 ) -> Result<(), String> {
     let category = parse_category(event)?;
     validate_body(&event.content)?;
@@ -27,8 +28,7 @@ pub async fn handle(
         .map(|tag| tag.as_slice().iter().map(ToString::to_string).collect())
         .collect::<Vec<Vec<String>>>();
     if !imeta_tags.is_empty() {
-        let media_base =
-            crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
+        let media_base = crate::api::media::media_base_url_for_tenant(public_scheme, tenant.host());
         crate::api::validate_imeta_tags(&imeta_tags, &media_base)?;
         crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage).await?;
     }

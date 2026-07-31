@@ -73,6 +73,7 @@ subtle          = { workspace = true }
 rand            = { workspace = true }
 hex             = { workspace = true }
 url             = { workspace = true }
+ipnet           = "2"
 moka            = { workspace = true }
 metrics         = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }

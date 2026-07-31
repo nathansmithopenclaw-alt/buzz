@@ -23,6 +23,7 @@
 //! RELAY_URL_A=http://a.localhost:3000 \
 //! RELAY_URL_A_ALIAS=http://alias-a.localhost:3000 \
 //! RELAY_URL_B=http://b.localhost:3000 \
+//! BUZZ_TRUSTED_PROXIES=127.0.0.1/32 \
 //! cargo test -p buzz-test-client --test conformance_multitenant -- --ignored
 //! ```
 //!
@@ -66,6 +67,119 @@ fn url_a_alias() -> String {
 fn url_unknown() -> String {
     std::env::var("RELAY_URL_UNKNOWN")
         .unwrap_or_else(|_| "http://unknown.localhost:3000".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// TLS-terminating trusted proxy: public scheme reconstruction
+// ---------------------------------------------------------------------------
+mod trusted_proxy_scheme {
+    use super::*;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use futures_util::{SinkExt, StreamExt};
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayUrl, Tag};
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
+
+    /// Simulates a TLS terminator in front of A's alias. The TCP connection is
+    /// still cleartext, but both signed auth surfaces must use the public TLS
+    /// scheme supplied by a trusted peer's `X-Forwarded-Proto: https`.
+    ///
+    /// Run the conformance relay with `BUZZ_TRUSTED_PROXIES=127.0.0.1/32` (or
+    /// the exact test proxy address). Without that explicit trust, this test
+    /// must fail closed with scheme mismatches.
+    #[tokio::test]
+    #[ignore = "requires a multi-tenant relay with the test peer explicitly trusted"]
+    async fn tls_fronted_alias_accepts_nip98_and_nip42_public_urls() {
+        let physical_http = url_a_alias();
+        let public_http = physical_http.replacen("http://", "https://", 1);
+        let keys = Keys::generate();
+
+        let body = EventBuilder::new(Kind::TextNote, "trusted proxy scheme conformance")
+            .sign_with_keys(&keys)
+            .expect("sign test event")
+            .as_json();
+        let events_url = format!("{public_http}/events");
+        let payload_hash = hex::encode(Sha256::digest(body.as_bytes()));
+        let auth = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                Tag::parse(["u", &events_url]).expect("u tag"),
+                Tag::parse(["method", "POST"]).expect("method tag"),
+                Tag::parse(["payload", &payload_hash]).expect("payload tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign NIP-98 event");
+        let authorization = format!("Nostr {}", BASE64.encode(auth.as_json().as_bytes()));
+        let response = reqwest::Client::new()
+            .post(format!("{physical_http}/events"))
+            .header("X-Forwarded-Proto", "https")
+            .header("Authorization", authorization)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .expect("send TLS-fronted NIP-98 request");
+        assert!(
+            response.status().is_success(),
+            "NIP-98 signed for the public https alias failed through the trusted proxy: {} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        );
+
+        let physical_ws = physical_http.replacen("http://", "ws://", 1);
+        let public_ws = physical_http.replacen("http://", "wss://", 1);
+        let mut request = physical_ws
+            .into_client_request()
+            .expect("build websocket request");
+        request
+            .headers_mut()
+            .insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        let (mut socket, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("connect through simulated TLS terminator");
+
+        let challenge = loop {
+            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .expect("AUTH challenge timeout")
+                .expect("socket closed before AUTH challenge")
+                .expect("read AUTH challenge");
+            let Message::Text(text) = frame else { continue };
+            let message: Value = serde_json::from_str(&text).expect("parse relay message");
+            if message.get(0).and_then(Value::as_str) == Some("AUTH") {
+                break message[1].as_str().expect("challenge string").to_string();
+            }
+        };
+        let relay_url: RelayUrl = public_ws.parse().expect("public relay URL");
+        let event = EventBuilder::auth(&challenge, relay_url)
+            .sign_with_keys(&keys)
+            .expect("sign NIP-42 event");
+        let event_id = event.id.to_hex();
+        socket
+            .send(Message::Text(json!(["AUTH", event]).to_string().into()))
+            .await
+            .expect("send NIP-42 AUTH");
+
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .expect("NIP-42 OK timeout")
+                .expect("socket closed before NIP-42 OK")
+                .expect("read NIP-42 OK");
+            let Message::Text(text) = frame else { continue };
+            let message: Value = serde_json::from_str(&text).expect("parse relay OK");
+            if message.get(0).and_then(Value::as_str) == Some("OK")
+                && message.get(1).and_then(Value::as_str) == Some(event_id.as_str())
+            {
+                assert_eq!(
+                    message.get(2).and_then(Value::as_bool),
+                    Some(true),
+                    "NIP-42 signed for the public wss alias was rejected: {message}"
+                );
+                break;
+            }
+        }
+    }
 }
 
 /// Marker for a conformance obligation whose lane has not yet landed on the

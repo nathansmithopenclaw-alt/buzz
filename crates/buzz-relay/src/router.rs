@@ -24,6 +24,7 @@ use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
+use crate::proxy::{public_scheme, PublicScheme};
 use crate::state::AppState;
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
@@ -187,9 +188,32 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     }
 
     merged
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            attach_public_scheme,
+        ))
         .layer(middleware::from_fn(track_metrics))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
+}
+
+async fn attach_public_scheme(
+    State(state): State<Arc<AppState>>,
+    mut request: Request<Body>,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map(|connect| connect.0);
+    let scheme = public_scheme(
+        &state.config.relay_url,
+        request.headers(),
+        peer,
+        &state.config.trusted_proxies,
+    );
+    request.extensions_mut().insert(scheme);
+    next.run(request).await
 }
 
 fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
@@ -256,6 +280,11 @@ async fn nip11_or_ws_handler(
         .get::<ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0)
         .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
+    let public_scheme = req
+        .extensions()
+        .get::<PublicScheme>()
+        .copied()
+        .unwrap_or_else(|| PublicScheme::from_relay_url(&state.config.relay_url));
 
     let accept = headers
         .get("accept")
@@ -287,7 +316,7 @@ async fn nip11_or_ws_handler(
     }
 
     if accept.contains("application/nostr+json") {
-        return Json(nip11_document(&state, raw_host).await).into_response();
+        return Json(nip11_document(&state, raw_host, public_scheme).await).into_response();
     }
 
     // Row zero: bind the connection to its community from the request host
@@ -324,7 +353,9 @@ async fn nip11_or_ws_handler(
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .on_upgrade(move |socket| {
+                    handle_connection(socket, state, addr, tenant, public_scheme)
+                })
                 .into_response()
         }
         Err(_) => {
@@ -340,7 +371,7 @@ async fn nip11_or_ws_handler(
                 }
             }
             // Not a WS request and not asking for nostr+json — serve NIP-11 as fallback.
-            Json(nip11_document(&state, raw_host).await).into_response()
+            Json(nip11_document(&state, raw_host, public_scheme).await).into_response()
         }
     }
 }

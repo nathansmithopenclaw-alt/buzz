@@ -59,6 +59,8 @@ pub struct ConnectionState {
     pub tenant: TenantContext,
     /// Remote socket address of the client.
     pub remote_addr: SocketAddr,
+    /// Public-facing transport scheme fixed at the trusted HTTP upgrade seam.
+    pub public_scheme: crate::proxy::PublicScheme,
     /// Current NIP-42 authentication state.
     pub auth_state: RwLock<AuthState>,
     /// Active subscriptions keyed by subscription ID.
@@ -120,6 +122,7 @@ pub async fn handle_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    public_scheme: crate::proxy::PublicScheme,
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
@@ -133,7 +136,17 @@ pub async fn handle_connection(
         community_id,
         cancel.clone(),
         move || async move { check_state.db.is_community_active(community_id).await },
-        move || handle_active_connection(socket, run_state, addr, tenant, conn_id, cancel),
+        move || {
+            handle_active_connection(
+                socket,
+                run_state,
+                addr,
+                tenant,
+                public_scheme,
+                conn_id,
+                cancel,
+            )
+        },
     )
     .await;
 }
@@ -143,6 +156,7 @@ async fn handle_active_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    public_scheme: crate::proxy::PublicScheme,
     conn_id: Uuid,
     cancel: CancellationToken,
 ) {
@@ -168,6 +182,7 @@ async fn handle_active_connection(
         conn_id,
         tenant,
         remote_addr: addr,
+        public_scheme,
         auth_state: RwLock::new(AuthState::Pending {
             challenge: challenge.clone(),
         }),

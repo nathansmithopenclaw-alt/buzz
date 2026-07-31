@@ -176,29 +176,26 @@ impl RelayInfo {
 /// Axum handler that returns the NIP-11 relay information document as JSON.
 pub async fn relay_info_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::state::AppState>>,
+    axum::extract::Extension(public_scheme): axum::extract::Extension<crate::proxy::PublicScheme>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Json<RelayInfo> {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    axum::response::Json(nip11_document(&state, raw_host).await)
+    axum::response::Json(nip11_document(&state, raw_host, public_scheme).await)
 }
 
 fn push_descriptor(
     push_configured: bool,
-    relay_url: &str,
+    public_scheme: crate::proxy::PublicScheme,
     executor_key_id: &str,
     relay_keypair: &nostr::Keys,
     tenant_host: Option<&str>,
 ) -> Option<serde_json::Value> {
     let host = tenant_host?;
     push_configured.then_some(())?;
-    let scheme = if relay_url.starts_with("wss://") {
-        "wss"
-    } else {
-        "ws"
-    };
+    let scheme = public_scheme.websocket();
     Some(serde_json::json!({
         "origin": format!("{scheme}://{host}"),
         "keys": [{
@@ -237,7 +234,11 @@ fn push_descriptor(
 /// `/info` endpoint can't drift apart. Every input to `RelayInfo::build`
 /// stays a pre-derived scalar: [`nip11_facts`] (config + keypair) plus the
 /// host-scoped workspace icon.
-pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &str) -> RelayInfo {
+pub(crate) async fn nip11_document(
+    state: &crate::state::AppState,
+    raw_host: &str,
+    public_scheme: crate::proxy::PublicScheme,
+) -> RelayInfo {
     let (relay_self, advertise_nip43) = nip11_facts(state);
     let icon = workspace_icon_for_host(state, raw_host).await;
     let mut info = RelayInfo::build(
@@ -257,7 +258,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     };
     if let Some(push) = push_descriptor(
         state.config.push_gateway_delivery_url.is_some(),
-        &state.config.relay_url,
+        public_scheme,
         &state.config.push_executor_key_id,
         &state.relay_keypair,
         tenant_host.as_deref(),
@@ -342,16 +343,28 @@ const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::PublicScheme;
 
     #[test]
     fn push_descriptor_is_gated_by_gateway_configuration_and_tenant_binding() {
         let keys = nostr::Keys::generate();
-        assert!(
-            push_descriptor(false, "ws://relay", "key", &keys, Some("tenant.example")).is_none()
-        );
-        assert!(push_descriptor(true, "ws://relay", "key", &keys, None).is_none());
-        let descriptor = push_descriptor(true, "ws://relay", "key", &keys, Some("tenant.example"))
-            .expect("configured push descriptor");
+        assert!(push_descriptor(
+            false,
+            PublicScheme::Http,
+            "key",
+            &keys,
+            Some("tenant.example")
+        )
+        .is_none());
+        assert!(push_descriptor(true, PublicScheme::Http, "key", &keys, None).is_none());
+        let descriptor = push_descriptor(
+            true,
+            PublicScheme::Http,
+            "key",
+            &keys,
+            Some("tenant.example"),
+        )
+        .expect("configured push descriptor");
         assert_eq!(descriptor["origin"], "ws://tenant.example");
         assert_eq!(
             descriptor["push_kinds"],
