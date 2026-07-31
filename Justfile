@@ -247,6 +247,11 @@ desktop-release-build target="aarch64-apple-darwin":
 desktop-install-macos target="aarch64-apple-darwin":
     ./scripts/install-desktop-macos.sh {{target}}
 
+# Copy the local canonical /Applications/Buzz.app to a remote macOS host (ssh
+# alias, matching CPU architecture required) and install it there the same way.
+desktop-sync-remote host:
+    ./scripts/sync-desktop-to-remote.sh {{host}}
+
 # Run desktop checks suitable for CI / pre-push
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
 
