@@ -220,6 +220,14 @@ fn generated_passphrase_clamps_word_count() {
 }
 
 #[test]
+fn generated_passphrase_rejects_separator_collisions() {
+    for _ in 0..5_000 {
+        let phrase = generate_passphrase(MAX_PASSPHRASE_WORDS, "-").unwrap();
+        assert_eq!(phrase.split('-').count(), MAX_PASSPHRASE_WORDS);
+    }
+}
+
+#[test]
 fn generated_passphrases_are_not_repeated() {
     // 3 words × ~10.3 bits each — a collision across 8 draws would indicate a
     // broken entropy source, not bad luck.
