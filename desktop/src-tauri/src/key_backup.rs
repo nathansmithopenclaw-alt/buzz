@@ -218,7 +218,11 @@ pub fn generate_passphrase(word_count: usize, separator: &str) -> Result<String,
             // Rejection sampling: accept only values below the largest
             // multiple of 1296 that fits in u16 (65536 - 65536 % 1296 = 64800).
             if value < 64800 {
-                chosen.push(words[(value as usize) % 1296]);
+                let word = words[(value as usize) % 1296];
+                // Reject word/separator collisions so the joined phrase stays unambiguous.
+                if separator.is_empty() || !word.contains(separator) {
+                    chosen.push(word);
+                }
             }
         }
         let phrase = chosen.join(separator);
