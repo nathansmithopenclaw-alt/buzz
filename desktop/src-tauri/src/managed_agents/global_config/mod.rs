@@ -70,6 +70,12 @@ pub struct GlobalAgentConfig {
     /// Preferred ACP runtime for definitions without an explicit runtime.
     #[serde(default)]
     pub preferred_runtime: Option<String>,
+
+    /// Automatically apply create-agent drafts from trusted owned agents.
+    ///
+    /// Disabled by default so existing installations retain owner review.
+    #[serde(default)]
+    pub auto_approve_agent_drafts: bool,
 }
 
 /// Validate a `GlobalAgentConfig` before persisting it.

@@ -269,6 +269,17 @@ pub enum AgentsCmd {
         /// Proposed instructions; use '-' to read from stdin
         #[arg(long)]
         system_prompt: String,
+        #[arg(long)]
+        runtime: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, value_enum)]
+        respond_to: Option<RespondToArg>,
+        /// Maximum concurrent agent turns (1-32)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=32))]
+        parallelism: Option<u32>,
     },
     /// Open a prefilled edit-agent form in the owner's Buzz Desktop
     DraftUpdate {

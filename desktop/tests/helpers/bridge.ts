@@ -419,6 +419,7 @@ type MockBridgeOptions = {
     provider: string | null;
     model: string | null;
     preferred_runtime?: string | null;
+    auto_approve_agent_drafts?: boolean;
   };
   /** File-layer config returned by runtime id. */
   runtimeFileConfigs?: Record<

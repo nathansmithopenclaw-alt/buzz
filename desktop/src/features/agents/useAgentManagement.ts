@@ -22,8 +22,15 @@ import {
   buildInstanceInputForDefinition,
   type BackendIntent,
 } from "./lib/instanceInputForDefinition";
+import { getDefaultPersonaRuntime } from "./lib/resolvePersonaRuntime";
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
-import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
+import {
+  classifyAgentManagementOrigin,
+  dequeueAgentManagementRequest,
+  enqueueAgentManagementRequest,
+  type QueuedAgentManagementRequest,
+} from "./agentManagementBuffer";
+import { useGlobalAgentConfig } from "./useGlobalAgentConfig";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
@@ -66,6 +73,7 @@ export function useAgentManagement() {
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const createAgentMutation = useCreateManagedAgentMutation();
+  const { globalConfig } = useGlobalAgentConfig();
   const [request, setRequest] = React.useState<AgentManagementRequest | null>(
     null,
   );
@@ -74,11 +82,26 @@ export function useAgentManagement() {
   const seenRequestIds = React.useRef(new Set<string>());
   const pendingRequestId = React.useRef<string | null>(null);
   const sourceAgentPubkey = React.useRef<string | null>(null);
+  const acceptedRequestsRef = React.useRef<QueuedAgentManagementRequest[]>([]);
+  const autoApprovingRequestId = React.useRef<string | null>(null);
+  const [failedAutoApprovalRequestId, setFailedAutoApprovalRequestId] =
+    React.useState<string | null>(null);
   const managedAgentsRef = React.useRef(managedAgentsQuery.data);
   const channelsRef = React.useRef(channelsQuery.data);
   const bufferedRequestsRef = React.useRef<
     Array<{ agentPubkey: string; request: AgentManagementRequest }>
   >([]);
+
+  const presentNextRequest = React.useEffectEvent(() => {
+    if (pendingRequestId.current !== null) return;
+    const next = dequeueAgentManagementRequest(acceptedRequestsRef.current);
+    if (!next) return;
+    pendingRequestId.current = next.request.requestId;
+    sourceAgentPubkey.current = next.agentPubkey;
+    setFailedAutoApprovalRequestId(null);
+    setError(null);
+    setRequest(next.request);
+  });
 
   const acceptOwnedRequest = React.useEffectEvent(
     (agentPubkey: string, next: AgentManagementRequest) => {
@@ -88,17 +111,18 @@ export function useAgentManagement() {
           channelsRef.current,
           agentPubkey,
           next.request.channelId,
-        ) !== "accept" ||
-        seenRequestIds.current.has(next.requestId)
+        ) !== "accept"
       ) {
         return;
       }
-      seenRequestIds.current.add(next.requestId);
-      setError(null);
-      if (pendingRequestId.current === null) {
-        pendingRequestId.current = next.requestId;
-        sourceAgentPubkey.current = agentPubkey;
-        setRequest(next);
+      if (
+        enqueueAgentManagementRequest(
+          acceptedRequestsRef.current,
+          seenRequestIds.current,
+          { agentPubkey, request: next },
+        )
+      ) {
+        presentNextRequest();
       }
     },
   );
@@ -187,9 +211,9 @@ export function useAgentManagement() {
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
       const runtimes = await availableRuntimesForStart(runtimesQuery);
-      const runtime = runtimes.find(
-        (candidate) => candidate.id === input.runtime,
-      );
+      const runtime = input.runtime
+        ? runtimes.find((candidate) => candidate.id === input.runtime)
+        : getDefaultPersonaRuntime(runtimes, globalConfig.preferred_runtime);
       if (!runtime) {
         throw new Error("Choose an available runtime for this agent.");
       }
@@ -263,6 +287,7 @@ export function useAgentManagement() {
     pendingRequestId.current = null;
     sourceAgentPubkey.current = null;
     setRequest(null);
+    presentNextRequest();
   }
 
   const createInitialValues = React.useMemo(
@@ -292,8 +317,47 @@ export function useAgentManagement() {
     return null;
   }, [currentPersona, error, matchingPersonas.length, request]);
 
-  return {
+  const autoApproveCreate = React.useEffectEvent(
+    async (requestId: string, input: CreatePersonaInput): Promise<void> => {
+      if (request?.requestId !== requestId) return;
+      const submitted = await submitCreate(input, "definition_start", null);
+      if (!submitted && pendingRequestId.current === requestId) {
+        setFailedAutoApprovalRequestId(requestId);
+      }
+    },
+  );
+
+  React.useEffect(() => {
+    if (
+      !globalConfig.auto_approve_agent_drafts ||
+      request?.action !== "create" ||
+      !createInitialValues ||
+      failedAutoApprovalRequestId === request.requestId ||
+      autoApprovingRequestId.current === request.requestId
+    ) {
+      return;
+    }
+    const requestId = request.requestId;
+    autoApprovingRequestId.current = requestId;
+    void autoApproveCreate(requestId, createInitialValues).finally(() => {
+      if (autoApprovingRequestId.current === requestId) {
+        autoApprovingRequestId.current = null;
+      }
+    });
+  }, [
+    createInitialValues,
+    failedAutoApprovalRequestId,
+    globalConfig.auto_approve_agent_drafts,
     request,
+  ]);
+
+  const hideAutoApprovedCreate =
+    globalConfig.auto_approve_agent_drafts &&
+    request?.action === "create" &&
+    failedAutoApprovalRequestId !== request.requestId;
+
+  return {
+    request: hideAutoApprovedCreate ? null : request,
     createInitialValues,
     editInitialValues,
     editError,

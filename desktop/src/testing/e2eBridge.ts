@@ -405,6 +405,7 @@ type E2eConfig = {
       provider: string | null;
       model: string | null;
       preferred_runtime?: string | null;
+      auto_approve_agent_drafts?: boolean;
     };
     /** File-layer config returned by runtime id. */
     runtimeFileConfigs?: Record<string, RuntimeFileConfigSubset | null>;
@@ -11168,14 +11169,14 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "get_global_agent_config": {
         // Return the mutable persisted mock value, seeded from the test config.
-        return (
-          mockGlobalAgentConfig ?? {
-            env_vars: {},
-            provider: null,
-            model: null,
-            preferred_runtime: null,
-          }
-        );
+        return {
+          env_vars: {},
+          provider: null,
+          model: null,
+          preferred_runtime: null,
+          auto_approve_agent_drafts: false,
+          ...mockGlobalAgentConfig,
+        };
       }
       case "set_global_agent_config": {
         // Echo back the submitted config as the saved value (mirrors the
@@ -11188,6 +11189,7 @@ export function maybeInstallE2eTauriMocks() {
               provider: string | null;
               model: string | null;
               preferred_runtime: string | null;
+              auto_approve_agent_drafts: boolean;
             };
           }
         ).config;

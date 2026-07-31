@@ -39,6 +39,7 @@ import {
 } from "@/features/agents/ui/AgentConfigFields";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Switch } from "@/shared/ui/switch";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -315,6 +316,34 @@ export function AgentDefaultsEditor({
           )}
         </>
       )}
+
+      {!configSurfaceLoading && !configSurfaceError ? (
+        <div className="flex items-start justify-between gap-4 rounded-lg border border-border/70 px-4 py-3">
+          <div className="min-w-0 space-y-1">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="auto-approve-agent-drafts"
+            >
+              Automatically create agents from trusted drafts
+            </label>
+            <p className="text-sm text-muted-foreground">
+              Allow agents you own to create and start other agents without a
+              review dialog. Drafts still must come from a channel you and the
+              requesting agent share.
+            </p>
+          </div>
+          <Switch
+            checked={config.auto_approve_agent_drafts}
+            id="auto-approve-agent-drafts"
+            onCheckedChange={(checked) =>
+              handleConfigChange({
+                ...config,
+                auto_approve_agent_drafts: checked,
+              })
+            }
+          />
+        </div>
+      ) : null}
 
       {/* Save bar */}
       {!configSurfaceLoading && !configSurfaceError && (

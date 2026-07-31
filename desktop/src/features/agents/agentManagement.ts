@@ -14,6 +14,11 @@ export type AgentManagementCreateRequest = {
     channelId: string;
     displayName: string;
     systemPrompt: string;
+    runtime?: string;
+    provider?: string;
+    model?: string;
+    respondTo?: RespondToMode;
+    parallelism?: number;
   };
 };
 
@@ -45,6 +50,13 @@ function isRespondTo(value: unknown): value is RespondToMode | undefined {
   return value === undefined || value === "owner-only" || value === "anyone";
 }
 
+function isParallelism(value: unknown): value is number | undefined {
+  return (
+    value === undefined ||
+    (Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 32)
+  );
+}
+
 function hasOnlyKeys(
   value: Record<string, unknown>,
   allowed: readonly string[],
@@ -70,7 +82,20 @@ export function parseAgentManagementRequest(
   const request = payload.request as Record<string, unknown>;
 
   if (payload.action === "create") {
-    if (!hasOnlyKeys(request, ["channelId", "displayName", "systemPrompt"])) {
+    if (
+      !isRespondTo(request.respondTo) ||
+      !isParallelism(request.parallelism) ||
+      !hasOnlyKeys(request, [
+        "channelId",
+        "displayName",
+        "systemPrompt",
+        "runtime",
+        "provider",
+        "model",
+        "respondTo",
+        "parallelism",
+      ])
+    ) {
       return null;
     }
     if (
@@ -88,6 +113,11 @@ export function parseAgentManagementRequest(
         channelId: request.channelId,
         displayName: request.displayName,
         systemPrompt: request.systemPrompt,
+        ...(isText(request.runtime) ? { runtime: request.runtime } : {}),
+        ...(isText(request.provider) ? { provider: request.provider } : {}),
+        ...(isText(request.model) ? { model: request.model } : {}),
+        ...(request.respondTo ? { respondTo: request.respondTo } : {}),
+        ...(request.parallelism ? { parallelism: request.parallelism } : {}),
       },
     };
   }
@@ -146,5 +176,16 @@ export function createInputFromRequest(
   return {
     displayName: request.request.displayName,
     systemPrompt: request.request.systemPrompt,
+    ...(request.request.runtime ? { runtime: request.request.runtime } : {}),
+    ...(request.request.provider ? { provider: request.request.provider } : {}),
+    ...(request.request.model ? { model: request.request.model } : {}),
+    ...(request.request.respondTo || request.request.parallelism
+      ? {
+          behavior: {
+            respondTo: request.request.respondTo,
+            parallelism: request.request.parallelism,
+          },
+        }
+      : {}),
   };
 }

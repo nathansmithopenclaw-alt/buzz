@@ -1,7 +1,8 @@
 //! Tauri commands for global agent configuration defaults.
 //!
 //! `get_global_agent_config` / `set_global_agent_config` — simple load/save
-//! around the `global_config` module with the standard save-time validation.
+//! around the `global_config` module with the standard save-time validation,
+//! including the owner-controlled create-draft approval policy.
 //!
 //! `set_global_agent_config` additionally auto-restarts any running local agent
 //! whose effective env changes under the new global config — including agents

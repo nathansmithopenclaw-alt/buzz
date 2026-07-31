@@ -16,6 +16,16 @@ pub struct CreateAgentDraft {
     pub channel_id: String,
     pub display_name: String,
     pub system_prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub respond_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,10 +143,32 @@ pub fn build_create(
     let channel_id = required(draft.channel_id, "channel", 128)?;
     uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel_id}")))?;
+    let respond_to = optional(draft.respond_to, "respond-to")?;
+    if respond_to
+        .as_deref()
+        .is_some_and(|value| value != "owner-only" && value != "anyone")
+    {
+        return Err(CliError::Usage(
+            "respond-to must be owner-only or anyone".into(),
+        ));
+    }
+    if draft
+        .parallelism
+        .is_some_and(|parallelism| !(1..=32).contains(&parallelism))
+    {
+        return Err(CliError::Usage(
+            "parallelism must be between 1 and 32".into(),
+        ));
+    }
     let request = CreateAgentDraft {
         channel_id: channel_id.clone(),
         display_name: required(draft.display_name, "display name", MAX_NAME_CHARS)?,
         system_prompt: required(draft.system_prompt, "system prompt", MAX_PROMPT_CHARS)?,
+        runtime: optional(draft.runtime, "runtime")?,
+        provider: optional(draft.provider, "provider")?,
+        model: optional(draft.model, "model")?,
+        respond_to,
+        parallelism: draft.parallelism,
     };
     build(keys, owner, channel_id, "create", request)
 }
@@ -203,6 +235,11 @@ mod tests {
                 channel_id: CHANNEL.into(),
                 display_name: "Research helper".into(),
                 system_prompt: "Find sources.".into(),
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: None,
+                parallelism: None,
             },
         )
         .unwrap();
@@ -241,6 +278,36 @@ mod tests {
     }
 
     #[test]
+    fn create_serializes_full_non_secret_configuration() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let built = build_create(
+            &agent,
+            &owner.public_key(),
+            CreateAgentDraft {
+                channel_id: CHANNEL.into(),
+                display_name: "Research helper".into(),
+                system_prompt: "Find sources.".into(),
+                runtime: Some("codex".into()),
+                provider: Some("openai".into()),
+                model: Some("gpt-5".into()),
+                respond_to: Some("anyone".into()),
+                parallelism: Some(4),
+            },
+        )
+        .unwrap();
+
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        let request = &payload["payload"]["request"];
+        assert_eq!(request["runtime"], "codex");
+        assert_eq!(request["provider"], "openai");
+        assert_eq!(request["model"], "gpt-5");
+        assert_eq!(request["respondTo"], "anyone");
+        assert_eq!(request["parallelism"], 4);
+        assert!(request.get("envVars").is_none());
+    }
+
+    #[test]
     fn update_requires_a_change() {
         let error = build_update(
             &Keys::generate(),
@@ -269,6 +336,11 @@ mod tests {
                 channel_id: "general".into(),
                 display_name: "Scout".into(),
                 system_prompt: "Help".into(),
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: None,
+                parallelism: None,
             },
         )
         .unwrap_err();

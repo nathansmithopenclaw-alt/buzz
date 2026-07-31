@@ -1,4 +1,33 @@
+import type { AgentManagementRequest } from "./agentManagement";
 import type { Channel, ManagedAgent } from "@/shared/api/types";
+
+export type QueuedAgentManagementRequest = {
+  agentPubkey: string;
+  request: AgentManagementRequest;
+};
+
+/**
+ * Records an accepted request exactly once and leaves it queued until the
+ * current review or automatic create finishes.
+ */
+export function enqueueAgentManagementRequest(
+  queue: QueuedAgentManagementRequest[],
+  seenRequestIds: Set<string>,
+  candidate: QueuedAgentManagementRequest,
+  maxQueued = 100,
+): boolean {
+  if (seenRequestIds.has(candidate.request.requestId)) return false;
+  seenRequestIds.add(candidate.request.requestId);
+  queue.push(candidate);
+  if (queue.length > maxQueued) queue.shift();
+  return true;
+}
+
+export function dequeueAgentManagementRequest(
+  queue: QueuedAgentManagementRequest[],
+): QueuedAgentManagementRequest | undefined {
+  return queue.shift();
+}
 
 /**
  * Defers the trust decision until both ownership and channel membership have

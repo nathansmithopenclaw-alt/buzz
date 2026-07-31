@@ -38,27 +38,42 @@ test("rejects an agent-management request with extra secret-shaped fields", () =
   assert.equal(parseAgentManagementRequest(payload), null);
 });
 
-test("chat creation cannot choose runtime, provider, model, or access", () => {
-  for (const [field, value] of [
-    ["runtime", "claude"],
-    ["provider", "anthropic"],
-    ["model", "claude-opus"],
-    ["respondTo", "anyone"],
-  ]) {
-    const payload = createPayload();
-    payload.request[field] = value;
-    assert.equal(parseAgentManagementRequest(payload), null);
-  }
-});
-
-test("chat creation leaves advanced behavior unset so the form stays collapsed", () => {
-  const parsed = parseAgentManagementRequest(createPayload());
+test("parses and maps full non-secret create configuration", () => {
+  const payload = createPayload();
+  Object.assign(payload.request, {
+    runtime: "codex",
+    provider: "openai",
+    model: "gpt-5",
+    respondTo: "anyone",
+    parallelism: 4,
+  });
+  const parsed = parseAgentManagementRequest(payload);
   assert.ok(parsed && parsed.action === "create");
 
   assert.deepEqual(createInputFromRequest(parsed), {
     displayName: "Research helper",
     systemPrompt: "Find reliable sources and summarize them.",
+    runtime: "codex",
+    provider: "openai",
+    model: "gpt-5",
+    behavior: {
+      respondTo: "anyone",
+      parallelism: 4,
+    },
   });
+});
+
+test("rejects invalid create behavior values", () => {
+  for (const [field, value] of [
+    ["respondTo", "allowlist"],
+    ["parallelism", 0],
+    ["parallelism", 33],
+    ["parallelism", 1.5],
+  ]) {
+    const payload = createPayload();
+    payload.request[field] = value;
+    assert.equal(parseAgentManagementRequest(payload), null);
+  }
 });
 
 test("requires the originating channel for profile updates", () => {

@@ -16,6 +16,15 @@ fn config_with_env(pairs: &[(&str, &str)]) -> GlobalAgentConfig {
     }
 }
 
+#[test]
+fn auto_approve_agent_drafts_defaults_false_for_legacy_config() {
+    let config: GlobalAgentConfig = serde_json::from_str(
+        r#"{"env_vars":{},"provider":null,"model":null,"preferred_runtime":null}"#,
+    )
+    .unwrap();
+    assert!(!config.auto_approve_agent_drafts);
+}
+
 // ── validate_global_config ────────────────────────────────────────────────────
 
 #[test]
@@ -225,6 +234,7 @@ fn normalize_none_fields_stay_none() {
     normalize_global_config_fields(&mut config);
     assert!(config.provider.is_none());
     assert!(config.model.is_none());
+    assert!(!config.auto_approve_agent_drafts);
 }
 
 // ── strip_empty_env_vars ──────────────────────────────────────────────────────
@@ -267,6 +277,7 @@ fn roundtrip_serialization() {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4".to_string()),
         preferred_runtime: Some("claude".to_string()),
+        auto_approve_agent_drafts: true,
     };
     let json = serde_json::to_string(&config).expect("serialize");
     let back: GlobalAgentConfig = serde_json::from_str(&json).expect("deserialize");
@@ -592,6 +603,7 @@ fn populated_global_config_round_trips() {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-5".to_string()),
         preferred_runtime: None,
+        auto_approve_agent_drafts: true,
     };
     let json = serde_json::to_string(&original).expect("serialization must not fail");
     let decoded: GlobalAgentConfig =

@@ -15,6 +15,11 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             channel,
             display_name,
             system_prompt,
+            runtime,
+            provider,
+            model,
+            respond_to,
+            parallelism,
         } => {
             let owner = require_owner(client)?;
             let built = build_create(
@@ -24,6 +29,11 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     channel_id: channel,
                     display_name,
                     system_prompt: read_or_stdin(&system_prompt)?,
+                    runtime,
+                    provider,
+                    model,
+                    respond_to: respond_to.map(RespondToArg::to_wire),
+                    parallelism,
                 },
             )?;
             let response = client.publish_ephemeral_event(built.event).await?;
@@ -35,7 +45,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                 obj.insert("saved".into(), false.into());
                 obj.insert(
                     "message".into(),
-                    "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it."
+                    "Draft sent to Buzz Desktop. The owner's Desktop policy decides whether it is applied automatically or opened for review."
                         .into(),
                 );
             }

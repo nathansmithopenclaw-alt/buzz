@@ -997,9 +997,7 @@ export type ChannelMessagesPageResponse = {
 
 // ── Global agent configuration ────────────────────────────────────────────────
 
-/**
- * Global agent configuration defaults applied to ALL agents.
- *
+/** Global agent configuration defaults applied to ALL agents.
  * Lowest user-settable layer — per-agent and persona values win on any key
  * collision. Mirrors the Rust `GlobalAgentConfig` struct.
  *
@@ -1014,6 +1012,8 @@ export type GlobalAgentConfig = {
   model: string | null;
   /** Preferred ACP runtime for agents without a persona-specific runtime. */
   preferred_runtime: string | null;
+  /** Apply trusted owned-agent create drafts without opening the review dialog. */
+  auto_approve_agent_drafts: boolean;
 };
 
 /**

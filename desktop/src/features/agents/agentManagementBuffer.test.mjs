@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyAgentManagementOrigin } from "./agentManagementBuffer.ts";
+import {
+  classifyAgentManagementOrigin,
+  dequeueAgentManagementRequest,
+  enqueueAgentManagementRequest,
+} from "./agentManagementBuffer.ts";
 
 const AGENT = "a".repeat(64);
 const CHANNEL = "channel-1";
@@ -59,4 +63,45 @@ test("rejects a draft from an agent this Desktop does not own", () => {
     ),
     "reject",
   );
+});
+
+test("queues rapid drafts sequentially instead of dropping the second", () => {
+  const queue = [];
+  const seen = new Set();
+  const first = {
+    agentPubkey: AGENT,
+    request: {
+      type: "agent_management_request",
+      action: "create",
+      requestId: "request-1",
+      request: {
+        channelId: CHANNEL,
+        displayName: "First",
+        systemPrompt: "First prompt",
+      },
+    },
+  };
+  const second = {
+    agentPubkey: AGENT,
+    request: {
+      ...first.request,
+      requestId: "request-2",
+      request: {
+        ...first.request.request,
+        displayName: "Second",
+      },
+    },
+  };
+
+  assert.equal(enqueueAgentManagementRequest(queue, seen, first), true);
+  const active = dequeueAgentManagementRequest(queue);
+  assert.equal(enqueueAgentManagementRequest(queue, seen, second), true);
+  assert.equal(enqueueAgentManagementRequest(queue, seen, second), false);
+
+  assert.equal(active.request.requestId, "request-1");
+  assert.equal(
+    dequeueAgentManagementRequest(queue).request.requestId,
+    "request-2",
+  );
+  assert.equal(dequeueAgentManagementRequest(queue), undefined);
 });
