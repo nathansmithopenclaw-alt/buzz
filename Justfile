@@ -242,6 +242,11 @@ desktop-release-build target="aarch64-apple-darwin":
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
+# Install a local desktop-release-build to a single canonical /Applications/Buzz.app,
+# replacing any prior copy instead of leaving numbered duplicates behind.
+desktop-install-macos target="aarch64-apple-darwin":
+    ./scripts/install-desktop-macos.sh {{target}}
+
 # Run desktop checks suitable for CI / pre-push
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
 
