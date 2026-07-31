@@ -21,6 +21,7 @@
 //!
 //! ```text
 //! RELAY_URL_A=http://a.localhost:3000 \
+//! RELAY_URL_A_ALIAS=http://alias-a.localhost:3000 \
 //! RELAY_URL_B=http://b.localhost:3000 \
 //! cargo test -p buzz-test-client --test conformance_multitenant -- --ignored
 //! ```
@@ -29,6 +30,7 @@
 //! Redis); only the `Host` header differs. That is the whole point: one binary,
 //! one DB, two communities, provably isolated by `community_id` derived from the
 //! host — never from caller input.
+//! `RELAY_URL_A_ALIAS` must be a second `community_hosts` row for community A.
 //!
 //! # Status of each row
 //!
@@ -49,6 +51,12 @@ fn url_a() -> String {
 /// Host B's base URL (community B), same relay process, different host.
 fn url_b() -> String {
     std::env::var("RELAY_URL_B").unwrap_or_else(|_| "http://b.localhost:3000".to_string())
+}
+
+/// A second authority mapped to community A on the same relay process.
+fn url_a_alias() -> String {
+    std::env::var("RELAY_URL_A_ALIAS")
+        .unwrap_or_else(|_| "http://alias-a.localhost:3000".to_string())
 }
 
 /// An unmapped/unknown host on the same relay process. No community row maps to
@@ -187,6 +195,32 @@ mod row_zero_host_binding {
             "WebSocket upgrade to an unmapped host must be rejected at the \
              handshake (fail-closed before any frame), but it succeeded — the \
              connection bound to a tenant it should not have"
+        );
+    }
+
+    /// Obligation: multiple authorities may resolve to one community without
+    /// weakening row zero. A channel created through A's canonical authority is
+    /// writable through A's alias, proving both hosts minted the same community
+    /// context; the request is still signed for the alias authority itself.
+    #[tokio::test]
+    #[ignore]
+    async fn alias_host_resolves_to_the_same_community() {
+        use nostr::Keys;
+
+        let keys = Keys::generate();
+        let channel = create_open_channel(&url_a(), &keys).await;
+        let (status, body) = post_kind9(
+            &url_a_alias(),
+            &keys,
+            &channel,
+            "row-zero alias: same community",
+        )
+        .await;
+
+        assert!(
+            status.is_success() && accepted(&body),
+            "community A alias must reach the same channel scope as its primary host \
+             (status {status}, body {body})"
         );
     }
 
@@ -469,12 +503,18 @@ mod nip11_relay_info {
     #[ignore]
     async fn nip11_is_not_a_cross_community_enumeration_oracle() {
         let (status_a, body_a) = fetch_nip11(&url_a()).await;
+        let (status_a_alias, body_a_alias) = fetch_nip11(&url_a_alias()).await;
         let (status_b, body_b) = fetch_nip11(&url_b()).await;
 
         assert_eq!(
             status_a,
             reqwest::StatusCode::OK,
             "host A must serve its NIP-11 document"
+        );
+        assert_eq!(
+            status_a_alias,
+            reqwest::StatusCode::OK,
+            "host A's alias must serve its NIP-11 document"
         );
         assert_eq!(
             status_b,
@@ -486,11 +526,22 @@ mod nip11_relay_info {
         // error page or a host echo.
         let mut json_a: serde_json::Value =
             serde_json::from_str(&body_a).expect("host A NIP-11 is valid JSON");
+        let mut json_a_alias: serde_json::Value =
+            serde_json::from_str(&body_a_alias).expect("host A alias NIP-11 is valid JSON");
         let mut json_b: serde_json::Value =
             serde_json::from_str(&body_b).expect("host B NIP-11 is valid JSON");
         assert!(
             json_a.get("supported_nips").is_some(),
             "host A NIP-11 must be a relay-info document (has supported_nips)"
+        );
+        assert!(
+            json_a_alias.get("supported_nips").is_some(),
+            "host A alias NIP-11 must be a relay-info document (has supported_nips)"
+        );
+        assert_eq!(
+            json_a.get("icon"),
+            json_a_alias.get("icon"),
+            "canonical and alias authorities for one community expose the same host-scoped icon"
         );
         assert!(
             json_b.get("supported_nips").is_some(),
@@ -502,7 +553,13 @@ mod nip11_relay_info {
         // Strip it before the equality proof — every OTHER field must still
         // be community-agnostic.
         json_a.as_object_mut().map(|o| o.remove("icon"));
+        json_a_alias.as_object_mut().map(|o| o.remove("icon"));
         json_b.as_object_mut().map(|o| o.remove("icon"));
+
+        assert_eq!(
+            json_a, json_a_alias,
+            "NIP-11 from a community's primary and alias authorities must be identical"
+        );
 
         // The enumeration-oracle obligation: no other field of the served
         // document varies by community. Identical icon-stripped bodies are the

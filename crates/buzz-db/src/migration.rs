@@ -338,6 +338,7 @@ mod tests {
 
         for value in [
             "communities",
+            "community_hosts",
             "rate_limit_violations",
             "_operator_global_tables",
             "push_gateway_challenges",
@@ -561,7 +562,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 26);
+        assert_eq!(migrations.len(), 27);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -919,6 +920,16 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
+
+        // Community host aliases are additive so brownfield canonical hosts
+        // are backfilled without changing the checksum-frozen initial schema.
+        assert_eq!(migrations[26].version, 27);
+        let community_hosts = migrations[26].sql.as_str();
+        assert!(community_hosts.contains("CREATE TABLE community_hosts"));
+        assert!(community_hosts.contains("CREATE UNIQUE INDEX idx_community_hosts_host"));
+        assert!(community_hosts.contains("SELECT host, id FROM communities"));
+        assert!(community_hosts.contains("CREATE TRIGGER trg_communities_sync_canonical_host"));
+        assert!(community_hosts.contains("_operator_global_tables"));
     }
 
     #[test]
@@ -1161,7 +1172,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(26));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(27));
     }
 
     #[tokio::test]

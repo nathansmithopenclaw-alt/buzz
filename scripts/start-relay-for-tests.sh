@@ -110,7 +110,7 @@ ok "Schema applied"
 
 # ── Seed the deployment community ────────────────────────────────────────────
 # Multi-tenant: the relay resolves every connection's tenant from the durable
-# communities host map (WHERE host = normalize_host($1)). normalize_host keeps
+# community_hosts map (WHERE host = normalize_host($1)). normalize_host keeps
 # non-default ports, so the host must be 'localhost:3000' verbatim to match
 # RELAY_URL=ws://localhost:3000. The relay never auto-seeds a community
 # (ensure_configured_community has no callers) and fails closed on an unmapped

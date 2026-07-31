@@ -45,7 +45,7 @@ echo "Checking database connection..."
 run_sql "SELECT 1" >/dev/null
 
 # Multi-tenant: every scoped row carries community_id. The relay resolves the
-# tenant per-connection from the durable communities host map (WHERE host = $1
+# tenant per-connection from the durable community_hosts map (WHERE host = $1
 # against the *normalized* host). normalize_host() keeps non-default ports, so
 # the host must be 'localhost:3000' verbatim to match RELAY_URL=ws://localhost:3000.
 # Insert the host if another setup step has not already done so, then resolve

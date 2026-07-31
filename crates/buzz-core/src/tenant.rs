@@ -101,9 +101,9 @@ impl TenantContext {
 /// lookup key.
 ///
 /// This is the *one* normalization rule shared by both sides of the fence:
-/// the `communities.host` column is stored already-normalized, and host
-/// resolution normalizes the incoming `Host` header with this same function
-/// before looking it up. Because both sides agree by construction,
+/// each `community_hosts.host` authority is stored already-normalized, and
+/// host resolution normalizes the incoming `Host` header with this same
+/// function before looking it up. Because both sides agree by construction,
 /// `Relay.Example`, `relay.example.`, and `relay.example:443` all resolve to
 /// the one community — they can never split into distinct tenants.
 ///
@@ -139,7 +139,7 @@ pub fn normalize_host(host: &str) -> String {
 
 /// Extract the authority (host plus an explicit non-default port, if present)
 /// from a relay URL in the same normalized shape as request `Host` headers and
-/// `communities.host`.
+/// `community_hosts.host`.
 ///
 /// Shared by the relay's host-resolution seam (startup community seeding and
 /// the deployment-community bind), the relay's `bind_deployment_community`, and
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn relay_url_authority_preserves_ipv6_brackets() {
         // `host_str()` strips IPv6 brackets and the port; `relay_url_authority`
-        // must keep both so the authority matches `communities.host`.
+        // must keep both so the authority matches `community_hosts.host`.
         assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
     }
 

@@ -553,8 +553,39 @@ impl Default for DbConfig {
 pub struct CommunityRecord {
     /// Stable server-resolved community id.
     pub id: CommunityId,
-    /// Normalized host that maps to this community.
+    /// Normalized host authority that matched the lookup.
     pub host: String,
+}
+
+/// One authority through which a community is reachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommunityHostRecord {
+    /// Normalized host authority.
+    pub host: String,
+    /// Whether this authority is the canonical `communities.host` value.
+    pub is_canonical: bool,
+}
+
+/// Result of adding a host authority to a community.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddCommunityHostResult {
+    /// A new alias was inserted.
+    Added,
+    /// The authority was already mapped to this community.
+    AlreadyMapped,
+    /// The authority belongs to a different community.
+    HostExists,
+}
+
+/// Result of removing a host authority from a community.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveCommunityHostResult {
+    /// The alias was removed.
+    Removed,
+    /// No such alias exists for this community.
+    NotFound,
+    /// The canonical authority cannot be removed from the alias map.
+    CanonicalHost,
 }
 
 /// Community row returned by idempotent community ensure/create operations.
@@ -1198,10 +1229,11 @@ impl Db {
     ) -> Result<Option<CommunityRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, host
-            FROM communities
-            WHERE lower(host) = lower($1)
-              AND archived_at IS NULL
+            SELECT c.id, ch.host
+            FROM community_hosts ch
+            JOIN communities c ON c.id = ch.community_id
+            WHERE lower(ch.host) = lower($1)
+              AND c.archived_at IS NULL
             "#,
         )
         .bind(normalized_host)
@@ -1236,10 +1268,17 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
-        let row = sqlx::query("SELECT id, host FROM communities WHERE lower(host) = lower($1)")
-            .bind(normalized_host)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            r#"
+            SELECT c.id, c.host
+            FROM community_hosts ch
+            JOIN communities c ON c.id = ch.community_id
+            WHERE lower(ch.host) = lower($1)
+            "#,
+        )
+        .bind(normalized_host)
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(|row| {
             Ok(CommunityRecord {
                 id: CommunityId::from_uuid(row.try_get("id")?),
@@ -1318,6 +1357,104 @@ impl Db {
         .transpose()
     }
 
+    /// Lists every authority mapped to a community, canonical authority first.
+    pub async fn list_community_hosts(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Vec<CommunityHostRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT ch.host, lower(ch.host) = lower(c.host) AS is_canonical
+            FROM community_hosts ch
+            JOIN communities c ON c.id = ch.community_id
+            WHERE ch.community_id = $1
+            ORDER BY is_canonical DESC, lower(ch.host) ASC
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(CommunityHostRecord {
+                    host: row.try_get("host")?,
+                    is_canonical: row.try_get("is_canonical")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Adds a normalized alias authority without changing the canonical host.
+    pub async fn add_community_host(
+        &self,
+        community_id: CommunityId,
+        normalized_host: &str,
+    ) -> Result<AddCommunityHostResult> {
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO community_hosts (host, community_id)
+            VALUES ($1, $2)
+            ON CONFLICT (lower(host)) DO NOTHING
+            "#,
+        )
+        .bind(normalized_host)
+        .bind(community_id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+
+        if inserted.rows_affected() == 1 {
+            return Ok(AddCommunityHostResult::Added);
+        }
+
+        let mapped_community: Option<Uuid> = sqlx::query_scalar(
+            "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
+        )
+        .bind(normalized_host)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(if mapped_community == Some(*community_id.as_uuid()) {
+            AddCommunityHostResult::AlreadyMapped
+        } else {
+            AddCommunityHostResult::HostExists
+        })
+    }
+
+    /// Removes a non-canonical authority from a community.
+    pub async fn remove_community_host(
+        &self,
+        community_id: CommunityId,
+        normalized_host: &str,
+    ) -> Result<RemoveCommunityHostResult> {
+        let is_canonical: Option<bool> = sqlx::query_scalar(
+            r#"
+            SELECT lower(ch.host) = lower(c.host)
+            FROM community_hosts ch
+            JOIN communities c ON c.id = ch.community_id
+            WHERE ch.community_id = $1 AND lower(ch.host) = lower($2)
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(normalized_host)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match is_canonical {
+            None => Ok(RemoveCommunityHostResult::NotFound),
+            Some(true) => Ok(RemoveCommunityHostResult::CanonicalHost),
+            Some(false) => {
+                sqlx::query(
+                    "DELETE FROM community_hosts WHERE community_id = $1 AND lower(host) = lower($2)",
+                )
+                .bind(community_id.as_uuid())
+                .bind(normalized_host)
+                .execute(&self.pool)
+                .await?;
+                Ok(RemoveCommunityHostResult::Removed)
+            }
+        }
+    }
+
     /// Returns the community's workspace icon (NIP-11 `icon`), if set.
     ///
     /// Set by relay admins/owners via the kind:9033 command; the value is
@@ -1370,26 +1507,44 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<EnsuredCommunityRecord> {
-        let row = sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(lower($1), 0))")
+            .bind(normalized_host)
+            .execute(&mut *tx)
+            .await?;
+
+        if let Some(row) = sqlx::query(
             r#"
-            INSERT INTO communities (host)
-            VALUES ($1)
-            ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host
-            RETURNING id, host, (xmax = 0) AS created
+            SELECT c.id, c.host
+            FROM community_hosts ch
+            JOIN communities c ON c.id = ch.community_id
+            WHERE lower(ch.host) = lower($1)
             "#,
         )
         .bind(normalized_host)
-        .fetch_one(&self.pool)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(EnsuredCommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
+                created: false,
+            });
+        }
 
+        let row = sqlx::query("INSERT INTO communities (host) VALUES ($1) RETURNING id, host")
+            .bind(normalized_host)
+            .fetch_one(&mut *tx)
+            .await?;
         let id: Uuid = row.try_get("id")?;
         let host: String = row.try_get("host")?;
-        let created: bool = row.try_get("created")?;
+        tx.commit().await?;
 
         Ok(EnsuredCommunityRecord {
             id: CommunityId::from_uuid(id),
             host,
-            created,
+            created: true,
         })
     }
 
@@ -1413,65 +1568,76 @@ impl Db {
             .execute(&mut *tx)
             .await?;
 
-        let row = sqlx::query(
+        // The map, not just `communities.host`, owns global authority
+        // uniqueness. Serialize creators for the same normalized authority so
+        // an alias can never race a canonical community create.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(lower($1), 0))")
+            .bind(normalized_host)
+            .execute(&mut *tx)
+            .await?;
+
+        let existing = sqlx::query(
             r#"
-            INSERT INTO communities (host)
-            VALUES ($1)
-            ON CONFLICT (lower(host)) DO NOTHING
-            RETURNING id, host
+            SELECT c.id, c.host,
+                   lower(c.host) = lower($1) AS is_canonical,
+                   EXISTS (
+                       SELECT 1 FROM relay_members rm
+                       WHERE rm.community_id = c.id
+                         AND lower(rm.pubkey) = lower($2)
+                         AND rm.role = 'owner'
+                   ) AS owned_by_requester,
+                   c.archived_at IS NULL AS is_active
+            FROM community_hosts ch
+            JOIN communities c ON c.id = ch.community_id
+            WHERE lower(ch.host) = lower($1)
             "#,
         )
         .bind(normalized_host)
+        .bind(&owner_pubkey)
         .fetch_optional(&mut *tx)
         .await?;
 
-        let (id, host) = if let Some(row) = row {
-            let id: Uuid = row.try_get("id")?;
-            let host: String = row.try_get("host")?;
-
-            // Enforce the limit before inserting the new owner row.
-            let owned_count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
-            )
-            .bind(&owner_pubkey)
-            .fetch_one(&mut *tx)
-            .await?;
-
-            if owned_count >= relay_members::max_communities_per_owner() {
-                tx.rollback().await?;
-                return Ok(CreateCommunityWithOwnerResult::LimitReached);
-            }
-
-            sqlx::query(
-                "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
-            )
-            .bind(id)
-            .bind(&owner_pubkey)
-            .execute(&mut *tx)
-            .await?;
-            (id, host)
-        } else {
-            let existing = sqlx::query(
-                r#"
-                SELECT c.id, c.host
-                FROM communities c
-                JOIN relay_members rm ON rm.community_id = c.id
-                WHERE lower(c.host) = lower($1)
-                  AND lower(rm.pubkey) = lower($2)
-                  AND rm.role = 'owner'
-                  AND c.archived_at IS NULL
-                "#,
-            )
-            .bind(normalized_host)
-            .bind(&owner_pubkey)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some(existing) = existing else {
+        if let Some(existing) = existing {
+            let is_identical_retry = existing.try_get::<bool, _>("is_canonical")?
+                && existing.try_get::<bool, _>("owned_by_requester")?
+                && existing.try_get::<bool, _>("is_active")?;
+            if !is_identical_retry {
                 tx.rollback().await?;
                 return Ok(CreateCommunityWithOwnerResult::HostExists);
+            }
+            let record = CreatedCommunityRecord {
+                id: CommunityId::from_uuid(existing.try_get("id")?),
+                host: existing.try_get("host")?,
             };
-            (existing.try_get("id")?, existing.try_get("host")?)
-        };
+            tx.commit().await?;
+            return Ok(CreateCommunityWithOwnerResult::Created(record));
+        }
+
+        let owned_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
+        )
+        .bind(&owner_pubkey)
+        .fetch_one(&mut *tx)
+        .await?;
+        if owned_count >= relay_members::max_communities_per_owner() {
+            tx.rollback().await?;
+            return Ok(CreateCommunityWithOwnerResult::LimitReached);
+        }
+
+        let row = sqlx::query("INSERT INTO communities (host) VALUES ($1) RETURNING id, host")
+            .bind(normalized_host)
+            .fetch_one(&mut *tx)
+            .await?;
+        let id: Uuid = row.try_get("id")?;
+        let host: String = row.try_get("host")?;
+
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
+        )
+        .bind(id)
+        .bind(&owner_pubkey)
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
         Ok(CreateCommunityWithOwnerResult::Created(
@@ -1492,8 +1658,9 @@ impl Db {
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = COALESCE(c.archived_at, now())
-               FROM relay_members rm
-               WHERE lower(c.host) = lower($1)
+               FROM relay_members rm, community_hosts ch
+               WHERE ch.community_id = c.id
+                 AND lower(ch.host) = lower($1)
                  AND rm.community_id = c.id
                  AND lower(rm.pubkey) = lower($2)
                  AND rm.role = 'owner'
@@ -1524,8 +1691,9 @@ impl Db {
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = NULL
-               FROM relay_members rm
-               WHERE lower(c.host) = lower($1)
+               FROM relay_members rm, community_hosts ch
+               WHERE ch.community_id = c.id
+                 AND lower(ch.host) = lower($1)
                  AND rm.community_id = c.id
                  AND lower(rm.pubkey) = lower($2)
                  AND rm.role = 'owner'
@@ -5861,6 +6029,116 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn community_host_aliases_resolve_and_preserve_the_canonical_host() {
+        let db = setup_db().await;
+        let canonical = format!("canonical-{}.example", Uuid::new_v4().simple());
+        let alias = format!("alias-{}.example:8443", Uuid::new_v4().simple());
+        let other_host = format!("other-{}.example", Uuid::new_v4().simple());
+
+        let primary = db
+            .ensure_configured_community(&canonical)
+            .await
+            .expect("create primary community");
+        let other = db
+            .ensure_configured_community(&other_host)
+            .await
+            .expect("create other community");
+
+        assert_eq!(
+            db.add_community_host(primary.id, &alias)
+                .await
+                .expect("add alias"),
+            AddCommunityHostResult::Added
+        );
+        assert_eq!(
+            db.add_community_host(primary.id, &alias.to_ascii_uppercase())
+                .await
+                .expect("idempotent alias add"),
+            AddCommunityHostResult::AlreadyMapped
+        );
+        assert_eq!(
+            db.add_community_host(other.id, &alias)
+                .await
+                .expect("cross-community collision"),
+            AddCommunityHostResult::HostExists
+        );
+
+        let ensured_via_alias = db
+            .ensure_configured_community(&alias)
+            .await
+            .expect("ensure through alias");
+        assert_eq!(ensured_via_alias.id, primary.id);
+        assert_eq!(ensured_via_alias.host, canonical);
+        assert!(!ensured_via_alias.created);
+
+        let resolved = db
+            .lookup_community_by_host(&alias)
+            .await
+            .expect("lookup alias")
+            .expect("alias resolves");
+        assert_eq!(resolved.id, primary.id);
+        assert_eq!(resolved.host, alias);
+        assert_eq!(
+            db.lookup_community_host(primary.id)
+                .await
+                .expect("lookup canonical")
+                .as_deref(),
+            Some(canonical.as_str()),
+            "reverse lookup remains canonical"
+        );
+
+        let hosts = db
+            .list_community_hosts(primary.id)
+            .await
+            .expect("list hosts");
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].host, canonical);
+        assert!(hosts[0].is_canonical);
+        assert_eq!(hosts[1].host, alias);
+        assert!(!hosts[1].is_canonical);
+
+        assert_eq!(
+            db.remove_community_host(primary.id, &canonical)
+                .await
+                .expect("protect canonical"),
+            RemoveCommunityHostResult::CanonicalHost
+        );
+        assert_eq!(
+            db.remove_community_host(primary.id, &alias)
+                .await
+                .expect("remove alias"),
+            RemoveCommunityHostResult::Removed
+        );
+        assert!(db
+            .lookup_community_by_host(&alias)
+            .await
+            .expect("lookup removed alias")
+            .is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn direct_community_inserts_always_create_a_canonical_host_mapping() {
+        let db = setup_db().await;
+        let id = Uuid::new_v4();
+        let host = format!("triggered-canonical-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&host)
+            .execute(&db.pool)
+            .await
+            .expect("insert community through legacy/direct path");
+
+        let resolved = db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup direct-insert canonical")
+            .expect("trigger created host mapping");
+        assert_eq!(resolved.id, CommunityId::from_uuid(id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn create_community_with_owner_is_atomic_and_create_only() {
         let db = setup_db().await;
         let host = format!("create-only-{}.example", Uuid::new_v4().simple());
@@ -5927,6 +6205,7 @@ mod tests {
     async fn unarchive_community_owned_by_restores_admission_idempotently() {
         let db = setup_db().await;
         let host = format!("unarchive-{}.example", Uuid::new_v4().simple());
+        let alias = format!("unarchive-alias-{}.example", Uuid::new_v4().simple());
         let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let outsider = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let created = db
@@ -5936,9 +6215,15 @@ mod tests {
         let CreateCommunityWithOwnerResult::Created(created) = created else {
             panic!("expected new community");
         };
+        assert_eq!(
+            db.add_community_host(created.id, &alias)
+                .await
+                .expect("add management alias"),
+            AddCommunityHostResult::Added
+        );
 
         let archived = db
-            .archive_community_owned_by(&host, &owner, "protected.example")
+            .archive_community_owned_by(&alias, &owner, "protected.example")
             .await
             .expect("archive community")
             .expect("owned community");
@@ -5962,7 +6247,7 @@ mod tests {
             .is_none());
 
         let restored = db
-            .unarchive_community_owned_by(&host.to_ascii_uppercase(), &owner)
+            .unarchive_community_owned_by(&alias.to_ascii_uppercase(), &owner)
             .await
             .expect("unarchive community")
             .expect("owned community");

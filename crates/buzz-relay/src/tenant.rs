@@ -21,9 +21,8 @@ use buzz_core::tenant::{normalize_host, CommunityId, TenantContext};
 ///
 /// Implementors MUST treat the input as already normalized by
 /// [`buzz_core::tenant::normalize_host`] — [`bind_community`] guarantees that,
-/// so the stored `communities.host` key and the lookup key agree by
-/// construction (the column is `UNIQUE(lower(host))`, frozen in migration
-/// `0001`).
+/// so the stored `community_hosts.host` key and the lookup key agree by
+/// construction (the map is `UNIQUE(lower(host))` in migration `0027`).
 ///
 /// Uses a native `async fn` in trait (no `async-trait` dependency). The relay
 /// holds a concrete resolver (`Db`), so callers are generic over `R:
@@ -109,7 +108,7 @@ pub async fn bind_deployment_community<R: HostResolver>(
 }
 
 /// Extract the relay URL authority in the same normalized shape as request
-/// `Host` headers and `communities.host`: host plus an explicit non-default
+/// `Host` headers and `community_hosts.host`: host plus an explicit non-default
 /// port, if present.
 ///
 /// `pub` so startup ([`crate::main`], a separate binary crate) can seed the
@@ -123,7 +122,7 @@ pub async fn bind_deployment_community<R: HostResolver>(
 pub use buzz_core::tenant::relay_url_authority;
 
 /// Production [`HostResolver`]: the relay resolves hosts against the durable
-/// `communities` host map in Postgres.
+/// `community_hosts` map in Postgres.
 ///
 /// This is the *only* place the relay couples the row-zero seam to buzz-db. The
 /// trait keeps `bind_community` and every call site database-free and testable;

@@ -24,12 +24,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
-use buzz_core::tenant::{relay_url_authority, TenantContext};
-use buzz_db::{Db, DbConfig};
+use buzz_core::tenant::{normalize_host, relay_url_authority, TenantContext};
+use buzz_db::{AddCommunityHostResult, Db, DbConfig, RemoveCommunityHostResult};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use tracing::warn;
+use url::{Host, Url};
 
 #[derive(Parser)]
 #[command(name = "buzz-admin", about = "Buzz instance administration")]
@@ -72,6 +73,20 @@ enum Command {
     },
     /// List all relay members.
     ListMembers,
+    /// Add an authority alias for the configured relay community.
+    AddHost {
+        /// Bare host authority, including a non-default port when required.
+        #[arg(long)]
+        host: String,
+    },
+    /// List every authority for the configured relay community.
+    ListHosts,
+    /// Remove a non-canonical authority alias.
+    RemoveHost {
+        /// Bare host authority to remove.
+        #[arg(long)]
+        host: String,
+    },
     /// Generate a new Nostr keypair (for bootstrapping).
     GenerateKey,
     /// Run pending database migrations.
@@ -145,6 +160,9 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
         Command::ListMembers => cmd_list_members().await,
+        Command::AddHost { host } => cmd_add_host(host).await,
+        Command::ListHosts => cmd_list_hosts().await,
+        Command::RemoveHost { host } => cmd_remove_host(host).await,
         Command::ProductFeedback {
             command: ProductFeedbackCommand::List { limit },
         } => cmd_list_product_feedback(limit).await,
@@ -153,6 +171,111 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+async fn cmd_add_host(host_arg: String) -> Result<i32> {
+    let host = match normalize_host_authority(&host_arg) {
+        Ok(host) => host,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return Ok(1);
+        }
+    };
+    let db = connect_db().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    match db.add_community_host(tenant.community(), &host).await? {
+        AddCommunityHostResult::Added => println!("added host alias: {host}"),
+        AddCommunityHostResult::AlreadyMapped => println!("already mapped: {host} (no change)"),
+        AddCommunityHostResult::HostExists => {
+            eprintln!("error: host is already mapped to another community");
+            return Ok(2);
+        }
+    }
+    Ok(0)
+}
+
+async fn cmd_list_hosts() -> Result<i32> {
+    let db = connect_db().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    for record in db.list_community_hosts(tenant.community()).await? {
+        if record.is_canonical {
+            println!("{}\t(primary)", record.host);
+        } else {
+            println!("{}", record.host);
+        }
+    }
+    Ok(0)
+}
+
+async fn cmd_remove_host(host_arg: String) -> Result<i32> {
+    let host = match normalize_host_authority(&host_arg) {
+        Ok(host) => host,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return Ok(1);
+        }
+    };
+    let db = connect_db().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    match db.remove_community_host(tenant.community(), &host).await? {
+        RemoveCommunityHostResult::Removed => println!("removed host alias: {host}"),
+        RemoveCommunityHostResult::NotFound => {
+            eprintln!("error: host alias not found");
+            return Ok(2);
+        }
+        RemoveCommunityHostResult::CanonicalHost => {
+            eprintln!(
+                "error: cannot remove the primary host; change communities.host through the canonical-host management path"
+            );
+            return Ok(3);
+        }
+    }
+    Ok(0)
+}
+
+fn normalize_host_authority(input: &str) -> std::result::Result<String, String> {
+    let authority = normalize_host(input);
+    if authority.is_empty() {
+        return Err("host is empty".to_string());
+    }
+    if authority.len() > 255 {
+        return Err(format!(
+            "host too long: {} bytes (max 255)",
+            authority.len()
+        ));
+    }
+    if authority
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+        || authority.contains('/')
+        || authority.contains('?')
+        || authority.contains('#')
+        || authority.contains('@')
+    {
+        return Err(
+            "host must be a bare authority with no scheme, path, query, or userinfo".to_string(),
+        );
+    }
+
+    let parsed = Url::parse(&format!("http://{authority}/"))
+        .map_err(|_| "host is not a valid authority".to_string())?;
+    let parsed_host = parsed
+        .host()
+        .ok_or_else(|| "host is not a valid authority".to_string())?;
+    let serialized_host = match parsed_host {
+        Host::Domain(domain) => domain.to_string(),
+        Host::Ipv4(address) => address.to_string(),
+        Host::Ipv6(address) => format!("[{address}]"),
+    };
+    let canonical = parsed.port().map_or(serialized_host.clone(), |port| {
+        format!("{serialized_host}:{port}")
+    });
+    if canonical != authority {
+        return Err(format!(
+            "host is not a canonical authority: expected {canonical:?}"
+        ));
+    }
+    Ok(authority)
 }
 
 async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
@@ -432,7 +555,7 @@ async fn connect_db() -> Result<Db> {
 ///
 /// `buzz-admin` runs inside the relay container (`compose exec relay
 /// buzz-admin …`), so it shares the relay's `RELAY_URL` and resolves the same
-/// single community against the durable `communities` host map. This is
+/// single community against the durable `community_hosts` map. This is
 /// deliberately NOT a default tenant: an unmapped host fails closed with an
 /// error, mirroring the relay's own `bind_community` row-zero seam. The CLI is
 /// single-community per invocation — there is no cross-community sweep.
@@ -581,4 +704,43 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_commands_parse() {
+        let add = Cli::try_parse_from(["buzz-admin", "add-host", "--host", "relay:8443"])
+            .expect("parse add-host");
+        assert!(matches!(
+            add.command,
+            Command::AddHost { host } if host == "relay:8443"
+        ));
+
+        let list = Cli::try_parse_from(["buzz-admin", "list-hosts"]).expect("parse list-hosts");
+        assert!(matches!(list.command, Command::ListHosts));
+
+        let remove = Cli::try_parse_from(["buzz-admin", "remove-host", "--host", "relay:8443"])
+            .expect("parse remove-host");
+        assert!(matches!(
+            remove.command,
+            Command::RemoveHost { host } if host == "relay:8443"
+        ));
+    }
+
+    #[test]
+    fn alias_authority_normalizes_but_rejects_urls() {
+        assert_eq!(
+            normalize_host_authority("Relay.Example:8443").expect("normalize authority"),
+            "relay.example:8443"
+        );
+        assert_eq!(
+            normalize_host_authority("relay.example:443").expect("strip default port"),
+            "relay.example"
+        );
+        assert!(normalize_host_authority("wss://relay.example:8443").is_err());
+        assert!(normalize_host_authority("relay.example/path").is_err());
+    }
 }

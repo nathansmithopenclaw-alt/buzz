@@ -35,7 +35,7 @@ use url::{Host, Url};
 
 use crate::state::AppState;
 
-/// Maximum accepted authority length. Matches `communities.host VARCHAR(255)`.
+/// Maximum accepted authority length. Matches the canonical and alias host columns.
 const MAX_HOST_LEN: usize = 255;
 
 /// JSON body for `POST /operator/communities`.
@@ -78,7 +78,7 @@ pub(crate) fn validate_pubkey_hex(value: &str) -> Option<String> {
 ///
 /// The host must already be in normalized shape (`normalize_host` is a
 /// no-op on it): lowercase, no default port, no trailing dot. Requiring the
-/// caller to send the normalized form keeps the stored `communities.host`
+/// caller to send the normalized form keeps the stored canonical or alias host
 /// value byte-identical to what request-time host resolution will look up.
 fn validate_host(host: &str) -> Result<(), String> {
     if host.is_empty() {
