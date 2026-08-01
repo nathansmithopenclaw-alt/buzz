@@ -1,5 +1,6 @@
 //! Authenticated relay stream for Gateway-supervised task-envelope ingestion.
 
+use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
 use std::time::Duration;
 
@@ -9,6 +10,9 @@ use clap::Parser;
 use nostr::Keys;
 use serde::Serialize;
 use serde_json::json;
+
+const CHANNEL_DISCOVERY_SUBSCRIPTION_ID: &str = "buzz-task-channel-discovery-v1";
+const TASK_SUBSCRIPTION_PREFIX: &str = "buzz-task-kernel-bridge-v1";
 
 #[derive(Debug, Parser)]
 #[command(about = "Stream SDK-validated Buzz task envelopes as NDJSON")]
@@ -82,39 +86,123 @@ fn emit_event(event: &TaskEnvelopeEvent, bridge_pubkey: &str) -> Result<(), Stri
         .map_err(|error| format!("failed to emit task event: {error}"))
 }
 
+fn membership_channel_id(event: &nostr::Event, bridge_pubkey: &str) -> Option<String> {
+    if event.kind.as_u16() != 39002 {
+        return None;
+    }
+    let is_member = event.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        values.first().map(String::as_str) == Some("p")
+            && values.get(1).map(String::as_str) == Some(bridge_pubkey)
+    });
+    if !is_member {
+        return None;
+    }
+    event.tags.iter().find_map(|tag| {
+        let values = tag.as_slice();
+        (values.first().map(String::as_str) == Some("d"))
+            .then(|| values.get(1))
+            .flatten()
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .map(|channel_id| channel_id.to_string())
+    })
+}
+
+async fn discover_member_channels(
+    connection: &mut NostrWsConnection,
+    bridge_pubkey: &str,
+) -> Result<Vec<String>, String> {
+    connection
+        .send_raw(&json!([
+            "REQ",
+            CHANNEL_DISCOVERY_SUBSCRIPTION_ID,
+            {
+                "kinds": [39002],
+                "#p": [bridge_pubkey],
+            }
+        ]))
+        .await
+        .map_err(|error| format!("relay channel discovery failed: {error}"))?;
+
+    let mut channel_ids = BTreeSet::new();
+    loop {
+        match connection.next_event(Duration::from_secs(30)).await {
+            Ok(RelayMessage::Event {
+                subscription_id,
+                event,
+            }) if subscription_id == CHANNEL_DISCOVERY_SUBSCRIPTION_ID => {
+                if let Some(channel_id) = membership_channel_id(&event, bridge_pubkey) {
+                    channel_ids.insert(channel_id);
+                }
+            }
+            Ok(RelayMessage::Eose { subscription_id })
+                if subscription_id == CHANNEL_DISCOVERY_SUBSCRIPTION_ID =>
+            {
+                break;
+            }
+            Ok(RelayMessage::Closed {
+                subscription_id,
+                message,
+            }) if subscription_id == CHANNEL_DISCOVERY_SUBSCRIPTION_ID => {
+                return Err(format!("relay closed channel discovery: {message}"));
+            }
+            Ok(RelayMessage::Notice { message }) => eprintln!("relay notice: {message}"),
+            Ok(_) => {}
+            Err(error) => return Err(format!("relay channel discovery failed: {error}")),
+        }
+    }
+    connection
+        .send_raw(&json!(["CLOSE", CHANNEL_DISCOVERY_SUBSCRIPTION_ID]))
+        .await
+        .map_err(|error| format!("relay channel discovery close failed: {error}"))?;
+    Ok(channel_ids.into_iter().collect())
+}
+
+fn task_subscription(channel_id: &str, since: u64) -> (String, serde_json::Value) {
+    let subscription_id = format!("{TASK_SUBSCRIPTION_PREFIX}-{channel_id}");
+    let request = json!([
+        "REQ",
+        subscription_id,
+        {
+            "kinds": [9],
+            "#h": [channel_id],
+            "#t": [TASK_DISCOVERY_HASHTAG],
+            "since": since,
+        }
+    ]);
+    (subscription_id, request)
+}
+
 async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
     let mut connection = NostrWsConnection::connect_authenticated(&args.relay, keys, None)
         .await
         .map_err(|error| format!("relay connect/auth failed: {error}"))?;
-    let subscription_id = "buzz-task-kernel-bridge-v1";
-    connection
-        .send_raw(&json!([
-            "REQ",
-            subscription_id,
-            {
-                "kinds": [9],
-                "#t": [TASK_DISCOVERY_HASHTAG],
-                // Replay a one-second overlap. Events published live in the same
-                // second are not guaranteed to arrive in event-id order; the
-                // Gateway relies on kernel idempotency to absorb the overlap.
-                "since": args.cursor_created_at.saturating_sub(1),
-            }
-        ]))
-        .await
-        .map_err(|error| format!("relay subscription failed: {error}"))?;
+    let bridge_pubkey = keys.public_key().to_hex();
+    let channel_ids = discover_member_channels(&mut connection, &bridge_pubkey).await?;
+    if channel_ids.is_empty() {
+        return Err("bridge identity is not a member of any channels".to_string());
+    }
+    let since = args.cursor_created_at.saturating_sub(1);
+    let mut pending_eose = BTreeSet::new();
+    for channel_id in channel_ids {
+        let (subscription_id, request) = task_subscription(&channel_id, since);
+        pending_eose.insert(subscription_id);
+        connection
+            .send_raw(&request)
+            .await
+            .map_err(|error| format!("relay task subscription failed: {error}"))?;
+    }
 
     let mut backfill = Vec::new();
-    let mut backfill_complete = false;
-    let bridge_pubkey = keys.public_key().to_hex();
     loop {
         match connection.next_event(Duration::from_secs(90)).await {
             Ok(RelayMessage::Event {
                 subscription_id: event_subscription,
                 event,
-            }) if event_subscription == subscription_id => {
+            }) if event_subscription.starts_with(TASK_SUBSCRIPTION_PREFIX) => {
                 match TaskEnvelopeEvent::from_event(&event) {
                     Ok(task_event) => {
-                        if backfill_complete {
+                        if pending_eose.is_empty() {
                             emit_event(&task_event, &bridge_pubkey)?;
                         } else {
                             backfill.push(task_event);
@@ -125,17 +213,22 @@ async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
             }
             Ok(RelayMessage::Eose {
                 subscription_id: event_subscription,
-            }) if event_subscription == subscription_id => {
-                backfill.sort_by(|left, right| {
-                    (left.created_at, left.event_id.as_str())
-                        .cmp(&(right.created_at, right.event_id.as_str()))
-                });
-                for task_event in backfill.drain(..) {
-                    emit_event(&task_event, &bridge_pubkey)?;
+            }) if event_subscription.starts_with(TASK_SUBSCRIPTION_PREFIX) => {
+                pending_eose.remove(&event_subscription);
+                if pending_eose.is_empty() {
+                    backfill.sort_by(|left, right| {
+                        (left.created_at, left.event_id.as_str())
+                            .cmp(&(right.created_at, right.event_id.as_str()))
+                    });
+                    for task_event in backfill.drain(..) {
+                        emit_event(&task_event, &bridge_pubkey)?;
+                    }
                 }
-                backfill_complete = true;
             }
-            Ok(RelayMessage::Closed { message, .. }) => {
+            Ok(RelayMessage::Closed {
+                subscription_id,
+                message,
+            }) if subscription_id.starts_with(TASK_SUBSCRIPTION_PREFIX) => {
                 return Err(format!("relay closed task subscription: {message}"));
             }
             Ok(RelayMessage::Notice { message }) => eprintln!("relay notice: {message}"),
@@ -211,5 +304,18 @@ mod tests {
         let generated = new_keypair();
         let keys = Keys::parse(&generated.private_key).expect("generated private key");
         assert_eq!(keys.public_key().to_hex(), generated.public_key);
+    }
+
+    #[test]
+    fn task_subscription_is_channel_scoped_for_live_fanout() {
+        let channel_id = uuid::Uuid::new_v4().to_string();
+        let (subscription_id, request) = task_subscription(&channel_id, 99);
+        assert_eq!(
+            subscription_id,
+            format!("{TASK_SUBSCRIPTION_PREFIX}-{channel_id}")
+        );
+        assert_eq!(request[2]["#h"], json!([channel_id]));
+        assert_eq!(request[2]["#t"], json!([TASK_DISCOVERY_HASHTAG]));
+        assert_eq!(request[2]["since"], json!(99));
     }
 }
