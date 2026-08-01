@@ -2075,6 +2075,30 @@ pub fn extract_model_state(result: &serde_json::Value) -> Option<serde_json::Val
     result.get("models").cloned()
 }
 
+/// Whether an advertised catalog value is the canonical form of a configured
+/// moving-family alias.
+///
+/// Claude Code has changed the spelling of extended-context selectors over
+/// time (for example, `opus[1m]` became `opus` when Max subscriptions began
+/// receiving 1M context automatically). Treat only the four built-in family
+/// aliases as compatible across that qualifier boundary. Full/pinned model
+/// IDs remain exact so `claude-opus-4-7[1m]` can never degrade to moving
+/// `opus`.
+fn model_catalog_value_matches(configured: &str, advertised: &str) -> bool {
+    if configured == advertised {
+        return true;
+    }
+
+    fn qualified_family(value: &str) -> Option<&str> {
+        let (family, qualifier) = value.split_once('[')?;
+        (qualifier.ends_with(']') && matches!(family, "opus" | "fable" | "sonnet" | "haiku"))
+            .then_some(family)
+    }
+
+    qualified_family(configured) == Some(advertised)
+        || qualified_family(advertised) == Some(configured)
+}
+
 /// Match a desired model ID against a fresh `session/new` response.
 ///
 /// Returns the correct ACP method to call, or `None` if no match.
@@ -2101,10 +2125,13 @@ pub fn resolve_model_switch_method(
         };
         if let Some(options) = config_opt.get("options").and_then(|v| v.as_array()) {
             for opt in options {
-                if opt.get("value").and_then(|v| v.as_str()) == Some(desired_model) {
+                if let Some(advertised) = opt.get("value").and_then(|v| v.as_str()) {
+                    if !model_catalog_value_matches(desired_model, advertised) {
+                        continue;
+                    }
                     return Some(ModelSwitchMethod::ConfigOption {
                         config_id: config_id.to_string(),
-                        option_value: desired_model.to_string(),
+                        option_value: advertised.to_string(),
                     });
                 }
             }
@@ -2115,9 +2142,12 @@ pub fn resolve_model_switch_method(
     if let Some(models) = extract_model_state(session_new_result) {
         if let Some(available) = models.get("availableModels").and_then(|v| v.as_array()) {
             for model in available {
-                if model.get("modelId").and_then(|v| v.as_str()) == Some(desired_model) {
+                if let Some(advertised) = model.get("modelId").and_then(|v| v.as_str()) {
+                    if !model_catalog_value_matches(desired_model, advertised) {
+                        continue;
+                    }
                     return Some(ModelSwitchMethod::SetModel {
-                        model_id: desired_model.to_string(),
+                        model_id: advertised.to_string(),
                     });
                 }
             }
@@ -2144,9 +2174,13 @@ pub fn model_in_catalog(
             .get("options")
             .and_then(|v| v.as_array())
             .is_some_and(|options| {
-                options
-                    .iter()
-                    .any(|opt| opt.get("value").and_then(|v| v.as_str()) == Some(desired_model))
+                options.iter().any(|opt| {
+                    opt.get("value")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|advertised| {
+                            model_catalog_value_matches(desired_model, advertised)
+                        })
+                })
             })
     });
     if in_config_options {
@@ -2157,9 +2191,14 @@ pub fn model_in_catalog(
         .and_then(|models| models.get("availableModels"))
         .and_then(|v| v.as_array())
         .is_some_and(|available| {
-            available
-                .iter()
-                .any(|model| model.get("modelId").and_then(|v| v.as_str()) == Some(desired_model))
+            available.iter().any(|model| {
+                model
+                    .get("modelId")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|advertised| {
+                        model_catalog_value_matches(desired_model, advertised)
+                    })
+            })
         })
 }
 
@@ -2702,6 +2741,42 @@ mod tests {
     }
 
     #[test]
+    fn resolve_canonicalizes_qualified_builtin_alias_to_live_catalog() {
+        let result = serde_json::json!({
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "options": [
+                    { "value": "sonnet", "name": "Sonnet" },
+                    { "value": "opus", "name": "Opus" },
+                    { "value": "haiku", "name": "Haiku" }
+                ]
+            }]
+        });
+
+        assert_eq!(
+            super::resolve_model_switch_method(&result, "opus[1m]"),
+            Some(super::ModelSwitchMethod::ConfigOption {
+                config_id: "model".to_string(),
+                option_value: "opus".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_canonicalize_pinned_model_to_moving_alias() {
+        let result = serde_json::json!({
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "options": [{ "value": "opus", "name": "Opus" }]
+            }]
+        });
+
+        assert!(super::resolve_model_switch_method(&result, "claude-opus-4-7[1m]").is_none());
+    }
+
+    #[test]
     fn resolve_falls_back_to_unstable() {
         let result = serde_json::json!({
             "models": {
@@ -2799,6 +2874,17 @@ mod tests {
             ]
         });
         assert!(super::model_in_catalog(&[], Some(&available), "o3-pro"));
+    }
+
+    #[test]
+    fn model_in_catalog_accepts_qualified_builtin_alias_canonicalization() {
+        let config_options = vec![serde_json::json!({
+            "id": "model",
+            "category": "model",
+            "options": [{ "value": "opus" }]
+        })];
+
+        assert!(super::model_in_catalog(&config_options, None, "opus[1m]"));
     }
 
     #[test]

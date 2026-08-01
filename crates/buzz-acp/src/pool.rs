@@ -1075,6 +1075,10 @@ async fn apply_model_switch(
     desired: &str,
     method: &ModelSwitchMethod,
 ) -> Result<serde_json::Value, AcpError> {
+    let selected_model = match method {
+        ModelSwitchMethod::ConfigOption { option_value, .. } => option_value.as_str(),
+        ModelSwitchMethod::SetModel { model_id } => model_id.as_str(),
+    };
     let method_label = match method {
         ModelSwitchMethod::ConfigOption { config_id, .. } => {
             format!("configOption (configId={config_id})")
@@ -1115,21 +1119,23 @@ async fn apply_model_switch(
                 .and_then(|option| option.get("currentValue"))
                 .and_then(|value| value.as_str());
             if let Some(accepted_value) = accepted {
-                if accepted_value != desired {
+                if accepted_value != selected_model {
                     return Err(AcpError::Protocol(format!(
-                        "agent accepted model {accepted_value:?}, not requested model {desired:?}"
+                        "agent accepted model {accepted_value:?}, not selected catalog model {selected_model:?} for configured selector {desired:?}"
                     )));
                 }
             }
             tracing::info!(
                 target: "pool::model",
                 accepted_model = accepted.unwrap_or("<unverified>"),
-                "applied model {desired} via {method_label} on session {session_id}"
+                configured_model = desired,
+                "applied catalog model {selected_model} via {method_label} on session {session_id}"
             );
             acp.observe(
                 "model_selection_verified",
                 serde_json::json!({
                     "requestedModel": desired,
+                    "selectedModel": selected_model,
                     "acceptedModel": accepted,
                     "method": method_label,
                     "sessionId": session_id,
