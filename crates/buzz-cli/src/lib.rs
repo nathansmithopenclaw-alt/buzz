@@ -179,6 +179,9 @@ enum Cmd {
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
+    /// Assign, update, list, and inspect task envelopes
+    #[command(subcommand)]
+    Tasks(TasksCmd),
     /// Create, configure, and manage channels
     #[command(subcommand)]
     Channels(ChannelsCmd),
@@ -520,6 +523,73 @@ pub enum MessagesCmd {
         /// Vote direction: "up" or "down"
         #[arg(long)]
         direction: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TasksCmd {
+    /// Assign a task through a normal channel message with machine-readable metadata
+    Assign {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Assignee pubkey (hex/npub) or exact @Name among channel members
+        #[arg(long)]
+        assignee: String,
+        /// Short task title
+        #[arg(long)]
+        title: String,
+        /// Deliverable as type=ref; repeatable
+        #[arg(long = "deliverable")]
+        deliverables: Vec<String>,
+        /// Verification method
+        #[arg(long = "verify", default_value = "not specified")]
+        verification: String,
+        /// Human-readable message text; use '-' for stdin
+        #[arg(long)]
+        content: String,
+    },
+    /// Append a lifecycle update for an existing task
+    Update {
+        /// Task UUID
+        #[arg(long)]
+        task: String,
+        /// New status: picked_up | blocked | done | failed | verified
+        #[arg(long)]
+        status: String,
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Deliverable as type=ref; repeatable
+        #[arg(long = "deliverable")]
+        deliverables: Vec<String>,
+        /// Verification evidence reference
+        #[arg(long)]
+        evidence: Option<String>,
+        /// Lifecycle note; also records blocked_on for blocked updates
+        #[arg(long)]
+        note: Option<String>,
+        /// Optional human-readable message text; use '-' for stdin
+        #[arg(long)]
+        content: Option<String>,
+    },
+    /// List current task state folded from append-only history
+    List {
+        /// Restrict to one channel UUID
+        #[arg(long)]
+        channel: Option<String>,
+        /// Restrict to one status
+        #[arg(long)]
+        status: Option<String>,
+        /// Restrict to assignee pubkey/npub, or exact @Name when --channel is set
+        #[arg(long)]
+        assignee: Option<String>,
+    },
+    /// Get full append-only history for one task
+    Get {
+        /// Task UUID
+        #[arg(long)]
+        task: String,
     },
 }
 
@@ -1830,6 +1900,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
+        Cmd::Tasks(sub) => commands::tasks::dispatch(sub, &client).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
@@ -1908,6 +1979,7 @@ mod tests {
             "reactions",
             "repos",
             "social",
+            "tasks",
             "upload",
             "users",
             "workflows",
@@ -1975,6 +2047,10 @@ mod tests {
                 "thread",
                 "vote"
             ]
+        );
+        assert_eq!(
+            names(&cmd, "tasks"),
+            vec!["assign", "get", "list", "update"]
         );
         assert_eq!(
             names(&cmd, "channels"),
