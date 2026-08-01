@@ -29,6 +29,7 @@ mod ptt_shortcut;
 mod relay;
 mod relay_admission;
 mod reset;
+mod runtime_identity;
 mod secret_store;
 mod shutdown;
 mod templates;
@@ -145,6 +146,8 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    runtime_identity::log_desktop_identity();
+
     // mesh-llm's async chains (model download, node start/join) overflow
     // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
     // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker

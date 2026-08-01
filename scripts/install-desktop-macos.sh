@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs the locally built Buzz Desktop app to a single canonical
-# /Applications/Buzz.app, replacing any prior copy in place.
-#
-# Without this, repeatedly dragging a freshly built .app into /Applications
-# by hand hits macOS's name-collision auto-rename and leaves "Buzz 2.app",
-# "Buzz 3.app", etc. behind — all sharing the same bundle id, none of them
-# ever cleaned up. This script always replaces instead of adding.
+# Installs the verified local Buzz Desktop app at one canonical path. The
+# previous app is moved to a hidden recoverable backup; nothing is deleted.
 #
 # Usage: ./scripts/install-desktop-macos.sh [target-triple]
 # Run after `just desktop-release-build` (or `just desktop-release-build <target>`).
 
 TARGET="${1:-aarch64-apple-darwin}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILT_APP="$REPO_ROOT/desktop/src-tauri/target/$TARGET/release/bundle/macos/Buzz.app"
+TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")"
+BUILT_APP="$TARGET_DIR/$TARGET/release/bundle/macos/Buzz.app"
 DEST="/Applications/Buzz.app"
 
 if [[ ! -d "$BUILT_APP" ]]; then
@@ -22,14 +18,37 @@ if [[ ! -d "$BUILT_APP" ]]; then
     exit 1
 fi
 
-echo "Quitting any running Buzz Desktop instances..."
-pkill -x buzz-desktop 2>/dev/null || true
-sleep 1
+if pgrep -x buzz-desktop >/dev/null 2>&1; then
+    echo "Error: Buzz Desktop is running. Quit it normally, then rerun this installer." >&2
+    exit 2
+fi
 
-echo "Removing existing /Applications/Buzz*.app copies..."
-find /Applications -maxdepth 1 -iname "Buzz*.app" -exec rm -rf {} +
+"$REPO_ROOT/scripts/verify-desktop-bundle.sh" "$TARGET"
 
-echo "Installing fresh build to $DEST..."
-ditto "$BUILT_APP" "$DEST"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+BACKUP_DIR="/Applications/.buzz-backups"
+mkdir -p "$BACKUP_DIR"
+if [[ -d "$DEST" ]]; then
+    BACKUP="$BACKUP_DIR/Buzz-$STAMP.bundle"
+    echo "Moving previous canonical app to recoverable backup: $BACKUP"
+    mv "$DEST" "$BACKUP"
+fi
 
-echo "Installed. Launch with: open '$DEST'"
+echo "Installing verified build to $DEST..."
+if ! mv "$BUILT_APP" "$DEST"; then
+    if [[ -n "${BACKUP:-}" && -d "$BACKUP" && ! -e "$DEST" ]]; then
+        mv "$BACKUP" "$DEST"
+    fi
+    exit 1
+fi
+if ! "$REPO_ROOT/scripts/verify-desktop-bundle.sh" "$TARGET" "$DEST"; then
+    FAILED="$BACKUP_DIR/Buzz-failed-$STAMP.bundle"
+    mv "$DEST" "$FAILED"
+    if [[ -n "${BACKUP:-}" && -d "$BACKUP" ]]; then
+        mv "$BACKUP" "$DEST"
+        echo "Verification failed; restored previous canonical app." >&2
+    fi
+    exit 1
+fi
+
+echo "Installed and verified. Launch only with: open '$DEST'"

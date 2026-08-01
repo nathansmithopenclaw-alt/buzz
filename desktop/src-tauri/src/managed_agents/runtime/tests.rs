@@ -1,5 +1,21 @@
 use crate::managed_agents::known_acp_runtime;
 
+#[test]
+fn child_logs_always_include_model_application_evidence() {
+    assert_eq!(
+        super::child_rust_log_filter_from(None),
+        "buzz_acp=info,pool::model=info"
+    );
+    assert_eq!(
+        super::child_rust_log_filter_from(Some("warn,buzz_acp=debug")),
+        "warn,buzz_acp=debug,pool::model=info"
+    );
+    assert_eq!(
+        super::child_rust_log_filter_from(Some("pool::model=debug")),
+        "pool::model=debug,buzz_acp=info"
+    );
+}
+
 // ── desktop binary name tests ───────────────────────────────────────────
 
 #[test]

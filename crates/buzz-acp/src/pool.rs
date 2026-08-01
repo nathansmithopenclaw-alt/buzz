@@ -820,6 +820,66 @@ const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Compare a configured model selector with provider-reported response model.
+/// Claude's ACP catalog intentionally uses moving family aliases such as
+/// `opus[1m]`, while usage reports the concrete API model (`claude-opus-4-8`).
+/// `None` means the selector is deliberately unverifiable (`default`).
+fn response_model_matches(requested: &str, actual: &str) -> Option<bool> {
+    let requested = requested.trim().to_ascii_lowercase();
+    let actual = actual.trim().to_ascii_lowercase();
+    if requested.is_empty() || requested == "default" {
+        return None;
+    }
+    let requested_base = requested.split('[').next().unwrap_or(&requested);
+    for family in ["opus", "fable", "sonnet", "haiku"] {
+        if requested_base == family {
+            return Some(actual.contains(family));
+        }
+    }
+    Some(actual == requested_base || actual.starts_with(&format!("{requested_base}-")))
+}
+
+fn verify_response_model(
+    acp: &AcpClient,
+    requested: Option<&str>,
+    usage: Option<&crate::usage::TurnUsage>,
+    session_id: &str,
+) -> Result<(), AcpError> {
+    let actual = usage.and_then(|value| value.model.as_deref());
+    let status = match (requested, actual) {
+        (Some(requested), Some(actual)) => match response_model_matches(requested, actual) {
+            Some(true) => "matched",
+            Some(false) => "mismatch",
+            None => "unverifiable_default",
+        },
+        (Some(_), None) => "response_model_unavailable",
+        (None, _) => "no_model_requested",
+    };
+    tracing::info!(
+        target: "pool::model",
+        requested_model = requested.unwrap_or("<default>"),
+        response_model = actual.unwrap_or("<unavailable>"),
+        status,
+        session_id,
+        "response model evidence"
+    );
+    acp.observe(
+        "response_model_verified",
+        serde_json::json!({
+            "requestedModel": requested,
+            "responseModel": actual,
+            "status": status,
+            "sessionId": session_id,
+        }),
+    );
+    if status == "mismatch" {
+        return Err(AcpError::Protocol(format!(
+            "response model {actual:?} did not match requested model {requested:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// Placeholder [`fetch_channel_info`] substitutes when a channel's metadata
 /// event carries no `name` tag. Not a real channel name — consumers that need
 /// an identifying name must treat it as absent.
@@ -866,9 +926,10 @@ async fn resolve_new_session_channel_context(
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
 /// on the agent (first session only), and apply `desired_model` if set.
 ///
-/// On error from `session_new_full()`, returns the `AcpError` — caller handles
-/// error reporting. Model-switch failures are logged and gracefully ignored
-/// (the agent proceeds with its default model).
+/// On error from `session_new_full()` or a requested model switch, returns the
+/// `AcpError` — caller handles error reporting. A configured model is a hard
+/// contract: silently proceeding on the adapter default can spend the wrong
+/// account/model pool and makes the UI lie about the live runtime.
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
@@ -944,21 +1005,18 @@ async fn create_session_and_apply_model(
     // Apply desired_model if set, matching against the fresh session/new response.
     // Track whether the switch succeeded so session_config_captured reflects
     // the post-switch state (not the pre-switch desired state).
-    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
+    let applied_config_options = if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
-                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
-                true
+                let applied =
+                    apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
+                applied.get("configOptions").cloned()
             }
             None => {
-                tracing::warn!(
+                tracing::error!(
                     target: "pool::model",
-                    "desired model {desired} not found in agent's available models — proceeding with agent default"
+                    "desired model {desired} not found in agent's available models — refusing silent fallback"
                 );
-                // Surface the miss so the desktop ModelPicker can reject a live
-                // pick rather than silently no-op. On the busy path the turn has
-                // already been cancelled+requeued by the time we get here, so the
-                // turn restarts on the unchanged model and the user is told no.
                 agent.acp.observe(
                     "control_result",
                     serde_json::json!({
@@ -967,11 +1025,13 @@ async fn create_session_and_apply_model(
                         "modelId": desired,
                     }),
                 );
-                false
+                return Err(AcpError::Protocol(format!(
+                    "configured model {desired:?} is not available from the agent"
+                )));
             }
         }
     } else {
-        false
+        None
     };
 
     // Emit session config for desktop consumption (config bridge tier 1b).
@@ -982,10 +1042,10 @@ async fn create_session_and_apply_model(
     agent.acp.observe(
         "session_config_captured",
         serde_json::json!({
-            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+            "configOptions": applied_config_options.unwrap_or_else(|| resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null)),
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
             "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
-            "modelOverridden": agent.model_overridden && switch_succeeded,
+            "modelOverridden": agent.model_overridden && agent.desired_model.is_some(),
             // Pair identity for the desktop session-config cache, which is
             // keyed by (agent, relay) like the lifecycle frames.
             "relayUrl": ctx.relay_url,
@@ -1007,16 +1067,14 @@ async fn create_session_and_apply_model(
 
 /// Send the appropriate ACP model-switch request with a timeout.
 ///
-/// On timeout or error, logs a warning and returns — the caller proceeds
-/// with the agent's default model. This is intentionally non-fatal: a stale
-/// response from a timed-out request is safely ignored by `read_until_response`
-/// (non-matching JSON-RPC IDs are skipped).
+/// Every failure is fatal when a model was explicitly requested. Returning an
+/// error prevents Buzz from silently running the adapter's default model.
 async fn apply_model_switch(
     acp: &mut AcpClient,
     session_id: &str,
     desired: &str,
     method: &ModelSwitchMethod,
-) -> Result<(), AcpError> {
+) -> Result<serde_json::Value, AcpError> {
     let method_label = match method {
         ModelSwitchMethod::ConfigOption { config_id, .. } => {
             format!("configOption (configId={config_id})")
@@ -1041,11 +1099,43 @@ async fn apply_model_switch(
     .await;
 
     match result {
-        Ok(Ok(_)) => {
+        Ok(Ok(response)) => {
+            let accepted = response
+                .get("configOptions")
+                .and_then(|options| options.as_array())
+                .and_then(|options| {
+                    options.iter().find(|option| {
+                        option
+                            .get("id")
+                            .or_else(|| option.get("configId"))
+                            .and_then(|value| value.as_str())
+                            == Some("model")
+                    })
+                })
+                .and_then(|option| option.get("currentValue"))
+                .and_then(|value| value.as_str());
+            if let Some(accepted_value) = accepted {
+                if accepted_value != desired {
+                    return Err(AcpError::Protocol(format!(
+                        "agent accepted model {accepted_value:?}, not requested model {desired:?}"
+                    )));
+                }
+            }
             tracing::info!(
                 target: "pool::model",
+                accepted_model = accepted.unwrap_or("<unverified>"),
                 "applied model {desired} via {method_label} on session {session_id}"
             );
+            acp.observe(
+                "model_selection_verified",
+                serde_json::json!({
+                    "requestedModel": desired,
+                    "acceptedModel": accepted,
+                    "method": method_label,
+                    "sessionId": session_id,
+                }),
+            );
+            Ok(response)
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
         // so the caller can respawn the agent instead of reusing a poisoned one.
@@ -1058,14 +1148,14 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "fatal error setting model {desired} via {method_label}: {e}"
             );
-            return Err(e);
+            Err(e)
         }
-        // Application-level errors (Json, etc.) — agent is fine, just uses default model.
         Ok(Err(e)) => {
-            tracing::warn!(
+            tracing::error!(
                 target: "pool::model",
-                "failed to set model {desired} via {method_label}: {e} — proceeding with agent default"
+                "failed to set model {desired} via {method_label}: {e} — refusing silent fallback"
             );
+            Err(e)
         }
         Err(_) => {
             // Outer timeout fired — the inner send_request may have left the
@@ -1074,10 +1164,9 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "model set via {method_label} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
             );
-            return Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT));
+            Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
         }
     }
-    Ok(())
 }
 
 /// Set the session permission mode via `session/set_config_option`.
@@ -2118,6 +2207,31 @@ pub async fn run_prompt_task(
 
             let core_stop = acp_stop_to_core(&stop_reason);
             let usage = agent.acp.take_turn_usage();
+            if let Err(error) = verify_response_model(
+                &agent.acp,
+                agent.desired_model.as_deref(),
+                usage.as_ref(),
+                &session_id,
+            ) {
+                publish_agent_turn_metric(
+                    &ctx,
+                    usage,
+                    observer_channel_id,
+                    &session_id,
+                    &turn_id,
+                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                )
+                .await;
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(error),
+                    None,
+                );
+                return;
+            }
             publish_agent_turn_metric(
                 &ctx,
                 usage,
@@ -6748,5 +6862,22 @@ mod tests {
             "one fetch_channel_info sequence (initial attempt + single retry)"
         );
         server.abort();
+    }
+
+    #[test]
+    fn response_model_evidence_matches_claude_family_aliases() {
+        assert_eq!(
+            response_model_matches("opus[1m]", "claude-opus-4-8"),
+            Some(true)
+        );
+        assert_eq!(
+            response_model_matches("claude-fable-5[1m]", "claude-fable-5"),
+            Some(true)
+        );
+        assert_eq!(
+            response_model_matches("opus[1m]", "claude-sonnet-5"),
+            Some(false)
+        );
+        assert_eq!(response_model_matches("default", "claude-sonnet-5"), None);
     }
 }

@@ -7,8 +7,8 @@ use super::{
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
-    try_record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    resolve_bundled_sidecar_from, try_record_agent_command, BUZZ_AGENT_AVATAR_URL,
+    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -51,6 +51,33 @@ fn default_agent_command_resolves_bundled_buzz_agent() {
     assert_eq!(
         normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
         Vec::<String>::new()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_buzz_sidecar_wins_only_for_buzz_owned_binaries() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bundled = temp.path().join("buzz-acp");
+    std::fs::write(&bundled, "#!/bin/sh\n").expect("write sidecar");
+    std::fs::set_permissions(&bundled, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod sidecar");
+
+    assert_eq!(
+        resolve_bundled_sidecar_from("buzz-acp", temp.path()).as_deref(),
+        Some(bundled.as_path())
+    );
+    assert_eq!(
+        resolve_bundled_sidecar_from("claude-agent-acp", temp.path()),
+        None,
+        "third-party adapters must keep managed/PATH resolution"
+    );
+    assert_eq!(
+        resolve_bundled_sidecar_from("/custom/buzz-acp", temp.path()),
+        None,
+        "an explicit operator path must not be replaced"
     );
 }
 

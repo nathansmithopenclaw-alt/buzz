@@ -9,6 +9,7 @@ mod pool;
 mod pool_lifecycle;
 mod queue;
 mod relay;
+mod runtime_identity;
 mod setup_mode;
 mod usage;
 
@@ -1280,6 +1281,21 @@ async fn tokio_main() -> Result<()> {
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
 
+    let runtime_identity = runtime_identity::capture(&config.agent_command);
+    tracing::info!(
+        target: "buzz_acp::runtime_identity",
+        broker_path = %runtime_identity.broker_path,
+        broker_sha256 = %runtime_identity.broker_sha256,
+        desktop_path = %runtime_identity.desktop_path,
+        desktop_sha256 = %runtime_identity.desktop_sha256,
+        token_source = runtime_identity.token_source,
+        token_fingerprint = %runtime_identity.token_fingerprint,
+        token_length = runtime_identity.token_length,
+        token_has_whitespace = runtime_identity.token_has_whitespace,
+        requested_model = config.model.as_deref().unwrap_or("<default>"),
+        "runtime identity"
+    );
+
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
     // When the desktop determines an agent is not ready (missing credentials,
@@ -1308,6 +1324,8 @@ async fn tokio_main() -> Result<()> {
                 "agentArgs": config.agent_args,
                 "parallelism": config.agents,
                 "relayObserver": config.relay_observer,
+                "runtimeIdentity": runtime_identity,
+                "requestedModel": config.model,
             }),
         );
     }

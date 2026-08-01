@@ -226,21 +226,26 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
       cargo test compiled_flag_matches_expected -- --ignored --nocapture
     echo "Both compiled states verified."
 
-# Build the full desktop Tauri app locally (unsigned, for testing)
-# Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
+# Build one self-contained local macOS app. Every bundled sidecar is compiled
+# from this checkout first; a release must never pick up stale target output.
 # pnpm install is unconditional here: release builds must start from a clean dep tree.
 desktop-release-build target="aarch64-apple-darwin":
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET={{target}}
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
     mkdir -p desktop/src-tauri/binaries
-    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
-    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-$TARGET"
+    cargo build --release --target "$TARGET" \
+      -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+        cp "$TARGET_DIR/$TARGET/release/$bin" "desktop/src-tauri/binaries/$bin-$TARGET"
+        chmod +x "desktop/src-tauri/binaries/$bin-$TARGET"
+    done
     pnpm install
-    cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
+    (cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}} --bundles app)
+    APP=$(cargo metadata --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")/$TARGET/release/bundle/macos/Buzz.app
+    codesign --force --deep --sign - "$APP"
+    ./scripts/verify-desktop-bundle.sh "$TARGET"
 
 # Install a local desktop-release-build to a single canonical /Applications/Buzz.app,
 # replacing any prior copy instead of leaving numbered duplicates behind.

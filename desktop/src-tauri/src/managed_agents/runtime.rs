@@ -860,6 +860,40 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+
+    let explicit_claude_token = descriptor.env.get("CLAUDE_CODE_OAUTH_TOKEN");
+    let ambient_claude_token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok();
+    let (token_source, token) = match (explicit_claude_token, ambient_claude_token.as_ref()) {
+        (Some(value), _) => ("managed_config", Some(value.as_str())),
+        (None, Some(value)) => ("desktop_environment", Some(value.as_str())),
+        (None, None) => ("credentials_file_fallback", None),
+    };
+    let token_fingerprint = token
+        .map(crate::runtime_identity::secret_fingerprint)
+        .unwrap_or_else(|| "unavailable".to_string());
+    let token_length = token.map(str::len).unwrap_or_default();
+    let token_has_whitespace = token.is_some_and(|value| value.chars().any(char::is_whitespace));
+
+    if let Some((desktop_path, desktop_hash)) = crate::runtime_identity::desktop_identity() {
+        command.env("BUZZ_ACP_DESKTOP_PATH", desktop_path);
+        command.env("BUZZ_ACP_DESKTOP_SHA256", desktop_hash);
+    }
+    let broker_hash = crate::runtime_identity::cached_file_sha256(&resolved_acp_command)
+        .unwrap_or_else(|| "unavailable".to_string());
+    eprintln!(
+        "buzz-desktop: agent_runtime_identity agent={} desktop_path={} broker_path={} broker_sha256={} requested_model={} token_source={} token_fingerprint={} token_length={} token_has_whitespace={}",
+        record.name,
+        crate::runtime_identity::desktop_identity()
+            .map(|(path, _)| path.display().to_string())
+            .unwrap_or_else(|| "unavailable".to_string()),
+        resolved_acp_command.display(),
+        broker_hash,
+        effective_model.as_deref().unwrap_or("<default>"),
+        token_source,
+        token_fingerprint,
+        token_length,
+        token_has_whitespace,
+    );
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
@@ -959,11 +993,24 @@ pub fn spawn_agent_child(
 }
 
 fn child_rust_log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
-        _ => "buzz_acp=info".to_string(),
+    child_rust_log_filter_from(std::env::var("RUST_LOG").ok().as_deref())
+}
+
+fn child_rust_log_filter_from(existing: Option<&str>) -> String {
+    let mut directives = existing.unwrap_or_default().trim().to_string();
+    for required in ["buzz_acp=info", "pool::model=info"] {
+        let target = required.split('=').next().unwrap_or(required);
+        if !directives
+            .split(',')
+            .any(|entry| entry.trim().starts_with(target))
+        {
+            if !directives.is_empty() {
+                directives.push(',');
+            }
+            directives.push_str(required);
+        }
     }
+    directives
 }
 
 pub fn start_managed_agent_process(

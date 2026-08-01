@@ -543,6 +543,35 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+/// Resolve Buzz-owned sidecars next to the running desktop executable.
+///
+/// Release bundles must be self-contained: allowing a workspace `target/`
+/// directory or ambient PATH entry to win creates a hybrid runtime where the
+/// desktop and broker come from different builds. Only binaries shipped in the
+/// Tauri bundle are pinned; third-party adapters still use the managed/PATH
+/// resolution flow below.
+fn resolve_bundled_sidecar_from(command: &str, executable_dir: &Path) -> Option<PathBuf> {
+    const BUNDLED: &[&str] = &[
+        "buzz-acp",
+        "buzz-agent",
+        "buzz-dev-mcp",
+        "git-credential-nostr",
+        "buzz",
+    ];
+
+    if command_looks_like_path(command) || !BUNDLED.contains(&command) {
+        return None;
+    }
+
+    let candidate = executable_dir.join(executable_basename(command));
+    is_executable_file(&candidate).then_some(candidate)
+}
+
+fn resolve_bundled_sidecar(command: &str) -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    resolve_bundled_sidecar_from(command, executable.parent()?)
+}
+
 fn resolve_workspace_command(command: &str) -> Option<PathBuf> {
     if command_looks_like_path(command) {
         let path = PathBuf::from(command);
@@ -568,6 +597,10 @@ fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String
 /// The cache eliminates redundant login-shell spawns when multiple agents share
 /// the same binaries (e.g. `npx`, `uvx`).
 pub fn resolve_command(command: &str) -> Option<PathBuf> {
+    if let Some(bundled) = resolve_bundled_sidecar(command) {
+        return Some(bundled);
+    }
+
     if let Some(managed) = resolve_buzz_managed_command(command) {
         return Some(managed);
     }

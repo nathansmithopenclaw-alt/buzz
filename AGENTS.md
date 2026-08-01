@@ -440,6 +440,24 @@ just desktop-dev   # web-only dev server (faster iteration)
 just dev           # full Tauri app with native shell
 ```
 
+### Local release/install invariant
+
+- Build with `just desktop-release-build`; install with
+  `just desktop-install-macos`. Do not drag a `.app` out of a target directory
+  and do not launch a target-directory bundle.
+- The build recipe compiles every bundled sidecar from the same checkout and
+  verifies the bundle. The installer refuses to run while Buzz is open, moves
+  the previous canonical app to a recoverable non-`.app` backup, and moves the
+  new bundle to the sole launch path: `/Applications/Buzz.app`.
+- After launch, prove the running desktop path and its broker path from
+  `runtime_identity` / `agent_runtime_identity` log lines. A config value or a
+  Finder/Spotlight label is not runtime evidence.
+- Never publish or hand off a local Desktop build if requested model,
+  ACP-accepted model, and provider-reported response model disagree. The broker
+  treats an explicit model as a contract and surfaces mismatches as errors.
+
+Full operator checklist: [docs/desktop-runtime-integrity.md](docs/desktop-runtime-integrity.md).
+
 ### Text sizing & zoom (use rem, never px)
 
 The desktop app implements Cmd +/- zoom by scaling the root `<html>`
