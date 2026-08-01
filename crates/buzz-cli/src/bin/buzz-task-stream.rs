@@ -1,8 +1,8 @@
 //! Authenticated relay stream for Gateway-supervised task-envelope ingestion.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use buzz_sdk::task_envelope::{TaskEnvelopeEvent, TASK_DISCOVERY_HASHTAG};
 use buzz_ws_client::{NostrWsConnection, RelayMessage};
@@ -13,6 +13,8 @@ use serde_json::json;
 
 const CHANNEL_DISCOVERY_SUBSCRIPTION_ID: &str = "buzz-task-channel-discovery-v1";
 const TASK_SUBSCRIPTION_PREFIX: &str = "buzz-task-kernel-bridge-v1";
+const DEFAULT_RELAY_URL: &str = "wss://tituss-mac-mini.tail561ede.ts.net:8443";
+const BACKFILL_EOSE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Parser)]
 #[command(about = "Stream SDK-validated Buzz task envelopes as NDJSON")]
@@ -21,8 +23,8 @@ struct Args {
     #[arg(long)]
     generate_key: bool,
 
-    /// Local relay WebSocket URL.
-    #[arg(long, default_value = "ws://localhost:3000")]
+    /// Relay WebSocket URL. The host must map to a relay community.
+    #[arg(long, default_value = DEFAULT_RELAY_URL)]
     relay: String,
 
     /// Last durably processed event timestamp.
@@ -108,10 +110,10 @@ fn membership_channel_id(event: &nostr::Event, bridge_pubkey: &str) -> Option<St
     })
 }
 
-async fn discover_member_channels(
+async fn start_channel_discovery(
     connection: &mut NostrWsConnection,
     bridge_pubkey: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<(), String> {
     connection
         .send_raw(&json!([
             "REQ",
@@ -122,40 +124,7 @@ async fn discover_member_channels(
             }
         ]))
         .await
-        .map_err(|error| format!("relay channel discovery failed: {error}"))?;
-
-    let mut channel_ids = BTreeSet::new();
-    loop {
-        match connection.next_event(Duration::from_secs(30)).await {
-            Ok(RelayMessage::Event {
-                subscription_id,
-                event,
-            }) if subscription_id == CHANNEL_DISCOVERY_SUBSCRIPTION_ID => {
-                if let Some(channel_id) = membership_channel_id(&event, bridge_pubkey) {
-                    channel_ids.insert(channel_id);
-                }
-            }
-            Ok(RelayMessage::Eose { subscription_id })
-                if subscription_id == CHANNEL_DISCOVERY_SUBSCRIPTION_ID =>
-            {
-                break;
-            }
-            Ok(RelayMessage::Closed {
-                subscription_id,
-                message,
-            }) if subscription_id == CHANNEL_DISCOVERY_SUBSCRIPTION_ID => {
-                return Err(format!("relay closed channel discovery: {message}"));
-            }
-            Ok(RelayMessage::Notice { message }) => eprintln!("relay notice: {message}"),
-            Ok(_) => {}
-            Err(error) => return Err(format!("relay channel discovery failed: {error}")),
-        }
-    }
-    connection
-        .send_raw(&json!(["CLOSE", CHANNEL_DISCOVERY_SUBSCRIPTION_ID]))
-        .await
-        .map_err(|error| format!("relay channel discovery close failed: {error}"))?;
-    Ok(channel_ids.into_iter().collect())
+        .map_err(|error| format!("relay channel discovery failed: {error}"))
 }
 
 fn task_subscription(channel_id: &str, since: u64) -> (String, serde_json::Value) {
@@ -173,39 +142,135 @@ fn task_subscription(channel_id: &str, since: u64) -> (String, serde_json::Value
     (subscription_id, request)
 }
 
+struct TaskSubscriptionState {
+    backfill: Vec<TaskEnvelopeEvent>,
+    backfill_complete: bool,
+    backfill_deadline: Instant,
+}
+
+impl TaskSubscriptionState {
+    fn new(now: Instant) -> Self {
+        Self {
+            backfill: Vec::new(),
+            backfill_complete: false,
+            backfill_deadline: now + BACKFILL_EOSE_DEADLINE,
+        }
+    }
+}
+
+fn complete_channel_backfill(state: &mut TaskSubscriptionState) -> Vec<TaskEnvelopeEvent> {
+    state.backfill_complete = true;
+    state.backfill.sort_by(|left, right| {
+        (left.created_at, left.event_id.as_str()).cmp(&(right.created_at, right.event_id.as_str()))
+    });
+    std::mem::take(&mut state.backfill)
+}
+
+async fn ensure_task_subscription(
+    connection: &mut NostrWsConnection,
+    subscriptions: &mut BTreeMap<String, TaskSubscriptionState>,
+    channel_id: &str,
+    since: u64,
+) -> Result<(), String> {
+    let (subscription_id, request) = task_subscription(channel_id, since);
+    if subscriptions.contains_key(&subscription_id) {
+        return Ok(());
+    }
+    connection
+        .send_raw(&request)
+        .await
+        .map_err(|error| format!("relay task subscription failed: {error}"))?;
+    subscriptions.insert(subscription_id, TaskSubscriptionState::new(Instant::now()));
+    Ok(())
+}
+
+fn expired_backfill_subscriptions(
+    subscriptions: &BTreeMap<String, TaskSubscriptionState>,
+    now: Instant,
+) -> Vec<String> {
+    subscriptions
+        .iter()
+        .filter_map(|(subscription_id, state)| {
+            (!state.backfill_complete && now >= state.backfill_deadline)
+                .then(|| subscription_id.clone())
+        })
+        .collect()
+}
+
+fn next_event_timeout(
+    subscriptions: &BTreeMap<String, TaskSubscriptionState>,
+    now: Instant,
+) -> Duration {
+    subscriptions
+        .values()
+        .filter(|state| !state.backfill_complete)
+        .map(|state| state.backfill_deadline.saturating_duration_since(now))
+        .min()
+        .unwrap_or(Duration::from_secs(90))
+        .min(Duration::from_secs(90))
+}
+
 async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
     let mut connection = NostrWsConnection::connect_authenticated(&args.relay, keys, None)
         .await
         .map_err(|error| format!("relay connect/auth failed: {error}"))?;
     let bridge_pubkey = keys.public_key().to_hex();
-    let channel_ids = discover_member_channels(&mut connection, &bridge_pubkey).await?;
-    if channel_ids.is_empty() {
-        return Err("bridge identity is not a member of any channels".to_string());
-    }
+    start_channel_discovery(&mut connection, &bridge_pubkey).await?;
     let since = args.cursor_created_at.saturating_sub(1);
-    let mut pending_eose = BTreeSet::new();
-    for channel_id in channel_ids {
-        let (subscription_id, request) = task_subscription(&channel_id, since);
-        pending_eose.insert(subscription_id);
-        connection
-            .send_raw(&request)
-            .await
-            .map_err(|error| format!("relay task subscription failed: {error}"))?;
-    }
-
-    let mut backfill = Vec::new();
+    let mut discovery_complete = false;
+    let mut subscriptions = BTreeMap::new();
     loop {
-        match connection.next_event(Duration::from_secs(90)).await {
+        for subscription_id in expired_backfill_subscriptions(&subscriptions, Instant::now()) {
+            eprintln!("relay task backfill EOSE deadline elapsed for {subscription_id}; emitting buffered events");
+            if let Some(state) = subscriptions.get_mut(&subscription_id) {
+                for task_event in complete_channel_backfill(state) {
+                    emit_event(&task_event, &bridge_pubkey)?;
+                }
+            }
+        }
+        let wait = next_event_timeout(&subscriptions, Instant::now());
+        match connection.next_event(wait).await {
+            Ok(RelayMessage::Event {
+                subscription_id,
+                event,
+            }) if subscription_id == CHANNEL_DISCOVERY_SUBSCRIPTION_ID => {
+                if let Some(channel_id) = membership_channel_id(&event, &bridge_pubkey) {
+                    ensure_task_subscription(
+                        &mut connection,
+                        &mut subscriptions,
+                        &channel_id,
+                        since,
+                    )
+                    .await?;
+                }
+            }
+            Ok(RelayMessage::Eose { subscription_id })
+                if subscription_id == CHANNEL_DISCOVERY_SUBSCRIPTION_ID =>
+            {
+                discovery_complete = true;
+                if subscriptions.is_empty() {
+                    return Err("bridge identity is not a member of any channels".to_string());
+                }
+            }
+            Ok(RelayMessage::Closed {
+                subscription_id,
+                message,
+            }) if subscription_id == CHANNEL_DISCOVERY_SUBSCRIPTION_ID => {
+                return Err(format!("relay closed channel discovery: {message}"));
+            }
             Ok(RelayMessage::Event {
                 subscription_id: event_subscription,
                 event,
             }) if event_subscription.starts_with(TASK_SUBSCRIPTION_PREFIX) => {
                 match TaskEnvelopeEvent::from_event(&event) {
                     Ok(task_event) => {
-                        if pending_eose.is_empty() {
+                        let Some(state) = subscriptions.get_mut(&event_subscription) else {
+                            continue;
+                        };
+                        if state.backfill_complete {
                             emit_event(&task_event, &bridge_pubkey)?;
                         } else {
-                            backfill.push(task_event);
+                            state.backfill.push(task_event);
                         }
                     }
                     Err(error) => eprintln!("invalid task envelope skipped: {error}"),
@@ -214,13 +279,8 @@ async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
             Ok(RelayMessage::Eose {
                 subscription_id: event_subscription,
             }) if event_subscription.starts_with(TASK_SUBSCRIPTION_PREFIX) => {
-                pending_eose.remove(&event_subscription);
-                if pending_eose.is_empty() {
-                    backfill.sort_by(|left, right| {
-                        (left.created_at, left.event_id.as_str())
-                            .cmp(&(right.created_at, right.event_id.as_str()))
-                    });
-                    for task_event in backfill.drain(..) {
+                if let Some(state) = subscriptions.get_mut(&event_subscription) {
+                    for task_event in complete_channel_backfill(state) {
                         emit_event(&task_event, &bridge_pubkey)?;
                     }
                 }
@@ -233,7 +293,17 @@ async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
             }
             Ok(RelayMessage::Notice { message }) => eprintln!("relay notice: {message}"),
             Ok(_) => {}
-            Err(error) => return Err(format!("relay stream failed: {error}")),
+            Err(error) => {
+                if !expired_backfill_subscriptions(&subscriptions, Instant::now()).is_empty() {
+                    continue;
+                }
+                let phase = if discovery_complete {
+                    "relay stream"
+                } else {
+                    "relay channel discovery"
+                };
+                return Err(format!("{phase} failed: {error}"));
+            }
         }
     }
 }
@@ -267,6 +337,7 @@ async fn main() {
 mod tests {
     use super::*;
     use buzz_sdk::task_envelope::{TaskEnvelope, TaskStatus, TaskVerification};
+    use nostr::{EventBuilder, Kind, Tag};
     use uuid::Uuid;
 
     fn event(created_at: u64, event_id: &str) -> TaskEnvelopeEvent {
@@ -293,6 +364,17 @@ mod tests {
         }
     }
 
+    fn membership_event(channel_id: Uuid, members: &[&str]) -> nostr::Event {
+        let mut tags = vec![Tag::parse(["d", channel_id.to_string().as_str()]).unwrap()];
+        for member in members {
+            tags.push(Tag::parse(["p", *member]).unwrap());
+        }
+        EventBuilder::new(Kind::Custom(39002), "")
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+
     #[test]
     fn event_fixture_preserves_cursor_tuple_fields() {
         let event = event(100, "b");
@@ -317,5 +399,69 @@ mod tests {
         assert_eq!(request[2]["#h"], json!([channel_id]));
         assert_eq!(request[2]["#t"], json!([TASK_DISCOVERY_HASHTAG]));
         assert_eq!(request[2]["since"], json!(99));
+    }
+
+    #[test]
+    fn channel_backfills_complete_independently() {
+        let now = Instant::now();
+        let mut first = TaskSubscriptionState::new(now);
+        let mut second = TaskSubscriptionState::new(now);
+        first.backfill.push(event(101, "b"));
+        first.backfill.push(event(100, "a"));
+        second.backfill.push(event(99, "z"));
+
+        let emitted = complete_channel_backfill(&mut first);
+
+        assert_eq!(
+            emitted
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert!(first.backfill_complete);
+        assert!(!second.backfill_complete);
+        assert_eq!(second.backfill.len(), 1);
+    }
+
+    #[test]
+    fn expired_channel_backfill_is_released_without_waiting_for_other_channels() {
+        let now = Instant::now();
+        let mut subscriptions = BTreeMap::new();
+        subscriptions.insert(
+            "expired".to_string(),
+            TaskSubscriptionState {
+                backfill: vec![event(100, "a")],
+                backfill_complete: false,
+                backfill_deadline: now,
+            },
+        );
+        subscriptions.insert("waiting".to_string(), TaskSubscriptionState::new(now));
+
+        assert_eq!(
+            expired_backfill_subscriptions(&subscriptions, now),
+            vec!["expired"]
+        );
+        assert_eq!(next_event_timeout(&subscriptions, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn canonical_relay_default_includes_mapped_host_and_port() {
+        let args = Args::parse_from(["buzz-task-stream"]);
+        assert_eq!(args.relay, DEFAULT_RELAY_URL);
+    }
+
+    #[test]
+    fn membership_snapshots_add_only_channels_containing_the_bridge() {
+        let channel_id = Uuid::new_v4();
+        let bridge_pubkey = "11".repeat(32);
+        let included = membership_event(channel_id, &[bridge_pubkey.as_str(), &"22".repeat(32)]);
+        let removed = membership_event(channel_id, &[&"22".repeat(32)]);
+
+        assert_eq!(
+            membership_channel_id(&included, &bridge_pubkey),
+            Some(channel_id.to_string())
+        );
+        assert_eq!(membership_channel_id(&removed, &bridge_pubkey), None);
     }
 }
