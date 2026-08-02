@@ -189,6 +189,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         runtime: content.runtime,
         model: content.model,
         provider: content.provider,
+        claude_account_id: None,
         name_pool: content.name_pool,
         is_builtin: false,
         is_active: true,

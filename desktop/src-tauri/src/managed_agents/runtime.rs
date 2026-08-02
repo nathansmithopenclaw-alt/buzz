@@ -22,8 +22,8 @@ pub(crate) use path::should_use_inherited;
 
 mod metadata;
 pub(crate) use metadata::{
-    resolve_effective_prompt_model_provider, resolve_session_title, runtime_metadata_env_vars,
-    SESSION_TITLE_ENV_VAR,
+    persona_drift_state, resolve_effective_prompt_model_provider, resolve_session_title,
+    runtime_metadata_env_vars, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;
@@ -69,35 +69,6 @@ mod lifecycle;
 #[cfg(test)]
 use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
-
-/// Classify an agent's persona against the live catalog for the Agents-menu
-/// drift indicator. Returns `(out_of_date, orphaned)`.
-///
-/// Drift basis is the RECORD's `persona_source_version`, never the engram:
-/// - persona_id set + persona present: out_of_date when the snapshot hash
-///   differs from the persona's current content hash.
-/// - persona_id set + persona gone: orphaned (no current hash to respawn into,
-///   so never out_of_date — we must not tell the user to respawn into nothing).
-/// - no persona_id: neither — a hand-built agent has no persona to drift from.
-fn persona_drift_state(
-    record: &ManagedAgentRecord,
-    personas: &[crate::managed_agents::types::AgentDefinition],
-) -> (bool, bool) {
-    let Some(persona_id) = record.persona_id.as_deref() else {
-        return (false, false);
-    };
-    let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
-        return (false, true);
-    };
-    let current = crate::managed_agents::persona_events::persona_content_hash(
-        &crate::managed_agents::persona_events::persona_event_content(persona),
-    );
-    let out_of_date = record
-        .persona_source_version
-        .as_deref()
-        .is_some_and(|pinned| pinned != current);
-    (out_of_date, false)
-}
 
 /// Resolve the runtime-pair key this record maps to for the active
 /// workspace: always the active workspace relay (the legacy per-record relay
@@ -296,6 +267,10 @@ pub fn build_managed_agent_summary(
         .and_then(|r| r.mcp_command)
         .unwrap_or("")
         .to_string();
+    let claude =
+        super::runtime_claude_account_summary(record, personas, global_config, pair_runtime);
+    let supports_claude_accounts =
+        known_acp_runtime(&descriptor.command).is_some_and(|runtime| runtime.id == "claude");
 
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
@@ -318,6 +293,10 @@ pub fn build_managed_agent_summary(
         model: effective_model,
         model_source,
         provider: effective_provider,
+        claude_account_id: claude.account_id,
+        claude_account_source: claude.source,
+        claude_account_shadowed: claude.shadowed,
+        supports_claude_accounts,
         persona_out_of_date,
         persona_orphaned,
         needs_restart,
@@ -860,19 +839,17 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
-
-    let explicit_claude_token = descriptor.env.get("CLAUDE_CODE_OAUTH_TOKEN");
-    let ambient_claude_token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok();
-    let (token_source, token) = match (explicit_claude_token, ambient_claude_token.as_ref()) {
-        (Some(value), _) => ("managed_config", Some(value.as_str())),
-        (None, Some(value)) => ("desktop_environment", Some(value.as_str())),
-        (None, None) => ("credentials_file_fallback", None),
-    };
-    let token_fingerprint = token
-        .map(crate::runtime_identity::secret_fingerprint)
-        .unwrap_or_else(|| "unavailable".to_string());
-    let token_length = token.map(str::len).unwrap_or_default();
-    let token_has_whitespace = token.is_some_and(|value| value.chars().any(char::is_whitespace));
+    let (
+        spawned_claude_account_id,
+        spawned_claude_token_fingerprint,
+        spawned_claude_account_source,
+    ) = super::configure_spawned_claude_account(
+        &mut command,
+        runtime_meta.is_some_and(|runtime| runtime.id == "claude"),
+        record,
+        &personas,
+        &global,
+    )?;
 
     if let Some((desktop_path, desktop_hash)) = crate::runtime_identity::desktop_identity() {
         command.env("BUZZ_ACP_DESKTOP_PATH", desktop_path);
@@ -881,7 +858,7 @@ pub fn spawn_agent_child(
     let broker_hash = crate::runtime_identity::cached_file_sha256(&resolved_acp_command)
         .unwrap_or_else(|| "unavailable".to_string());
     eprintln!(
-        "buzz-desktop: agent_runtime_identity agent={} desktop_path={} broker_path={} broker_sha256={} requested_model={} token_source={} token_fingerprint={} token_length={} token_has_whitespace={}",
+        "buzz-desktop: agent_runtime_identity agent={} desktop_path={} broker_path={} broker_sha256={} requested_model={} token_source={} token_fingerprint={} token_length={} token_has_whitespace=false",
         record.name,
         crate::runtime_identity::desktop_identity()
             .map(|(path, _)| path.display().to_string())
@@ -889,10 +866,11 @@ pub fn spawn_agent_child(
         resolved_acp_command.display(),
         broker_hash,
         effective_model.as_deref().unwrap_or("<default>"),
-        token_source,
-        token_fingerprint,
-        token_length,
-        token_has_whitespace,
+        spawned_claude_account_source,
+        spawned_claude_token_fingerprint
+            .as_deref()
+            .unwrap_or("unavailable"),
+        spawned_claude_account_id.as_ref().map_or(0, |_| 108),
     );
     configure_runtime_cli(&mut command, runtime_meta);
 
@@ -976,6 +954,9 @@ pub fn spawn_agent_child(
         child,
         log_path,
         spawn_config_hash,
+        spawned_claude_account_id,
+        spawned_claude_token_fingerprint,
+        spawned_claude_account_source,
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
@@ -986,6 +967,9 @@ pub fn spawn_agent_child(
         child,
         log_path,
         spawn_config_hash,
+        claude_account_id: spawned_claude_account_id,
+        claude_token_fingerprint: spawned_claude_token_fingerprint,
+        claude_account_source: spawned_claude_account_source,
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,

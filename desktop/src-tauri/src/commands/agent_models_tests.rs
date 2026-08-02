@@ -391,6 +391,7 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
         runtime: Some("goose".to_string()),
         model: Some("persona-model".to_string()),
         provider: Some("anthropic".to_string()),
+        claude_account_id: None,
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,

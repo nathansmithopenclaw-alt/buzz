@@ -471,7 +471,6 @@ fn inject_text_chunk(png_bytes: &[u8], keyword: &str, text: &str) -> Result<Vec<
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +502,7 @@ mod tests {
             system_prompt: Some("You are a test agent.".to_string()),
             model: Some("claude-opus-4".to_string()),
             provider: Some("anthropic".to_string()),
+            claude_account_id: None,
             persona_source_version: Some("v1.0".to_string()), // MUST NOT appear
             env_vars: {
                 let mut m = BTreeMap::new();

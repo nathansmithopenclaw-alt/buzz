@@ -32,6 +32,7 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         runtime: Some("goose".to_string()),
         model: Some("test-model".to_string()),
         provider: Some("test-provider".to_string()),
+        claude_account_id: None,
         name_pool: vec!["Fizzy".to_string()],
         is_builtin: true,
         is_active: true,

@@ -118,6 +118,7 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
             runtime: persona.runtime.map(|s| s.to_string()),
             model: persona.model.map(|s| s.to_string()),
             provider: None,
+            claude_account_id: None,
             name_pool: persona.name_pool.iter().map(|s| s.to_string()).collect(),
             is_builtin: true,
             is_active: persona.default_active,

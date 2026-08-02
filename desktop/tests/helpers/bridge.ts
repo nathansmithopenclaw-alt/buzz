@@ -46,6 +46,14 @@ type MockCommandAvailability = {
 type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
+  runtime?: string | null;
+  claudeAccountId?: string | null;
+  claudeAccountSource?:
+    | "instance"
+    | "definition"
+    | "global"
+    | "credentials_file";
+  claudeAccountShadowed?: boolean;
   personaId?: string | null;
   status?: "running" | "stopped" | "deployed" | "not_deployed";
   channelNames?: string[];

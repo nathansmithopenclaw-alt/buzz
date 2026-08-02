@@ -32,6 +32,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         system_prompt: None,
         model: None,
         provider: None,
+        claude_account_id: None,
         persona_source_version: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,

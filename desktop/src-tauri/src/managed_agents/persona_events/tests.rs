@@ -24,6 +24,7 @@ fn sample_record() -> ManagedAgentRecord {
         system_prompt: None,
         model: None,
         provider: None,
+        claude_account_id: None,
         persona_source_version: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
@@ -148,6 +149,7 @@ fn sample_persona() -> AgentDefinition {
         runtime: Some("goose".to_string()),
         model: Some("claude-opus-4".to_string()),
         provider: Some("anthropic".to_string()),
+        claude_account_id: None,
         name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
         is_builtin: false,
         is_active: true,
@@ -375,6 +377,7 @@ fn content_matches_nip_ap_vector() {
         runtime: Some("goose".to_string()),
         model: Some("claude-opus-4".to_string()),
         provider: Some("anthropic".to_string()),
+        claude_account_id: None,
         name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
         is_builtin: false,
         is_active: true,
@@ -406,6 +409,7 @@ fn round_trip_minimal_persona() {
         runtime: None,
         model: None,
         provider: None,
+        claude_account_id: None,
         name_pool: vec![],
         is_builtin: true,
         is_active: false,
@@ -503,6 +507,7 @@ fn quad_absent_definition_hash_stable_across_activation() {
         runtime: Some("goose".to_string()),
         model: Some("gpt-oss".to_string()),
         provider: None,
+        claude_account_id: None,
         name_pool: vec!["nib".to_string()],
         is_builtin: false,
         is_active: true,
@@ -547,6 +552,7 @@ fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDef
         runtime: content.runtime,
         model: content.model,
         provider: content.provider,
+        claude_account_id: None,
         name_pool: content.name_pool,
         is_builtin: false,
         is_active: true,
@@ -638,6 +644,7 @@ fn blank_model_persona() -> AgentDefinition {
     AgentDefinition {
         model: None,
         provider: None,
+        claude_account_id: None,
         ..sample_persona()
     }
 }

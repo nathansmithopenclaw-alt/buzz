@@ -13,8 +13,8 @@
 
 use std::collections::BTreeMap;
 
-/// Env var keys that are *derived* from the structured `AgentDefinition.provider`
-/// and `AgentDefinition.model` fields at spawn/deploy time. These must NOT be
+/// Env var keys that are *derived* from structured provider, model, or account
+/// fields at spawn/deploy time. These must NOT be
 /// persisted in `AgentDefinition.env_vars` because they would shadow the
 /// structured fields after the user edits provider/model in the UI.
 ///
@@ -29,10 +29,20 @@ pub(crate) const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
     "GOOSE_PROVIDER",
     "BUZZ_AGENT_MODEL",
     "BUZZ_AGENT_PROVIDER",
+    "CLAUDE_CODE_OAUTH_TOKEN",
 ];
+
+/// Provider/model-only subset used by the older Databricks cleanup. Credential
+/// keys must survive that pass so their dedicated migration can keychain them.
+pub(crate) fn is_legacy_provider_model_env_key(key: &str) -> bool {
+    DERIVED_PROVIDER_MODEL_ENV_KEYS[..4]
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(key))
+}
 
 /// Returns `true` if `key` is a derived provider/model env key that should be
 /// filtered out of persisted `AgentDefinition.env_vars` at pack import time.
+#[cfg(test)]
 pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
     DERIVED_PROVIDER_MODEL_ENV_KEYS
         .iter()

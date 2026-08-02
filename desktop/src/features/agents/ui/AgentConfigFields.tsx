@@ -60,6 +60,7 @@ export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
   provider: null,
   model: null,
+  claude_account_id: null,
   preferred_runtime: null,
   auto_approve_agent_drafts: false,
 };

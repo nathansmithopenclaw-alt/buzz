@@ -42,6 +42,7 @@ export default defineConfig({
         "**/channel-star.spec.ts",
         "**/channel-controls.spec.ts",
         "**/active-turn-resilience.spec.ts",
+        "**/claude-accounts.spec.ts",
         "**/profile-active-turn.spec.ts",
         "**/config-bridge-screenshots.spec.ts",
         "**/observer-feed-screenshots.spec.ts",

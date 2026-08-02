@@ -74,6 +74,16 @@ fn validate_rejects_derived_key_buzz_agent_provider() {
 }
 
 #[test]
+fn validate_rejects_plaintext_claude_oauth_token() {
+    let config = config_with_env(&[("CLAUDE_CODE_OAUTH_TOKEN", &"a".repeat(108))]);
+    let err = validate_global_config(&config).unwrap_err();
+    assert!(
+        err.contains("structured provider/model fields"),
+        "got: {err}"
+    );
+}
+
+#[test]
 fn validate_rejects_malformed_key() {
     let config = config_with_env(&[("has spaces", "val")]);
     let err = validate_global_config(&config).unwrap_err();
@@ -276,6 +286,7 @@ fn roundtrip_serialization() {
         env_vars: BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string())]),
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4".to_string()),
+        claude_account_id: Some("account-a".to_string()),
         preferred_runtime: Some("claude".to_string()),
         auto_approve_agent_drafts: true,
     };
@@ -329,6 +340,7 @@ fn bare_record() -> ManagedAgentRecord {
         system_prompt: None,
         model: None,
         provider: None,
+        claude_account_id: None,
         persona_source_version: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
@@ -375,6 +387,7 @@ fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefini
         runtime: None,
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
+        claude_account_id: None,
         name_pool: vec![],
         is_builtin: false,
         is_active: true,
@@ -602,6 +615,7 @@ fn populated_global_config_round_trips() {
             .collect(),
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-5".to_string()),
+        claude_account_id: Some("account-a".to_string()),
         preferred_runtime: None,
         auto_approve_agent_drafts: true,
     };
@@ -637,6 +651,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
         runtime: Some("goose".to_string()),
         model: None,
         provider: None,
+        claude_account_id: None,
         name_pool: vec![],
         is_builtin: false,
         is_active: true,

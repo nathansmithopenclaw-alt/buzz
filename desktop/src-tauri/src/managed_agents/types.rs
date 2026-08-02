@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf, process::Child};
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -32,6 +32,8 @@ pub struct AgentDefinition {
     /// falls back to auto-detection (e.g., goose config file or available credentials).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_account_id: Option<String>,
     /// Pool of short, thematic names for bot instances created from this persona.
     /// When a new copy is added to a channel, a random unused name is picked from this pool.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -118,6 +120,7 @@ impl AgentDefinition {
             system_prompt: (!self.system_prompt.is_empty()).then_some(self.system_prompt),
             model: self.model,
             provider: self.provider,
+            claude_account_id: self.claude_account_id,
             persona_source_version: None,
             env_vars: self.env_vars,
             start_on_app_launch: false,
@@ -175,6 +178,7 @@ impl ManagedAgentRecord {
             runtime: self.runtime.clone(),
             model: self.model.clone(),
             provider: self.provider.clone(),
+            claude_account_id: self.claude_account_id.clone(),
             name_pool: self.name_pool.clone(),
             is_builtin: self.is_builtin,
             is_active: self.is_active,
@@ -294,6 +298,8 @@ pub struct ManagedAgentRecord {
     /// first load.
     #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_account_id: Option<String>,
     /// Content hash of the persona at the time this agent was created — the
     /// `persona_content_hash` of the snapshot in `system_prompt` / `model` /
     /// `provider` / `env_vars`. The Agents menu compares it against the linked
@@ -458,39 +464,6 @@ pub struct RelayMeshConfig {
     pub model_ref: String,
 }
 
-#[derive(Debug)]
-pub struct ManagedAgentProcess {
-    pub child: Child,
-    pub log_path: PathBuf,
-    /// Digest of the effective spawn config at launch (see
-    /// `spawn_hash::spawn_config_hash`). Runtime-only — never persisted. The
-    /// summary builder recomputes the hash from current disk state and flags
-    /// `needs_restart` on mismatch. Agents adopted via a persisted
-    /// `runtime_pid` have no `ManagedAgentProcess` entry, so their spawn
-    /// config is unknown and the badge stays off.
-    pub spawn_config_hash: u64,
-    /// Whether this process was spawned in setup-listener mode (i.e.
-    /// `BUZZ_ACP_SETUP_PAYLOAD` was set at launch because the agent was
-    /// `NotReady`). Runtime-only — never persisted. Used by
-    /// `install_acp_runtime` to target only stuck agents for auto-restart,
-    /// excluding healthy in-pool agents.
-    pub setup_mode: bool,
-    /// Adapter availability status stamped at spawn time for runtimes with a
-    /// version gate (currently codex only; `None` for all others). Runtime-only
-    /// — never persisted. The summary builder compares this against the current
-    /// cached availability and sets `needs_restart` on drift, catching out-of-
-    /// band adapter changes that Phase-1 auto-restart doesn't cover.
-    pub adapter_availability: Option<AcpAvailabilityStatus>,
-    /// Unpredictable identity shared only with this harness generation.
-    pub start_nonce: String,
-    /// Win32 Job Object owning the harness + its entire process tree. Closing
-    /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
-    /// tree — the Windows mirror of the Unix process-group teardown. `None`
-    /// if job creation/assignment failed (we fall back to `Child::kill()`).
-    #[cfg(windows)]
-    pub job: Option<crate::managed_agents::JobHandle>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentSummary {
     pub pubkey: String,
@@ -528,6 +501,10 @@ pub struct ManagedAgentSummary {
     /// (definition → global for linked instances; instance → global for
     /// definition-less instances). `None` for an orphaned instance.
     pub provider: Option<String>,
+    pub claude_account_id: Option<String>,
+    pub claude_account_source: String,
+    pub claude_account_shadowed: bool,
+    pub supports_claude_accounts: bool,
     /// `true` when the linked persona has been edited since this agent was
     /// created — the running agent uses the older pinned snapshot. The UI
     /// flags it and tells the user to delete + respawn to pick up the edit.

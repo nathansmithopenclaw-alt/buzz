@@ -67,6 +67,12 @@ pub struct GlobalAgentConfig {
     #[serde(default)]
     pub model: Option<String>,
 
+    /// Lowest-precedence Claude account selection. Persona and per-instance
+    /// selections override it; `None` leaves Claude Code to its credentials
+    /// file fallback. The bearer itself remains in the OS keychain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_account_id: Option<String>,
+
     /// Preferred ACP runtime for definitions without an explicit runtime.
     #[serde(default)]
     pub preferred_runtime: Option<String>,

@@ -1236,7 +1236,7 @@ pub fn reconcile_provider_mcp_commands(app: &tauri::AppHandle) {
 }
 
 fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool) {
-    use crate::managed_agents::is_derived_provider_model_key;
+    use crate::managed_agents::is_legacy_provider_model_env_key;
     patch_json_records(path, |obj| {
         let mut changed = false;
 
@@ -1270,18 +1270,18 @@ fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool)
             changed = true;
         }
 
-        // Strip derived provider/model keys from env_vars on ALL records,
+        // Strip the legacy provider/model keys from env_vars on ALL records,
         // regardless of rewrite_v1_provider. These keys are re-derived from
         // structured fields at spawn time; stale copies in env_vars silently
         // override the structured fields (last-write-wins in Command::env) and
         // can cause V1 routing even when the provider dropdown shows V2.
-        //
-        // The check is case-insensitive (matching the established helper)
-        // to cover any case-variant that may have been written historically.
+        // Keep credential-derived keys here. In particular, the Claude account
+        // migration runs later in startup and must be allowed to move a legacy
+        // plaintext CLAUDE_CODE_OAUTH_TOKEN into the OS keychain first.
         if let Some(serde_json::Value::Object(env_vars)) = obj.get_mut("env_vars") {
             let stale_keys: Vec<String> = env_vars
                 .keys()
-                .filter(|k| is_derived_provider_model_key(k))
+                .filter(|key| is_legacy_provider_model_env_key(key))
                 .cloned()
                 .collect();
             for key in stale_keys {

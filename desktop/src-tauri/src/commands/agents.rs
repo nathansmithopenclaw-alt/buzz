@@ -867,8 +867,8 @@ pub async fn create_managed_agent(
             }),
             model: effective_model.clone(),
             provider: effective_provider.clone(),
+            claude_account_id: None,
             persona_source_version: snapshot_source_version,
-            // Provider agents are managed externally — force false.
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false
             } else {

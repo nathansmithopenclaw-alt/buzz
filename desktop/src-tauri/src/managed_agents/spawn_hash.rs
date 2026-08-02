@@ -102,6 +102,7 @@ pub(crate) fn spawn_config_hash(
     // Effective env layering (baked floor → runtime metadata → definition env
     // → global → persona → agent). BTreeMap iteration is ordered, deterministic.
     descriptor.env.hash(&mut hasher);
+    super::effective_claude_account_id(record, personas, global).hash(&mut hasher);
 
     // Record fields the spawn env writes read directly. The relay is hashed
     // resolved: every record spawns on the workspace relay (legacy pins

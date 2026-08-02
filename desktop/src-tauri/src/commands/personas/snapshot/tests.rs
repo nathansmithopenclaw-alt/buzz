@@ -41,6 +41,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         system_prompt: None,
         model: None,
         provider: None,
+        claude_account_id: None,
         persona_source_version: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
@@ -87,7 +88,6 @@ fn make_instance(pubkey: &str, persona_id: &str) -> ManagedAgentRecord {
     }
 }
 
-/// Build a minimal valid AgentSnapshot for import tests.
 fn make_snapshot(
     memory_level: MemoryLevel,
     entries: Vec<AgentSnapshotMemoryEntry>,

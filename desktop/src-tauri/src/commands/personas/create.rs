@@ -59,6 +59,7 @@ pub async fn create_persona(
             runtime,
             model,
             provider,
+            claude_account_id: None,
             name_pool,
             is_builtin: false,
             is_active: true,

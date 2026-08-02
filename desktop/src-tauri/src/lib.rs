@@ -438,17 +438,12 @@ pub fn run() {
                 .load(std::sync::atomic::Ordering::Acquire);
             let recovery_mode = identity_lost || keyring_locked;
 
-            // Backfill the pinned persona snapshot for any pre-existing agent
-            // that predates the record-authoritative-spawn cutover (persona_id
-            // set but no source_version). Must run before
-            // restore_managed_agents_on_launch so no agent spawns from an empty
-            // snapshot. Synchronous and best-effort — a failure here must not
-            // block launch, but a missing persona is logged loudly inside.
+            // Complete synchronous data migrations before any agent spawns.
+            managed_agents::migrate_plaintext_claude_tokens_at_startup(&app_handle);
             if let Err(e) = backfill_persona_snapshots(&app_handle) {
                 eprintln!("buzz-desktop: persona-snapshot backfill failed: {e}");
             }
 
-            // Warm the loaded-harness registry BEFORE restore so cold-launch
             // agent spawns can resolve custom/preset runtime ids without
             // waiting for the frontend's discover_acp_providers call.  This is
             // a pure directory scan — no PATH probing, no async work.
@@ -828,6 +823,11 @@ pub fn run() {
             put_agent_session_config,
             get_global_agent_config,
             set_global_agent_config,
+            managed_agents::list_claude_accounts,
+            managed_agents::add_claude_account,
+            managed_agents::delete_claude_account,
+            managed_agents::note_claude_account_switch_queued,
+            managed_agents::switch_agent_claude_account,
             mesh_start_node,
             mesh_stop_node,
             mesh_node_status,

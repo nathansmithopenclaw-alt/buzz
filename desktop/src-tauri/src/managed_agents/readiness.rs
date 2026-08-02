@@ -77,7 +77,6 @@ pub(crate) struct EffectiveAgentEnv {
     /// The resolved harness binary name (e.g. `"buzz-agent"`, `"goose"`).
     pub effective_command: String,
 }
-
 // ── Typed effective-harness descriptor ───────────────────────────────────────
 //
 // A single owned type that fully describes what a spawn would run.  Produced
@@ -1498,6 +1497,7 @@ mod tests {
             system_prompt: None,
             model: None,
             provider: None,
+            claude_account_id: None,
             persona_source_version: None,
             env_vars,
             start_on_app_launch: false,

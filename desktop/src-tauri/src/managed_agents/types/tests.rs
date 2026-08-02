@@ -479,6 +479,7 @@ fn sample_persona() -> AgentDefinition {
         runtime: Some("goose".to_string()),
         model: Some("gpt-x".to_string()),
         provider: Some("openai".to_string()),
+        claude_account_id: None,
         name_pool: vec!["Nimble".to_string()],
         is_builtin: false,
         is_active: true,

@@ -79,6 +79,7 @@ import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
+import { ClaudeAccountsSettingsCard } from "./ClaudeAccountsSettingsCard";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
@@ -183,7 +184,7 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "agents",
-    label: "Agents",
+    label: "AI",
     icon: Bot,
     featureGate: "managed-agents",
   },
@@ -823,6 +824,7 @@ export function renderSettingsSection(
     case "agents":
       return (
         <div className="space-y-12">
+          <ClaudeAccountsSettingsCard />
           <PreventSleepSettingsCard />
           <HarnessesSettingsPanel />
           <AgentDefaultsSettingsCard />

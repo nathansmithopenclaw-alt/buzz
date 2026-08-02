@@ -80,7 +80,6 @@ fn resolve_config_surface(
         record.model = None;
         record.provider = None;
     }
-
     let had_prompt =
         record.system_prompt.is_some() || record.env_vars.contains_key("BUZZ_ACP_SYSTEM_PROMPT");
     let had_model = record.model.is_some();
@@ -149,7 +148,6 @@ fn resolve_config_surface(
             record.env_vars.insert(provider_env_key.to_string(), prov);
         }
     }
-
     // Inject global defaults where neither the record nor the persona had a value.
     // Track injection so we can re-tag to GlobalDefault after the reader.
     let inject_global_model = !had_model && record.model.is_none();
@@ -695,6 +693,7 @@ mod tests {
             agent_command_override: None,
             persona_source_version: None,
             provider: None,
+            claude_account_id: None,
         }
     }
 
@@ -707,6 +706,7 @@ mod tests {
             runtime: None,
             model: Some(model.to_string()),
             provider: None,
+            claude_account_id: None,
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,

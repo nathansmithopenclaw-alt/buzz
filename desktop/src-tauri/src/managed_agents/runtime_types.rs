@@ -1,7 +1,23 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::{path::PathBuf, process::Child};
 
-use super::ManagedAgentProcess;
+use super::AcpAvailabilityStatus;
+
+#[derive(Debug)]
+pub struct ManagedAgentProcess {
+    pub child: Child,
+    pub log_path: PathBuf,
+    pub spawn_config_hash: u64,
+    pub claude_account_id: Option<String>,
+    pub claude_token_fingerprint: Option<String>,
+    pub claude_account_source: String,
+    pub setup_mode: bool,
+    pub adapter_availability: Option<AcpAvailabilityStatus>,
+    pub start_nonce: String,
+    #[cfg(windows)]
+    pub job: Option<crate::managed_agents::JobHandle>,
+}
 
 /// Canonical identity of one managed-agent harness on one relay.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

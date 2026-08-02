@@ -163,6 +163,7 @@ fn fixture(
         system_prompt: None,
         model: None,
         provider: None,
+        claude_account_id: None,
         persona_source_version: None,
         env_vars: std::collections::BTreeMap::new(),
         start_on_app_launch: false,
@@ -291,8 +292,6 @@ fn build_env_rejects_empty_allowlist_in_allowlist_mode() {
     assert!(err.contains("at least one pubkey"));
 }
 
-// ── persona fixture helpers ─────────────────────────────────────────
-
 fn persona_with_provider(
     id: &str,
     prompt: &str,
@@ -307,6 +306,7 @@ fn persona_with_provider(
         runtime: None,
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
+        claude_account_id: None,
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
@@ -1272,8 +1272,7 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     //
     // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
     // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
-    // bare `true` lookup during that window fails with NotFound (observed
-    // flake). Windows keeps the PATH lookup — no test there swaps PATH.
+    // bare `true` lookup during that window fails with NotFound.
     #[cfg(unix)]
     let program = "/usr/bin/true";
     #[cfg(windows)]
@@ -1288,6 +1287,9 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         child,
         log_path: std::path::PathBuf::new(),
         spawn_config_hash: 0,
+        claude_account_id: None,
+        claude_token_fingerprint: None,
+        claude_account_source: "credentials_file".into(),
         setup_mode: false,
         adapter_availability: None,
         start_nonce: "test-nonce".to_string(),
@@ -1296,8 +1298,6 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
 }
-
-// ── restart_eligible tests ──────────────────────────────────────────────
 
 #[test]
 fn restart_eligible_true_when_non_orphan_has_hash_drift() {

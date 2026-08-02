@@ -223,6 +223,7 @@ fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agent
         runtime: runtime.map(str::to_string),
         model: None,
         provider: None,
+        claude_account_id: None,
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
@@ -249,8 +250,6 @@ fn effective_agent_command_explicit_override_wins() {
     );
 }
 
-/// Minimal record for `record_agent_command` tests. Only the resolution
-/// inputs (runtime / persona_id / agent_command_override) vary.
 fn record_with(
     runtime: Option<&str>,
     persona_id: Option<&str>,
@@ -276,6 +275,7 @@ fn record_with(
         system_prompt: None,
         model: None,
         provider: None,
+        claude_account_id: None,
         persona_source_version: None,
         start_on_app_launch: false,
         auto_restart_on_config_change: true,

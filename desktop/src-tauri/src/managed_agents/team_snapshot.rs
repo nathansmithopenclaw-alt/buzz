@@ -272,6 +272,7 @@ mod tests {
             system_prompt: Some(format!("You are {name}.")),
             model: Some("claude-opus-4".to_string()),
             provider: Some("anthropic".to_string()),
+            claude_account_id: None,
             persona_source_version: None,
             env_vars: {
                 let mut m = BTreeMap::new();

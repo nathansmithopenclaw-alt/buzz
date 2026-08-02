@@ -27,6 +27,7 @@ import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastE
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
+import { ClaudeAccountPill } from "./ClaudeAccountPill";
 
 export function ManagedAgentRow({
   agent,
@@ -159,6 +160,9 @@ export function ManagedAgentRow({
         )}
 
         <div className="flex shrink-0 items-start gap-2 lg:pt-0.5">
+          {agent.supportsClaudeAccounts ? (
+            <ClaudeAccountPill agent={agent} compact />
+          ) : null}
           <Button
             onClick={() => onOpenProfile(agent.pubkey)}
             size="sm"

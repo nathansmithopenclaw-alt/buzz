@@ -80,6 +80,13 @@ type MockManagedAgentSeed = {
   personaId?: string | null;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
   runtime?: string | null;
+  claudeAccountId?: string | null;
+  claudeAccountSource?:
+    | "instance"
+    | "definition"
+    | "global"
+    | "credentials_file";
+  claudeAccountShadowed?: boolean;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
   channelIds?: string[];
@@ -792,6 +799,14 @@ type RawManagedAgent = {
   avatar_url: string | null;
   model: string | null;
   provider?: string | null;
+  claude_account_id?: string | null;
+  claude_account_source?:
+    | "instance"
+    | "definition"
+    | "global"
+    | "credentials_file";
+  claude_account_shadowed?: boolean;
+  supports_claude_accounts?: boolean;
   env_vars?: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
   pid: number | null;
@@ -1563,6 +1578,10 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     avatar_url: agent.avatar_url ?? null,
     model: agent.model,
     provider: agent.provider ?? null,
+    claude_account_id: agent.claude_account_id ?? null,
+    claude_account_source: agent.claude_account_source ?? "credentials_file",
+    claude_account_shadowed: agent.claude_account_shadowed ?? false,
+    supports_claude_accounts: agent.supports_claude_accounts ?? false,
     env_vars: { ...(agent.env_vars ?? {}) },
     status: agent.status,
     pid: agent.pid,
@@ -2078,6 +2097,7 @@ function buildMockConfigSurface(pubkey: string): {
 function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
   const now = new Date().toISOString();
   const status = seed.status ?? "stopped";
+  const runtime = seed.runtime ?? "goose";
 
   return {
     pubkey: seed.pubkey,
@@ -2088,7 +2108,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     runtime: seed.runtime ?? null,
     relay_url: DEFAULT_RELAY_WS_URL,
     acp_command: "buzz-acp",
-    agent_command: "goose",
+    agent_command: runtime,
     agent_args: ["acp"],
     mcp_command: "",
     turn_timeout_seconds: 320,
@@ -2098,6 +2118,17 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     system_prompt: null,
     avatar_url: seed.avatarUrl ?? null,
     model: null,
+    claude_account_id:
+      seed.claudeAccountId !== undefined
+        ? seed.claudeAccountId
+        : runtime === "claude"
+          ? "account-a"
+          : null,
+    claude_account_source:
+      seed.claudeAccountSource ??
+      (runtime === "claude" ? "instance" : "credentials_file"),
+    claude_account_shadowed: seed.claudeAccountShadowed ?? false,
+    supports_claude_accounts: runtime === "claude",
     env_vars: {},
     status,
     pid: status === "running" ? 42000 + mockManagedAgents.length : null,
@@ -2156,6 +2187,45 @@ function resetMockRelayAgents(config?: E2eConfig) {
 
 function resetMockManagedAgents(config?: E2eConfig) {
   mockManagedAgents = [];
+  mockClaudeAccounts = [
+    {
+      id: "account-a",
+      label: "Account A",
+      fingerprint: "576cfced00000000",
+      length: 108,
+      last_verified: new Date().toISOString(),
+      plan_type: "max",
+      five_hour: {
+        utilization: 82,
+        resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+      weekly: {
+        utilization: 44,
+        resets_at: new Date(Date.now() + 86_400_000).toISOString(),
+      },
+      model_scoped: [],
+      usage_status: "available",
+      usage_http_status: 200,
+      usage_error: null,
+      usage_checked_at: new Date().toISOString(),
+    },
+    {
+      id: "account-b",
+      label: "Account B",
+      fingerprint: "02a8b0dd00000000",
+      length: 108,
+      last_verified: new Date().toISOString(),
+      plan_type: "max",
+      five_hour: null,
+      weekly: null,
+      model_scoped: [],
+      usage_status: "scope_insufficient",
+      usage_http_status: 403,
+      usage_error:
+        "Usage meter needs a login-minted token; re-mint with interactive login.",
+      usage_checked_at: new Date().toISOString(),
+    },
+  ];
   mockManagedAgentRuntimes = (config?.mock?.managedAgentRuntimes ?? []).map(
     (seed) => ({
       pubkey: seed.pubkey,
@@ -2874,6 +2944,26 @@ let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
+type MockClaudeAccount = {
+  id: string;
+  label: string;
+  fingerprint: string;
+  length: number;
+  last_verified: string | null;
+  plan_type: string | null;
+  five_hour: { utilization: number | null; resets_at: string | null } | null;
+  weekly: { utilization: number | null; resets_at: string | null } | null;
+  model_scoped: Array<{
+    model: string;
+    utilization: number | null;
+    resets_at: string | null;
+  }>;
+  usage_status: "available" | "scope_insufficient" | "stale" | "unavailable";
+  usage_http_status: number | null;
+  usage_error: string | null;
+  usage_checked_at: string | null;
+};
+let mockClaudeAccounts: MockClaudeAccount[] = [];
 
 // Mutable `save_subscriptions` table mirror — TEST-ONLY.
 //
@@ -11613,6 +11703,78 @@ export function maybeInstallE2eTauriMocks() {
           restarted_count: config?.mock?.globalConfigRestartedCount ?? 0,
           failed_restart_count:
             config?.mock?.globalConfigFailedRestartCount ?? 0,
+        };
+      }
+      case "list_claude_accounts":
+        return mockClaudeAccounts;
+      case "add_claude_account": {
+        const args = payload as { label: string; token: string };
+        const normalized = args.token.replace(/\s/g, "");
+        if (normalized.length !== 108 || !/^[A-Za-z0-9_-]+$/.test(normalized)) {
+          throw new Error(
+            `Claude OAuth token must be 108 characters after whitespace is removed (got ${normalized.length})`,
+          );
+        }
+        const account: MockClaudeAccount = {
+          id: `account-${mockClaudeAccounts.length + 1}`,
+          label: args.label,
+          fingerprint: "e2e000000000000",
+          length: 108,
+          last_verified: new Date().toISOString(),
+          plan_type: "max",
+          five_hour: {
+            utilization: 18,
+            resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+          },
+          weekly: {
+            utilization: 31,
+            resets_at: new Date(Date.now() + 86_400_000).toISOString(),
+          },
+          model_scoped: [],
+          usage_status: "available",
+          usage_http_status: 200,
+          usage_error: null,
+          usage_checked_at: new Date().toISOString(),
+        };
+        mockClaudeAccounts.push(account);
+        return account;
+      }
+      case "delete_claude_account": {
+        const id = (payload as { id: string }).id;
+        mockClaudeAccounts = mockClaudeAccounts.filter(
+          (account) => account.id !== id,
+        );
+        return null;
+      }
+      case "note_claude_account_switch_queued":
+        return null;
+      case "switch_agent_claude_account": {
+        const args = payload as { pubkey: string; accountId: string | null };
+        const credentialsFileSelected =
+          args.accountId === "__credentials_file__";
+        const agent = mockManagedAgents.find(
+          (candidate) => candidate.pubkey === args.pubkey,
+        );
+        if (!agent) throw new Error(`agent ${args.pubkey} not found`);
+        agent.claude_account_id = credentialsFileSelected
+          ? null
+          : args.accountId;
+        agent.claude_account_source =
+          args.accountId && !credentialsFileSelected
+            ? "instance"
+            : "credentials_file";
+        return {
+          account_id: credentialsFileSelected ? null : args.accountId,
+          fingerprint:
+            args.accountId && !credentialsFileSelected
+              ? (mockClaudeAccounts.find(
+                  (account) => account.id === args.accountId,
+                )?.fingerprint ?? null)
+              : null,
+          restarted_count: agent.status === "running" ? 1 : 0,
+          failed_restart_count: 0,
+          verified_runtime_count: agent.status === "running" ? 1 : 0,
+          running_pids: agent.pid == null ? [] : [agent.pid],
         };
       }
       case "get_baked_build_env": {

@@ -2,6 +2,8 @@ import { LogIn } from "lucide-react";
 import type * as React from "react";
 
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
+import { ClaudeAccountPill } from "@/features/agents/ui/ClaudeAccountPill";
+import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import type { EphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import type { ActiveDmHeaderParticipant } from "@/features/channels/useActiveChannelHeader";
 import { getChannelDescription } from "@/features/channels/lib/channelDescription";
@@ -17,6 +19,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 const DM_HEADER_AVATAR_SIZE = 32;
 const DM_HEADER_AVATAR_STATUS_GEOMETRY = scaleProfileAvatarStatusGeometry(
@@ -67,6 +70,15 @@ export function ChannelScreenHeader({
     activeChannel?.channelType === "dm" &&
     activeDmHeaderParticipants.length > 1;
   const activeDmParticipant = activeDmHeaderParticipants[0] ?? null;
+  const managedAgents = useManagedAgentsQuery().data ?? [];
+  const activeDmManagedAgent =
+    activeDmHeaderParticipants.length === 1
+      ? (managedAgents.find(
+          (agent) =>
+            normalizePubkey(agent.pubkey) ===
+            normalizePubkey(activeDmHeaderParticipants[0]?.pubkey ?? ""),
+        ) ?? null)
+      : null;
   const showJoinButton =
     activeChannel !== null &&
     !activeChannel.isMember &&
@@ -151,9 +163,14 @@ export function ChannelScreenHeader({
         ) : undefined
       }
       statusBadge={
-        <ChannelHeaderStatusBadge
-          ephemeralDisplay={activeChannelEphemeralDisplay}
-        />
+        <div className="flex items-center gap-2">
+          <ChannelHeaderStatusBadge
+            ephemeralDisplay={activeChannelEphemeralDisplay}
+          />
+          {!isGroupDm && activeDmManagedAgent?.supportsClaudeAccounts ? (
+            <ClaudeAccountPill agent={activeDmManagedAgent} compact />
+          ) : null}
+        </div>
       }
       title={activeChannelTitle}
       transparentChrome={transparentChrome}

@@ -25,6 +25,7 @@ import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
+import { ClaudeAccountPill } from "./ClaudeAccountPill";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
@@ -159,21 +160,30 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               return (
                 <AgentPersonaCard
                   actions={(effectiveAvatarUrl, isEffectiveAvatarLoading) => (
-                    <PersonaActionsMenu
-                      isActionPending={
-                        isActionPending || isEffectiveAvatarLoading
-                      }
-                      isPending={isPersonasPending}
-                      persona={group.persona}
-                      linkedAgent={profileAgent}
-                      onDeactivate={onDeactivatePersona}
-                      onDelete={onDeletePersona}
-                      onDuplicate={onDuplicatePersona}
-                      onEdit={onEditPersona}
-                      onShare={(persona, linkedAgent) =>
-                        onSharePersona(persona, linkedAgent, effectiveAvatarUrl)
-                      }
-                    />
+                    <div className="flex flex-col items-end gap-2">
+                      <PersonaActionsMenu
+                        isActionPending={
+                          isActionPending || isEffectiveAvatarLoading
+                        }
+                        isPending={isPersonasPending}
+                        persona={group.persona}
+                        linkedAgent={profileAgent}
+                        onDeactivate={onDeactivatePersona}
+                        onDelete={onDeletePersona}
+                        onDuplicate={onDuplicatePersona}
+                        onEdit={onEditPersona}
+                        onShare={(persona, linkedAgent) =>
+                          onSharePersona(
+                            persona,
+                            linkedAgent,
+                            effectiveAvatarUrl,
+                          )
+                        }
+                      />
+                      {profileAgent?.supportsClaudeAccounts ? (
+                        <ClaudeAccountPill agent={profileAgent} compact />
+                      ) : null}
+                    </div>
                   )}
                   agent={profileAgent}
                   defaultModel={defaultModel}
@@ -381,6 +391,11 @@ function StandaloneAgentCard({
 
   return (
     <AgentIdentityCard
+      actions={
+        agent.supportsClaudeAccounts ? (
+          <ClaudeAccountPill agent={agent} compact />
+        ) : null
+      }
       ariaLabel={`${title} agent profile`}
       avatar={
         <AgentRuntimeAvatarControl

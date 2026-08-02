@@ -167,7 +167,7 @@ fn reconcile_databricks_v1_to_v2_strips_stale_buzz_agent_provider_from_env_vars(
 }
 
 #[test]
-fn reconcile_databricks_v1_to_v2_strips_all_derived_keys_from_env_vars() {
+fn reconcile_databricks_v1_to_v2_strips_provider_model_keys_but_preserves_claude_token() {
     let dir = tempfile::tempdir().unwrap();
     write_agents_json(
         dir.path(),
@@ -180,6 +180,7 @@ fn reconcile_databricks_v1_to_v2_strips_all_derived_keys_from_env_vars() {
                 "BUZZ_AGENT_MODEL": "claude-opus-4-5",
                 "GOOSE_PROVIDER": "anthropic",
                 "GOOSE_MODEL": "claude-opus-4-5",
+                "CLAUDE_CODE_OAUTH_TOKEN": "legacy-token-for-account-migration",
                 "ANTHROPIC_API_KEY": "sk-test"
             }
         }]),
@@ -197,7 +198,13 @@ fn reconcile_databricks_v1_to_v2_strips_all_derived_keys_from_env_vars() {
     assert!(env_vars.get("BUZZ_AGENT_MODEL").is_none());
     assert!(env_vars.get("GOOSE_PROVIDER").is_none());
     assert!(env_vars.get("GOOSE_MODEL").is_none());
-    // Non-derived key must be preserved.
+    // Credential migration runs after this legacy provider migration. It must
+    // still be able to move the plaintext token into the OS keychain.
+    assert_eq!(
+        env_vars["CLAUDE_CODE_OAUTH_TOKEN"],
+        "legacy-token-for-account-migration"
+    );
+    // Non-derived key must also be preserved.
     assert_eq!(env_vars["ANTHROPIC_API_KEY"], "sk-test");
 }
 
