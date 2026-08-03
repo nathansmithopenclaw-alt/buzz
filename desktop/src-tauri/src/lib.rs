@@ -76,7 +76,6 @@ use tauri::{Listener, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
-
 #[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
 
@@ -800,6 +799,7 @@ pub fn run() {
             list_relay_agents,
             list_managed_agents,
             get_managed_agent_nsec,
+            apply_managed_agent_avatar_request,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,

@@ -11,6 +11,10 @@ import {
   parseAgentManagementRequest,
   type AgentManagementRequest,
 } from "./agentManagement";
+import {
+  parseAgentAvatarApplyRequest,
+  type AgentAvatarApplyRequest,
+} from "./agentAvatarApply";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
@@ -103,6 +107,9 @@ const controlResultListeners = new Map<
 
 const agentManagementListeners = new Set<
   (agentPubkey: string, request: AgentManagementRequest) => void
+>();
+const agentAvatarApplyListeners = new Set<
+  (agentPubkey: string, request: AgentAvatarApplyRequest) => void
 >();
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
@@ -398,6 +405,12 @@ async function handleRelayObserverEvent(
         listener(agentPubkey, managementRequest);
       }
     }
+    const avatarApplyRequest = parseAgentAvatarApplyRequest(parsed.payload);
+    if (avatarApplyRequest) {
+      for (const listener of agentAvatarApplyListeners) {
+        listener(agentPubkey, avatarApplyRequest);
+      }
+    }
     if (parsed.kind === "session_config_captured") {
       void putAgentSessionConfig(agentPubkey, parsed.payload);
       onSessionConfigCaptured?.(agentPubkey);
@@ -525,6 +538,16 @@ export function subscribeAgentManagementRequests(
   void ensureRelayObserverSubscription();
   return () => {
     agentManagementListeners.delete(listener);
+  };
+}
+
+export function subscribeAgentAvatarApplyRequests(
+  listener: (agentPubkey: string, request: AgentAvatarApplyRequest) => void,
+) {
+  agentAvatarApplyListeners.add(listener);
+  void ensureRelayObserverSubscription();
+  return () => {
+    agentAvatarApplyListeners.delete(listener);
   };
 }
 
@@ -756,6 +779,7 @@ export function resetAgentObserverStore() {
   pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
   agentManagementListeners.clear();
+  agentAvatarApplyListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

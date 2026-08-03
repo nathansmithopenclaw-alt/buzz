@@ -452,6 +452,31 @@ pub(crate) fn save_agent_definitions(
     write_agent_store(app, definitions, instances)
 }
 
+/// Atomically replace both halves of the unified agent store. Callers must
+/// hold `managed_agents_store_lock` and supply the complete definition and
+/// instance sets. This is the only save shape that can propagate one change
+/// across a definition and all of its instances without an intermediate
+/// on-disk state that app-restore reconciliation could observe.
+pub(crate) fn save_agent_definitions_and_instances(
+    app: &AppHandle,
+    definitions: &[ManagedAgentRecord],
+    records: &[ManagedAgentRecord],
+) -> Result<(), String> {
+    let mut definitions = definitions.to_vec();
+    definitions.retain(|record| record.pubkey.is_empty());
+
+    let mut instances = records.to_vec();
+    instances.retain(|record| !record.pubkey.is_empty());
+    instances.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.pubkey.cmp(&right.pubkey))
+    });
+    persist_agent_keys(&mut instances);
+    write_agent_store(app, definitions, instances)
+}
+
 /// Serialize definitions + instances into the single unified store file.
 /// Definitions sort first (by slug) for stable diffs; instances keep the
 /// name/pubkey order their save path established.

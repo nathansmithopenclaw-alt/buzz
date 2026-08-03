@@ -1,7 +1,7 @@
 //! Owner-reviewed agent draft requests published through Buzz observer frames.
 
 use buzz_core::observer::{encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY};
-use nostr::{Event, Keys, PublicKey};
+use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag};
 use serde::Serialize;
 
 use crate::error::CliError;
@@ -10,6 +10,10 @@ const REQUEST_KIND: &str = "agent_management_request";
 const MAX_NAME_CHARS: usize = 120;
 const MAX_NAME_POOL_ENTRIES: usize = 100;
 const MAX_PROMPT_CHARS: usize = 20_000;
+const AVATAR_APPLY_REQUEST_KIND: &str = "agent_avatar_apply_request";
+const AVATAR_AUTHORIZATION_KIND: u16 = 30_078;
+const AVATAR_AUTHORIZATION_D_TAG: &str = "buzz-agent-avatar-apply";
+const MAX_AVATAR_URL_CHARS: usize = 4_096;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +107,126 @@ pub struct BuiltDraftRequest {
     pub event: Event,
     pub request_id: String,
     pub action: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AvatarAuthorization {
+    #[serde(rename = "type")]
+    request_type: &'static str,
+    request_id: String,
+    target_pubkey: String,
+    url: String,
+    issued_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AvatarApplyRequest {
+    #[serde(rename = "type")]
+    request_type: &'static str,
+    request_id: String,
+    authorization_event: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AvatarObserverEvent {
+    seq: u64,
+    timestamp: String,
+    kind: &'static str,
+    agent_index: Option<usize>,
+    channel_id: Option<String>,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    payload: AvatarApplyRequest,
+}
+
+#[derive(Debug)]
+pub struct BuiltAvatarApplyRequest {
+    pub event: Event,
+    pub request_id: String,
+    pub target_pubkey: String,
+    pub url: String,
+}
+
+fn validate_avatar_url(value: String) -> Result<String, CliError> {
+    let value = required(value, "avatar URL", MAX_AVATAR_URL_CHARS)?;
+    let parsed = url::Url::parse(&value)
+        .map_err(|error| CliError::Usage(format!("invalid avatar URL: {error}")))?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(CliError::Usage(
+            "avatar URL must be an absolute HTTPS URL".into(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(CliError::Usage(
+            "avatar URL must not contain credentials".into(),
+        ));
+    }
+    Ok(value)
+}
+
+/// Build a narrow avatar apply request. The invoking agent signs the observer
+/// frame so it follows the existing authenticated owner-scoped route; the
+/// embedded authorization event separately authorizes the requested target.
+pub fn build_set_avatar(
+    owner_keys: &Keys,
+    requester_keys: &Keys,
+    target: &PublicKey,
+    url: String,
+) -> Result<BuiltAvatarApplyRequest, CliError> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let issued_at = chrono::Utc::now().to_rfc3339();
+    let target_pubkey = target.to_hex();
+    let url = validate_avatar_url(url)?;
+    let authorization = AvatarAuthorization {
+        request_type: AVATAR_APPLY_REQUEST_KIND,
+        request_id: request_id.clone(),
+        target_pubkey: target_pubkey.clone(),
+        url: url.clone(),
+        issued_at: issued_at.clone(),
+    };
+    let content = serde_json::to_string(&authorization)
+        .map_err(|error| CliError::Other(format!("serialize avatar authorization: {error}")))?;
+    let d_tag = Tag::parse(["d", AVATAR_AUTHORIZATION_D_TAG])
+        .map_err(|error| CliError::Other(format!("build avatar authorization tag: {error}")))?;
+    let authorization_event = EventBuilder::new(Kind::Custom(AVATAR_AUTHORIZATION_KIND), content)
+        .tags([d_tag])
+        .sign_with_keys(owner_keys)
+        .map_err(|error| CliError::Other(format!("sign avatar authorization: {error}")))?;
+    let payload = AvatarObserverEvent {
+        seq: 0,
+        timestamp: issued_at,
+        kind: AVATAR_APPLY_REQUEST_KIND,
+        agent_index: None,
+        channel_id: None,
+        session_id: None,
+        turn_id: None,
+        payload: AvatarApplyRequest {
+            request_type: AVATAR_APPLY_REQUEST_KIND,
+            request_id: request_id.clone(),
+            authorization_event: authorization_event.as_json(),
+        },
+    };
+    let requester_pubkey = requester_keys.public_key().to_hex();
+    let encrypted = encrypt_observer_payload(requester_keys, &owner_keys.public_key(), &payload)
+        .map_err(|error| CliError::Other(format!("encrypt avatar request: {error}")))?;
+    let event = buzz_sdk::build_agent_observer_frame(
+        &owner_keys.public_key().to_hex(),
+        &requester_pubkey,
+        OBSERVER_FRAME_TELEMETRY,
+        &encrypted,
+    )
+    .map_err(|error| CliError::Other(format!("build avatar request: {error}")))?
+    .sign_with_keys(requester_keys)
+    .map_err(|error| CliError::Other(format!("sign avatar request: {error}")))?;
+    Ok(BuiltAvatarApplyRequest {
+        event,
+        request_id,
+        target_pubkey,
+        url,
+    })
 }
 
 fn required(value: String, label: &str, max: usize) -> Result<String, CliError> {
@@ -281,6 +405,48 @@ mod tests {
     use buzz_core::observer::{decrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG};
 
     const CHANNEL: &str = "7c07e659-3610-42f4-9a5e-1e9973c09da9";
+
+    #[test]
+    fn set_avatar_is_requester_framed_and_owner_authorized_for_target() {
+        let owner = Keys::generate();
+        let requester = Keys::generate();
+        let target = Keys::generate();
+        let built = build_set_avatar(
+            &owner,
+            &requester,
+            &target.public_key(),
+            "https://relay.example/media/bolt.png".into(),
+        )
+        .unwrap();
+
+        assert_eq!(built.event.kind.as_u16(), 24_200);
+        assert_eq!(built.event.pubkey, requester.public_key());
+        let decrypted: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        let authorization =
+            Event::from_json(decrypted["payload"]["authorizationEvent"].as_str().unwrap()).unwrap();
+        assert!(authorization.verify().is_ok());
+        assert_eq!(authorization.pubkey, owner.public_key());
+        assert_eq!(authorization.kind, Kind::Custom(AVATAR_AUTHORIZATION_KIND));
+        let content: serde_json::Value = serde_json::from_str(&authorization.content).unwrap();
+        assert_eq!(content["targetPubkey"], target.public_key().to_hex());
+        assert_eq!(content["url"], "https://relay.example/media/bolt.png");
+    }
+
+    #[test]
+    fn set_avatar_rejects_non_https_or_credentialed_urls() {
+        let owner = Keys::generate();
+        let requester = Keys::generate();
+        let target = Keys::generate();
+        for url in [
+            "http://relay.example/a.png",
+            "https://user:pass@relay.example/a.png",
+            "not-a-url",
+        ] {
+            assert!(
+                build_set_avatar(&owner, &requester, &target.public_key(), url.into()).is_err()
+            );
+        }
+    }
 
     #[test]
     fn create_is_owner_encrypted_and_matches_desktop_contract() {
