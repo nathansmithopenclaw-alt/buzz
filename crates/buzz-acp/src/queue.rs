@@ -89,6 +89,21 @@ pub struct FlushBatch {
     pub cancel_reason: Option<CancelReason>,
 }
 
+/// A queue loss that must be surfaced outside the queue state machine.
+///
+/// The queue itself has no relay client, so callers drain these records and
+/// publish a visible channel notice instead of leaving an ERROR log as the
+/// only evidence that user work was discarded.
+#[derive(Debug, Clone)]
+pub enum QueueLoss {
+    Overflow(QueuedEvent),
+    InFlightExpired {
+        channel_id: Uuid,
+        batch: Option<FlushBatch>,
+        event_count: usize,
+    },
+}
+
 /// Per-channel event queue with per-channel in-flight enforcement.
 ///
 /// # State Machine
@@ -141,6 +156,10 @@ pub struct EventQueue {
     in_flight_deadlines: HashMap<Uuid, Instant>,
     /// Number of events in each in-flight batch (for expiry logging).
     in_flight_batch_sizes: HashMap<Uuid, usize>,
+    /// Recoverable copy used only by the in-flight deadline backstop so an
+    /// orphaned turn can produce a reply-scoped visible failure notice.
+    in_flight_batches: HashMap<Uuid, FlushBatch>,
+    pending_losses: Vec<QueueLoss>,
     retry_after: HashMap<Uuid, Instant>,
     /// Per-channel retry attempt counter for exponential backoff / dead-lettering.
     retry_counts: HashMap<Uuid, u32>,
@@ -182,6 +201,8 @@ impl EventQueue {
             in_flight_channels: HashSet::new(),
             in_flight_deadlines: HashMap::new(),
             in_flight_batch_sizes: HashMap::new(),
+            in_flight_batches: HashMap::new(),
+            pending_losses: Vec::new(),
             retry_after: HashMap::new(),
             retry_counts: HashMap::new(),
             dedup_mode,
@@ -240,7 +261,9 @@ impl EventQueue {
         let queue = self.queues.entry(event.channel_id).or_default();
         // Enforce per-channel depth cap: drop oldest to make room.
         if queue.len() >= MAX_PENDING_PER_CHANNEL {
-            queue.pop_front();
+            if let Some(dropped) = queue.pop_front() {
+                self.pending_losses.push(QueueLoss::Overflow(dropped));
+            }
             tracing::warn!(
                 channel_id = %event.channel_id,
                 limit = MAX_PENDING_PER_CHANNEL,
@@ -269,6 +292,12 @@ impl EventQueue {
             .collect();
         for id in expired {
             let lost_events = self.in_flight_batch_sizes.remove(&id).unwrap_or(0);
+            let batch = self.in_flight_batches.remove(&id);
+            self.pending_losses.push(QueueLoss::InFlightExpired {
+                channel_id: id,
+                batch,
+                event_count: lost_events,
+            });
             tracing::error!(
                 channel_id = %id,
                 lost_events,
@@ -320,12 +349,14 @@ impl EventQueue {
                         self.in_flight_deadlines
                             .insert(id, now + self.in_flight_deadline);
                         self.in_flight_batch_sizes.insert(id, cancelled.len());
-                        return Some(FlushBatch {
+                        let batch = FlushBatch {
                             channel_id: id,
                             events: cancelled,
                             cancelled_events: vec![],
                             cancel_reason,
-                        });
+                        };
+                        self.in_flight_batches.insert(id, batch.clone());
+                        return Some(batch);
                     }
                     None => return None,
                 }
@@ -371,12 +402,14 @@ impl EventQueue {
             self.cancel_reasons.remove(&channel_id)
         };
 
-        Some(FlushBatch {
+        let batch = FlushBatch {
             channel_id,
             events,
             cancelled_events,
             cancel_reason,
-        })
+        };
+        self.in_flight_batches.insert(channel_id, batch.clone());
+        Some(batch)
     }
 
     /// Mark the prompt for `channel_id` as complete.
@@ -393,6 +426,7 @@ impl EventQueue {
         self.in_flight_channels.remove(&channel_id);
         self.in_flight_deadlines.remove(&channel_id);
         self.in_flight_batch_sizes.remove(&channel_id);
+        self.in_flight_batches.remove(&channel_id);
         let now = Instant::now();
         match self.retry_after.get(&channel_id) {
             // Active throttle → channel was requeued; keep retry_counts intact.
@@ -565,6 +599,12 @@ impl EventQueue {
             .collect();
         for id in expired {
             let lost_events = self.in_flight_batch_sizes.remove(&id).unwrap_or(0);
+            let batch = self.in_flight_batches.remove(&id);
+            self.pending_losses.push(QueueLoss::InFlightExpired {
+                channel_id: id,
+                batch,
+                event_count: lost_events,
+            });
             tracing::error!(
                 channel_id = %id,
                 lost_events,
@@ -593,6 +633,11 @@ impl EventQueue {
     /// Number of channels with pending events.
     pub fn pending_channels(&self) -> usize {
         self.queues.len()
+    }
+
+    /// Drain queue-loss records for visible reporting by the harness.
+    pub fn take_losses(&mut self) -> Vec<QueueLoss> {
+        std::mem::take(&mut self.pending_losses)
     }
 
     /// Number of queued events for a specific channel. Test-only.
@@ -2696,6 +2741,27 @@ mod tests {
     }
 
     #[test]
+    fn queue_cap_records_evicted_event_for_visible_notice() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        for i in 0..MAX_PENDING_PER_CHANNEL {
+            q.push(make_queued(ch, &format!("queued-{i}")));
+        }
+
+        q.push(make_queued(ch, "overflow"));
+
+        let losses = q.take_losses();
+        assert_eq!(losses.len(), 1);
+        match &losses[0] {
+            QueueLoss::Overflow(event) => {
+                assert_eq!(event.channel_id, ch);
+                assert_eq!(event.event.content, "queued-0");
+            }
+            other => panic!("expected overflow loss, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_requeue_preserve_timestamps_no_retry_after() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
@@ -4650,6 +4716,15 @@ mod tests {
             .expect("channel should be dispatchable after auto-expiry");
         assert_eq!(batch.channel_id, ch);
         assert_eq!(batch.events[0].event.content, "after-expiry");
+        let losses = q.take_losses();
+        assert!(matches!(
+            losses.as_slice(),
+            [QueueLoss::InFlightExpired {
+                channel_id,
+                event_count: 1,
+                ..
+            }] if *channel_id == ch
+        ));
     }
 
     /// F2 case 2.2 — `flush_next` path.

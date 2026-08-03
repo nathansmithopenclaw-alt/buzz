@@ -43,6 +43,86 @@ fn relay_http_url() -> String {
         .to_string()
 }
 
+/// Live packet proof for the exact Desktop channel REQ shape. The subscriber
+/// and publisher are distinct identities; successful receipt proves kind:7 +
+/// #h fan-out through the channel-kind index.
+#[tokio::test]
+#[ignore]
+async fn test_desktop_reaction_req_shape_two_identities() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let url = relay_url();
+    let publisher_keys = Keys::generate();
+    let subscriber_keys = Keys::generate();
+    let channel_id = create_test_channel(&publisher_keys).await;
+
+    let mut publisher = BuzzTestClient::connect(&url, &publisher_keys)
+        .await
+        .expect("publisher connect");
+    let (accepted, message) = add_member_ws(
+        &mut publisher,
+        &channel_id,
+        &subscriber_keys.public_key().to_hex(),
+        &publisher_keys,
+    )
+    .await;
+    assert!(accepted, "add subscriber failed: {message}");
+
+    let mut subscriber = BuzzTestClient::connect(&url, &subscriber_keys)
+        .await
+        .expect("subscriber connect");
+    let sid = sub_id("desktop-reaction-packet-proof");
+    let desktop_filter = Filter::new()
+        .kinds(
+            [
+                5_u16, 7, 9005, 9, 40002, 45001, 45003, 40001, 40003, 40008, 40099, 48100, 48101,
+                48102, 48103,
+            ]
+            .map(Kind::Custom),
+        )
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), channel_id.as_str())
+        .limit(200);
+    subscriber
+        .subscribe(&sid, vec![desktop_filter])
+        .await
+        .expect("exact Desktop REQ");
+    subscriber
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("Desktop REQ EOSE");
+
+    let target = EventBuilder::new(Kind::Custom(9), "reaction packet proof target")
+        .tags([Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&publisher_keys)
+        .unwrap();
+    let target_id = target.id.to_hex();
+    assert!(publisher.send_event(target).await.unwrap().accepted);
+
+    let reaction = EventBuilder::new(Kind::Custom(7), "+")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["e", &target_id]).unwrap(),
+        ])
+        .sign_with_keys(&publisher_keys)
+        .unwrap();
+    let reaction_id = reaction.id.to_hex();
+    assert!(publisher.send_event(reaction).await.unwrap().accepted);
+
+    loop {
+        let frame = subscriber
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("raw reaction EVENT frame");
+        println!("RAW_RELAY_FRAME={frame:?}");
+        if let RelayMessage::Event { event, .. } = frame {
+            if event.id.to_hex() == reaction_id {
+                assert_eq!(event.kind, Kind::Custom(7));
+                assert_eq!(event.pubkey, publisher_keys.public_key());
+                break;
+            }
+        }
+    }
+}
+
 fn test_owner_keys() -> Keys {
     std::env::var("BUZZ_TEST_OWNER_PRIVATE_KEY")
         .ok()

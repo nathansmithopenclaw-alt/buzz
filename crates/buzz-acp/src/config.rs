@@ -30,6 +30,10 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
 pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 
+/// Bounded history replay on harness startup. This closes the delivery gap for
+/// mentions published while the managed agent was stopped or respawning.
+pub(crate) const DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS: u64 = 86_400;
+
 /// Upper bound for `max_turn_duration` (7 days). Any higher is operationally
 /// meaningless and risks arithmetic overflow when deriving the in-flight
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
@@ -274,6 +278,19 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value_t = DEFAULT_MAX_TURN_DURATION_SECS)]
     pub max_turn_duration: u64,
 
+    /// Seconds of channel history to replay when the harness starts.
+    ///
+    /// Replay is intentionally at-least-once: duplicate delivery after an
+    /// unclean restart is preferable to silently losing a mention received
+    /// while the agent was down. The relay's in-process event-id cache removes
+    /// duplicates within a single connection lifecycle.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_STARTUP_REPLAY_LOOKBACK",
+        default_value_t = DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS
+    )]
+    pub startup_replay_lookback_secs: u64,
+
     /// Deprecated: alias for --idle-timeout. If both set, --idle-timeout wins.
     #[arg(long, env = "BUZZ_ACP_TURN_TIMEOUT", hide = true)]
     pub turn_timeout: Option<u64>,
@@ -511,6 +528,7 @@ pub struct Config {
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
+    pub startup_replay_lookback_secs: u64,
     pub agents: u32,
     pub heartbeat_interval_secs: u64,
     /// Seconds between per-turn liveness pings. 0 = disabled. Distinct from
@@ -1086,6 +1104,7 @@ impl Config {
             mcp_command: args.mcp_command,
             idle_timeout_secs,
             max_turn_duration_secs,
+            startup_replay_lookback_secs: args.startup_replay_lookback_secs,
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
@@ -1466,6 +1485,7 @@ mod tests {
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
+            startup_replay_lookback_secs: DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -2410,6 +2430,29 @@ channels = "ALL"
     #[test]
     fn idle_timeout_zero_from_deprecated_clamped_to_one() {
         assert_eq!(resolve_idle_timeout(None, Some(0)), 1);
+    }
+
+    #[test]
+    fn startup_replay_lookback_defaults_to_one_day() {
+        let key = "0".repeat(64);
+        let args = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(
+            args.startup_replay_lookback_secs,
+            DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS
+        );
+    }
+
+    #[test]
+    fn startup_replay_lookback_accepts_bounded_override() {
+        let key = "0".repeat(64);
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--startup-replay-lookback-secs",
+            "900",
+        ]);
+        assert_eq!(args.startup_replay_lookback_secs, 900);
     }
 
     #[test]

@@ -1338,15 +1338,16 @@ async fn tokio_main() -> Result<()> {
     let mut pool_ready = !config.lazy_pool;
     let mut pool_lifecycle: PoolLifecycle<AgentPool> = PoolLifecycle::listening();
 
-    // Capture a startup watermark BEFORE connecting to the relay. This timestamp
-    // is used for membership notification replay (via startup_watermark) and as
-    // the initial subscribe_since for channels discovered at startup. The Subscribe
-    // handler falls back to subscribe_since when last_seen is None, closing the
-    // blind spot between "agents ready" and "first REQ sent".
+    // Capture a bounded replay watermark BEFORE connecting to the relay. Starting
+    // at `now` only protects the milliseconds between process startup and the
+    // first REQ; it silently loses mentions published while the harness was down.
+    // A bounded at-least-once replay makes that failure recoverable. Duplicate
+    // delivery after an unclean restart is the safer failure mode.
     let startup_watermark: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_secs()
+        .saturating_sub(config.startup_replay_lookback_secs);
 
     let pubkey_hex = config.keys.public_key().to_hex();
 
@@ -1368,6 +1369,11 @@ async fn tokio_main() -> Result<()> {
     if let Err(e) = relay.set_startup_watermark(startup_watermark).await {
         tracing::warn!("failed to set startup watermark: {e}");
     }
+    tracing::info!(
+        startup_replay_lookback_secs = config.startup_replay_lookback_secs,
+        startup_watermark,
+        "startup mention replay enabled"
+    );
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
@@ -2220,6 +2226,7 @@ async fn tokio_main() -> Result<()> {
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
                             });
+                            spawn_queue_loss_notices(&mut queue, Some(&ctx.rest_client));
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
@@ -2401,6 +2408,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -2423,6 +2431,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
@@ -2934,7 +2943,9 @@ fn dispatch_pending(
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
     loop {
-        let batch = match queue.flush_next() {
+        let next_batch = queue.flush_next();
+        spawn_queue_loss_notices(queue, Some(&ctx.rest_client));
+        let batch = match next_batch {
             Some(b) => b,
             None => break,
         };
@@ -3071,6 +3082,61 @@ fn spawn_failure_notice(
     }
 }
 
+/// Publish every loss recorded by [`EventQueue`] as a visible channel notice.
+/// Logging alone is insufficient: queue pressure and an orphaned in-flight
+/// deadline both mean a human request will never receive an agent response.
+fn spawn_queue_loss_notices(queue: &mut EventQueue, rest_client: Option<&relay::RestClient>) {
+    let Some(rest) = rest_client else {
+        // Preserve the records until a relay client is available.
+        return;
+    };
+    for loss in queue.take_losses() {
+        match loss {
+            queue::QueueLoss::Overflow(event) => {
+                let batch = FlushBatch {
+                    channel_id: event.channel_id,
+                    events: vec![queue::BatchEvent {
+                        event: event.event,
+                        prompt_tag: event.prompt_tag,
+                        received_at: event.received_at,
+                    }],
+                    cancelled_events: Vec::new(),
+                    cancel_reason: None,
+                };
+                spawn_failure_notice(
+                    Some(rest),
+                    &batch,
+                    "⚠️ I couldn't process this request because the channel queue reached its 500-event safety limit. Please re-send if it's still needed."
+                        .to_string(),
+                );
+            }
+            queue::QueueLoss::InFlightExpired {
+                channel_id,
+                batch,
+                event_count,
+            } => {
+                let content = format!(
+                    "⚠️ I couldn't finish the last request because its in-flight deadline expired ({event_count} event(s) affected). Please re-send if it's still needed."
+                );
+                if let Some(batch) = batch {
+                    spawn_failure_notice(Some(rest), &batch, content);
+                } else {
+                    let rest = rest.clone();
+                    tokio::spawn(async move {
+                        pool::post_failure_notice(
+                            &rest,
+                            channel_id,
+                            &ThreadTags::default(),
+                            &content,
+                        )
+                        .await;
+                    });
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -3099,6 +3165,11 @@ fn handle_prompt_result(
     // branch below records what actually happened; only the hard-timeout
     // match arm in the death_message construction reads it.
     let mut hard_timeout_fate_suffix: Option<&'static str> = None;
+    let mut delivery_fate = if matches!(result.outcome, PromptOutcome::Ok(_)) {
+        "completed"
+    } else {
+        "unrecoverable"
+    };
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -3129,6 +3200,7 @@ fn handle_prompt_result(
                 // accounting, same as a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
+                delivery_fate = "requeue";
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -3147,6 +3219,7 @@ fn handle_prompt_result(
                 );
                 spawn_failure_notice(rest_client, &batch, content);
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
+                delivery_fate = "dead_letter";
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -3165,8 +3238,10 @@ fn handle_prompt_result(
                     );
                     spawn_failure_notice(rest_client, &dead, content);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
+                    delivery_fate = "dead_letter";
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
+                    delivery_fate = "requeue";
                 }
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
@@ -3183,6 +3258,7 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+                delivery_fate = "dead_letter";
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -3197,6 +3273,9 @@ fn handle_prompt_result(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
                 spawn_failure_notice(rest_client, &dead, content);
+                delivery_fate = "dead_letter";
+            } else {
+                delivery_fate = "requeue";
             }
         } else {
             tracing::debug!(
@@ -3205,6 +3284,7 @@ fn handle_prompt_result(
                 "dropping failed batch for removed channel"
             );
             hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
+            delivery_fate = "dead_letter";
         }
     }
 
@@ -3249,6 +3329,17 @@ fn handle_prompt_result(
         PromptSource::Heartbeat => None,
     };
     let turn_id = result.turn_id.clone();
+    if let Some(ref observer) = observer {
+        observer.emit(
+            "turn_outcome",
+            Some(agent_index),
+            &observer::context_for(channel_id, None, Some(turn_id.clone())),
+            serde_json::json!({
+                "outcome": outcome_label,
+                "fate": delivery_fate,
+            }),
+        );
+    }
     let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
@@ -3452,6 +3543,7 @@ fn recover_panicked_agent(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) {
     let task_id = join_error.id();
     let Some(meta) = pool.task_map_mut().remove(&task_id) else {
@@ -3464,10 +3556,16 @@ fn recover_panicked_agent(
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
             if !removed_channels.contains(&ch) {
-                // Dead-letter on exhaustion is logged inside requeue(); a
-                // panic path has no outcome to report, so no notice here.
-                let _ = queue.requeue(batch);
-                tracing::warn!("requeued batch for panicked agent {i}");
+                if let Some(dead) = queue.requeue(batch) {
+                    spawn_failure_notice(
+                        rest_client,
+                        &dead,
+                        "⚠️ I couldn't process the last request after multiple agent crashes. Please re-send if it's still needed."
+                            .to_string(),
+                    );
+                } else {
+                    tracing::warn!("requeued batch for panicked agent {i}");
+                }
             } else {
                 tracing::debug!(
                     channel_id = %ch,
@@ -3550,6 +3648,7 @@ fn drain_ready_join_results(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     while let Some(Some(join_result)) = pool.join_set.join_next().now_or_never() {
         if let Err(join_error) = join_result {
@@ -3566,6 +3665,7 @@ fn drain_ready_join_results(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                rest_client,
             );
             if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
                 return LoopAction::Exit;
@@ -5054,6 +5154,7 @@ mod build_mcp_servers_tests {
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            startup_replay_lookback_secs: config::DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -5277,6 +5378,7 @@ mod error_outcome_emission_tests {
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            startup_replay_lookback_secs: config::DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -5480,6 +5582,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
         );
 
         let panic = observer

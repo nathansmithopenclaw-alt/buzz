@@ -1632,6 +1632,20 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
+    let queue_wait_ms = batch
+        .as_ref()
+        .and_then(|b| b.events.iter().map(|event| event.received_at).min())
+        .map(|received_at| received_at.elapsed().as_millis() as u64);
+    let mention_to_turn_start_ms = batch.as_ref().and_then(|b| {
+        b.events
+            .iter()
+            .map(|event| event.event.created_at.as_secs())
+            .min()
+            .map(|created_at_secs| {
+                let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                now_ms.saturating_sub(created_at_secs.saturating_mul(1_000))
+            })
+    });
     agent.acp.observe(
         "turn_started",
         serde_json::json!({
@@ -1640,6 +1654,8 @@ pub async fn run_prompt_task(
                 PromptSource::Heartbeat => "heartbeat",
             },
             "triggeringEventIds": triggering_event_ids,
+            "mentionToTurnStartMs": mention_to_turn_start_ms,
+            "queueWaitMs": queue_wait_ms,
         }),
     );
 
