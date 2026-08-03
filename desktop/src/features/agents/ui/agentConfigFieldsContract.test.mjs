@@ -16,6 +16,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -217,4 +218,35 @@ test("required-model harnesses always keep the control", () => {
     true,
     "required-model harnesses always keep the control",
   );
+});
+
+test("definition and instance dialogs place effort directly below model", async () => {
+  for (const [filename, modelMarker] of [
+    ["AgentDefinitionDialog.tsx", "<PersonaModelField"],
+    ["AgentInstanceEditDialog.tsx", 'htmlFor="edit-agent-model"'],
+  ]) {
+    const source = await readFile(
+      new URL(`./${filename}`, import.meta.url),
+      "utf8",
+    );
+    const model = source.indexOf(modelMarker);
+    const effort = source.indexOf("<AgentDialogEffortSection", model);
+    const advanced = source.indexOf("Advanced", effort);
+    assert.ok(model >= 0, `${filename} must render Model`);
+    assert.ok(effort > model, `${filename} must render Effort after Model`);
+    assert.ok(
+      advanced > effort,
+      `${filename} must render Effort before Advanced`,
+    );
+  }
+});
+
+test("computed effort omissions are rendered instead of discarded", async () => {
+  const source = await readFile(
+    new URL("./AgentDialogEffortField.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /fieldModel\.omissions/);
+  assert.match(source, /model_reasoning_effort/);
+  assert.match(source, /does not advertise or expose/);
 });

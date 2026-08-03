@@ -2,7 +2,6 @@ import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
 } from "@/shared/api/types";
-import { BUZZ_AGENT_THINKING_EFFORT } from "../ui/buzzAgentConfig";
 
 export type AgentConfigScope =
   | "onboarding"
@@ -133,14 +132,16 @@ export function deriveAgentConfigFieldModel({
       optionSource:
         runtime.id === "buzz-agent"
           ? "buzzAgentCatalog"
-          : "legacyProviderModelCatalog",
+          : runtime.id === "claude"
+            ? "harnessNative"
+            : "legacyProviderModelCatalog",
       currentPersistence: {
         kind: "envVar",
-        key: BUZZ_AGENT_THINKING_EFFORT,
+        key: runtime.thinkingEnvVar,
       },
       targetApplication: { kind: "envVar", key: runtime.thinkingEnvVar },
       render: "control",
-      value: valueFromEnv(config, BUZZ_AGENT_THINKING_EFFORT),
+      value: valueFromEnv(config, runtime.thinkingEnvVar),
     });
   } else if (runtime?.id === "claude") {
     fields.push({

@@ -509,6 +509,37 @@ fn global_model_change_trips_hash_without_model_env_var() {
 }
 
 #[test]
+fn direct_model_edit_trips_restart_hash() {
+    let rec = record();
+    let mut edited = rec.clone();
+    edited.model = Some("model-b".to_string());
+
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default()),
+        "a model edit changes the next spawned session and must badge"
+    );
+}
+
+#[test]
+fn effort_env_edit_trips_restart_hash() {
+    let mut rec = record();
+    rec.agent_command = "goose".to_string();
+    rec.env_vars
+        .insert("GOOSE_THINKING_EFFORT".to_string(), "high".to_string());
+    let mut edited = rec.clone();
+    edited
+        .env_vars
+        .insert("GOOSE_THINKING_EFFORT".to_string(), "max".to_string());
+
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default()),
+        "an effort edit changes the child environment and must badge"
+    );
+}
+
+#[test]
 fn linked_instance_stale_prompt_bytes_are_inert_at_hash_time() {
     // Regression for the split-resolve defect: prompt used to be read from
     // the record's own (possibly Phase-A-snapshot-stale) bytes while

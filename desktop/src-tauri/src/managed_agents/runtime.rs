@@ -743,11 +743,6 @@ pub fn spawn_agent_child(
     } else {
         command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
     }
-    if let Some(model) = effective_model.as_deref() {
-        command.env("BUZZ_ACP_MODEL", model);
-    } else {
-        command.env_remove("BUZZ_ACP_MODEL");
-    }
     // Session title for the harness to pass out-of-band on `session/new`. The
     // adapter names the session after it; it never reaches the prompt, so this
     // is display metadata only. `spawn_config_hash` hashes the same resolve, so
@@ -828,17 +823,18 @@ pub fn spawn_agent_child(
         );
     }
 
-    // ── User env vars: definition floor + global + live persona + agent overrides ──
-    //
-    // `descriptor.env` is the fully-layered result from `resolve_effective_harness_descriptor`:
-    // baked floor → runtime metadata → definition env (harness author defaults) →
-    // global → live persona → per-agent, with reserved-key and malformed-key filtering
-    // applied. Writing it last lets user-provided values win over every Buzz-set env
-    // written above — reserved keys were already stripped from descriptor.env so they
-    // cannot clobber BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, etc.
+    // Fully layered user env (baked through agent overrides), with reserved keys filtered.
+    // Structured model/account fields below remain authoritative over legacy env entries.
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    // Structured model state wins over stale free-form BUZZ_ACP_MODEL values.
+    if let Some(model) = effective_model.as_deref() {
+        command.env("BUZZ_ACP_MODEL", model);
+    } else {
+        command.env_remove("BUZZ_ACP_MODEL");
+    }
+    // Claude OAuth is derived at spawn and must never come from persisted env_vars.
     let (
         spawned_claude_account_id,
         spawned_claude_token_fingerprint,

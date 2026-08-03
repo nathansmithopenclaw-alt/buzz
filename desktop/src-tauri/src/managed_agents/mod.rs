@@ -7,6 +7,7 @@ pub(crate) use agent_env::{
 };
 mod backend;
 mod claude_accounts;
+mod claude_model_catalog;
 pub(crate) mod config_bridge;
 pub(crate) mod custom_harnesses;
 mod discovery;
@@ -49,6 +50,9 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 
 pub use backend::*;
 pub use claude_accounts::*;
+pub(crate) use claude_model_catalog::{
+    sync_catalog_and_save_agents, sync_claude_catalog_for_state,
+};
 pub use discovery::*;
 pub use env_vars::*;
 #[cfg(windows)]

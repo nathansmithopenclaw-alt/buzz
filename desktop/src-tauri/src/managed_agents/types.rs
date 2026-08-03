@@ -725,6 +725,17 @@ pub struct AgentModelsResponse {
     pub selected_model: Option<String>,
     /// Whether this agent supports model switching.
     pub supports_switching: bool,
+    /// Native effort option id advertised by ACP for the selected model.
+    pub effort_config_id: Option<String>,
+    /// Native effort values advertised for the selected model, in wire order.
+    pub effort_options: Vec<AgentEffortInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEffortInfo {
+    pub id: String,
+    pub name: Option<String>,
 }
 
 /// A single model available from an agent.

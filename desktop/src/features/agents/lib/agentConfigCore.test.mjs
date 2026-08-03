@@ -77,7 +77,7 @@ test("Goose exposes provider, model, and its real effort application key", () =>
   );
   assert.deepEqual(field(model, "effort").currentPersistence, {
     kind: "envVar",
-    key: "BUZZ_AGENT_THINKING_EFFORT",
+    key: "GOOSE_THINKING_EFFORT",
   });
   assert.deepEqual(field(model, "effort").targetApplication, {
     kind: "envVar",
@@ -85,10 +85,12 @@ test("Goose exposes provider, model, and its real effort application key", () =>
   });
 });
 
-test("Claude models effort as a deferred native ACP option", () => {
+test("Claude exposes native ACP effort through the harness env bridge", () => {
   const model = deriveAgentConfigFieldModel({
     config,
-    runtime: runtime("claude"),
+    runtime: runtime("claude", {
+      thinkingEnvVar: "BUZZ_ACP_THINKING_EFFORT",
+    }),
     scope: "global",
   });
 
@@ -96,17 +98,15 @@ test("Claude models effort as a deferred native ACP option", () => {
     model.fields.map((item) => item.kind),
     ["model", "effort"],
   );
-  assert.equal(
-    field(model, "effort").render,
-    "deferredUntilNativeOptionsAvailable",
-  );
+  assert.equal(field(model, "effort").render, "control");
+  assert.equal(field(model, "effort").optionSource, "harnessNative");
   assert.deepEqual(field(model, "effort").currentPersistence, {
-    kind: "unavailable",
+    kind: "envVar",
+    key: "BUZZ_ACP_THINKING_EFFORT",
   });
   assert.deepEqual(field(model, "effort").targetApplication, {
-    kind: "acpConfigOption",
-    id: "effort",
-    category: "thought_level",
+    kind: "envVar",
+    key: "BUZZ_ACP_THINKING_EFFORT",
   });
 });
 

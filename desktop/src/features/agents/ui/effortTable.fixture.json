@@ -14,6 +14,13 @@
     "defaultValue": null
   },
   {
+    "note": "Anthropic dated Opus 4.1 offline fallback; native ACP discovery may truthfully omit effort",
+    "provider": "anthropic",
+    "model": "claude-opus-4-1-20250805",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
+  },
+  {
     "note": "Anthropic adaptive xhigh-capable: claude-opus-4-7",
     "provider": "anthropic",
     "model": "claude-opus-4-7",

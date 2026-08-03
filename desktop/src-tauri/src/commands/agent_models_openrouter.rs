@@ -108,5 +108,7 @@ pub(super) fn filter_openrouter_models(
         agent_default_model: None,
         selected_model,
         supports_switching: true,
+        effort_config_id: None,
+        effort_options: Vec::new(),
     }))
 }

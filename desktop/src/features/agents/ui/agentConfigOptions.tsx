@@ -48,12 +48,17 @@ const KNOWN_LLM_PROVIDER_IDS = [
 type PersonaLlmProviderId = (typeof KNOWN_LLM_PROVIDER_IDS)[number];
 
 export type PersonaModelOption = {
+  badge?: string;
+  disabled?: boolean;
+  group?: string;
   id: string;
   label: string;
 };
 
 export type PersonaDropdownOption = {
+  badge?: string;
   disabled?: boolean;
+  group?: string;
   label: string;
   value: string;
 };
@@ -346,6 +351,9 @@ export function buildTemplateModelDropdownOptions(
       ? [{ id: "", label: inheritedModelLabel }, ...modelOptions]
       : modelOptions;
   return base.map((option) => ({
+    badge: option.badge,
+    disabled: option.disabled,
+    group: option.group,
     label: option.id === "" ? inheritedModelLabel : option.label,
     value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
   }));

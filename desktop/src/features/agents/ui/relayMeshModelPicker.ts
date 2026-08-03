@@ -79,6 +79,9 @@ export function modelDropdownOptions({
   const modelOptions =
     globalModel === undefined
       ? options.map((option) => ({
+          badge: option.badge,
+          disabled: option.disabled,
+          group: option.group,
           label: option.label,
           value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
         }))

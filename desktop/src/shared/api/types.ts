@@ -249,7 +249,6 @@ export type GetHomeFeedInput = {
   limit?: number;
   types?: string;
 };
-
 export type {
   SearchHit,
   SearchMessagesInput,
@@ -594,13 +593,14 @@ export type AgentModelsResponse = {
   agentDefaultModel: string | null;
   selectedModel: string | null;
   supportsSwitching: boolean;
+  effortConfigId?: string | null;
+  effortOptions?: Array<{ id: string; name: string | null }>;
 };
 export type AgentModelInfo = {
   id: string;
   name: string | null;
   description: string | null;
 };
-
 // ── Config bridge types ──────────────────────────────────────────────────────
 
 export type ConfigOrigin =

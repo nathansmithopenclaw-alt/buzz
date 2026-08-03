@@ -1,6 +1,84 @@
 use super::*;
 
 #[test]
+fn acp_model_normalization_carries_model_dependent_native_effort_values() {
+    let response = normalize_agent_models(
+        &serde_json::json!({
+            "agent": { "name": "claude-agent-acp", "version": "0.54.1" },
+            "stable": {
+                "configOptions": [
+                    {
+                        "id": "model",
+                        "category": "model",
+                        "options": [{ "value": "opus", "displayName": "Opus" }]
+                    },
+                    {
+                        "id": "effort",
+                        "category": "thought_level",
+                        "options": [
+                            { "value": "default", "displayName": "Default" },
+                            { "value": "high", "displayName": "High" }
+                        ]
+                    }
+                ]
+            }
+        }),
+        Some("opus".to_string()),
+    );
+
+    assert_eq!(response.effort_config_id.as_deref(), Some("effort"));
+    assert_eq!(response.effort_options.len(), 2);
+    assert_eq!(response.effort_options[0].id, "default");
+    assert_eq!(response.effort_options[0].name.as_deref(), Some("Default"));
+    assert_eq!(response.effort_options[1].id, "high");
+}
+
+#[test]
+fn acp_model_normalization_accepts_native_thought_level_with_custom_id() {
+    let response = normalize_agent_models(
+        &serde_json::json!({
+            "stable": {
+                "configOptions": [{
+                    "configId": "reasoning-depth",
+                    "category": "thought_level",
+                    "options": [{ "value": "high", "name": "High" }]
+                }]
+            }
+        }),
+        None,
+    );
+
+    assert_eq!(
+        response.effort_config_id.as_deref(),
+        Some("reasoning-depth")
+    );
+    assert_eq!(response.effort_options[0].id, "high");
+}
+
+#[test]
+fn acp_model_normalization_reports_no_effort_for_unknown_dated_model() {
+    let response = normalize_agent_models(
+        &serde_json::json!({
+            "agent": { "name": "claude-agent-acp", "version": "0.54.1" },
+            "stable": {
+                "configOptions": [{
+                    "id": "model",
+                    "category": "model",
+                    "options": [{
+                        "value": "claude-opus-4-1-20250805",
+                        "displayName": "Claude Opus 4.1"
+                    }]
+                }]
+            }
+        }),
+        Some("claude-opus-4-1-20250805".to_string()),
+    );
+
+    assert_eq!(response.effort_config_id, None);
+    assert!(response.effort_options.is_empty());
+}
+
+#[test]
 fn openai_model_normalization_keeps_agent_text_models() {
     let models = normalize_openai_compatible_models(
         OpenAiModelListResponse {

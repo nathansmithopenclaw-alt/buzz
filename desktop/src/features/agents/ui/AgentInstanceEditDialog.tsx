@@ -25,9 +25,15 @@ import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
+import { AgentDialogEffortSection } from "./AgentDialogEffortField";
+import {
+  instanceModelDropdownOptions,
+  instanceProviderDropdownOptions,
+  useAgentDialogModelPicker,
+  useHiddenProviderIds,
+} from "./useAgentDialogModelPicker";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
-  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   formatRuntimeOptionLabel,
   getDefaultLlmModelLabel,
@@ -43,10 +49,6 @@ import {
   sortPersonaRuntimes,
   type PersonaDropdownOption,
 } from "./agentConfigOptions";
-import {
-  modelDropdownOptions as buildModelDropdownOptions,
-  relayMeshModelPickerState,
-} from "./relayMeshModelPicker";
 import {
   computeEditAgentFormValidity,
   envVarsEqual,
@@ -66,15 +68,9 @@ import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { CreateAgentRespondToField } from "./RespondToField";
 import { PersonaDropdownField } from "./PersonaDropdownField";
-import {
-  MODEL_DISCOVERY_LOADING_VALUE,
-  usePersonaModelDiscovery,
-} from "./usePersonaModelDiscovery";
+import { usePersonaModelDiscovery } from "./usePersonaModelDiscovery";
 import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
-import {
-  getBakedModelInheritLabel,
-  getBakedProviderInheritLabel,
-} from "./bakedEnvHelpers";
+import { getBakedModelInheritLabel } from "./bakedEnvHelpers";
 import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
@@ -414,10 +410,12 @@ export function AgentInstanceEditDialog({
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
+    nativeEffortOptions,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
     modelFieldVisible: true,
+    model,
     open,
     provider: providerForDiscovery,
     selectedRuntime,
@@ -584,11 +582,13 @@ export function AgentInstanceEditDialog({
       }),
     );
   }
-
   function handleOpenChange(next: boolean) {
     onOpenChange(next);
   }
-
+  const inheritedModelLabel =
+    inheritedModelDefault.source === "build"
+      ? getBakedModelInheritLabel(inheritedModelDefault.value)
+      : getDefaultLlmModelLabel(inheritedModelDefault.value);
   const providerValid = isEditAgentProviderSaveValid({
     llmProviderFieldVisible,
     currentProvider: provider,
@@ -596,7 +596,28 @@ export function AgentInstanceEditDialog({
     globalProvider: inheritedProviderDefault.value,
     originalRuntimeSupportsProvider,
   });
-
+  const {
+    effortValidationError,
+    isRelayMesh,
+    modelValidationError,
+    options: effectiveModelOptions,
+    selectValue: modelSelectValue,
+    showCustomInput: showCustomModelInput,
+  } = useAgentDialogModelPicker({
+    discoveredOptions: discoveredModelOptions,
+    effort: selectedRuntime?.thinkingEnvVar
+      ? (envVars[selectedRuntime.thinkingEnvVar] ?? "")
+      : "",
+    effortProvider: effectiveProvider,
+    effortRuntimeId: selectedRuntimeId,
+    fallbackOptions: [{ id: "", label: inheritedModelLabel }],
+    isCustomEditing: isCustomModelEditing,
+    model,
+    modelFieldVisible: true,
+    nativeEffortOptions,
+    provider: providerForDiscovery,
+    runtimeId: prospectiveRuntimeId,
+  });
   const canSubmit =
     computeEditAgentFormValidity({
       name,
@@ -611,9 +632,10 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
+    !modelValidationError &&
+    !effortValidationError &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
-
   async function handleSubmit() {
     try {
       const parsedParallelism = Number.parseInt(parallelism, 10);
@@ -765,7 +787,6 @@ export function AgentInstanceEditDialog({
     }
   }
 
-  // Model and provider field derived state
   const normalizedConfig = configSurfaceQuery.data?.normalized;
   const modelRequired = isMissingRequiredDropdownField(
     normalizedConfig?.model,
@@ -775,28 +796,11 @@ export function AgentInstanceEditDialog({
     normalizedConfig?.provider,
     provider,
   );
-  const inheritedModelLabel =
-    inheritedModelDefault.source === "build"
-      ? getBakedModelInheritLabel(inheritedModelDefault.value)
-      : getDefaultLlmModelLabel(inheritedModelDefault.value);
-  const {
+  const modelDropdownOptions = instanceModelDropdownOptions({
+    globalModel: inheritedModelDefault.value,
+    globalModelLabel: inheritedModelLabel,
     isRelayMesh,
-    options: effectiveModelOptions,
-    selectValue: modelSelectValue,
-    showCustomInput: showCustomModelInput,
-  } = relayMeshModelPickerState({
-    discoveredOptions: discoveredModelOptions,
-    fallbackOptions: [{ id: "", label: inheritedModelLabel }],
-    isCustomEditing: isCustomModelEditing,
-    model,
-    provider: providerForDiscovery,
-  });
-  const modelDropdownOptions = buildModelDropdownOptions({
-    allowCustom: !isRelayMesh,
-    globalModel: isRelayMesh ? undefined : inheritedModelDefault.value,
-    globalModelLabel: isRelayMesh ? undefined : inheritedModelLabel,
     loading: modelDiscoveryLoading && discoveredModelOptions === null,
-    loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
     options: effectiveModelOptions,
   });
   const modelStatusMessage = resolveModelFieldStatusMessage({
@@ -805,15 +809,8 @@ export function AgentInstanceEditDialog({
     status: modelDiscoveryStatus,
   });
 
-  // Provider field derived state
   const trimmedProvider = provider.trim();
-  const hideProviderIds = React.useMemo(
-    () =>
-      (bakedEnvKeys ?? []).includes("BUZZ_AGENT_PROVIDER")
-        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
-        : new Set<string>(),
-    [bakedEnvKeys],
-  );
+  const hideProviderIds = useHiddenProviderIds(bakedEnvKeys);
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     selectedRuntime?.id ?? "",
@@ -825,20 +822,11 @@ export function AgentInstanceEditDialog({
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
-  const providerDropdownOptions: PersonaDropdownOption[] = [
-    ...providerOptions.map((option) => ({
-      label:
-        option.id === "" && inheritedProviderDefault.source === "build"
-          ? getBakedProviderInheritLabel(
-              inheritedProviderDefault.value,
-              providerOptions,
-            )
-          : option.label,
-      value: option.id || AUTO_PROVIDER_DROPDOWN_VALUE,
-    })),
-    { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
-  ];
-
+  const providerDropdownOptions = instanceProviderDropdownOptions(
+    providerOptions,
+    inheritedProviderDefault.source,
+    inheritedProviderDefault.value,
+  );
   const previewLabel = name.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
   const advancedFieldsTransition = shouldReduceMotion
@@ -1130,6 +1118,18 @@ export function AgentInstanceEditDialog({
                 </p>
               ) : null}
             </div>
+            <AgentDialogEffortSection
+              disabled={updateMutation.isPending || modelDiscoveryLoading}
+              envVars={envVars}
+              inheritedEnvVars={inheritedEnvVars}
+              model={model}
+              nativeEffortOptions={nativeEffortOptions}
+              provider={effectiveProvider}
+              runtime={selectedRuntime}
+              scope="instance"
+              setEnvVars={setEnvVars}
+              validationError={modelValidationError ?? effortValidationError}
+            />
 
             <AgentAiDefaultsNotice
               onEditDefaults={() => setAiDefaultsOpen(true)}

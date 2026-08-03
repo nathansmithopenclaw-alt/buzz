@@ -6,6 +6,7 @@ export type DiscoverAgentModelsInput = {
   agentCommand: string;
   agentArgs?: string[];
   provider?: string;
+  model?: string;
   envVars?: Record<string, string>;
   /** Definition-level env from the harness definition (custom/preset). Merged below user envVars. */
   definitionEnv?: Record<string, string>;

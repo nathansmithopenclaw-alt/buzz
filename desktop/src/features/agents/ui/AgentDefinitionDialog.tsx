@@ -34,7 +34,6 @@ import {
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
-  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   buildPersonaRuntimeDropdownOptions,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
@@ -53,19 +52,12 @@ import {
 } from "./agentConfigOptions";
 import { RequiredFieldLabel } from "./agentConfigControls";
 import {
-  modelDropdownOptions as buildModelDropdownOptions,
-  relayMeshModelPickerState,
-} from "./relayMeshModelPicker";
-import {
   selectionOnModelDropdownChange,
   selectionOnProviderDropdownChange,
   selectionOnRuntimeChange,
   type RuntimeModelProviderSelection,
 } from "./runtimeModelProviderSelection";
-import {
-  MODEL_DISCOVERY_LOADING_VALUE,
-  usePersonaModelDiscovery,
-} from "./usePersonaModelDiscovery";
+import { usePersonaModelDiscovery } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -83,6 +75,13 @@ import {
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 import { AgentDefinitionDialogFooter } from "./AgentDefinitionDialogFooter";
+import { AgentDialogEffortSection } from "./AgentDialogEffortField";
+import {
+  definitionProviderDropdownOptions,
+  definitionModelDropdownOptions,
+  useAgentDialogModelPicker,
+  useHiddenProviderIds,
+} from "./useAgentDialogModelPicker";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
 import {
   ADD_CUSTOM_HARNESS_OPTION,
@@ -499,7 +498,7 @@ export function AgentDefinitionDialog({
     selectedRuntime?.availability === "available";
   // Gate model/provider validity through missingNormalizedFields — single
   // source of truth with the readiness gate so display and Save can't drift.
-  const canSubmit =
+  const baseCanSubmit =
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
@@ -513,8 +512,7 @@ export function AgentDefinitionDialog({
     customAiPairSatisfied &&
     !isAvatarUploadPending;
 
-  // Merge global env as the base layer so credential keys satisfied via global
-  // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
+  // Include inherited credentials in model discovery.
   const envVarsForDiscovery = React.useMemo(
     () => ({ ...globalConfig.env_vars, ...envVars }),
     [globalConfig.env_vars, envVars],
@@ -523,10 +521,12 @@ export function AgentDefinitionDialog({
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
+    nativeEffortOptions,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
     modelFieldVisible,
+    model,
     open,
     // Gate provider by runtime: runtimes that don't support LLM provider
     // selection (codex, claude) must not inherit the global provider — doing
@@ -539,31 +539,30 @@ export function AgentDefinitionDialog({
   const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
   const {
+    effortValidationError,
     isCustom: isModelCustom,
     isRelayMesh,
+    modelValidationError,
     options: modelOptions,
     selectValue: modelSelectValue,
     showCustomInput: showCustomModelInput,
-  } = relayMeshModelPickerState({
+  } = useAgentDialogModelPicker({
     discoveredOptions: discoveredModelOptions,
+    effort: selectedRuntime?.thinkingEnvVar
+      ? (envVars[selectedRuntime.thinkingEnvVar] ?? "")
+      : "",
     fallbackOptions: staticModelOptions,
-    knownOptions: discoveredModelOptions ?? runtimeModelOptions,
+    knownOptions: runtimeModelOptions,
     isCustomEditing: isCustomModelEditing,
     model,
     modelFieldVisible,
+    nativeEffortOptions,
     provider: effectiveProvider,
+    runtimeId: runtime,
   });
-  // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
-  // migration rewrites any persisted Databricks v1 values → v2. Hide the v1
-  // option there so it is not offered for new selections. OSS builds have no
-  // baked provider, so v1 remains visible.
-  const hideProviderIds = React.useMemo(
-    () =>
-      (bakedEnvKeys ?? []).includes("BUZZ_AGENT_PROVIDER")
-        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
-        : new Set<string>(),
-    [bakedEnvKeys],
-  );
+  const canSubmit =
+    baseCanSubmit && !modelValidationError && !effortValidationError;
+  const hideProviderIds = useHiddenProviderIds(bakedEnvKeys);
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     runtime,
@@ -590,31 +589,14 @@ export function AgentDefinitionDialog({
   const runtimeSummaryLabel = selectedRuntime
     ? formatRuntimeOptionLabel(selectedRuntime)
     : runtime.trim() || "Not configured";
-  const providerDropdownOptions: PersonaDropdownOption[] = [
-    ...providerOptions
-      .filter((option) => option.id.trim().length > 0)
-      .map((option) => ({
-        label: option.label,
-        value: option.id,
-      })),
-    { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
-  ];
+  const providerDropdownOptions =
+    definitionProviderDropdownOptions(providerOptions);
   const modelDropdownOptions: PersonaDropdownOption[] =
-    buildModelDropdownOptions({
-      allowCustom: !isRelayMesh,
-      globalModel: undefined,
-      loading: modelDiscoveryLoading && discoveredModelOptions === null,
-      loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
-      options: modelOptions,
-    })
-      .filter(
-        (option) => isRelayMesh || option.value !== AUTO_MODEL_DROPDOWN_VALUE,
-      )
-      .map((option) =>
-        isRelayMesh && option.value === AUTO_MODEL_DROPDOWN_VALUE
-          ? { ...option, label: "Automatic" }
-          : option,
-      );
+    definitionModelDropdownOptions(
+      modelOptions,
+      isRelayMesh,
+      modelDiscoveryLoading && discoveredModelOptions === null,
+    );
   const previewLabel = displayName.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
   const runtimeWarningText = selectedRuntime
@@ -945,6 +927,24 @@ export function AgentDefinitionDialog({
                   />
                 ) : null}
               </AnimatePresence>
+
+              {modelFieldVisible && aiConfigurationMode === "custom" ? (
+                <AgentDialogEffortSection
+                  disabled={isPending || modelDiscoveryLoading}
+                  envVars={envVars}
+                  inheritedEnvVars={globalConfig.env_vars}
+                  model={model}
+                  nativeEffortOptions={nativeEffortOptions}
+                  onBeforeChange={() => setHasUserChanges(true)}
+                  provider={effectiveProvider}
+                  runtime={selectedRuntime}
+                  scope="definition"
+                  setEnvVars={setEnvVars}
+                  validationError={
+                    modelValidationError ?? effortValidationError
+                  }
+                />
+              ) : null}
 
               {aiConfigurationMode === "defaults" ? (
                 <AgentCreateAiDefaultsSummary

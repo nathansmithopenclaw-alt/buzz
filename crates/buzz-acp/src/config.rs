@@ -179,6 +179,10 @@ pub struct ModelsArgs {
     #[command(flatten)]
     pub agent: AuthAgentArgs,
 
+    /// Select this model before returning model-dependent config options.
+    #[arg(long)]
+    pub model: Option<String>,
+
     /// Output structured JSON instead of human-readable text.
     #[arg(long)]
     pub json: bool,
@@ -423,6 +427,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MODEL")]
     pub model: Option<String>,
 
+    /// Desired reasoning effort. Applied through the adapter's native ACP
+    /// `effort` config option after the selected model is active.
+    #[arg(long, env = "BUZZ_ACP_THINKING_EFFORT")]
+    pub thinking_effort: Option<String>,
+
     /// Title for the agent's ACP sessions, passed out-of-band in `session/new`
     /// `_meta`. Adapters that recognize it name the session after this value;
     /// others ignore it. Never enters the prompt.
@@ -528,6 +537,8 @@ pub struct Config {
     pub memory_enabled: bool,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
+    /// Desired native ACP effort value, validated against session/new.
+    pub thinking_effort: Option<String>,
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
@@ -1039,6 +1050,12 @@ impl Config {
         // instructions arrive independently so they can be layered at runtime.
         let mut persona_env_vars = Vec::new();
         let model = args.model;
+        let thinking_effort = args
+            .thinking_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
 
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
@@ -1087,6 +1104,7 @@ impl Config {
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
             model,
+            thinking_effort,
             session_title: args
                 .session_title
                 .as_deref()
@@ -1460,6 +1478,7 @@ mod tests {
             typing_enabled: true,
             memory_enabled: true,
             model: None,
+            thinking_effort: None,
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,

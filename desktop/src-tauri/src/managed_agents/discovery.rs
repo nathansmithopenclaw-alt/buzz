@@ -132,7 +132,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_path: Some("~/.claude/settings.json"),
         config_file_format: Some("json"),
         supports_acp_native_config: false,
-        thinking_env_var: None,
+        thinking_env_var: Some("BUZZ_ACP_THINKING_EFFORT"),
         max_tokens_env_var: None,
         context_limit_env_var: None,
         required_normalized_fields: &[],

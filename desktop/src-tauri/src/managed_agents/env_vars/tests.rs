@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    display_invalid_key, is_derived_provider_model_key, is_reserved_env_key,
-    is_well_formed_env_key, merged_user_env, validate_user_env_keys,
+    display_invalid_key, is_derived_provider_model_key, is_legacy_provider_model_env_key,
+    is_reserved_env_key, is_well_formed_env_key, merged_user_env, validate_user_env_keys,
     DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_TOTAL_BYTES, MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
 };
 
@@ -418,10 +418,9 @@ fn merged_env_drops_oversize_value() {
 
 // ── derived provider/model key filter ──────────────────────────────
 //
-// Pack import must strip derived env keys (GOOSE_MODEL, GOOSE_PROVIDER,
-// BUZZ_AGENT_MODEL, BUZZ_AGENT_PROVIDER) so they don't shadow the
-// structured AgentDefinition.model / AgentDefinition.provider fields after
-// the user edits them in the UI.
+// Pack import must strip derived env keys (BUZZ_ACP_MODEL, GOOSE_MODEL,
+// GOOSE_PROVIDER, BUZZ_AGENT_MODEL, BUZZ_AGENT_PROVIDER) and derived account
+// credentials so they don't shadow their structured fields after an edit.
 
 #[test]
 fn is_derived_key_matches_all_known_keys() {
@@ -435,10 +434,19 @@ fn is_derived_key_matches_all_known_keys() {
 
 #[test]
 fn is_derived_key_is_case_insensitive() {
+    assert!(is_derived_provider_model_key("buzz_acp_model"));
     assert!(is_derived_provider_model_key("goose_model"));
     assert!(is_derived_provider_model_key("Goose_Provider"));
     assert!(is_derived_provider_model_key("buzz_agent_model"));
     assert!(is_derived_provider_model_key("BUZZ_AGENT_PROVIDER"));
+    assert!(is_derived_provider_model_key("claude_code_oauth_token"));
+}
+
+#[test]
+fn legacy_provider_model_filter_includes_buzz_acp_but_not_account_credentials() {
+    assert!(is_legacy_provider_model_env_key("BUZZ_ACP_MODEL"));
+    assert!(is_legacy_provider_model_env_key("BUZZ_AGENT_PROVIDER"));
+    assert!(!is_legacy_provider_model_env_key("CLAUDE_CODE_OAUTH_TOKEN"));
 }
 
 #[test]

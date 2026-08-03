@@ -1570,6 +1570,7 @@ async fn tokio_main() -> Result<()> {
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
+        thinking_effort: config.thinking_effort.clone(),
         agent_keys: config.keys.clone(),
         agent_owner_pubkey: startup_owner
             .as_deref()
@@ -4059,7 +4060,10 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
 /// Flow: spawn → initialize → session/new → print models → shutdown.
 /// No relay connection, no MCP servers, no subscriptions. ~2-5s total.
 async fn run_models(args: ModelsArgs) -> Result<()> {
-    use acp::{extract_model_config_options, extract_model_state};
+    use acp::{
+        extract_model_config_options, extract_model_state, resolve_model_switch_method,
+        ModelSwitchMethod,
+    };
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
     let cwd = std::env::current_dir()
@@ -4087,7 +4091,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     })
     .await;
 
-    let (init_result, session_resp) = match protocol_result {
+    let (init_result, mut session_resp) = match protocol_result {
         Ok(Ok(tuple)) => tuple,
         Ok(Err(e)) => {
             client.shutdown().await;
@@ -4100,6 +4104,35 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    if let Some(desired) = args
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let method = resolve_model_switch_method(&session_resp.raw, desired).ok_or_else(|| {
+            anyhow::anyhow!("requested model {desired:?} is not advertised by the agent")
+        })?;
+        let updated = match method {
+            ModelSwitchMethod::ConfigOption {
+                config_id,
+                option_value,
+            } => {
+                client
+                    .session_set_config_option(&session_resp.session_id, &config_id, &option_value)
+                    .await?
+            }
+            ModelSwitchMethod::SetModel { model_id } => {
+                client
+                    .session_set_model(&session_resp.session_id, &model_id)
+                    .await?
+            }
+        };
+        if let Some(options) = updated.get("configOptions") {
+            session_resp.raw["configOptions"] = options.clone();
+        }
+    }
 
     // Extract agent info from initialize response.
     // ACP spec uses "serverInfo" (MCP heritage); some agents may use "agentInfo".
@@ -4127,7 +4160,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
                 "version": agent_version,
             },
             "stable": {
-                "configOptions": config_options,
+                "configOptions": session_resp.raw.get("configOptions").cloned().unwrap_or_default(),
             },
             "unstable": model_state.as_ref().map(|ms| serde_json::json!({
                 "currentModelId": ms.get("currentModelId"),
@@ -5025,6 +5058,7 @@ mod build_mcp_servers_tests {
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
+            thinking_effort: None,
             team_instructions: None,
             initial_message: None,
             subscribe_mode: config::SubscribeMode::All,
@@ -5246,6 +5280,7 @@ mod error_outcome_emission_tests {
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
+            thinking_effort: None,
             team_instructions: None,
             initial_message: None,
             subscribe_mode: config::SubscribeMode::All,

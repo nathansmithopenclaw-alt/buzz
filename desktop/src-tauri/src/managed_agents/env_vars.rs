@@ -7,7 +7,8 @@
 //!
 //! A small set of *reserved* keys — Buzz's identity and secrets — are
 //! rejected at save time and stripped at runtime so a typo or malicious
-//! value can't swap the agent's nsec. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain
+//! value can't swap the agent's nsec. Behavior knobs (GOOSE_MODE,
+//! BUZZ_ACP_SYSTEM_PROMPT, …) remain
 //! freely overridable — those have dedicated UI fields, but power users
 //! may want to bypass them.
 
@@ -25,6 +26,7 @@ use std::collections::BTreeMap;
 /// Non-structured knobs (`GOOSE_TEMPERATURE`, `GOOSE_CONTEXT_LIMIT`) are NOT
 /// in this list — they have no structured counterpart and must be preserved.
 pub(crate) const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
+    "BUZZ_ACP_MODEL",
     "GOOSE_MODEL",
     "GOOSE_PROVIDER",
     "BUZZ_AGENT_MODEL",
@@ -35,8 +37,9 @@ pub(crate) const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
 /// Provider/model-only subset used by the older Databricks cleanup. Credential
 /// keys must survive that pass so their dedicated migration can keychain them.
 pub(crate) fn is_legacy_provider_model_env_key(key: &str) -> bool {
-    DERIVED_PROVIDER_MODEL_ENV_KEYS[..4]
+    DERIVED_PROVIDER_MODEL_ENV_KEYS
         .iter()
+        .filter(|candidate| **candidate != "CLAUDE_CODE_OAUTH_TOKEN")
         .any(|candidate| candidate.eq_ignore_ascii_case(key))
 }
 
@@ -62,7 +65,7 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 ///    example), or redirect the agent to an attacker-controlled relay.
 ///
 /// This list is deliberately narrow — it only covers keys with security
-/// implications. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
+/// implications. Behavior knobs (GOOSE_MODE, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
 /// overridable; those have dedicated UI fields but power users may want
 /// to bypass them.
 pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[

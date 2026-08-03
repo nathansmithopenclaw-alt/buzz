@@ -916,8 +916,7 @@ pub async fn create_managed_agent(
         };
 
         records.push(record);
-
-        save_managed_agents(&app, &records)?;
+        crate::managed_agents::sync_catalog_and_save_agents(&app, &records, &personas)?;
 
         let record = records
             .iter()

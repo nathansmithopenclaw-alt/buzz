@@ -17,9 +17,7 @@ import {
   BUZZ_AGENT_MAX_CONTEXT_TOKENS,
   BUZZ_AGENT_MAX_OUTPUT_TOKENS,
   BUZZ_AGENT_MAX_ROUNDS,
-  BUZZ_AGENT_THINKING_EFFORT,
   BUZZ_AGENT_THINKING_EFFORT_VALUES,
-  getProviderEffortConfig,
 } from "./buzzAgentConfig";
 
 /**
@@ -41,6 +39,7 @@ export function EffortSelectField({
   emptyOptionLabel,
   effortDefault,
   effortValid,
+  availableOptions,
   fieldClassName,
   htmlFor,
   inheritedEffort,
@@ -64,6 +63,8 @@ export function EffortSelectField({
   effortDefault: string | null;
   /** Valid effort values for this provider/model. */
   effortValid: ReadonlyArray<string>;
+  /** Optional harness-native values. When present, render these verbatim. */
+  availableOptions?: ReadonlyArray<{ id: string; name?: string | null }>;
   /** Optional class override for the field wrapper. */
   fieldClassName?: string;
   /** `htmlFor` attribute for the label element. */
@@ -108,14 +109,20 @@ export function EffortSelectField({
       : (inheritFallbackLabel ?? "Inherit");
   const effortOptions: AgentDropdownOption[] = [
     { label: emptyOptionLabel ?? inheritLabel, value: "" },
-    ...BUZZ_AGENT_THINKING_EFFORT_VALUES.flatMap((v) => {
+    ...(
+      availableOptions ??
+      BUZZ_AGENT_THINKING_EFFORT_VALUES.map((id) => ({ id, name: null }))
+    ).flatMap((option) => {
+      const v = option.id;
       const isValid = (effortValid as readonly string[]).includes(v);
       if (!showUnavailableOptions && !isValid) return [];
       const isDefault = v === effortDefault;
       return [
         {
           disabled: !isValid,
-          label: isDefault ? `${v} (default)` : v,
+          label: isDefault
+            ? `${option.name ?? v} (default)`
+            : (option.name ?? v),
           value: v,
         },
       ];
@@ -204,9 +211,7 @@ export function useEffortAutoClear({
 export function BuzzAgentModelTuningFields({
   envVars,
   inheritedEnvVars,
-  model,
   onEnvVarChange,
-  provider,
 }: {
   envVars: EnvVarsValue;
   inheritedEnvVars: EnvVarsValue;
@@ -216,17 +221,6 @@ export function BuzzAgentModelTuningFields({
   /** Active LLM provider id (optional) — used for effort filtering + default labels. */
   provider?: string;
 }) {
-  const effortConfig = getProviderEffortConfig(provider ?? "", model);
-  const { validValues: effortValid, defaultValue: effortDefault } =
-    effortConfig;
-
-  const currentEffort = envVars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
-  useEffortAutoClear({
-    currentEffort,
-    effortValid,
-    onClear: () => onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, ""),
-  });
-
   return (
     <div className="space-y-4">
       <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -234,30 +228,6 @@ export function BuzzAgentModelTuningFields({
       </p>
 
       <div className="grid gap-4 md:grid-cols-2">
-        {/* Thinking / Effort */}
-        <div className="space-y-1.5">
-          <EffortSelectField
-            currentEffort={currentEffort}
-            effortDefault={effortDefault}
-            effortValid={effortValid}
-            htmlFor="ba-thinking-effort"
-            inheritedEffort={inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]}
-            inheritFallbackLabel="Inherit (agent default)"
-            label="Thinking / Effort"
-            onChange={(value) =>
-              onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, value)
-            }
-            testId="ba-thinking-effort-select"
-          />
-          <p
-            className="text-xs text-muted-foreground"
-            id="help-ba-thinking-effort"
-          >
-            Controls how much reasoning effort the LLM applies per turn. Leave
-            blank to inherit from the global or persona default.
-          </p>
-        </div>
-
         {/* Max Rounds */}
         <div className="space-y-1.5">
           <label className="text-sm font-medium" htmlFor="ba-max-rounds">

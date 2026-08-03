@@ -509,6 +509,8 @@ type E2eConfig = {
       supportsSwitching: boolean;
       agentDefaultModel?: string | null;
       selectedModel?: string | null;
+      effortConfigId?: string | null;
+      effortOptions?: Array<{ id: string; name: string | null }>;
     };
     /**
      * When set, `discover_agent_models` throws with this message instead of
@@ -7244,7 +7246,9 @@ function withMockRuntimeConfigMetadata(
           ? "BUZZ_AGENT_THINKING_EFFORT"
           : runtime.id === "goose"
             ? "GOOSE_THINKING_EFFORT"
-            : null,
+            : runtime.id === "claude"
+              ? "BUZZ_ACP_THINKING_EFFORT"
+              : null,
   };
 }
 
@@ -8458,6 +8462,7 @@ async function handleUpdateManagedAgent(args: {
     pubkey: string;
     name?: string;
     model?: string | null;
+    provider?: string | null;
     systemPrompt?: string | null;
     envVars?: Record<string, string>;
     respondTo?: "owner-only" | "allowlist" | "anyone";
@@ -8470,6 +8475,9 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.model !== undefined) {
     agent.model = args.input.model;
+  }
+  if (args.input.provider !== undefined) {
+    agent.provider = args.input.provider;
   }
   if (args.input.systemPrompt !== undefined) {
     agent.system_prompt = args.input.systemPrompt;
@@ -11562,6 +11570,8 @@ export function maybeInstallE2eTauriMocks() {
             agentDefaultModel: discoverOverride.agentDefaultModel ?? null,
             selectedModel: discoverOverride.selectedModel ?? null,
             supportsSwitching: discoverOverride.supportsSwitching,
+            effortConfigId: discoverOverride.effortConfigId ?? null,
+            effortOptions: discoverOverride.effortOptions ?? [],
           };
         }
         const input = (

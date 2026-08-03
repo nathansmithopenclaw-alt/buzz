@@ -3480,6 +3480,18 @@ mod tests {
             Some("Fizz · #buzz-dev"),
             "title should ride in _meta.sessionTitle, out of band from the prompt"
         );
+        let meta = received["params"]["_meta"]
+            .as_object()
+            .expect("_meta must be an object");
+        assert_eq!(
+            meta.len(),
+            1,
+            "session/new must not inject adapter-specific settings that override Claude's managed project catalog"
+        );
+        assert!(
+            !meta.contains_key("claudeCode"),
+            "future _meta.claudeCode.options.settings would silently shadow Claude's managed project catalog"
+        );
     }
 
     #[tokio::test]

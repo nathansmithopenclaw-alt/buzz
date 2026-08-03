@@ -24,6 +24,15 @@ X" flag): add it to `KnownAcpRuntime` first, expose it on
 `AcpRuntimeCatalogEntry`, then project it through the core. Do not shortcut
 with a TypeScript lookup table or an id comparison in a component.
 
+Model *inventory* is separate from capability metadata. Live ACP/CLI discovery
+is authoritative for what an already-running harness advertises. The curated
+offline inventory in `ui/agentModelCatalog.ts` supplements it with known model
+IDs, display names, and family groups; its entries must be visibly marked when
+they are not live-advertised. Curated Claude entries are made live-advertised
+on restart by the Desktop-managed harness-wide `.claude/settings.json` catalog.
+Never infer a harness capability (env key, effort support, install state) from
+that frontend inventory.
+
 ## Rules
 
 1. **No hardcoded harness-ID checks in render code.** `runtime.id === "claude"`
@@ -31,16 +40,17 @@ with a TypeScript lookup table or an id comparison in a component.
    in a component. Components ask the field model what exists
    (`hasRenderableAgentConfigField`, `getRenderableEffortField`).
 2. **Effort reads/writes go through the descriptor.** Use the effort
-   descriptor's `currentPersistence` key — never a raw
-   `BUZZ_AGENT_THINKING_EFFORT` literal in UI code. `currentPersistence` is
-   where the value lives *today*; `targetApplication` is how the harness
-   *should* receive it. They intentionally differ until PR 2.7 migrates
-   Goose/Claude — do not "fix" one to match the other without doing the
-   migration work.
+   descriptor's `currentPersistence` key — never a raw effort env literal in
+   UI code. Buzz Agent persists `BUZZ_AGENT_THINKING_EFFORT`, Goose persists
+   `GOOSE_THINKING_EFFORT`, and Claude persists
+   `BUZZ_ACP_THINKING_EFFORT`, which buzz-acp validates and applies through the
+   adapter's native `effort` config option after model selection.
 3. **Field absence has a named reason, not a boolean.** Codex effort is
-   `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
-   New absences get new named reasons in `AgentConfigOmission` /
-   `render` — never a `showX` prop.
+   `ownedByModelId`; unsupported harnesses are `unsupportedByHarness`. Claude's
+   control uses the selected model's live native values verbatim (including
+   `default`); when the adapter omits effort for that model, render an explicit
+   read-only explanation. New absences get new named reasons in
+   `AgentConfigOmission` / `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:
    "resetDependentValues"` (user changed harness/provider → dependent values
    reset everywhere) vs `onCatalogMismatch: "explainOnly" | "onboardingCleanup"`
@@ -171,6 +181,10 @@ with a TypeScript lookup table or an id comparison in a component.
   acceptance coverage for readiness, failure states, defaults, navigation,
   successful-empty vs failed optional-model discovery, and persistence races.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
+- Rust: `claude_model_catalog` tests pin comprehensive allowlisting, unknown-key
+  preservation, existing-agent aliases, and custom saved-model union behavior.
+- Rust: `spawn_hash` tests pin the restart-required badge for both model and
+  effort changes.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
 

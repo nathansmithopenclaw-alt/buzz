@@ -532,6 +532,8 @@ pub struct PromptContext {
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Native ACP effort value to apply after the model selection.
+    pub thinking_effort: Option<String>,
     /// Agent identity — used to derive the NIP-AE conversation key at
     /// session creation for core injection.
     pub agent_keys: nostr::Keys,
@@ -1005,7 +1007,7 @@ async fn create_session_and_apply_model(
     // Apply desired_model if set, matching against the fresh session/new response.
     // Track whether the switch succeeded so session_config_captured reflects
     // the post-switch state (not the pre-switch desired state).
-    let applied_config_options = if let Some(ref desired) = agent.desired_model {
+    let mut applied_config_options = if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
                 let applied =
@@ -1033,6 +1035,23 @@ async fn create_session_and_apply_model(
     } else {
         None
     };
+
+    if let Some(desired_effort) = ctx.thinking_effort.as_deref() {
+        let advertised = applied_config_options
+            .as_ref()
+            .or_else(|| resp.raw.get("configOptions"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        applied_config_options = Some(
+            apply_thinking_effort(
+                &mut agent.acp,
+                &resp.session_id,
+                desired_effort,
+                &advertised,
+            )
+            .await?,
+        );
+    }
 
     // Emit session config for desktop consumption (config bridge tier 1b).
     // Emitted AFTER desired_model resolution so the desktop caches the
@@ -1173,6 +1192,73 @@ async fn apply_model_switch(
             Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
         }
     }
+}
+
+async fn apply_thinking_effort(
+    acp: &mut AcpClient,
+    session_id: &str,
+    desired: &str,
+    config_options: &serde_json::Value,
+) -> Result<serde_json::Value, AcpError> {
+    let config_id = resolve_thinking_effort_config_id(config_options, desired)?;
+
+    let response = tokio::time::timeout(
+        MODEL_SWITCH_TIMEOUT,
+        acp.session_set_config_option(session_id, config_id, desired),
+    )
+    .await
+    .map_err(|_| AcpError::Timeout(MODEL_SWITCH_TIMEOUT))??;
+    tracing::info!(
+        target: "pool::effort",
+        configured_effort = desired,
+        "applied native effort via configOption on session {session_id}"
+    );
+    acp.observe(
+        "effort_selection_verified",
+        serde_json::json!({ "effort": desired }),
+    );
+    Ok(response
+        .get("configOptions")
+        .cloned()
+        .unwrap_or_else(|| config_options.clone()))
+}
+
+fn resolve_thinking_effort_config_id<'a>(
+    config_options: &'a serde_json::Value,
+    desired: &str,
+) -> Result<&'a str, AcpError> {
+    let effort_option = config_options.as_array().and_then(|options| {
+        options.iter().find(|option| {
+            option
+                .get("id")
+                .or_else(|| option.get("configId"))
+                .and_then(|value| value.as_str())
+                == Some("effort")
+                || option.get("category").and_then(|value| value.as_str()) == Some("thought_level")
+        })
+    });
+    let config_id = effort_option
+        .and_then(|option| option.get("id").or_else(|| option.get("configId")))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            AcpError::Protocol(format!(
+                "configured effort {desired:?} is not available for the selected model"
+            ))
+        })?;
+    let is_valid = effort_option
+        .and_then(|option| option.get("options"))
+        .and_then(|value| value.as_array())
+        .is_some_and(|options| {
+            options
+                .iter()
+                .any(|option| option.get("value").and_then(|value| value.as_str()) == Some(desired))
+        });
+    if !is_valid {
+        return Err(AcpError::Protocol(format!(
+            "configured effort {desired:?} is not advertised for the selected model"
+        )));
+    }
+    Ok(config_id)
 }
 
 /// Set the session permission mode via `session/set_config_option`.
@@ -6416,6 +6502,7 @@ mod tests {
             context_message_limit: 0,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
+            thinking_effort: None,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
@@ -6885,5 +6972,43 @@ mod tests {
             Some(false)
         );
         assert_eq!(response_model_matches("default", "claude-sonnet-5"), None);
+    }
+
+    #[test]
+    fn native_effort_resolution_accepts_effort_id_and_thought_level_category() {
+        let by_id = json!([{
+            "id": "effort",
+            "options": [{"value": "high"}]
+        }]);
+        assert_eq!(
+            resolve_thinking_effort_config_id(&by_id, "high").unwrap(),
+            "effort"
+        );
+
+        let by_category = json!([{
+            "configId": "reasoning-depth",
+            "category": "thought_level",
+            "options": [{"value": "xhigh"}]
+        }]);
+        assert_eq!(
+            resolve_thinking_effort_config_id(&by_category, "xhigh").unwrap(),
+            "reasoning-depth"
+        );
+    }
+
+    #[test]
+    fn native_effort_resolution_rejects_unadvertised_values_and_missing_options() {
+        let advertised = json!([{
+            "id": "effort",
+            "options": [{"value": "high"}]
+        }]);
+        assert!(resolve_thinking_effort_config_id(&advertised, "ultra")
+            .unwrap_err()
+            .to_string()
+            .contains("not advertised"));
+        assert!(resolve_thinking_effort_config_id(&json!([]), "high")
+            .unwrap_err()
+            .to_string()
+            .contains("not available"));
     }
 }

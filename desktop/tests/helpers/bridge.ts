@@ -527,6 +527,8 @@ type MockBridgeOptions = {
     supportsSwitching: boolean;
     agentDefaultModel?: string | null;
     selectedModel?: string | null;
+    effortConfigId?: string | null;
+    effortOptions?: Array<{ id: string; name: string | null }>;
   };
   /**
    * When set, `discover_agent_models` throws with this message instead of

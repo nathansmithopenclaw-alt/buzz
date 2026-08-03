@@ -167,6 +167,7 @@ export function usePersonaModelDiscovery({
   modelFieldVisible,
   open,
   provider,
+  model,
   selectedRuntime,
 }: {
   envVars: EnvVarsValue;
@@ -174,6 +175,7 @@ export function usePersonaModelDiscovery({
   modelFieldVisible: boolean;
   open: boolean;
   provider: string;
+  model?: string;
   selectedRuntime: AcpRuntimeCatalogEntry | undefined;
 }) {
   const [modelDiscoveryData, setModelDiscoveryData] =
@@ -228,6 +230,7 @@ export function usePersonaModelDiscovery({
       agentCommand: discoveryAgentCommand,
       agentArgs: modelDiscoveryArgsKey,
       provider: trimmedProvider,
+      model: model?.trim() ?? "",
       envVars: modelDiscoveryEnvKey,
     });
   }, [
@@ -236,6 +239,7 @@ export function usePersonaModelDiscovery({
     modelDiscoveryArgsKey,
     modelDiscoveryEnvKey,
     trimmedProvider,
+    model,
   ]);
 
   React.useEffect(() => {
@@ -291,6 +295,7 @@ export function usePersonaModelDiscovery({
         agentCommand: activeAgentCommand,
         agentArgs: selectedRuntimeDefaultArgs ?? [],
         provider: trimmedProvider || undefined,
+        model: model?.trim() || undefined,
         envVars,
         definitionEnv: selectedRuntimeDefinitionEnv ?? {},
       })
@@ -364,6 +369,7 @@ export function usePersonaModelDiscovery({
     selectedRuntimeLabel,
     shouldDebounceModelDiscovery,
     trimmedProvider,
+    model,
   ]);
 
   const activeModelDiscoveryData =
@@ -395,6 +401,9 @@ export function usePersonaModelDiscovery({
     discoveredModelOptions,
     modelDiscoveryPending,
   });
+  const nativeEffortOptions = activeModelDiscoveryData
+    ? (activeModelDiscoveryData.effortOptions ?? [])
+    : null;
 
   return {
     discoveredModelOptions,
@@ -404,5 +413,7 @@ export function usePersonaModelDiscovery({
         ? null
         : activeModelDiscoveryStatus,
     modelDiscoverySuccessfulEmpty,
+    nativeEffortConfigId: activeModelDiscoveryData?.effortConfigId ?? null,
+    nativeEffortOptions,
   };
 }

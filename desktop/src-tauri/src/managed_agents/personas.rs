@@ -368,6 +368,11 @@ pub fn save_personas(app: &AppHandle, records: &[AgentDefinition]) -> Result<(),
     let mut sorted = records.to_vec();
     sort_personas(&mut sorted);
 
+    if let Some(nest) = crate::managed_agents::nest_dir() {
+        let instances = crate::managed_agents::load_managed_agents(app)?;
+        crate::managed_agents::sync_claude_catalog_for_state(&nest, &instances, &sorted)?;
+    }
+
     // Post-fold: persona saves write key-less definition records into the
     // unified agent store (instances preserved by `save_agent_definitions`).
     let definitions: Vec<_> = sorted

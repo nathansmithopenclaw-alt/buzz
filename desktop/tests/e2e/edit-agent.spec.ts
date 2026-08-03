@@ -18,8 +18,8 @@ const BAKED_DEFAULTS = [
 // pre-existing spec rather than one written alongside it.
 //
 // Mock-boundary caveat: the e2eBridge `update_managed_agent` handler echoes
-// name/model/systemPrompt/envVars/respondTo/respondToAllowlist into the
-// mock store — it does NOT
+// name/model/provider/systemPrompt/envVars/respondTo/respondToAllowlist into
+// the mock store — it does NOT
 // model the diff-based partial-update wire semantics (change-detected-or-omit,
 // tri-state provider, harnessOverride derivation), and it ignores
 // agentCommand/harnessOverride entirely. This spec therefore pins UI behavior
@@ -145,11 +145,14 @@ test.describe("edit agent dialog", () => {
     await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
       timeout: 10_000,
     });
-    // Custom model round-trips: the reopened dialog shows it in the custom
-    // input (the discovered-model lists don't contain it).
-    await expect(page.locator("#edit-agent-custom-model")).toHaveValue(
+    // The value entered through Custom is now recognized by live discovery,
+    // so reopen renders the persisted value in the dropdown rather than
+    // mounting the custom input. Provider must round-trip independently too.
+    await expect(page.locator("#edit-agent-model")).toContainText(
       "claude-opus-4-5",
-      { timeout: 10_000 },
+    );
+    await expect(page.locator("#edit-agent-llm-provider")).toContainText(
+      "Anthropic",
     );
   });
 
@@ -331,5 +334,115 @@ test.describe("edit agent dialog", () => {
     await expect(page.locator("#persona-display-name")).toHaveValue(
       "Edit E2E Persona",
     );
+  });
+
+  test("Claude Edit Agent shows the complete catalog with native effort directly below model", async ({
+    page,
+  }) => {
+    const claudeCatalog = [
+      ["opus", "Claude Opus (current)"],
+      ["sonnet", "Claude Sonnet (current)"],
+      ["haiku", "Claude Haiku (current)"],
+      ["claude-fable-5", "Claude Fable 5"],
+      ["claude-opus-5", "Claude Opus 5"],
+      ["claude-opus-4-8", "Claude Opus 4.8"],
+      ["claude-opus-4-7", "Claude Opus 4.7"],
+      ["claude-opus-4-6", "Claude Opus 4.6"],
+      ["claude-opus-4-5-20251101", "Claude Opus 4.5 (2025-11-01)"],
+      ["claude-opus-4-1-20250805", "Claude Opus 4.1 (2025-08-05)"],
+      ["claude-opus-4-20250514", "Claude Opus 4 (2025-05-14)"],
+      ["claude-sonnet-5", "Claude Sonnet 5"],
+      ["claude-sonnet-4-6", "Claude Sonnet 4.6"],
+      ["claude-sonnet-4-5-20250929", "Claude Sonnet 4.5 (2025-09-29)"],
+      ["claude-sonnet-4-20250514", "Claude Sonnet 4 (2025-05-14)"],
+      ["claude-haiku-4-5-20251001", "Claude Haiku 4.5 (2025-10-01)"],
+    ] as const;
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        {
+          id: "claude",
+          label: "Claude Code",
+          avatar_url: "",
+          availability: "available",
+          command: "claude-agent-acp",
+          binary_path: "/usr/local/bin/claude-agent-acp",
+          default_args: [],
+          mcp_command: null,
+          install_hint: "",
+          install_instructions_url: null,
+          can_auto_install: false,
+          requires_external_cli: true,
+          underlying_cli_path: "/usr/local/bin/claude",
+          source: "builtin",
+        },
+      ],
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          runtime: "claude",
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+      discoverAgentModels: {
+        models: claudeCatalog.map(([id, name]) => ({
+          id,
+          name,
+        })),
+        supportsSwitching: true,
+        effortConfigId: "effort",
+        effortOptions: ["default", "low", "medium", "high", "xhigh", "max"].map(
+          (id) => ({ id, name: id === "default" ? "Default" : id }),
+        ),
+      },
+    });
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    await page
+      .getByRole("button", { name: `${AGENT_NAME} agent profile` })
+      .click();
+    await page.getByTestId("user-profile-edit-agent").click();
+
+    const dialog = page.getByTestId("edit-agent-dialog");
+    const model = page.locator("#edit-agent-model");
+    const effort = page.getByTestId("instance-agent-effort-select");
+    await expect(dialog).toBeVisible({ timeout: 10_000 });
+    await expect(model).toBeVisible({ timeout: 10_000 });
+    await expect(effort).toBeVisible({ timeout: 10_000 });
+    const [modelBox, effortBox] = await Promise.all([
+      model.boundingBox(),
+      effort.boundingBox(),
+    ]);
+    expect(effortBox?.y ?? 0).toBeGreaterThan(
+      (modelBox?.y ?? 0) + (modelBox?.height ?? 0),
+    );
+    await dialog.screenshot({
+      path: "test-results/model-selector-effort/01-claude-model-and-effort.png",
+    });
+
+    await model.click();
+    for (const [, name] of claudeCatalog) {
+      await expect(
+        page.getByRole("menuitemradio").filter({ hasText: name }),
+      ).toBeAttached();
+    }
+    await page.screenshot({
+      path: "test-results/model-selector-effort/02-claude-full-catalog.png",
+    });
+
+    await page
+      .getByRole("menuitemradio")
+      .filter({ hasText: "Claude Opus 4.1 (2025-08-05)" })
+      .click();
+    await expect(model).toHaveText("Claude Opus 4.1 (2025-08-05)");
+    await page.getByTestId("edit-agent-dialog-submit").click();
+    await expect(dialog).not.toBeVisible();
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(model).toHaveText("Claude Opus 4.1 (2025-08-05)", {
+      timeout: 10_000,
+    });
   });
 });

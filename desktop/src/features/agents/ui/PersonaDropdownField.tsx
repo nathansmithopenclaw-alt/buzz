@@ -82,14 +82,28 @@ export function PersonaDropdownField({
               }}
               value={value}
             >
-              {options.map((option) => (
-                <DropdownMenuRadioItem
-                  disabled={option.disabled}
-                  key={option.value}
-                  value={option.value}
-                >
-                  <span className="truncate">{option.label}</span>
-                </DropdownMenuRadioItem>
+              {options.map((option, index) => (
+                <React.Fragment key={option.value}>
+                  {option.group &&
+                  option.group !== options[index - 1]?.group ? (
+                    <div className="px-2 pb-1 pt-2 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      {option.group}
+                    </div>
+                  ) : null}
+                  <DropdownMenuRadioItem
+                    disabled={option.disabled}
+                    value={option.value}
+                  >
+                    <span className="min-w-0 flex-1 truncate">
+                      {option.label}
+                    </span>
+                    {option.badge ? (
+                      <span className="ml-2 shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-2xs text-muted-foreground">
+                        {option.badge}
+                      </span>
+                    ) : null}
+                  </DropdownMenuRadioItem>
+                </React.Fragment>
               ))}
             </DropdownMenuRadioGroup>
           </div>
