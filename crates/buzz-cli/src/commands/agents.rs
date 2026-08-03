@@ -1,10 +1,12 @@
 use buzz_core::kind::KIND_IA_ARCHIVED_LIST;
 use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identity_request};
-use nostr::{Keys, PublicKey, ToBech32};
+use nostr::{Event, Keys, Kind, PublicKey, ToBech32};
 use serde_json::json;
 use std::collections::HashMap;
 
-use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
+use crate::agent_management::{
+    build_create, build_set_avatar, build_update, CreateAgentDraft, UpdateAgentDraft,
+};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, validate_hex64};
@@ -19,6 +21,42 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             let secrets = read_desktop_secret_blob()?;
             let nsec = managed_agent_nsec_from_secrets(&secrets, &owner, &target)?;
             println!("{nsec}");
+            Ok(())
+        }
+        AgentsCmd::SetAvatar { pubkey, url } => {
+            let owner = require_owner(client)?;
+            let target = PublicKey::parse(pubkey.trim())
+                .map_err(|e| CliError::Usage(format!("invalid agent pubkey: {e}")))?;
+            let secrets = read_desktop_secret_blob()?;
+            let owner_keys = desktop_owner_keys_from_secrets(&secrets, &owner)?;
+            let built = build_set_avatar(&owner_keys, client.keys(), &target, url)?;
+            let request_id = built.request_id.clone();
+            let target_pubkey = built.target_pubkey.clone();
+            let avatar_url = built.url.clone();
+            let response = client.publish_ephemeral_event(built.event).await?;
+            let receipt =
+                wait_for_avatar_receipt(client, &owner, &request_id, &target_pubkey, &avatar_url)
+                    .await?;
+            let mut output: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            if let Some(obj) = output.as_object_mut() {
+                obj.insert("request_id".into(), request_id.into());
+                obj.insert("target_pubkey".into(), target_pubkey.into());
+                obj.insert("avatar_url".into(), avatar_url.into());
+                obj.insert("applied".into(), true.into());
+                obj.insert("persona_id".into(), receipt["personaId"].clone());
+                obj.insert("instance_count".into(), receipt["instanceCount"].clone());
+                obj.insert(
+                    "reconciled_count".into(),
+                    receipt["reconciledCount"].clone(),
+                );
+                obj.insert(
+                    "message".into(),
+                    "Buzz Desktop persisted the avatar to the definition and linked instances, then completed immediate profile reconciliation."
+                        .into(),
+                );
+            }
+            println!("{output}");
             Ok(())
         }
         AgentsCmd::DraftCreate {
@@ -175,6 +213,56 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
     }
 }
 
+async fn wait_for_avatar_receipt(
+    client: &BuzzClient,
+    owner: &PublicKey,
+    request_id: &str,
+    target_pubkey: &str,
+    avatar_url: &str,
+) -> Result<serde_json::Value, CliError> {
+    let d_tag = format!("buzz-agent-avatar-apply-receipt:{request_id}");
+    let filter = serde_json::json!({
+        "kinds": [30_078],
+        "authors": [owner.to_hex()],
+        "#d": [d_tag],
+        "limit": 1,
+    });
+    for _ in 0..40 {
+        let raw = client.query(&filter).await?;
+        let events: Vec<Event> = serde_json::from_str(&raw)
+            .map_err(|error| CliError::Other(format!("invalid avatar receipt query: {error}")))?;
+        if let Some(event) = events.into_iter().find(|event| {
+            event.kind == Kind::Custom(30_078) && event.pubkey == *owner && event.verify().is_ok()
+        }) {
+            let receipt: serde_json::Value = serde_json::from_str(&event.content)
+                .map_err(|error| CliError::Other(format!("invalid avatar receipt: {error}")))?;
+            let matches = receipt["type"] == "agent_avatar_apply_receipt"
+                && receipt["requestId"] == request_id
+                && receipt["targetPubkey"] == target_pubkey
+                && receipt["url"] == avatar_url;
+            if matches && receipt["applied"] == true {
+                if receipt["instanceCount"] != receipt["reconciledCount"] {
+                    return Err(CliError::Other(
+                        "Buzz Desktop persisted the avatar, but one or more linked instance profiles failed immediate reconciliation"
+                            .into(),
+                    ));
+                }
+                return Ok(receipt);
+            }
+            if matches {
+                return Err(CliError::Other(
+                    "Buzz Desktop rejected the avatar request as stale".into(),
+                ));
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    Err(CliError::DeliveryUnknown(
+        "avatar request was accepted by the relay, but no Desktop apply receipt arrived within 10 seconds; local persistence outcome is unknown"
+            .into(),
+    ))
+}
+
 const DESKTOP_KEYRING_SERVICE: &str = "buzz-desktop";
 const DESKTOP_KEYRING_BLOB_KEY: &str = "secrets";
 const DESKTOP_IDENTITY_KEY: &str = "identity";
@@ -199,6 +287,16 @@ fn managed_agent_nsec_from_secrets(
     owner: &PublicKey,
     target: &PublicKey,
 ) -> Result<String, CliError> {
+    let keys = managed_agent_keys_from_secrets(secrets, owner, target)?;
+    keys.secret_key()
+        .to_bech32()
+        .map_err(|e| CliError::Other(format!("encode managed-agent nsec: {e}")))
+}
+
+fn desktop_owner_keys_from_secrets(
+    secrets: &HashMap<String, String>,
+    owner: &PublicKey,
+) -> Result<Keys, CliError> {
     let identity_nsec = secrets
         .get(DESKTOP_IDENTITY_KEY)
         .ok_or_else(|| CliError::Auth("desktop owner identity is unavailable".into()))?;
@@ -209,6 +307,15 @@ fn managed_agent_nsec_from_secrets(
             "BUZZ_AUTH_TAG owner does not match this Desktop identity".into(),
         ));
     }
+    Ok(identity)
+}
+
+fn managed_agent_keys_from_secrets(
+    secrets: &HashMap<String, String>,
+    owner: &PublicKey,
+    target: &PublicKey,
+) -> Result<Keys, CliError> {
+    desktop_owner_keys_from_secrets(secrets, owner)?;
 
     let target_hex = target.to_hex();
     let nsec = secrets
@@ -224,9 +331,7 @@ fn managed_agent_nsec_from_secrets(
             "stored managed-agent key does not match the requested pubkey".into(),
         ));
     }
-    keys.secret_key()
-        .to_bech32()
-        .map_err(|e| CliError::Other(format!("encode managed-agent nsec: {e}")))
+    Ok(keys)
 }
 
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used by agent

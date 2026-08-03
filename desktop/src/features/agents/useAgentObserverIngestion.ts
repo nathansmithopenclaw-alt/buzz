@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
+import { useAgentAvatarApply } from "@/features/agents/useAgentAvatarApply";
 import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
@@ -74,6 +75,7 @@ export function combineObserverIngestionAgents(
  * managed-agent observer coverage during startup.
  */
 export function useAgentObserverIngestion() {
+  useAgentAvatarApply();
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
 

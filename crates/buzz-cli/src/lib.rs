@@ -266,6 +266,14 @@ pub enum AgentsCmd {
         /// Managed agent public key (hex or npub)
         pubkey: String,
     },
+    /// Persist and immediately reconcile a managed agent persona's avatar
+    SetAvatar {
+        /// Managed agent public key (hex or npub)
+        pubkey: String,
+        /// HTTPS avatar URL
+        #[arg(long)]
+        url: String,
+    },
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
     DraftCreate {
         /// Current channel UUID; the new agent is added here after save
@@ -2032,6 +2040,7 @@ mod tests {
                 "draft-create",
                 "draft-update",
                 "get-nsec",
+                "set-avatar",
                 "unarchive"
             ]
         );
@@ -2162,7 +2171,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 6),
+            ("agents", 7),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

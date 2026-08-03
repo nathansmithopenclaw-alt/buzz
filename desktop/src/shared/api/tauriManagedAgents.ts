@@ -8,6 +8,24 @@ import type {
   ManagedAgentRuntimeStatus,
 } from "@/shared/api/types";
 
+export type ApplyManagedAgentAvatarResult = {
+  applied: boolean;
+  targetPubkey: string;
+  personaId: string;
+  instanceCount: number;
+  reconciledCount: number;
+};
+
+export async function applyManagedAgentAvatarRequest(
+  sourcePubkey: string,
+  authorizationEvent: string,
+): Promise<ApplyManagedAgentAvatarResult> {
+  return invokeTauri("apply_managed_agent_avatar_request", {
+    sourcePubkey,
+    authorizationEvent,
+  });
+}
+
 export async function startManagedAgent(pubkey: string): Promise<ManagedAgent> {
   const response = await invokeTauri<RawManagedAgent>("start_managed_agent", {
     pubkey,
