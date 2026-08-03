@@ -602,7 +602,6 @@ fn parse_models(raw: Option<&serde_json::Value>) -> (Vec<AcpModelEntry>, Option<
 mod tests {
     use super::*;
     use crate::managed_agents::{BackendKind, RespondTo};
-
     fn goose_runtime() -> &'static KnownAcpRuntime {
         &KnownAcpRuntime {
             id: "goose",
@@ -622,6 +621,7 @@ mod tests {
             adapter_install_hint: "",
             skill_dir: None,
             supports_acp_model_switching: false,
+            effort_model_qualifier: false,
             model_env_var: Some("GOOSE_MODEL"),
             provider_env_var: Some("GOOSE_PROVIDER"),
             provider_locked: false,

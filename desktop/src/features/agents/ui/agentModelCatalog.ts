@@ -237,6 +237,10 @@ function modelFamily(modelId: string): string {
 export function validateModelSelection(
   model: string,
   runtimeId: string,
+  qualifierCapability?: {
+    enabled: boolean;
+    effortOptions: ReadonlyArray<{ id: string }> | null;
+  },
 ): string | null {
   const trimmed = model.trim();
   const qualifier = trimmed.match(/^(.*)\[([^\]]+)]$/);
@@ -249,7 +253,42 @@ export function validateModelSelection(
   ) {
     return null;
   }
+  if (qualifierCapability?.enabled) {
+    if (qualifierCapability.effortOptions === null) return null;
+    return qualifierCapability.effortOptions.some(
+      (option) => option.id === value,
+    )
+      ? null
+      : `Reasoning effort ${value} is not advertised for ${base}.`;
+  }
   return `Remove [${value}] from the model ID and choose it in Reasoning effort instead. Bracket qualifiers are not accepted by this harness.`;
+}
+
+export function parseModelEffortQualifier(model: string): {
+  baseModel: string;
+  effort: string | null;
+} {
+  const trimmed = model.trim();
+  const match = trimmed.match(/^(.*)\[([^\]]+)]$/);
+  return match
+    ? { baseModel: match[1].trim(), effort: match[2].trim() || null }
+    : { baseModel: trimmed, effort: null };
+}
+
+export function modelWithEffortQualifier({
+  effort,
+  inheritedModel,
+  model,
+}: {
+  effort: string;
+  inheritedModel: string;
+  model: string;
+}): string {
+  const explicitBase = parseModelEffortQualifier(model).baseModel;
+  if (!effort) return explicitBase;
+  const inheritedBase = parseModelEffortQualifier(inheritedModel).baseModel;
+  const baseModel = explicitBase || inheritedBase;
+  return baseModel ? `${baseModel}[${effort}]` : "";
 }
 
 export function validateEffortSelection({

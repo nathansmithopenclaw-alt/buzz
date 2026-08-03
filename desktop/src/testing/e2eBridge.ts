@@ -95,6 +95,8 @@ type MockManagedAgentSeed = {
   lastErrorCode?: number | null;
   needsRestart?: boolean;
   autoRestartOnConfigChange?: boolean;
+  model?: string | null;
+  envVars?: Record<string, string>;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
 };
@@ -2122,7 +2124,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     parallelism: 1,
     system_prompt: null,
     avatar_url: seed.avatarUrl ?? null,
-    model: null,
+    model: seed.model ?? null,
     claude_account_id:
       seed.claudeAccountId !== undefined
         ? seed.claudeAccountId
@@ -2134,7 +2136,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
       (runtime === "claude" ? "instance" : "credentials_file"),
     claude_account_shadowed: seed.claudeAccountShadowed ?? false,
     supports_claude_accounts: runtime === "claude",
-    env_vars: {},
+    env_vars: seed.envVars ?? {},
     status,
     pid: status === "running" ? 42000 + mockManagedAgents.length : null,
     created_at: now,
@@ -7252,6 +7254,10 @@ function withMockRuntimeConfigMetadata(
             : runtime.id === "claude"
               ? "BUZZ_ACP_THINKING_EFFORT"
               : null,
+    effort_model_qualifier:
+      "effort_model_qualifier" in runtime
+        ? runtime.effort_model_qualifier
+        : runtime.id === "codex",
   };
 }
 

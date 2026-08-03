@@ -49,10 +49,13 @@ that frontend inventory.
    `GOOSE_THINKING_EFFORT`, and Claude persists
    `BUZZ_ACP_THINKING_EFFORT`, which buzz-acp validates and applies through the
    adapter's native `effort` config option after model selection.
-3. **Field absence has a named reason, not a boolean.** Codex effort is
+3. **Field absence has a named reason, not a boolean.** Codex instance edits
+   expose effort through the runtime-declared `effortModelQualifier` capability:
+   the control reads and writes the saved model ID's `[level]` suffix and uses
+   the adapter's live native values. Global/definition/onboarding surfaces keep Codex effort
    `ownedByModelId`; unsupported harnesses are `unsupportedByHarness`. Claude's
    control uses the selected model's live native values verbatim (including
-   `default`); when the adapter omits effort for that model, render an explicit
+   `default`); when either adapter omits effort for that model, render an explicit
    read-only explanation. New absences get new named reasons in
    `AgentConfigOmission` / `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:

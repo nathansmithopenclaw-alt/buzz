@@ -184,6 +184,24 @@ test("fromRawAcpRuntimeCatalogEntry preserves source preset", () => {
   assert.deepStrictEqual(entry.definitionEnv, {});
 });
 
+test("fromRawAcpRuntimeCatalogEntry maps the model qualifier effort capability", () => {
+  const raw = {
+    id: "codex",
+    label: "Codex",
+    availability: "available",
+    command: "codex-acp",
+    source: "builtin",
+    default_args: [],
+    can_auto_install: false,
+    requires_external_cli: true,
+    install_hint: "",
+    install_instructions_url: "",
+    effort_model_qualifier: true,
+  };
+  const entry = fromRawAcpRuntimeCatalogEntry(raw);
+  assert.equal(entry.effortModelQualifier, true);
+});
+
 test("fromRawAcpRuntimeCatalogEntry env round-trips through edit payload shape", () => {
   // Simulate the full save → re-open cycle: raw entry comes back from Rust
   // with definition_env populated; the edit form reads entry.definitionEnv.

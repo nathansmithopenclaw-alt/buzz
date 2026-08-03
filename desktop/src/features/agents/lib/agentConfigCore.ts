@@ -26,6 +26,11 @@ type EnvVarPersistence = {
   key: string;
 };
 
+type ModelQualifierPersistence = {
+  kind: "modelQualifier";
+  field: "model";
+};
+
 type AcpConfigOptionPersistence = {
   kind: "acpConfigOption";
   id: string;
@@ -63,10 +68,12 @@ export type AgentConfigFieldDescriptor =
         | "harnessNative";
       currentPersistence:
         | EnvVarPersistence
+        | ModelQualifierPersistence
         | AcpConfigOptionPersistence
         | UnavailablePersistence;
       targetApplication:
         | { kind: "envVar"; key: string }
+        | { kind: "modelQualifier"; field: "model" }
         | { kind: "acpConfigOption"; id: string; category: string };
       render: "control" | "deferredUntilNativeOptionsAvailable";
       value: string | null;
@@ -102,6 +109,10 @@ export type AgentConfigFieldModel = {
 
 function valueFromEnv(config: GlobalAgentConfig, key: string) {
   return config.env_vars[key]?.trim() || null;
+}
+
+function valueFromModelQualifier(config: GlobalAgentConfig) {
+  return config.model?.trim().match(/\[([^\]]+)]$/)?.[1] ?? null;
 }
 
 /**
@@ -161,6 +172,15 @@ export function deriveAgentConfigFieldModel({
       targetApplication: { kind: "envVar", key: runtime.thinkingEnvVar },
       render: "control",
       value: valueFromEnv(config, runtime.thinkingEnvVar),
+    });
+  } else if (runtime?.effortModelQualifier && scope === "instance") {
+    fields.push({
+      kind: "effort",
+      optionSource: "harnessNative",
+      currentPersistence: { kind: "modelQualifier", field: "model" },
+      targetApplication: { kind: "modelQualifier", field: "model" },
+      render: "control",
+      value: valueFromModelQualifier(config),
     });
   } else if (runtime?.id === "claude") {
     fields.push({

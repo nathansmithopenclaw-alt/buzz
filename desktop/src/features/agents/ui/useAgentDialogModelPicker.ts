@@ -31,6 +31,7 @@ type PickerInput = Omit<
   effortProvider?: string;
   effortRuntimeId?: string;
   nativeEffortOptions: ReadonlyArray<{ id: string }> | null;
+  effortModelQualifier?: boolean;
   provider: string;
   runtimeId: string;
 };
@@ -39,6 +40,7 @@ export function useAgentDialogModelPicker(input: PickerInput) {
   const {
     discoveredOptions,
     effort,
+    effortModelQualifier = false,
     effortProvider = input.provider,
     effortRuntimeId = input.runtimeId,
     knownOptions,
@@ -69,14 +71,19 @@ export function useAgentDialogModelPicker(input: PickerInput) {
       provider,
     }),
     completeModelOptions,
-    effortValidationError: validateEffortSelection({
-      effort,
-      model,
-      nativeEffortOptions,
-      provider: effortProvider,
-      runtimeId: effortRuntimeId,
+    effortValidationError: effortModelQualifier
+      ? null
+      : validateEffortSelection({
+          effort,
+          model,
+          nativeEffortOptions,
+          provider: effortProvider,
+          runtimeId: effortRuntimeId,
+        }),
+    modelValidationError: validateModelSelection(model, runtimeId, {
+      enabled: effortModelQualifier,
+      effortOptions: nativeEffortOptions,
     }),
-    modelValidationError: validateModelSelection(model, runtimeId),
   };
 }
 

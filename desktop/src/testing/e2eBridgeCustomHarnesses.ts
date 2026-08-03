@@ -89,6 +89,7 @@ export function handleSaveCustomHarness(args: {
     binary_path: null,
     default_args: def.args ?? [],
     mcp_command: null,
+    effort_model_qualifier: false,
     install_hint: def.installHint ?? "",
     install_instructions_url: def.installInstructionsUrl ?? "",
     can_auto_install: false,

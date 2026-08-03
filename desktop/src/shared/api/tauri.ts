@@ -188,6 +188,7 @@ export type RawAcpRuntimeCatalogEntry = {
   model_env_var?: string | null;
   provider_env_var?: string | null;
   thinking_env_var?: string | null;
+  effort_model_qualifier?: boolean;
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
@@ -205,7 +206,6 @@ export type RawAcpRuntimeCatalogEntry = {
    */
   definition_env?: Record<string, string>;
 };
-
 export type {
   RawInstallRuntimeResult,
   RawInstallStepResult,
@@ -749,6 +749,7 @@ export function fromRawAcpRuntimeCatalogEntry(
     modelEnvVar: entry.model_env_var ?? null,
     providerEnvVar: entry.provider_env_var ?? null,
     thinkingEnvVar: entry.thinking_env_var ?? null,
+    effortModelQualifier: entry.effort_model_qualifier ?? false,
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
@@ -763,7 +764,6 @@ export function fromRawAcpRuntimeCatalogEntry(
     definitionEnv: entry.definition_env ?? {},
   };
 }
-
 function fromRawCommandAvailability(
   command: RawCommandAvailability,
 ): CommandAvailability {
