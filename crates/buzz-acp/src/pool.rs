@@ -534,6 +534,8 @@ pub struct PromptContext {
     pub permission_mode: PermissionMode,
     /// Native ACP effort value to apply after the model selection.
     pub thinking_effort: Option<String>,
+    /// Native Fast mode state to apply after model and effort selection.
+    pub fast_mode: Option<bool>,
     /// Agent identity — used to derive the NIP-AE conversation key at
     /// session creation for core injection.
     pub agent_keys: nostr::Keys,
@@ -1053,6 +1055,16 @@ async fn create_session_and_apply_model(
         );
     }
 
+    if let Some(enabled) = ctx.fast_mode {
+        let advertised = applied_config_options
+            .as_ref()
+            .or_else(|| resp.raw.get("configOptions"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        applied_config_options =
+            Some(apply_fast_mode(&mut agent.acp, &resp.session_id, enabled, &advertised).await?);
+    }
+
     // Emit session config for desktop consumption (config bridge tier 1b).
     // Emitted AFTER desired_model resolution so the desktop caches the
     // post-switch state. modelOverridden reflects whether the switch actually
@@ -1259,6 +1271,79 @@ fn resolve_thinking_effort_config_id<'a>(
         )));
     }
     Ok(config_id)
+}
+
+async fn apply_fast_mode(
+    acp: &mut AcpClient,
+    session_id: &str,
+    enabled: bool,
+    config_options: &serde_json::Value,
+) -> Result<serde_json::Value, AcpError> {
+    let (config_id, value) = resolve_fast_mode_config_option(config_options, enabled)?;
+    let response = tokio::time::timeout(
+        MODEL_SWITCH_TIMEOUT,
+        acp.session_set_config_option(session_id, config_id, value),
+    )
+    .await
+    .map_err(|_| AcpError::Timeout(MODEL_SWITCH_TIMEOUT))??;
+    tracing::info!(
+        target: "pool::fast_mode",
+        fast_mode = enabled,
+        "applied native Fast mode via configOption on session {session_id}"
+    );
+    acp.observe(
+        "fast_mode_selection_verified",
+        serde_json::json!({ "enabled": enabled, "configId": config_id }),
+    );
+    Ok(response
+        .get("configOptions")
+        .cloned()
+        .unwrap_or_else(|| config_options.clone()))
+}
+
+fn resolve_fast_mode_config_option(
+    config_options: &serde_json::Value,
+    enabled: bool,
+) -> Result<(&str, &'static str), AcpError> {
+    let option = config_options.as_array().and_then(|options| {
+        options.iter().find(|option| {
+            let id = option
+                .get("id")
+                .or_else(|| option.get("configId"))
+                .and_then(|value| value.as_str());
+            id == Some("fast")
+                || id == Some("fast-mode")
+                || (option.get("category").and_then(|value| value.as_str()) == Some("model_config")
+                    && option
+                        .get("name")
+                        .or_else(|| option.get("displayName"))
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case("fast mode")))
+        })
+    });
+    let config_id = option
+        .and_then(|option| option.get("id").or_else(|| option.get("configId")))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            AcpError::Protocol(
+                "configured Fast mode is not available for the selected model".to_string(),
+            )
+        })?;
+    let desired = if enabled { "on" } else { "off" };
+    let advertised = option
+        .and_then(|option| option.get("options"))
+        .and_then(|value| value.as_array())
+        .is_some_and(|options| {
+            options
+                .iter()
+                .any(|option| option.get("value").and_then(|value| value.as_str()) == Some(desired))
+        });
+    if !advertised {
+        return Err(AcpError::Protocol(format!(
+            "Fast mode value {desired:?} is not advertised for the selected model"
+        )));
+    }
+    Ok((config_id, desired))
 }
 
 /// Set the session permission mode via `session/set_config_option`.
@@ -6503,6 +6588,7 @@ mod tests {
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
             thinking_effort: None,
+            fast_mode: None,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
@@ -7007,6 +7093,39 @@ mod tests {
             .to_string()
             .contains("not advertised"));
         assert!(resolve_thinking_effort_config_id(&json!([]), "high")
+            .unwrap_err()
+            .to_string()
+            .contains("not available"));
+    }
+
+    #[test]
+    fn native_fast_mode_resolution_accepts_claude_and_codex_option_ids() {
+        let claude = json!([{
+            "id": "fast",
+            "category": "model_config",
+            "name": "Fast mode",
+            "options": [{"value": "on"}, {"value": "off"}]
+        }]);
+        assert_eq!(
+            resolve_fast_mode_config_option(&claude, true).unwrap(),
+            ("fast", "on")
+        );
+
+        let codex = json!([{
+            "id": "fast-mode",
+            "category": "model_config",
+            "name": "Fast mode",
+            "options": [{"value": "off"}, {"value": "on"}]
+        }]);
+        assert_eq!(
+            resolve_fast_mode_config_option(&codex, false).unwrap(),
+            ("fast-mode", "off")
+        );
+    }
+
+    #[test]
+    fn native_fast_mode_resolution_rejects_unavailable_models() {
+        assert!(resolve_fast_mode_config_option(&json!([]), true)
             .unwrap_err()
             .to_string()
             .contains("not available"));

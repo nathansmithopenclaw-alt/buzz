@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deriveAgentConfigFieldModel } from "./agentConfigCore.ts";
+import {
+  AGENT_FAST_MODE_ENV_KEY,
+  deriveAgentConfigFieldModel,
+} from "./agentConfigCore.ts";
 
 const config = {
   env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high" },
@@ -86,6 +89,7 @@ test("Goose exposes provider, model, and its real effort application key", () =>
 });
 
 test("Claude exposes native ACP effort through the harness env bridge", () => {
+  assert.equal(AGENT_FAST_MODE_ENV_KEY, "BUZZ_ACP_FAST_MODE");
   const model = deriveAgentConfigFieldModel({
     config,
     runtime: runtime("claude", {
@@ -96,7 +100,7 @@ test("Claude exposes native ACP effort through the harness env bridge", () => {
 
   assert.deepEqual(
     model.fields.map((item) => item.kind),
-    ["model", "effort"],
+    ["model", "effort", "fastMode"],
   );
   assert.equal(field(model, "effort").render, "control");
   assert.equal(field(model, "effort").optionSource, "harnessNative");
@@ -108,6 +112,11 @@ test("Claude exposes native ACP effort through the harness env bridge", () => {
     kind: "envVar",
     key: "BUZZ_ACP_THINKING_EFFORT",
   });
+  assert.deepEqual(field(model, "fastMode").currentPersistence, {
+    kind: "envVar",
+    key: "BUZZ_ACP_FAST_MODE",
+  });
+  assert.equal(field(model, "fastMode").usageNotice, "claudeCreditsAndLimits");
 });
 
 test("Codex omits separate effort because model IDs own it", () => {
@@ -119,11 +128,12 @@ test("Codex omits separate effort because model IDs own it", () => {
 
   assert.deepEqual(
     model.fields.map((item) => item.kind),
-    ["model"],
+    ["model", "fastMode"],
   );
   assert.deepEqual(model.omissions, [
     { kind: "effort", reason: "ownedByModelId" },
   ]);
+  assert.equal(field(model, "fastMode").usageNotice, null);
 });
 
 test("catalog mismatch cleanup is named and restricted to onboarding", () => {

@@ -277,6 +277,7 @@ pub async fn discover_agent_models(
             supports_switching: true,
             effort_config_id: None,
             effort_options: Vec::new(),
+            ..AgentModelsResponse::default()
         });
     }
     #[cfg(not(feature = "mesh-llm"))]
@@ -285,7 +286,6 @@ pub async fn discover_agent_models(
     {
         return Err("Buzz shared compute is not available in this build".to_string());
     }
-
     if let Some(models) = discover_openrouter_models(
         &state.http_client,
         &effective_provider,
@@ -547,7 +547,6 @@ async fn discover_openai_compatible_models(
     if models.is_empty() {
         return Err("OpenAI model discovery returned no compatible text models".to_string());
     }
-
     Ok(Some(AgentModelsResponse {
         agent_name: provider.as_deref().unwrap_or("openai").trim().to_string(),
         agent_version: "models-api".to_string(),
@@ -557,6 +556,7 @@ async fn discover_openai_compatible_models(
         supports_switching: true,
         effort_config_id: None,
         effort_options: Vec::new(),
+        ..AgentModelsResponse::default()
     }))
 }
 
@@ -691,7 +691,6 @@ async fn discover_anthropic_models(
     if models.is_empty() {
         return Err("Anthropic model discovery returned no models".to_string());
     }
-
     Ok(Some(AgentModelsResponse {
         agent_name: provider
             .as_deref()
@@ -705,6 +704,7 @@ async fn discover_anthropic_models(
         supports_switching: true,
         effort_config_id: None,
         effort_options: Vec::new(),
+        ..AgentModelsResponse::default()
     }))
 }
 
@@ -799,9 +799,9 @@ async fn discover_databricks_models(
         supports_switching: true,
         effort_config_id: None,
         effort_options: Vec::new(),
+        ..AgentModelsResponse::default()
     }))
 }
-
 /// Apply an `UpdateManagedAgentRequest`'s model/provider/system_prompt patch
 /// to `record`, enforcing the linked-instance write guard: a definition-linked
 /// record's model/provider/prompt are definition-authoritative (see

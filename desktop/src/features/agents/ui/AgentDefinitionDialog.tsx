@@ -521,7 +521,7 @@ export function AgentDefinitionDialog({
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
-    nativeEffortOptions,
+    nativeTuning,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
@@ -556,7 +556,7 @@ export function AgentDefinitionDialog({
     isCustomEditing: isCustomModelEditing,
     model,
     modelFieldVisible,
-    nativeEffortOptions,
+    nativeEffortOptions: nativeTuning.effortOptions,
     provider: effectiveProvider,
     runtimeId: runtime,
   });
@@ -934,7 +934,7 @@ export function AgentDefinitionDialog({
                   envVars={envVars}
                   inheritedEnvVars={globalConfig.env_vars}
                   model={model}
-                  nativeEffortOptions={nativeEffortOptions}
+                  nativeTuning={nativeTuning}
                   onBeforeChange={() => setHasUserChanges(true)}
                   provider={effectiveProvider}
                   runtime={selectedRuntime}

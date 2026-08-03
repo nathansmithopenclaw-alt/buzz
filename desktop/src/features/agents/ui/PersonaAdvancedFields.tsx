@@ -4,6 +4,7 @@ import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
+import { AGENT_FAST_MODE_ENV_KEY } from "../lib/agentConfigCore";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import {
   PERSONA_FIELD_CONTROL_CLASS,
@@ -141,7 +142,7 @@ export function PersonaAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
-        hiddenKeys={hiddenEnvKeys}
+        hiddenKeys={[...hiddenEnvKeys, AGENT_FAST_MODE_ENV_KEY]}
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}

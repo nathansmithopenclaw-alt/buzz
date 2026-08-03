@@ -220,7 +220,7 @@ test("required-model harnesses always keep the control", () => {
   );
 });
 
-test("definition and instance dialogs place effort directly below model", async () => {
+test("definition and instance dialogs place model tuning directly below model", async () => {
   for (const [filename, modelMarker] of [
     ["AgentDefinitionDialog.tsx", "<PersonaModelField"],
     ["AgentInstanceEditDialog.tsx", 'htmlFor="edit-agent-model"'],
@@ -236,9 +236,30 @@ test("definition and instance dialogs place effort directly below model", async 
     assert.ok(effort > model, `${filename} must render Effort after Model`);
     assert.ok(
       advanced > effort,
-      `${filename} must render Effort before Advanced`,
+      `${filename} must render model tuning before Advanced`,
     );
   }
+
+  const tuning = await readFile(
+    new URL("./AgentDialogEffortField.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.ok(
+    tuning.indexOf("<AgentDialogFastModeSection") >
+      tuning.indexOf("<AgentDialogEffortField"),
+    "Fast mode must render directly after Effort in the shared tuning section",
+  );
+});
+
+test("Fast mode uses native capability gating and explicit unavailable copy", async () => {
+  const source = await readFile(
+    new URL("./AgentDialogFastModeField.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /nativeConfigId/);
+  assert.match(source, /not available for the selected model/);
+  assert.match(source, /not available for this runtime/);
+  assert.match(source, /higher rate and has separate rate limits/);
 });
 
 test("computed effort omissions are rendered instead of discarded", async () => {

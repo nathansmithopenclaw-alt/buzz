@@ -13,6 +13,7 @@ import {
   EffortSelectField,
   useEffortAutoClear,
 } from "./buzzAgentModelTuningFields";
+import { AgentDialogFastModeSection } from "./AgentDialogFastModeField";
 
 export function AgentDialogEffortField({
   disabled,
@@ -119,15 +120,25 @@ export function AgentDialogEffortField({
 }
 
 export function AgentDialogEffortSection({
+  nativeTuning,
   onBeforeChange,
   setEnvVars,
   validationError,
   ...fieldProps
 }: Omit<
   React.ComponentProps<typeof AgentDialogEffortField>,
-  "envVars" | "onEnvVarChange"
+  "envVars" | "nativeEffortOptions" | "onEnvVarChange"
 > & {
   envVars: EnvVarsValue;
+  nativeTuning: {
+    effortOptions: ReadonlyArray<{ id: string; name?: string | null }> | null;
+    fastMode: {
+      configId: string | null;
+      description: string | null;
+      discoveryReady: boolean;
+      enabled: boolean | null;
+    };
+  };
   onBeforeChange?: () => void;
   setEnvVars: React.Dispatch<React.SetStateAction<EnvVarsValue>>;
   validationError: string | null;
@@ -146,6 +157,7 @@ export function AgentDialogEffortSection({
       <AgentDialogEffortField
         {...fieldProps}
         envVars={fieldProps.envVars}
+        nativeEffortOptions={nativeTuning.effortOptions}
         onEnvVarChange={onEnvVarChange}
       />
       {validationError ? (
@@ -153,6 +165,19 @@ export function AgentDialogEffortSection({
           {validationError}
         </p>
       ) : null}
+      <AgentDialogFastModeSection
+        disabled={fieldProps.disabled}
+        discoveryReady={nativeTuning.fastMode.discoveryReady}
+        envVars={fieldProps.envVars}
+        model={fieldProps.model}
+        nativeConfigId={nativeTuning.fastMode.configId}
+        nativeDescription={nativeTuning.fastMode.description}
+        nativeEnabled={nativeTuning.fastMode.enabled}
+        onBeforeChange={onBeforeChange}
+        runtime={fieldProps.runtime}
+        scope={fieldProps.scope}
+        setEnvVars={setEnvVars}
+      />
     </div>
   );
 }

@@ -9,6 +9,8 @@ export type AgentConfigScope =
   | "definition"
   | "instance";
 
+export const AGENT_FAST_MODE_ENV_KEY = "BUZZ_ACP_FAST_MODE";
+
 export type DependentValuePolicy = {
   onContextChange: "resetDependentValues";
   onCatalogMismatch: "explainOnly" | "onboardingCleanup";
@@ -68,12 +70,29 @@ export type AgentConfigFieldDescriptor =
         | { kind: "acpConfigOption"; id: string; category: string };
       render: "control" | "deferredUntilNativeOptionsAvailable";
       value: string | null;
+    }
+  | {
+      kind: "fastMode";
+      optionSource: "harnessNative";
+      currentPersistence: EnvVarPersistence;
+      targetApplication: {
+        kind: "acpConfigOption";
+        category: "model_config";
+      };
+      render: "deferredUntilNativeOptionsAvailable";
+      usageNotice: "claudeCreditsAndLimits" | null;
+      value: string | null;
     };
 
-export type AgentConfigOmission = {
-  kind: "effort";
-  reason: "ownedByModelId" | "unsupportedByHarness";
-};
+export type AgentConfigOmission =
+  | {
+      kind: "effort";
+      reason: "ownedByModelId" | "unsupportedByHarness";
+    }
+  | {
+      kind: "fastMode";
+      reason: "unsupportedByHarness";
+    };
 
 export type AgentConfigFieldModel = {
   fields: AgentConfigFieldDescriptor[];
@@ -164,6 +183,23 @@ export function deriveAgentConfigFieldModel({
     });
   }
 
+  if (runtime?.id === "claude" || runtime?.id === "codex") {
+    fields.push({
+      kind: "fastMode",
+      optionSource: "harnessNative",
+      currentPersistence: { kind: "envVar", key: AGENT_FAST_MODE_ENV_KEY },
+      targetApplication: {
+        kind: "acpConfigOption",
+        category: "model_config",
+      },
+      render: "deferredUntilNativeOptionsAvailable",
+      usageNotice: runtime.id === "claude" ? "claudeCreditsAndLimits" : null,
+      value: valueFromEnv(config, AGENT_FAST_MODE_ENV_KEY),
+    });
+  } else {
+    omissions.push({ kind: "fastMode", reason: "unsupportedByHarness" });
+  }
+
   return {
     fields,
     omissions,
@@ -190,5 +226,16 @@ export function getRenderableEffortField(
   return model.fields.find(
     (field): field is Extract<AgentConfigFieldDescriptor, { kind: "effort" }> =>
       field.kind === "effort" && field.render === "control",
+  );
+}
+
+export function getFastModeField(
+  model: AgentConfigFieldModel,
+): Extract<AgentConfigFieldDescriptor, { kind: "fastMode" }> | undefined {
+  return model.fields.find(
+    (
+      field,
+    ): field is Extract<AgentConfigFieldDescriptor, { kind: "fastMode" }> =>
+      field.kind === "fastMode",
   );
 }

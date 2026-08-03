@@ -111,6 +111,50 @@ pub(super) fn normalize_agent_models(
         })
         .unwrap_or_default();
 
+    let fast_mode_option = raw["stable"]["configOptions"]
+        .as_array()
+        .and_then(|options| {
+            options.iter().find(|option| {
+                let id = option
+                    .get("id")
+                    .or_else(|| option.get("configId"))
+                    .and_then(|value| value.as_str());
+                id == Some("fast")
+                    || id == Some("fast-mode")
+                    || (option.get("category").and_then(|value| value.as_str())
+                        == Some("model_config")
+                        && option
+                            .get("name")
+                            .or_else(|| option.get("displayName"))
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|name| name.eq_ignore_ascii_case("fast mode")))
+            })
+        });
+    let fast_mode_config_id = fast_mode_option.and_then(|option| {
+        option
+            .get("id")
+            .or_else(|| option.get("configId"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    });
+    let fast_mode_enabled = fast_mode_option.and_then(|option| {
+        option.get("currentValue").and_then(|value| {
+            value
+                .as_bool()
+                .or_else(|| value.as_str().and_then(|value| match value {
+                    "on" => Some(true),
+                    "off" => Some(false),
+                    _ => None,
+                }))
+        })
+    });
+    let fast_mode_description = fast_mode_option.and_then(|option| {
+        option
+            .get("description")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    });
+
     AgentModelsResponse {
         agent_name,
         agent_version,
@@ -120,5 +164,8 @@ pub(super) fn normalize_agent_models(
         selected_model: persisted_model,
         effort_config_id,
         effort_options,
+        fast_mode_config_id,
+        fast_mode_enabled,
+        fast_mode_description,
     }
 }

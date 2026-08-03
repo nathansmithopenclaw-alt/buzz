@@ -432,6 +432,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_THINKING_EFFORT")]
     pub thinking_effort: Option<String>,
 
+    /// Desired Fast mode state. Applied through the adapter's native ACP
+    /// model-config option after the selected model is active.
+    #[arg(long, env = "BUZZ_ACP_FAST_MODE")]
+    pub fast_mode: Option<bool>,
+
     /// Title for the agent's ACP sessions, passed out-of-band in `session/new`
     /// `_meta`. Adapters that recognize it name the session after this value;
     /// others ignore it. Never enters the prompt.
@@ -539,6 +544,8 @@ pub struct Config {
     pub model: Option<String>,
     /// Desired native ACP effort value, validated against session/new.
     pub thinking_effort: Option<String>,
+    /// Desired native ACP Fast mode state, validated against session/new.
+    pub fast_mode: Option<bool>,
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
@@ -1056,6 +1063,7 @@ impl Config {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let fast_mode = args.fast_mode;
 
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
@@ -1105,6 +1113,7 @@ impl Config {
             memory_enabled: args.memory && !args.no_memory,
             model,
             thinking_effort,
+            fast_mode,
             session_title: args
                 .session_title
                 .as_deref()
@@ -1479,6 +1488,7 @@ mod tests {
             memory_enabled: true,
             model: None,
             thinking_effort: None,
+            fast_mode: None,
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,

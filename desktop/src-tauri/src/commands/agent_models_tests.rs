@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "agent_models_fast_mode_tests.rs"]
+mod fast_mode_tests;
+
 #[test]
 fn acp_model_normalization_carries_model_dependent_native_effort_values() {
     let response = normalize_agent_models(

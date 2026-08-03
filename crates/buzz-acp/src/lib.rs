@@ -1571,6 +1571,7 @@ async fn tokio_main() -> Result<()> {
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
         thinking_effort: config.thinking_effort.clone(),
+        fast_mode: config.fast_mode,
         agent_keys: config.keys.clone(),
         agent_owner_pubkey: startup_owner
             .as_deref()
@@ -5059,6 +5060,7 @@ mod build_mcp_servers_tests {
             heartbeat_prompt: None,
             system_prompt: None,
             thinking_effort: None,
+            fast_mode: None,
             team_instructions: None,
             initial_message: None,
             subscribe_mode: config::SubscribeMode::All,
@@ -5281,6 +5283,7 @@ mod error_outcome_emission_tests {
             heartbeat_prompt: None,
             system_prompt: None,
             thinking_effort: None,
+            fast_mode: None,
             team_instructions: None,
             initial_message: None,
             subscribe_mode: config::SubscribeMode::All,

@@ -10,6 +10,7 @@ import {
 import type { AgentPersona } from "@/shared/api/types";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
+import { AGENT_FAST_MODE_ENV_KEY } from "../lib/agentConfigCore";
 
 export function EditAgentAdvancedFields({
   acpCommand,
@@ -242,7 +243,7 @@ export function EditAgentAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
-        hiddenKeys={hiddenEnvKeys}
+        hiddenKeys={[...hiddenEnvKeys, AGENT_FAST_MODE_ENV_KEY]}
         focusKey={focusKey}
         helperText="Per-agent env vars. Override the template's vars on collision."
         inheritedFrom={inheritedEnvVars}

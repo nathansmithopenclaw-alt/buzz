@@ -1,4 +1,5 @@
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import { AGENT_FAST_MODE_ENV_KEY } from "../lib/agentConfigCore";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -44,6 +45,7 @@ export function selectionOnRuntimeChange(
   },
 ): RuntimeModelProviderSelection {
   const next = { ...current };
+  next.envVars = envVarsWithoutKey(next.envVars, AGENT_FAST_MODE_ENV_KEY);
 
   if (
     shouldClearModelForRuntimeChange(
@@ -150,6 +152,7 @@ export function selectionOnModelDropdownChange(
   },
 ): RuntimeModelProviderSelection {
   const next = { ...current };
+  next.envVars = envVarsWithoutKey(next.envVars, AGENT_FAST_MODE_ENV_KEY);
 
   if (params.nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
     next.isCustomModelEditing = true;

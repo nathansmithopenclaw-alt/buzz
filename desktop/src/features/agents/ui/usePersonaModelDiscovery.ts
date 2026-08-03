@@ -414,6 +414,17 @@ export function usePersonaModelDiscovery({
         : activeModelDiscoveryStatus,
     modelDiscoverySuccessfulEmpty,
     nativeEffortConfigId: activeModelDiscoveryData?.effortConfigId ?? null,
-    nativeEffortOptions,
+    nativeTuning: {
+      effortOptions: nativeEffortOptions,
+      fastMode: {
+        configId: activeModelDiscoveryData?.fastModeConfigId ?? null,
+        description: activeModelDiscoveryData?.fastModeDescription ?? null,
+        discoveryReady:
+          !modelDiscoveryPending &&
+          (activeModelDiscoveryData !== null ||
+            activeModelDiscoveryStatus !== null),
+        enabled: activeModelDiscoveryData?.fastModeEnabled ?? null,
+      },
+    },
   };
 }

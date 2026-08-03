@@ -511,6 +511,9 @@ type E2eConfig = {
       selectedModel?: string | null;
       effortConfigId?: string | null;
       effortOptions?: Array<{ id: string; name: string | null }>;
+      fastModeConfigId?: string | null;
+      fastModeEnabled?: boolean | null;
+      fastModeDescription?: string | null;
     };
     /**
      * When set, `discover_agent_models` throws with this message instead of
@@ -11572,6 +11575,9 @@ export function maybeInstallE2eTauriMocks() {
             supportsSwitching: discoverOverride.supportsSwitching,
             effortConfigId: discoverOverride.effortConfigId ?? null,
             effortOptions: discoverOverride.effortOptions ?? [],
+            fastModeConfigId: discoverOverride.fastModeConfigId ?? null,
+            fastModeEnabled: discoverOverride.fastModeEnabled ?? null,
+            fastModeDescription: discoverOverride.fastModeDescription ?? null,
           };
         }
         const input = (

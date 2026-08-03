@@ -712,7 +712,7 @@ pub struct UpdateManagedAgentResponse {
 }
 
 /// Response from `get_agent_models` — normalized model info for the frontend.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentModelsResponse {
     pub agent_name: String,
@@ -729,6 +729,12 @@ pub struct AgentModelsResponse {
     pub effort_config_id: Option<String>,
     /// Native effort values advertised for the selected model, in wire order.
     pub effort_options: Vec<AgentEffortInfo>,
+    /// Native Fast mode option id advertised for the selected model.
+    pub fast_mode_config_id: Option<String>,
+    /// Adapter-reported Fast mode state for the fresh session.
+    pub fast_mode_enabled: Option<bool>,
+    /// Adapter-provided Fast mode description.
+    pub fast_mode_description: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

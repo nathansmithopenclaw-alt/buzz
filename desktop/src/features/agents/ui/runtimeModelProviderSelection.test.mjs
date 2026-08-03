@@ -45,7 +45,10 @@ test("runtime change to a provider-locked runtime, provider-only reset (Create):
     {
       ...base,
       provider: "anthropic",
-      envVars: { ANTHROPIC_API_KEY: "sk-1" },
+      envVars: {
+        ANTHROPIC_API_KEY: "sk-1",
+        BUZZ_ACP_FAST_MODE: "true",
+      },
       isCustomModelEditing: true,
       model: "my-custom",
     },
@@ -227,4 +230,20 @@ test("auto-model selection clears the model; concrete selection sets it", () => 
     },
   );
   assert.equal(concrete.model, "gpt-5");
+});
+
+test("model selection clears the model-dependent Fast mode override", () => {
+  const next = selectionOnModelDropdownChange(
+    {
+      ...base,
+      envVars: { BUZZ_ACP_FAST_MODE: "true", KEEP: "x" },
+    },
+    {
+      nextValue: "claude-fable-5",
+      clearKnownModelOnCustomEntry: false,
+      isModelCustom: false,
+    },
+  );
+
+  assert.deepEqual(next.envVars, { KEEP: "x" });
 });

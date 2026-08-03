@@ -410,7 +410,7 @@ export function AgentInstanceEditDialog({
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
-    nativeEffortOptions,
+    nativeTuning,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
@@ -614,7 +614,7 @@ export function AgentInstanceEditDialog({
     isCustomEditing: isCustomModelEditing,
     model,
     modelFieldVisible: true,
-    nativeEffortOptions,
+    nativeEffortOptions: nativeTuning.effortOptions,
     provider: providerForDiscovery,
     runtimeId: prospectiveRuntimeId,
   });
@@ -1123,14 +1123,13 @@ export function AgentInstanceEditDialog({
               envVars={envVars}
               inheritedEnvVars={inheritedEnvVars}
               model={model}
-              nativeEffortOptions={nativeEffortOptions}
+              nativeTuning={nativeTuning}
               provider={effectiveProvider}
               runtime={selectedRuntime}
               scope="instance"
               setEnvVars={setEnvVars}
               validationError={modelValidationError ?? effortValidationError}
             />
-
             <AgentAiDefaultsNotice
               onEditDefaults={() => setAiDefaultsOpen(true)}
               triggerRef={aiDefaultsTriggerRef}

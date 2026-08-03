@@ -61,12 +61,18 @@ that frontend inventory.
    (an async catalog miss never silently erases saved state outside
    onboarding's named cleanup). Do not add mutation booleans like
    `clearInvalidModel`; extend the policy types.
-5. **"Metadata unknown" ≠ "harness lacks the capability".** Passing
+5. **Fast mode follows the same capability contract.** Claude and Codex expose
+   model-dependent native ACP options, persisted per agent through the
+   descriptor's `BUZZ_ACP_FAST_MODE` key and applied after model selection.
+   Clear it on an explicit model/runtime context change; an asynchronous
+   catalog miss must only explain the mismatch. Never synthesize OpenRouter
+   throughput routing as Fast mode.
+6. **"Metadata unknown" ≠ "harness lacks the capability".** Passing
    `runtime: undefined` to the core means fields won't render. Surfaces must
    gate on the runtime catalog query settling (loading/error states) rather
    than letting fields silently vanish — see `AgentDefaultsEditor` /
    `DefaultConfigStep` for the pattern.
-6. **One canonical behavior, disclosure presets for visibility.** Behavior
+7. **One canonical behavior, disclosure presets for visibility.** Behavior
    flags were deliberately killed in #2148 (`CANONICAL_CONFIG_BEHAVIORS`).
    Surface differences are expressed via the `disclosure` preset, not new
    boolean props.  **Exception:** `onboarding-essential` hides happy-path
@@ -78,7 +84,7 @@ that frontend inventory.
    via `synthesizeEmptyDiscoveryStatus()` and is intentionally **not cached**
    so that closing → reopening the dialog re-runs discovery after the user
    installs or signs into the CLI (`isCacheableDiscoveryResponse()`).
-7. **Onboarding setup detects readiness; it does not select defaults.** The
+8. **Onboarding setup detects readiness; it does not select defaults.** The
    setup page derives visible and ready harnesses from the runtime catalog and
    only offers install or sign-in actions. The following defaults page is the
    sole onboarding surface that chooses and persists `preferred_runtime`, and
@@ -88,7 +94,7 @@ that frontend inventory.
    provider). Baked build env and runtime-file config satisfy the gate.
    `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
    touching this flow or the shared renderer.
-8. **Omit the Model control only after a confirmed successful empty
+9. **Omit the Model control only after a confirmed successful empty
    discovery on an optional-model harness.** When the field model marks model
    as `acpNative` (Claude Code / Codex), `shouldRenderModelControl` hides the
    picker while discovery is in flight and after IPC resolves with no usable
@@ -99,7 +105,7 @@ that frontend inventory.
    harnesses always keep the field. Gate: `defaults hides model when optional
    harness has empty discovery` (and the failed-discovery counterpart) in
    `onboarding-agent-defaults.spec.ts`.
-9. **The defaults modal is progressively disclosed.** An unset global config
+10. **The defaults modal is progressively disclosed.** An unset global config
    starts on the Buzz Agent-first deployment fallback and carries that visible
    harness into the next saved edit. The `progressive-defaults` disclosure
    preset therefore begins at Provider for Buzz Agent, then reveals Model,
@@ -120,7 +126,7 @@ that frontend inventory.
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
    picker rather than hiding it in Advanced.
-10. **Catalog visibility is community-scoped relay state, never a global
+11. **Catalog visibility is community-scoped relay state, never a global
     definition field.** `AgentDefinition.shared` is only the active
     relay+owner projection returned to the UI. Durable heads and pending
     publications live in the scoped retention database, and explicit share
@@ -128,7 +134,7 @@ that frontend inventory.
     published or removed. A queued update must stay visibly queued, and the
     catalog itself must render only relay-confirmed publications — never an
     optimistic local persona.
-11. **Shared agent access names the consequence where it is selected.** The
+12. **Shared agent access names the consequence where it is selected.** The
    shared respond-to field shows a persistent warning whenever `anyone` **or**
    `allowlist` is selected — both hand the host's access to someone other than
    the owner, so both disclose it and only the audience phrase differs. This

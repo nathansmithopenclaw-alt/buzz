@@ -339,7 +339,7 @@ test.describe("edit agent dialog", () => {
   test("Claude Edit Agent shows the complete catalog with native effort directly below model", async ({
     page,
   }) => {
-    const claudeCatalog = [
+    const advertisedClaudeCatalog = [
       ["opus", "Claude Opus (current)"],
       ["sonnet", "Claude Sonnet (current)"],
       ["haiku", "Claude Haiku (current)"],
@@ -357,6 +357,7 @@ test.describe("edit agent dialog", () => {
       ["claude-sonnet-4-20250514", "Claude Sonnet 4 (2025-05-14)"],
       ["claude-haiku-4-5-20251001", "Claude Haiku 4.5 (2025-10-01)"],
     ] as const;
+    const canonicalClaudeCatalog = advertisedClaudeCatalog.slice(3);
     await installMockBridge(page, {
       acpRuntimesCatalog: [
         {
@@ -386,7 +387,7 @@ test.describe("edit agent dialog", () => {
         },
       ],
       discoverAgentModels: {
-        models: claudeCatalog.map(([id, name]) => ({
+        models: advertisedClaudeCatalog.map(([id, name]) => ({
           id,
           name,
         })),
@@ -395,6 +396,9 @@ test.describe("edit agent dialog", () => {
         effortOptions: ["default", "low", "medium", "high", "xhigh", "max"].map(
           (id) => ({ id, name: id === "default" ? "Default" : id }),
         ),
+        fastModeConfigId: "fast",
+        fastModeEnabled: false,
+        fastModeDescription: "Fast mode",
       },
     });
 
@@ -408,28 +412,51 @@ test.describe("edit agent dialog", () => {
     const dialog = page.getByTestId("edit-agent-dialog");
     const model = page.locator("#edit-agent-model");
     const effort = page.getByTestId("instance-agent-effort-select");
+    const fastMode = page.getByTestId("agent-fast-mode-field");
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await expect(model).toBeVisible({ timeout: 10_000 });
     await expect(effort).toBeVisible({ timeout: 10_000 });
-    const [modelBox, effortBox] = await Promise.all([
+    await expect(fastMode).toBeVisible({ timeout: 10_000 });
+    await expect(fastMode).toContainText(
+      "Uses usage credits at a higher rate and has separate rate limits.",
+    );
+    const [modelBox, effortBox, fastModeBox] = await Promise.all([
       model.boundingBox(),
       effort.boundingBox(),
+      fastMode.boundingBox(),
     ]);
     expect(effortBox?.y ?? 0).toBeGreaterThan(
       (modelBox?.y ?? 0) + (modelBox?.height ?? 0),
     );
+    expect(fastModeBox?.y ?? 0).toBeGreaterThan(
+      (effortBox?.y ?? 0) + (effortBox?.height ?? 0),
+    );
     await dialog.screenshot({
       path: "test-results/model-selector-effort/01-claude-model-and-effort.png",
     });
+    await fastMode.scrollIntoViewIfNeeded();
+    await dialog.screenshot({
+      path: "test-results/model-selector-effort/02-claude-fast-mode.png",
+    });
 
+    await dialog.evaluate((root) => {
+      for (const element of [root, ...root.querySelectorAll("*")]) {
+        if (element.scrollHeight > element.clientHeight) element.scrollTop = 0;
+      }
+    });
     await model.click();
-    for (const [, name] of claudeCatalog) {
+    for (const [, name] of canonicalClaudeCatalog) {
       await expect(
         page.getByRole("menuitemradio").filter({ hasText: name }),
       ).toBeAttached();
     }
-    await page.screenshot({
-      path: "test-results/model-selector-effort/02-claude-full-catalog.png",
+    for (const [, aliasName] of advertisedClaudeCatalog.slice(0, 3)) {
+      await expect(
+        page.getByRole("menuitemradio").filter({ hasText: aliasName }),
+      ).toHaveCount(0);
+    }
+    await page.getByRole("menu").screenshot({
+      path: "test-results/model-selector-effort/03-claude-full-catalog.png",
     });
 
     await page
