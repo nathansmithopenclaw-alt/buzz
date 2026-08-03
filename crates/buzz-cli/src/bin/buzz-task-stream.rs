@@ -166,6 +166,12 @@ fn complete_channel_backfill(state: &mut TaskSubscriptionState) -> Vec<TaskEnvel
     std::mem::take(&mut state.backfill)
 }
 
+fn event_is_not_cursor(event: &TaskEnvelopeEvent, args: &Args) -> bool {
+    args.cursor_event_id.is_empty()
+        || event.created_at != args.cursor_created_at
+        || event.event_id != args.cursor_event_id
+}
+
 async fn ensure_task_subscription(
     connection: &mut NostrWsConnection,
     subscriptions: &mut BTreeMap<String, TaskSubscriptionState>,
@@ -195,6 +201,21 @@ fn expired_backfill_subscriptions(
         .collect()
 }
 
+fn complete_expired_backfills(
+    subscriptions: &mut BTreeMap<String, TaskSubscriptionState>,
+    now: Instant,
+) -> Vec<(String, Vec<TaskEnvelopeEvent>)> {
+    expired_backfill_subscriptions(subscriptions, now)
+        .into_iter()
+        .filter_map(|subscription_id| {
+            subscriptions
+                .get_mut(&subscription_id)
+                .map(complete_channel_backfill)
+                .map(|events| (subscription_id, events))
+        })
+        .collect()
+}
+
 fn next_event_timeout(
     subscriptions: &BTreeMap<String, TaskSubscriptionState>,
     now: Instant,
@@ -218,12 +239,12 @@ async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
     let mut discovery_complete = false;
     let mut subscriptions = BTreeMap::new();
     loop {
-        for subscription_id in expired_backfill_subscriptions(&subscriptions, Instant::now()) {
+        for (subscription_id, events) in
+            complete_expired_backfills(&mut subscriptions, Instant::now())
+        {
             eprintln!("relay task backfill EOSE deadline elapsed for {subscription_id}; emitting buffered events");
-            if let Some(state) = subscriptions.get_mut(&subscription_id) {
-                for task_event in complete_channel_backfill(state) {
-                    emit_event(&task_event, &bridge_pubkey)?;
-                }
+            for task_event in events {
+                emit_event(&task_event, &bridge_pubkey)?;
             }
         }
         let wait = next_event_timeout(&subscriptions, Instant::now());
@@ -262,6 +283,9 @@ async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
             }) if event_subscription.starts_with(TASK_SUBSCRIPTION_PREFIX) => {
                 match TaskEnvelopeEvent::from_event(&event) {
                     Ok(task_event) => {
+                        if !event_is_not_cursor(&task_event, args) {
+                            continue;
+                        }
                         let Some(state) = subscriptions.get_mut(&event_subscription) else {
                             continue;
                         };
@@ -306,6 +330,14 @@ async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
     }
 }
 
+fn stream_error_exit_code(error: &str) -> i32 {
+    if error.starts_with("relay connect/auth failed:") {
+        3
+    } else {
+        2
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -327,7 +359,7 @@ async fn main() {
 
     if let Err(error) = stream_once(&args, &keys).await {
         eprintln!("{error}");
-        std::process::exit(2);
+        std::process::exit(stream_error_exit_code(&error));
     }
 }
 
@@ -377,6 +409,26 @@ mod tests {
     fn event_fixture_preserves_cursor_tuple_fields() {
         let event = event(100, "b");
         assert_eq!((event.created_at, event.event_id.as_str()), (100, "b"));
+    }
+
+    #[test]
+    fn cursor_event_id_skips_only_the_exact_processed_event() {
+        let args = Args::parse_from([
+            "buzz-task-stream",
+            "--cursor-created-at",
+            "100",
+            "--cursor-event-id",
+            "b",
+        ]);
+
+        assert!(event_is_not_cursor(&event(99, "z"), &args));
+        assert!(event_is_not_cursor(&event(100, "a"), &args));
+        assert!(!event_is_not_cursor(&event(100, "b"), &args));
+        assert!(event_is_not_cursor(&event(100, "c"), &args));
+        assert!(event_is_not_cursor(&event(101, "a"), &args));
+
+        let timestamp_only = Args::parse_from(["buzz-task-stream", "--cursor-created-at", "100"]);
+        assert!(event_is_not_cursor(&event(100, "a"), &timestamp_only));
     }
 
     #[test]
@@ -441,6 +493,49 @@ mod tests {
             vec!["expired"]
         );
         assert_eq!(next_event_timeout(&subscriptions, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn chatty_other_channel_does_not_extend_a_missing_eose_deadline() {
+        let now = Instant::now();
+        let mut subscriptions = BTreeMap::new();
+        let mut stalled = TaskSubscriptionState::new(now);
+        stalled.backfill.push(event(100, "stalled"));
+        subscriptions.insert("stalled".to_string(), stalled);
+
+        let mut chatty = TaskSubscriptionState::new(now);
+        chatty.backfill_complete = true;
+        subscriptions.insert("chatty".to_string(), chatty);
+        subscriptions.insert(
+            "later".to_string(),
+            TaskSubscriptionState::new(now + Duration::from_secs(15)),
+        );
+
+        for elapsed in [1, 5, 10, 20, 29] {
+            assert!(complete_expired_backfills(
+                &mut subscriptions,
+                now + Duration::from_secs(elapsed),
+            )
+            .is_empty());
+            assert!(subscriptions["chatty"].backfill_complete);
+        }
+
+        let released = complete_expired_backfills(&mut subscriptions, now + BACKFILL_EOSE_DEADLINE);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].0, "stalled");
+        assert_eq!(released[0].1[0].event_id, "stalled");
+        assert!(subscriptions["stalled"].backfill_complete);
+        assert!(subscriptions["chatty"].backfill_complete);
+        assert!(!subscriptions["later"].backfill_complete);
+    }
+
+    #[test]
+    fn auth_failures_request_secret_invalidation_exit_code() {
+        assert_eq!(
+            stream_error_exit_code("relay connect/auth failed: relay rejected authentication"),
+            3
+        );
+        assert_eq!(stream_error_exit_code("relay stream failed: timeout"), 2);
     }
 
     #[test]
