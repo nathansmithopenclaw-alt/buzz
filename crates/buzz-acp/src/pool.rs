@@ -90,6 +90,7 @@ fn is_channel_report_kind(kind: u32) -> bool {
 struct PublicationWatch {
     channel_id: Uuid,
     observed_at_start: u64,
+    turn_started_at: nostr::Timestamp,
     thread_tags: ThreadTags,
 }
 
@@ -1675,12 +1676,76 @@ fn publication_watch_for_batch(
     Some(PublicationWatch {
         channel_id: batch.channel_id,
         observed_at_start: tracker.snapshot(batch.channel_id),
+        turn_started_at: nostr::Timestamp::now(),
         thread_tags,
     })
 }
 
 fn publication_missing(watch: &PublicationWatch, tracker: &ChannelPublicationTracker) -> bool {
     !tracker.advanced_since(watch.channel_id, watch.observed_at_start)
+}
+
+fn self_authored_report_filter(
+    watch: &PublicationWatch,
+    agent_pubkey: nostr::PublicKey,
+) -> nostr::Filter {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    nostr::Filter::new()
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_FORUM_POST as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_FORUM_COMMENT as u16),
+        ])
+        .author(agent_pubkey)
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            [watch.channel_id.to_string()],
+        )
+        .since(watch.turn_started_at)
+        .limit(1)
+}
+
+/// Pull-verify a report when the subscription-fed tracker did not advance.
+///
+/// `None` means the relay could not give us a trustworthy answer. Callers must
+/// fail closed (skip the notice) in that case: a silence warning is only useful
+/// when absence was positively checked, and the warning itself uses the same
+/// REST path.
+async fn self_authored_report_exists(watch: &PublicationWatch, rest: &RestClient) -> Option<bool> {
+    let filter = self_authored_report_filter(watch, rest.keys.public_key());
+    match timeout(
+        CONTEXT_FETCH_TIMEOUT,
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    {
+        Ok(Ok(events)) => match events.as_array() {
+            Some(events) => Some(!events.is_empty()),
+            None => {
+                tracing::warn!(
+                    channel = %watch.channel_id,
+                    "publication pull verification returned a non-array response; suppressing silence notice"
+                );
+                None
+            }
+        },
+        Ok(Err(e)) => {
+            tracing::warn!(
+                channel = %watch.channel_id,
+                "publication pull verification failed; suppressing silence notice: {e}"
+            );
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                channel = %watch.channel_id,
+                "publication pull verification timed out; suppressing silence notice"
+            );
+            None
+        }
+    }
 }
 
 fn publication_silence_notice_content(turn_id: &str) -> String {
@@ -1709,6 +1774,10 @@ fn spawn_publication_silence_notice(
         tokio::time::sleep(PUBLICATION_SETTLE_DELAY).await;
         if !publication_missing(&watch, &ctx.publication_tracker) {
             return;
+        }
+        match self_authored_report_exists(&watch, &ctx.rest_client).await {
+            Some(false) => {}
+            Some(true) | None => return,
         }
         let content = publication_silence_notice_content(&turn_id);
         post_failure_notice(
@@ -6775,6 +6844,41 @@ mod tests {
         }
     }
 
+    async fn publication_query_client(
+        response: serde_json::Value,
+    ) -> (RestClient, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind publication query test server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let body = response.to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept query request");
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write query response");
+        });
+        (
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+            server,
+        )
+    }
+
     #[test]
     fn publication_tracker_counts_only_visible_channel_reports() {
         let tracker = ChannelPublicationTracker::default();
@@ -6830,6 +6934,63 @@ mod tests {
 
         tracker.observe(channel, buzz_core::kind::KIND_STREAM_MESSAGE);
         assert!(!publication_missing(&watch, &tracker));
+    }
+
+    #[test]
+    fn publication_pull_filter_is_scoped_to_self_channel_kinds_and_turn_start() {
+        let agent_keys = nostr::Keys::generate();
+        let tracker = ChannelPublicationTracker::default();
+        let channel = Uuid::new_v4();
+        let batch = addressed_batch(channel, &agent_keys);
+        let mut watch =
+            publication_watch_for_batch(Some(&batch), &agent_keys.public_key().to_hex(), &tracker)
+                .unwrap();
+        watch.turn_started_at = Timestamp::from(1_234_u64);
+
+        let filter = self_authored_report_filter(&watch, agent_keys.public_key());
+        let json = serde_json::to_value(filter).expect("serialize publication filter");
+
+        assert_eq!(
+            json.get("authors"),
+            Some(&json!([agent_keys.public_key().to_hex()]))
+        );
+        assert_eq!(json.get("kinds"), Some(&json!([9, 40002, 45001, 45003])));
+        assert_eq!(json.get("#h"), Some(&json!([channel.to_string()])));
+        assert_eq!(json.get("since"), Some(&json!(1_234)));
+        assert_eq!(json.get("limit"), Some(&json!(1)));
+    }
+
+    #[tokio::test]
+    async fn publication_pull_verification_detects_a_relay_report() {
+        let agent_keys = nostr::Keys::generate();
+        let tracker = ChannelPublicationTracker::default();
+        let channel = Uuid::new_v4();
+        let batch = addressed_batch(channel, &agent_keys);
+        let watch =
+            publication_watch_for_batch(Some(&batch), &agent_keys.public_key().to_hex(), &tracker)
+                .unwrap();
+        let (rest, server) = publication_query_client(json!([{ "id": "report" }])).await;
+
+        assert_eq!(self_authored_report_exists(&watch, &rest).await, Some(true));
+        server.await.expect("publication query server");
+    }
+
+    #[tokio::test]
+    async fn publication_pull_verification_confirms_relay_silence() {
+        let agent_keys = nostr::Keys::generate();
+        let tracker = ChannelPublicationTracker::default();
+        let channel = Uuid::new_v4();
+        let batch = addressed_batch(channel, &agent_keys);
+        let watch =
+            publication_watch_for_batch(Some(&batch), &agent_keys.public_key().to_hex(), &tracker)
+                .unwrap();
+        let (rest, server) = publication_query_client(json!([])).await;
+
+        assert_eq!(
+            self_authored_report_exists(&watch, &rest).await,
+            Some(false)
+        );
+        server.await.expect("publication query server");
     }
 
     #[test]
