@@ -1585,6 +1585,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        publication_tracker: pool::ChannelPublicationTracker::default(),
     });
 
     if !config.memory_enabled {
@@ -2049,9 +2050,15 @@ async fn tokio_main() -> Result<()> {
                                 continue;
                             }
 
-                            if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
-                                tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
-                                continue;
+                            if buzz_event.event.pubkey.to_hex() == pubkey_hex {
+                                ctx.publication_tracker.observe(
+                                    buzz_event.channel_id,
+                                    buzz_event.event.kind.as_u16() as u32,
+                                );
+                                if config.ignore_self {
+                                    tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
+                                    continue;
+                                }
                             }
 
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.

@@ -41,6 +41,58 @@ use crate::queue::{
 };
 use crate::relay::{ChannelInfo, RestClient};
 
+const PUBLICATION_SETTLE_DELAY: Duration = Duration::from_secs(1);
+
+/// Counts visible, self-authored channel reports observed on the harness relay
+/// subscription. Reactions and typing/presence frames deliberately do not
+/// advance the counter: the harness emits those itself, and they are not a
+/// human-readable report from the agent runtime.
+#[derive(Default)]
+pub struct ChannelPublicationTracker {
+    counts: Mutex<HashMap<Uuid, u64>>,
+}
+
+impl ChannelPublicationTracker {
+    pub fn observe(&self, channel_id: Uuid, kind: u32) {
+        if !is_channel_report_kind(kind) {
+            return;
+        }
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        let count = counts.entry(channel_id).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    fn snapshot(&self, channel_id: Uuid) -> u64 {
+        self.counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&channel_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn advanced_since(&self, channel_id: Uuid, snapshot: u64) -> bool {
+        self.snapshot(channel_id) > snapshot
+    }
+}
+
+fn is_channel_report_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        buzz_core::kind::KIND_STREAM_MESSAGE
+            | buzz_core::kind::KIND_STREAM_MESSAGE_V2
+            | buzz_core::kind::KIND_FORUM_POST
+            | buzz_core::kind::KIND_FORUM_COMMENT
+    )
+}
+
+#[derive(Clone, Debug)]
+struct PublicationWatch {
+    channel_id: Uuid,
+    observed_at_start: u64,
+    thread_tags: ThreadTags,
+}
+
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
@@ -555,6 +607,10 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Self-authored channel reports observed by the harness subscription.
+    /// Used only to detect a successful mention-triggered turn that produced
+    /// no visible report; never stores or republishes agent output content.
+    pub publication_tracker: ChannelPublicationTracker,
 }
 
 impl AgentPool {
@@ -1591,6 +1647,80 @@ fn send_prompt_result(
     });
 }
 
+fn event_mentions_pubkey(event: &nostr::Event, pubkey_hex: &str) -> bool {
+    event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.first().map(String::as_str) == Some("p")
+            && parts.get(1).map(String::as_str) == Some(pubkey_hex)
+    })
+}
+
+fn publication_watch_for_batch(
+    batch: Option<&FlushBatch>,
+    agent_pubkey_hex: &str,
+    tracker: &ChannelPublicationTracker,
+) -> Option<PublicationWatch> {
+    let batch = batch?;
+    let trigger = batch
+        .events
+        .iter()
+        .rev()
+        .find(|event| event_mentions_pubkey(&event.event, agent_pubkey_hex))?;
+    let mut thread_tags = crate::queue::parse_thread_tags(&trigger.event);
+    if thread_tags.root_event_id.is_none() {
+        let trigger_id = trigger.event.id.to_hex();
+        thread_tags.root_event_id = Some(trigger_id.clone());
+        thread_tags.parent_event_id = Some(trigger_id);
+    }
+    Some(PublicationWatch {
+        channel_id: batch.channel_id,
+        observed_at_start: tracker.snapshot(batch.channel_id),
+        thread_tags,
+    })
+}
+
+fn publication_missing(watch: &PublicationWatch, tracker: &ChannelPublicationTracker) -> bool {
+    !tracker.advanced_since(watch.channel_id, watch.observed_at_start)
+}
+
+fn publication_silence_notice_content(turn_id: &str) -> String {
+    format!(
+        "⚠️ A mention-triggered turn completed with no channel report \
+         (turn_outcome: outcome=ok, fate=completed). Inspect the local agent \
+         transcript/log for turn `{turn_id}`; the runtime may have been unable \
+         to publish its result."
+    )
+}
+
+fn spawn_publication_silence_notice(
+    ctx: &Arc<PromptContext>,
+    watch: Option<PublicationWatch>,
+    turn_id: &str,
+) {
+    let Some(watch) = watch else {
+        return;
+    };
+    let ctx = Arc::clone(ctx);
+    let turn_id = turn_id.to_string();
+    tokio::spawn(async move {
+        // A CLI send can return just before the relay fans the signed event
+        // back to this WebSocket. Give that event one bounded settle window so
+        // a successful report does not race its own failure notice.
+        tokio::time::sleep(PUBLICATION_SETTLE_DELAY).await;
+        if !publication_missing(&watch, &ctx.publication_tracker) {
+            return;
+        }
+        let content = publication_silence_notice_content(&turn_id);
+        post_failure_notice(
+            &ctx.rest_client,
+            watch.channel_id,
+            &watch.thread_tags,
+            &content,
+        )
+        .await;
+    });
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -1617,6 +1747,11 @@ pub async fn run_prompt_task(
         Some(b) => PromptSource::Channel(b.channel_id),
         None => PromptSource::Heartbeat,
     };
+    let publication_watch = publication_watch_for_batch(
+        batch.as_ref(),
+        &ctx.agent_keys.public_key().to_hex(),
+        &ctx.publication_tracker,
+    );
     let observer_channel_id = match &source {
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
@@ -2347,6 +2482,11 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
+                        spawn_publication_silence_notice(
+                            &ctx,
+                            publication_watch,
+                            &turn_id,
+                        );
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -2434,6 +2574,8 @@ pub async fn run_prompt_task(
                 Some(core_stop),
             )
             .await;
+
+            spawn_publication_silence_notice(&ctx, publication_watch, &turn_id);
 
             send_prompt_result(
                 &result_tx,
@@ -6610,7 +6752,124 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            publication_tracker: ChannelPublicationTracker::default(),
         }
+    }
+
+    fn addressed_batch(channel_id: Uuid, agent_keys: &nostr::Keys) -> FlushBatch {
+        let author = nostr::Keys::generate();
+        let mention = nostr::Tag::parse(["p", &agent_keys.public_key().to_hex()]).unwrap();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "please report")
+            .tags([mention])
+            .sign_with_keys(&author)
+            .unwrap();
+        FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "custom-addressed-rule".to_string(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn publication_tracker_counts_only_visible_channel_reports() {
+        let tracker = ChannelPublicationTracker::default();
+        let channel = Uuid::new_v4();
+        let other = Uuid::new_v4();
+
+        tracker.observe(channel, 7); // harness 👀 reaction
+        tracker.observe(channel, buzz_core::kind::KIND_TYPING_INDICATOR);
+        tracker.observe(channel, buzz_core::kind::KIND_PRESENCE_UPDATE);
+        assert_eq!(tracker.snapshot(channel), 0);
+
+        tracker.observe(channel, buzz_core::kind::KIND_STREAM_MESSAGE);
+        tracker.observe(other, buzz_core::kind::KIND_FORUM_COMMENT);
+        assert_eq!(tracker.snapshot(channel), 1);
+        assert_eq!(tracker.snapshot(other), 1);
+    }
+
+    #[test]
+    fn addressed_turn_without_report_requires_silence_notice() {
+        let agent_keys = nostr::Keys::generate();
+        let tracker = ChannelPublicationTracker::default();
+        let channel = Uuid::new_v4();
+        let batch = addressed_batch(channel, &agent_keys);
+        let trigger_id = batch.events[0].event.id.to_hex();
+
+        let watch =
+            publication_watch_for_batch(Some(&batch), &agent_keys.public_key().to_hex(), &tracker)
+                .expect("p-tagged batch should be watched even with a custom prompt tag");
+
+        assert!(publication_missing(&watch, &tracker));
+        assert_eq!(
+            watch.thread_tags.root_event_id.as_deref(),
+            Some(trigger_id.as_str())
+        );
+        assert_eq!(
+            watch.thread_tags.parent_event_id.as_deref(),
+            Some(trigger_id.as_str())
+        );
+    }
+
+    #[test]
+    fn self_authored_report_suppresses_silence_notice_but_reaction_does_not() {
+        let agent_keys = nostr::Keys::generate();
+        let tracker = ChannelPublicationTracker::default();
+        let channel = Uuid::new_v4();
+        let batch = addressed_batch(channel, &agent_keys);
+        let watch =
+            publication_watch_for_batch(Some(&batch), &agent_keys.public_key().to_hex(), &tracker)
+                .unwrap();
+
+        tracker.observe(channel, 7);
+        assert!(publication_missing(&watch, &tracker));
+
+        tracker.observe(channel, buzz_core::kind::KIND_STREAM_MESSAGE);
+        assert!(!publication_missing(&watch, &tracker));
+    }
+
+    #[test]
+    fn unaddressed_turn_does_not_create_publication_watch() {
+        let agent_keys = nostr::Keys::generate();
+        let author = nostr::Keys::generate();
+        let channel = Uuid::new_v4();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "ambient")
+            .sign_with_keys(&author)
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id: channel,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "all".to_string(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        assert!(publication_watch_for_batch(
+            Some(&batch),
+            &agent_keys.public_key().to_hex(),
+            &ChannelPublicationTracker::default(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn publication_silence_notice_is_metadata_only() {
+        let content = publication_silence_notice_content("turn-123");
+        assert_eq!(
+            content,
+            "⚠️ A mention-triggered turn completed with no channel report \
+             (turn_outcome: outcome=ok, fate=completed). Inspect the local agent \
+             transcript/log for turn `turn-123`; the runtime may have been unable \
+             to publish its result."
+        );
+        assert!(!content.contains("rejected content"));
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────
