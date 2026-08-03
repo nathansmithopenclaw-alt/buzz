@@ -190,10 +190,8 @@ fn expired_backfill_subscriptions(
 ) -> Vec<String> {
     subscriptions
         .iter()
-        .filter_map(|(subscription_id, state)| {
-            (!state.backfill_complete && now >= state.backfill_deadline)
-                .then(|| subscription_id.clone())
-        })
+        .filter(|(_, state)| !state.backfill_complete && now >= state.backfill_deadline)
+        .map(|(subscription_id, _)| subscription_id.clone())
         .collect()
 }
 

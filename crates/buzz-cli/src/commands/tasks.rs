@@ -233,8 +233,7 @@ async fn assign(
     Ok(())
 }
 
-async fn update(
-    client: &BuzzClient,
+struct TaskUpdateInput {
     task: String,
     status: String,
     channel: String,
@@ -242,7 +241,18 @@ async fn update(
     evidence: Option<String>,
     note: Option<String>,
     content: Option<String>,
-) -> Result<(), CliError> {
+}
+
+async fn update(client: &BuzzClient, input: TaskUpdateInput) -> Result<(), CliError> {
+    let TaskUpdateInput {
+        task,
+        status,
+        channel,
+        deliverables,
+        evidence,
+        note,
+        content,
+    } = input;
     let task_id = Uuid::parse_str(&task)
         .map_err(|_| CliError::Usage(format!("invalid task UUID: {task}")))?;
     let channel = parse_uuid(&channel)?;
@@ -389,13 +399,15 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
         } => {
             update(
                 client,
-                task,
-                status,
-                channel,
-                deliverables,
-                evidence,
-                note,
-                content,
+                TaskUpdateInput {
+                    task,
+                    status,
+                    channel,
+                    deliverables,
+                    evidence,
+                    note,
+                    content,
+                },
             )
             .await
         }
