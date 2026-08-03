@@ -700,6 +700,28 @@ CREATE INDEX idx_moderation_reports_target_pubkey
 CREATE UNIQUE INDEX idx_moderation_reports_event
     ON moderation_reports (community_id, report_event_id);
 
+-- ── Product feedback (kind:1650 ingest) ──────────────────────────────────────
+-- Deployment operators review one inbox across communities. `community_id`
+-- records tenant provenance, but event identity and queue ordering are global.
+
+CREATE TABLE product_feedback (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    community_id        UUID NOT NULL REFERENCES communities(id),
+    event_id             BYTEA NOT NULL UNIQUE CHECK (length(event_id) = 32),
+    submitter_pubkey     BYTEA NOT NULL CHECK (length(submitter_pubkey) = 32),
+    category             TEXT CHECK (category IN ('bug', 'praise', 'needs-work')),
+    body                 TEXT NOT NULL CHECK (length(btrim(body)) > 0),
+    tags                 JSONB NOT NULL DEFAULT '[]'::jsonb
+                         CHECK (jsonb_typeof(tags) = 'array'),
+    event_created_at     TIMESTAMPTZ NOT NULL,
+    received_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_product_feedback_received
+    ON product_feedback (received_at DESC, id);
+CREATE INDEX idx_product_feedback_community_received
+    ON product_feedback (community_id, received_at DESC, id);
+
 -- ── Bans + timeouts (one restriction row per member) ──────────────────────────
 -- Ban = connection block, enforced at the NIP-42 auth seam
 -- ("blocked: you are banned from this community") + join/ingest surfaces.
@@ -780,6 +802,7 @@ CREATE TABLE _operator_global_tables (
 
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('communities',           'the tenant registry itself; id IS the community key'),
+    ('product_feedback',      'deployment product inbox; community_id is provenance only'),
     ('rate_limit_violations', 'deployment abuse/health; never tenant-observable; community_id is an attribution label only'),
     ('_operator_global_tables', 'the registry table itself');
 -- NIP-PL effective lease state and durable wake outbox. Every key is led by
