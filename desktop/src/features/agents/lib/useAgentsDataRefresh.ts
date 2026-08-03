@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
+import { toast } from "sonner";
 
 import {
   managedAgentsQueryKey,
@@ -16,6 +17,22 @@ import { managedAgentRuntimesQueryKey } from "@/features/agents/managedAgentRunt
 // refetch off React Query's implicit in-flight dedup and avoids redundant
 // disk-read IPC.
 const COALESCE_MS = 200;
+
+export interface ManagedAgentReapNotice {
+  instanceId: string;
+  processCount: number;
+}
+
+export function formatManagedAgentReapNotice(payload: ManagedAgentReapNotice): {
+  title: string;
+  description: string;
+} {
+  const count = payload.processCount;
+  return {
+    title: `Stopped ${count} agent process${count === 1 ? "" : "es"} left by a closed Buzz app`,
+    description: `Desktop instance: ${payload.instanceId}`,
+  };
+}
 
 // Invalidate the live Agents-tab queries when the backend signals that inbound
 // relay events changed the on-disk agents data. Mounted once at the app root
@@ -37,6 +54,14 @@ export function useAgentsDataRefresh(): void {
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     });
 
+    const unlistenReaped = listen<ManagedAgentReapNotice>(
+      "managed-agent-orphans-reaped",
+      (event) => {
+        const notice = formatManagedAgentReapNotice(event.payload);
+        toast.warning(notice.title, { description: notice.description });
+      },
+    );
+
     const unlisten = listen("agents-data-changed", () => {
       if (timer !== undefined) clearTimeout(timer);
       timer = setTimeout(() => {
@@ -51,6 +76,7 @@ export function useAgentsDataRefresh(): void {
       if (timer !== undefined) clearTimeout(timer);
       void unlisten.then((fn) => fn());
       void unlistenRuntime.then((fn) => fn());
+      void unlistenReaped.then((fn) => fn());
     };
   }, [queryClient]);
 }

@@ -1,4 +1,26 @@
 use super::*;
+use tauri::Emitter;
+
+#[cfg(test)]
+mod tests;
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeadInstanceReapReport {
+    pub instance_id: String,
+    pub process_count: usize,
+}
+
+pub(crate) fn emit_dead_instance_reap_reports(
+    app: &tauri::AppHandle,
+    reports: Vec<DeadInstanceReapReport>,
+) {
+    for report in reports {
+        if let Err(error) = app.emit("managed-agent-orphans-reaped", report) {
+            eprintln!("buzz-desktop: failed to surface dead-instance reap: {error}");
+        }
+    }
+}
 
 /// Binary names for the Buzz desktop/Tauri process. Used by dead-instance
 /// detection to confirm the owning desktop is still alive.
@@ -39,6 +61,57 @@ pub(super) fn buffer_contains_identifier(buf: &[u8], id: &[u8]) -> bool {
             }
         }
     })
+}
+
+pub(super) fn desktop_identity_matches_instance(
+    args_and_env: &[u8],
+    bundle_identifier: Option<&str>,
+    instance_id: &str,
+) -> bool {
+    buffer_contains_identifier(args_and_env, instance_id.as_bytes())
+        || bundle_identifier == Some(instance_id)
+}
+
+pub(super) fn bundle_identifier_for_executable_path(
+    executable: &std::path::Path,
+) -> Option<String> {
+    let macos_dir = executable.parent()?;
+    if macos_dir.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name()? != "Contents" {
+        return None;
+    }
+    let info = plist::from_file::<_, plist::Dictionary>(contents_dir.join("Info.plist")).ok()?;
+    info.get("CFBundleIdentifier")?
+        .as_string()
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(target_os = "macos")]
+fn bundle_identifier_for_desktop_process(pid: libc::c_int) -> Option<String> {
+    extern "C" {
+        fn proc_pidpath(
+            pid: libc::c_int,
+            buffer: *mut libc::c_void,
+            buffersize: u32,
+        ) -> libc::c_int;
+    }
+
+    let mut path_buf = [0u8; 4096];
+    let len = unsafe {
+        proc_pidpath(
+            pid,
+            path_buf.as_mut_ptr() as *mut libc::c_void,
+            path_buf.len() as u32,
+        )
+    };
+    if len <= 0 {
+        return None;
+    }
+    let executable = std::path::Path::new(std::str::from_utf8(&path_buf[..len as usize]).ok()?);
+    bundle_identifier_for_executable_path(executable)
 }
 
 /// Extract the `BUZZ_MANAGED_AGENT` value from a process's environment.
@@ -117,8 +190,6 @@ fn desktop_is_alive_for_instance(instance_id: &str) -> bool {
     }
 
     let my_uid = unsafe { libc::getuid() };
-    let identifier_bytes = instance_id.as_bytes();
-
     let pids = sweep::collect_all_pids();
     if pids.is_empty() {
         return false;
@@ -170,7 +241,12 @@ fn desktop_is_alive_for_instance(instance_id: &str) -> bool {
         // Boundary-anchored search: the identifier in the config JSON is
         // followed by a non-identifier char (typically `"`). A raw substring
         // match would let `...app` match inside `...app.dev`.
-        if buffer_contains_identifier(&args_buf, identifier_bytes) {
+        let bundle_identifier = bundle_identifier_for_desktop_process(pid);
+        if desktop_identity_matches_instance(
+            &args_buf,
+            bundle_identifier.as_deref(),
+            instance_id,
+        ) {
             return true;
         }
     }
@@ -229,13 +305,16 @@ fn desktop_is_alive_for_instance(_instance_id: &str) -> bool {
 /// whether a Buzz desktop binary is still alive for that instance. If not,
 /// all agents from that dead instance are reaped.
 #[cfg(target_os = "macos")]
-pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]) {
+pub(crate) fn reap_dead_instance_agents(
+    our_instance_id: &str,
+    skip_pids: &[u32],
+) -> Vec<DeadInstanceReapReport> {
     let my_uid = unsafe { libc::getuid() };
     let my_pid = std::process::id() as i32;
 
     let pids = sweep::collect_all_pids();
     if pids.is_empty() {
-        return;
+        return Vec::new();
     }
 
     // Collect (pid, instance_id) for all foreign agent processes.
@@ -285,6 +364,7 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
     }
 
     // For each foreign instance, check if its desktop is still alive.
+    let mut reports = Vec::new();
     for (instance_id, agent_pids) in &foreign_agents {
         if desktop_is_alive_for_instance(instance_id) {
             continue;
@@ -294,11 +374,19 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
             agent_pids.len()
         );
         resolve_pgids_and_kill(agent_pids);
+        reports.push(DeadInstanceReapReport {
+            instance_id: instance_id.clone(),
+            process_count: agent_pids.len(),
+        });
     }
+    reports
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]) {
+pub(crate) fn reap_dead_instance_agents(
+    our_instance_id: &str,
+    skip_pids: &[u32],
+) -> Vec<DeadInstanceReapReport> {
     let my_uid = unsafe { libc::getuid() };
     let my_pid = std::process::id() as i32;
     let mut foreign_agents: HashMap<String, Vec<i32>> = HashMap::new();
@@ -343,6 +431,7 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
             .push(pid);
     }
 
+    let mut reports = Vec::new();
     for (instance_id, agent_pids) in &foreign_agents {
         if desktop_is_alive_for_instance(instance_id) {
             continue;
@@ -352,8 +441,18 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
             agent_pids.len()
         );
         resolve_pgids_and_kill(agent_pids);
+        reports.push(DeadInstanceReapReport {
+            instance_id: instance_id.clone(),
+            process_count: agent_pids.len(),
+        });
     }
+    reports
 }
 
 #[cfg(not(unix))]
-pub(crate) fn reap_dead_instance_agents(_our_instance_id: &str, _skip_pids: &[u32]) {}
+pub(crate) fn reap_dead_instance_agents(
+    _our_instance_id: &str,
+    _skip_pids: &[u32],
+) -> Vec<DeadInstanceReapReport> {
+    Vec::new()
+}

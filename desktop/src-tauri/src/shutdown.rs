@@ -254,7 +254,10 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
 
     // Dead-instance reaping: find agents belonging to Buzz instances
     // whose desktop process is no longer running and reap them.
-    managed_agents::reap_dead_instance_agents(&managed_agents::current_instance_id(app), &[]);
+    let _ = managed_agents::reap_dead_instance_agents(
+        &managed_agents::current_instance_id(app),
+        &[],
+    );
 
     if changed {
         save_managed_agents(app, &records)?;

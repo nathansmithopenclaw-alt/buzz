@@ -59,7 +59,7 @@ use orphan_sweep::{BSDInfo, PROC_PIDTBSDINFO};
 use process::resolve_pgids_and_kill;
 
 mod instance_reaper;
-pub(crate) use instance_reaper::reap_dead_instance_agents;
+pub(crate) use instance_reaper::{emit_dead_instance_reap_reports, reap_dead_instance_agents};
 #[cfg(test)]
 use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
 

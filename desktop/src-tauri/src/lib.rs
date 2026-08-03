@@ -621,16 +621,16 @@ pub fn run() {
                     let prev = prev_orphans.clone();
                     let inst = instance_id.clone();
                     // Run the blocking syscall work off the async executor.
-                    let new_orphans = tauri::async_runtime::spawn_blocking(move || {
-                        let orphans = managed_agents::sweep_system_agent_processes_with_grace(
-                            &inst, &skip_pids, &prev,
-                        );
-                        managed_agents::reap_dead_instance_agents(&inst, &skip_pids);
-                        orphans
-                    })
-                    .await
-                    .unwrap_or_default();
+                    let (new_orphans, reap_reports) = tauri::async_runtime::spawn_blocking(move || {
+                        (
+                            managed_agents::sweep_system_agent_processes_with_grace(
+                                &inst, &skip_pids, &prev,
+                            ),
+                            managed_agents::reap_dead_instance_agents(&inst, &skip_pids),
+                        )
+                    }).await.unwrap_or_default();
                     prev_orphans = new_orphans;
+                    managed_agents::emit_dead_instance_reap_reports(&sweep_handle, reap_reports);
                 }
             });
 
