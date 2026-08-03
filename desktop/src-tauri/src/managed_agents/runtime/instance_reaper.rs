@@ -242,11 +242,7 @@ fn desktop_is_alive_for_instance(instance_id: &str) -> bool {
         // followed by a non-identifier char (typically `"`). A raw substring
         // match would let `...app` match inside `...app.dev`.
         let bundle_identifier = bundle_identifier_for_desktop_process(pid);
-        if desktop_identity_matches_instance(
-            &args_buf,
-            bundle_identifier.as_deref(),
-            instance_id,
-        ) {
+        if desktop_identity_matches_instance(&args_buf, bundle_identifier.as_deref(), instance_id) {
             return true;
         }
     }

@@ -1,6 +1,4 @@
-use super::{
-    bundle_identifier_for_executable_path, desktop_identity_matches_instance,
-};
+use super::{bundle_identifier_for_executable_path, desktop_identity_matches_instance};
 
 #[test]
 fn live_bundled_sibling_matches_without_procargs_identifier() {

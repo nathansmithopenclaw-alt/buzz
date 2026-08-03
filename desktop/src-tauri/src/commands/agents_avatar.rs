@@ -138,7 +138,11 @@ fn apply_avatar_to_state(
 ) -> Result<(String, Vec<usize>, bool), String> {
     let target = records
         .iter()
-        .find(|record| record.pubkey.eq_ignore_ascii_case(&authorization.target_pubkey))
+        .find(|record| {
+            record
+                .pubkey
+                .eq_ignore_ascii_case(&authorization.target_pubkey)
+        })
         .ok_or_else(|| format!("managed agent not found: {}", authorization.target_pubkey))?;
     let persona_id = target
         .persona_id
@@ -270,8 +274,9 @@ pub async fn apply_managed_agent_avatar_request(
     let receipt_d_tag = format!("{AVATAR_RECEIPT_D_TAG_PREFIX}{request_id}");
     let receipt_tag = Tag::parse(["d", receipt_d_tag.as_str()])
         .map_err(|error| format!("build avatar apply receipt tag: {error}"))?;
-    let receipt_builder = EventBuilder::new(Kind::Custom(AVATAR_AUTHORIZATION_KIND), receipt_content)
-        .tags([receipt_tag]);
+    let receipt_builder =
+        EventBuilder::new(Kind::Custom(AVATAR_AUTHORIZATION_KIND), receipt_content)
+            .tags([receipt_tag]);
     if let Err(error) = crate::relay::submit_event_with_keys(
         receipt_builder,
         &app.state::<AppState>(),

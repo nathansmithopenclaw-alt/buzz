@@ -150,8 +150,7 @@ pub async fn restore_managed_agents_on_launch(
 
         // Dead-instance reaping: find agents belonging to Buzz instances
         // whose desktop process is no longer running and reap them.
-        let _ =
-            super::reap_dead_instance_agents(&super::current_instance_id(app), &tracked_pids);
+        let _ = super::reap_dead_instance_agents(&super::current_instance_id(app), &tracked_pids);
 
         // Exact-path sweep: kill any buzz-acp process whose executable path
         // matches this bundle's harness binary but is not in the tracked set.

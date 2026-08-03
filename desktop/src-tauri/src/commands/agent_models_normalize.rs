@@ -139,13 +139,13 @@ pub(super) fn normalize_agent_models(
     });
     let fast_mode_enabled = fast_mode_option.and_then(|option| {
         option.get("currentValue").and_then(|value| {
-            value
-                .as_bool()
-                .or_else(|| value.as_str().and_then(|value| match value {
+            value.as_bool().or_else(|| {
+                value.as_str().and_then(|value| match value {
                     "on" => Some(true),
                     "off" => Some(false),
                     _ => None,
-                }))
+                })
+            })
         })
     });
     let fast_mode_description = fast_mode_option.and_then(|option| {
