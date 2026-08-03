@@ -31,7 +31,7 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     cursor_created_at: u64,
 
-    /// Last durably processed event ID, used to order same-second events.
+    /// Last durably processed event ID, skipped exactly once during replay.
     #[arg(long, default_value = "")]
     cursor_event_id: String,
 }
@@ -72,6 +72,32 @@ struct StreamTaskEvent<'a> {
     bridge_pubkey: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct StreamRejectionRecord {
+    record_type: &'static str,
+    event_id: String,
+    author_pubkey: String,
+    channel_id: String,
+    created_at: u64,
+    bridge_pubkey: String,
+    error: String,
+}
+
+#[derive(Debug)]
+enum BufferedRecord {
+    Task(TaskEnvelopeEvent),
+    Rejection(StreamRejectionRecord),
+}
+
+impl BufferedRecord {
+    fn sort_key(&self) -> (u64, &str) {
+        match self {
+            Self::Task(event) => (event.created_at, event.event_id.as_str()),
+            Self::Rejection(record) => (record.created_at, record.event_id.as_str()),
+        }
+    }
+}
+
 fn emit_event(event: &TaskEnvelopeEvent, bridge_pubkey: &str) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(
@@ -86,6 +112,38 @@ fn emit_event(event: &TaskEnvelopeEvent, bridge_pubkey: &str) -> Result<(), Stri
         .write_all(b"\n")
         .and_then(|_| stdout.flush())
         .map_err(|error| format!("failed to emit task event: {error}"))
+}
+
+fn emit_record(record: &BufferedRecord, bridge_pubkey: &str) -> Result<(), String> {
+    match record {
+        BufferedRecord::Task(event) => emit_event(event, bridge_pubkey),
+        BufferedRecord::Rejection(record) => {
+            let mut stdout = io::stdout().lock();
+            serde_json::to_writer(&mut stdout, record)
+                .map_err(|error| format!("failed to serialize rejection record: {error}"))?;
+            stdout
+                .write_all(b"\n")
+                .and_then(|_| stdout.flush())
+                .map_err(|error| format!("failed to emit rejection record: {error}"))
+        }
+    }
+}
+
+fn rejection_record(
+    event: &nostr::Event,
+    channel_id: &str,
+    bridge_pubkey: &str,
+    error: &str,
+) -> StreamRejectionRecord {
+    StreamRejectionRecord {
+        record_type: "rejection",
+        event_id: event.id.to_hex(),
+        author_pubkey: event.pubkey.to_hex(),
+        channel_id: channel_id.to_string(),
+        created_at: event.created_at.as_secs(),
+        bridge_pubkey: bridge_pubkey.to_string(),
+        error: error.chars().take(512).collect(),
+    }
 }
 
 fn membership_channel_id(event: &nostr::Event, bridge_pubkey: &str) -> Option<String> {
@@ -143,7 +201,7 @@ fn task_subscription(channel_id: &str, since: u64) -> (String, serde_json::Value
 }
 
 struct TaskSubscriptionState {
-    backfill: Vec<TaskEnvelopeEvent>,
+    backfill: Vec<BufferedRecord>,
     backfill_complete: bool,
     backfill_deadline: Instant,
 }
@@ -158,11 +216,11 @@ impl TaskSubscriptionState {
     }
 }
 
-fn complete_channel_backfill(state: &mut TaskSubscriptionState) -> Vec<TaskEnvelopeEvent> {
+fn complete_channel_backfill(state: &mut TaskSubscriptionState) -> Vec<BufferedRecord> {
     state.backfill_complete = true;
-    state.backfill.sort_by(|left, right| {
-        (left.created_at, left.event_id.as_str()).cmp(&(right.created_at, right.event_id.as_str()))
-    });
+    state
+        .backfill
+        .sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
     std::mem::take(&mut state.backfill)
 }
 
@@ -204,7 +262,7 @@ fn expired_backfill_subscriptions(
 fn complete_expired_backfills(
     subscriptions: &mut BTreeMap<String, TaskSubscriptionState>,
     now: Instant,
-) -> Vec<(String, Vec<TaskEnvelopeEvent>)> {
+) -> Vec<(String, Vec<BufferedRecord>)> {
     expired_backfill_subscriptions(subscriptions, now)
         .into_iter()
         .filter_map(|subscription_id| {
@@ -243,8 +301,8 @@ async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
             complete_expired_backfills(&mut subscriptions, Instant::now())
         {
             eprintln!("relay task backfill EOSE deadline elapsed for {subscription_id}; emitting buffered events");
-            for task_event in events {
-                emit_event(&task_event, &bridge_pubkey)?;
+            for record in events {
+                emit_record(&record, &bridge_pubkey)?;
             }
         }
         let wait = next_event_timeout(&subscriptions, Instant::now());
@@ -281,29 +339,47 @@ async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
                 subscription_id: event_subscription,
                 event,
             }) if event_subscription.starts_with(TASK_SUBSCRIPTION_PREFIX) => {
+                let Some(state) = subscriptions.get_mut(&event_subscription) else {
+                    continue;
+                };
                 match TaskEnvelopeEvent::from_event(&event) {
                     Ok(task_event) => {
                         if !event_is_not_cursor(&task_event, args) {
                             continue;
                         }
-                        let Some(state) = subscriptions.get_mut(&event_subscription) else {
-                            continue;
-                        };
                         if state.backfill_complete {
                             emit_event(&task_event, &bridge_pubkey)?;
                         } else {
-                            state.backfill.push(task_event);
+                            state.backfill.push(BufferedRecord::Task(task_event));
                         }
                     }
-                    Err(error) => eprintln!("invalid task envelope skipped: {error}"),
+                    Err(error) => {
+                        let Some(channel_id) = event_subscription
+                            .strip_prefix(TASK_SUBSCRIPTION_PREFIX)
+                            .and_then(|suffix| suffix.strip_prefix('-'))
+                        else {
+                            continue;
+                        };
+                        let rejection = rejection_record(
+                            &event,
+                            channel_id,
+                            &bridge_pubkey,
+                            &error.to_string(),
+                        );
+                        if state.backfill_complete {
+                            emit_record(&BufferedRecord::Rejection(rejection), &bridge_pubkey)?;
+                        } else {
+                            state.backfill.push(BufferedRecord::Rejection(rejection));
+                        }
+                    }
                 }
             }
             Ok(RelayMessage::Eose {
                 subscription_id: event_subscription,
             }) if event_subscription.starts_with(TASK_SUBSCRIPTION_PREFIX) => {
                 if let Some(state) = subscriptions.get_mut(&event_subscription) {
-                    for task_event in complete_channel_backfill(state) {
-                        emit_event(&task_event, &bridge_pubkey)?;
+                    for record in complete_channel_backfill(state) {
+                        emit_record(&record, &bridge_pubkey)?;
                     }
                 }
             }
@@ -412,6 +488,33 @@ mod tests {
     }
 
     #[test]
+    fn malformed_envelope_rejection_record_is_metadata_only() {
+        let channel_id = Uuid::new_v4().to_string();
+        let raw_event = EventBuilder::new(Kind::Custom(9), "MIRRORED CONTENT MUST NOT LEAK")
+            .tags([
+                Tag::parse(["h", channel_id.as_str()]).unwrap(),
+                Tag::parse(["t", TASK_DISCOVERY_HASHTAG]).unwrap(),
+                Tag::parse(["task", "malformed"]).unwrap(),
+            ])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let record = rejection_record(
+            &raw_event,
+            &channel_id,
+            &"bb".repeat(32),
+            "task envelope event requires exactly one well-formed task tag",
+        );
+        let value = serde_json::to_value(&record).unwrap();
+
+        assert_eq!(value["record_type"], "rejection");
+        assert_eq!(value["event_id"], raw_event.id.to_hex());
+        assert_eq!(value["channel_id"], channel_id);
+        assert_eq!(value["created_at"], raw_event.created_at.as_secs());
+        assert!(value.get("content").is_none());
+        assert!(!value.to_string().contains("MIRRORED CONTENT MUST NOT LEAK"));
+    }
+
+    #[test]
     fn cursor_event_id_skips_only_the_exact_processed_event() {
         let args = Args::parse_from([
             "buzz-task-stream",
@@ -456,18 +559,33 @@ mod tests {
         let now = Instant::now();
         let mut first = TaskSubscriptionState::new(now);
         let mut second = TaskSubscriptionState::new(now);
-        first.backfill.push(event(101, "b"));
-        first.backfill.push(event(100, "a"));
-        second.backfill.push(event(99, "z"));
+        first.backfill.push(BufferedRecord::Task(event(101, "b")));
+        first.backfill.push(BufferedRecord::Task(event(100, "a")));
+        first
+            .backfill
+            .push(BufferedRecord::Rejection(StreamRejectionRecord {
+                record_type: "rejection",
+                event_id: "0".repeat(64),
+                author_pubkey: "aa".repeat(32),
+                channel_id: Uuid::new_v4().to_string(),
+                created_at: 100,
+                bridge_pubkey: "bb".repeat(32),
+                error: "malformed envelope".to_string(),
+            }));
+        second.backfill.push(BufferedRecord::Task(event(99, "z")));
 
         let emitted = complete_channel_backfill(&mut first);
 
         assert_eq!(
             emitted
                 .iter()
-                .map(|event| event.event_id.as_str())
+                .map(|record| record.sort_key().1)
                 .collect::<Vec<_>>(),
-            vec!["a", "b"]
+            vec![
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "a",
+                "b"
+            ]
         );
         assert!(first.backfill_complete);
         assert!(!second.backfill_complete);
@@ -481,7 +599,7 @@ mod tests {
         subscriptions.insert(
             "expired".to_string(),
             TaskSubscriptionState {
-                backfill: vec![event(100, "a")],
+                backfill: vec![BufferedRecord::Task(event(100, "a"))],
                 backfill_complete: false,
                 backfill_deadline: now,
             },
@@ -500,7 +618,9 @@ mod tests {
         let now = Instant::now();
         let mut subscriptions = BTreeMap::new();
         let mut stalled = TaskSubscriptionState::new(now);
-        stalled.backfill.push(event(100, "stalled"));
+        stalled
+            .backfill
+            .push(BufferedRecord::Task(event(100, "stalled")));
         subscriptions.insert("stalled".to_string(), stalled);
 
         let mut chatty = TaskSubscriptionState::new(now);
@@ -523,7 +643,10 @@ mod tests {
         let released = complete_expired_backfills(&mut subscriptions, now + BACKFILL_EOSE_DEADLINE);
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].0, "stalled");
-        assert_eq!(released[0].1[0].event_id, "stalled");
+        assert!(matches!(
+            &released[0].1[0],
+            BufferedRecord::Task(event) if event.event_id == "stalled"
+        ));
         assert!(subscriptions["stalled"].backfill_complete);
         assert!(subscriptions["chatty"].backfill_complete);
         assert!(!subscriptions["later"].backfill_complete);
