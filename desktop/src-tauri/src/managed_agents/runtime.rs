@@ -270,7 +270,7 @@ pub fn build_managed_agent_summary(
     let claude =
         super::runtime_claude_account_summary(record, personas, global_config, pair_runtime);
     let supports_claude_accounts =
-        known_acp_runtime(&descriptor.command).is_some_and(|runtime| runtime.id == "claude");
+        super::record_supports_claude_accounts(record, &descriptor.command);
 
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),

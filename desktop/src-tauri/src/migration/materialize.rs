@@ -41,25 +41,56 @@ pub fn materialize_agent_runtimes(app: &tauri::AppHandle) {
 
 fn materialize_runtimes_in_file(path: &Path) {
     let persona_runtimes = load_persona_runtimes(path);
-    if persona_runtimes.is_empty() {
-        return;
-    }
     patch_json_records(path, |obj| {
-        if obj.contains_key("runtime") {
-            return false;
-        }
-        let Some(runtime) = obj
-            .get("persona_id")
-            .and_then(|v| v.as_str())
-            .and_then(|pid| persona_runtimes.get(pid))
-        else {
-            return false;
+        let mut changed = false;
+        let runtime = if let Some(runtime) = obj.get("runtime").and_then(|v| v.as_str()) {
+            runtime.to_string()
+        } else {
+            let Some(runtime) = obj
+                .get("persona_id")
+                .and_then(|v| v.as_str())
+                .and_then(|pid| persona_runtimes.get(pid))
+                .cloned()
+            else {
+                return false;
+            };
+            obj.insert(
+                "runtime".to_string(),
+                serde_json::Value::String(runtime.clone()),
+            );
+            changed = true;
+            runtime
         };
-        obj.insert(
-            "runtime".to_string(),
-            serde_json::Value::String(runtime.clone()),
-        );
-        true
+
+        let mut explicitly_pinned = obj
+            .get("agent_command_override")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty());
+        if let Some(expected) = crate::managed_agents::runtime_primary_command(&runtime) {
+            if explicitly_pinned && obj.get("persona_id").is_some() {
+                let stale_known_pin = obj
+                    .get("agent_command_override")
+                    .and_then(|value| value.as_str())
+                    .filter(|pin| pin.trim() != expected)
+                    .is_some_and(|pin| crate::managed_agents::known_acp_runtime(pin).is_some());
+                if stale_known_pin {
+                    obj.remove("agent_command_override");
+                    explicitly_pinned = false;
+                    changed = true;
+                }
+            }
+            if !explicitly_pinned
+                && obj.get("agent_command").and_then(|value| value.as_str())
+                    != Some(expected.as_str())
+            {
+                obj.insert(
+                    "agent_command".to_string(),
+                    serde_json::Value::String(expected),
+                );
+                changed = true;
+            }
+        }
+        changed
     });
 }
 
@@ -84,6 +115,7 @@ mod tests {
         materialize_runtimes_in_file(&dir.path().join("agents/managed-agents.json"));
         let records = read_agents_json(dir.path());
         assert_eq!(records[0]["runtime"], "goose");
+        assert_eq!(records[0]["agent_command"], "goose");
     }
 
     #[test]
@@ -110,11 +142,44 @@ mod tests {
             "existing runtime preserved"
         );
         assert_eq!(records[1]["runtime"], "goose");
+        assert_eq!(records[0]["agent_command"], "claude-agent-acp");
+        assert_eq!(records[1]["agent_command"], "goose");
 
         let before = std::fs::read_to_string(&agents_path).unwrap();
         materialize_runtimes_in_file(&agents_path);
         let after = std::fs::read_to_string(&agents_path).unwrap();
         assert_eq!(before, after, "second run must be a no-op");
+    }
+
+    #[test]
+    fn materialize_repairs_stale_snapshot_but_preserves_explicit_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        write_personas_json(dir.path(), &serde_json::json!([]));
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([
+                {
+                    "name": "Grok",
+                    "persona_id": "builtin:honey",
+                    "runtime": "grok",
+                    "agent_command": "claude-agent-acp",
+                    "agent_command_override": "claude-agent-acp"
+                },
+                {
+                    "name": "Pinned",
+                    "persona_id": "builtin:honey",
+                    "runtime": "grok",
+                    "agent_command": "team-custom-acp",
+                    "agent_command_override": "team-custom-acp"
+                }
+            ]),
+        );
+
+        materialize_runtimes_in_file(&dir.path().join("agents/managed-agents.json"));
+        let records = read_agents_json(dir.path());
+        assert_eq!(records[0]["agent_command"], "grok");
+        assert!(records[0].get("agent_command_override").is_none());
+        assert_eq!(records[1]["agent_command"], "team-custom-acp");
     }
 
     #[test]

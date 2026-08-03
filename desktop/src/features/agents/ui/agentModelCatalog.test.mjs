@@ -7,16 +7,20 @@ import {
   validateModelSelection,
 } from "./agentModelCatalog.ts";
 
-test("Claude catalog unions live rows, curated versions, and current saved value", () => {
+test("Claude catalog canonicalizes aliases, adds Opus 5, and orders families", () => {
   const options = mergeRuntimeModelCatalog({
     currentModel: "team-private-model",
-    discovered: [{ id: "opus", label: "Opus" }],
+    discovered: [
+      { id: "claude-sonnet-4-5", label: "Sonnet 4.5 alias" },
+      { id: "opus", label: "Opus alias" },
+      { id: "claude-opus-4-5-20251101", label: "Opus 4.5 canonical" },
+    ],
     provider: "",
     runtimeId: "claude",
   });
 
   assert.equal(
-    options.find((option) => option.id === "opus")?.badge,
+    options.find((option) => option.id === "claude-opus-5")?.badge,
     "Available now",
   );
   assert.equal(
@@ -27,13 +31,34 @@ test("Claude catalog unions live rows, curated versions, and current saved value
     options.find((option) => option.id === "team-private-model")?.badge,
     "Current value",
   );
-  assert.deepEqual(
-    ["opus", "sonnet", "haiku"].map(
-      (id) => options.find((option) => option.id === id)?.label,
-    ),
-    ["Opus", "Claude Sonnet (current)", "Claude Haiku (current)"],
+  assert.equal(
+    options.filter((option) => option.group === "Opus").length,
+    7,
+    "the live alias and canonical id collapse to one Opus 4.5 row",
   );
-  assert.equal(options.length, 17, "16 catalog targets plus one custom value");
+  assert.equal(
+    options.length,
+    14,
+    "13 canonical catalog rows plus one custom value",
+  );
+  assert.deepEqual(
+    [...new Set(options.map((option) => option.group).filter(Boolean))],
+    ["Fable", "Opus", "Sonnet", "Haiku", "Other"],
+  );
+  assert.deepEqual(
+    options
+      .filter((option) => option.group === "Opus")
+      .map((option) => option.id),
+    [
+      "claude-opus-5",
+      "claude-opus-4-8",
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-opus-4-5-20251101",
+      "claude-opus-4-1-20250805",
+      "claude-opus-4-20250514",
+    ],
+  );
   assert.equal(
     options
       .filter((option) => option.id.startsWith("claude-"))

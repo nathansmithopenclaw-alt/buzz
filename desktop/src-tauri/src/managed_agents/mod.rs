@@ -29,6 +29,7 @@ mod repos;
 mod restore;
 pub mod retention;
 mod runtime;
+mod runtime_catalog;
 mod runtime_commands;
 mod runtime_types;
 pub(crate) mod snapshot_avatar;
@@ -78,6 +79,7 @@ pub use repos::{
 };
 pub use restore::*;
 pub use runtime::*;
+pub(crate) use runtime_catalog::{record_supports_claude_accounts, runtime_primary_command};
 pub use runtime_commands::*;
 pub use runtime_types::*;
 pub use storage::*;

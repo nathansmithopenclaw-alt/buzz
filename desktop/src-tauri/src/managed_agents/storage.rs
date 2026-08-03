@@ -238,22 +238,80 @@ pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
 /// with fail-loud parse handling. Internal seam; public readers filter.
 fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
     let path = managed_agents_store_path(app)?;
+    load_agent_store_at(&path)
+}
+
+fn load_agent_store_at(path: &Path) -> Result<Vec<ManagedAgentRecord>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
 
-    let content = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read agent store: {error}"))?;
-    serde_json::from_str(&content).map_err(|error| {
+    let content =
+        fs::read_to_string(path).map_err(|error| format!("failed to read agent store: {error}"))?;
+    let mut records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|error| {
         // Fail loudly and preserve the evidence: a later in-app save rewrites
         // this file wholesale, which would silently destroy a malformed hand
         // edit. Best-effort file-authoring contract (see managed_agents::
         // reconcile): the broken content survives as `.invalid` for the user
         // to recover, and the parse error propagates instead of being
         // swallowed into an empty store.
-        backup_invalid_store(&path);
+        backup_invalid_store(path);
         format!("failed to parse agent store (preserved as .invalid): {error}")
-    })
+    })?;
+    let repaired = repair_stale_agent_command_snapshots(&mut records);
+    if repaired > 0 {
+        let payload = serde_json::to_vec_pretty(&records)
+            .map_err(|error| format!("failed to serialize repaired agent store: {error}"))?;
+        atomic_write_json_restricted(path, &payload)?;
+        eprintln!("buzz-desktop: repaired {repaired} stale managed-agent command snapshot(s)");
+    }
+    Ok(records)
+}
+
+/// Repair legacy instance snapshots whose definition/runtime was refreshed but
+/// whose non-authoritative `agent_command` string was left on an older harness.
+/// A mismatched known-runtime pin on a linked instance is stale writer residue;
+/// unknown/custom pins remain explicit user intent and are preserved.
+fn repair_stale_agent_command_snapshots(records: &mut [ManagedAgentRecord]) -> usize {
+    let mut repaired = 0;
+    for record in records {
+        let mut record_changed = false;
+        if record.pubkey.is_empty() {
+            continue;
+        }
+        let Some(runtime_id) = record.runtime.as_deref() else {
+            continue;
+        };
+        let Some(expected) = crate::managed_agents::runtime_primary_command(runtime_id) else {
+            continue;
+        };
+        if record.persona_id.is_some() {
+            let stale_known_pin = record
+                .agent_command_override
+                .as_deref()
+                .filter(|pin| pin.trim() != expected)
+                .is_some_and(|pin| crate::managed_agents::known_acp_runtime(pin).is_some());
+            if stale_known_pin {
+                record.agent_command_override = None;
+                record_changed = true;
+            }
+        }
+        if record
+            .agent_command_override
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            continue;
+        }
+        if record.agent_command != expected {
+            record.agent_command = expected;
+            record_changed = true;
+        }
+        if record_changed {
+            repaired += 1;
+        }
+    }
+    repaired
 }
 
 /// Load the keyed agent *instances*. Key-less definitions (former personas,

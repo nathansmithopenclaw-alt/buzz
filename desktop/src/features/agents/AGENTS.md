@@ -30,6 +30,10 @@ offline inventory in `ui/agentModelCatalog.ts` supplements it with known model
 IDs, display names, and family groups; its entries must be visibly marked when
 they are not live-advertised. Curated Claude entries are made live-advertised
 on restart by the Desktop-managed harness-wide `.claude/settings.json` catalog.
+The displayed Claude union canonicalizes known alias/dated-id pairs and sorts
+families as Fable, Opus, Sonnet, Haiku with newest versions first; this is a
+presentation-only transform and must never remove entries from the persisted
+`availableModels` allowlist.
 Never infer a harness capability (env key, effort support, install state) from
 that frontend inventory.
 

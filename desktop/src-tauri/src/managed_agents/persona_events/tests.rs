@@ -637,6 +637,21 @@ fn snapshot_runtime_verbatim_from_persona() {
     );
 }
 
+#[test]
+fn apply_snapshot_refreshes_stale_command_for_definition_runtime() {
+    let mut record = sample_record();
+    record.agent_command = "claude-agent-acp".to_string();
+    record.agent_command_override = Some("claude-agent-acp".to_string());
+    let mut persona = sample_persona();
+    persona.runtime = Some("grok".to_string());
+
+    super::apply_persona_snapshot(&mut record, &persona);
+
+    assert_eq!(record.runtime.as_deref(), Some("grok"));
+    assert_eq!(record.agent_command, "grok");
+    assert_eq!(record.agent_command_override, None);
+}
+
 // ── persona_snapshot (definition-authoritative) ──────────────────────────
 
 /// Helper: a persona with no model/provider configured.

@@ -12,8 +12,9 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 use super::{
-    agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
-    KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
+    agent_keyring_name, hydrate_keys_with, load_agent_store_at, migrate_inline_key,
+    persist_agent_keys_with, repair_stale_agent_command_snapshots, KeyMigration, KeyStore,
+    KeyringProbe, ManagedAgentRecord,
 };
 
 /// In-memory [`KeyStore`] for testing the migrate decision without the OS
@@ -141,6 +142,41 @@ fn record_with_pubkey_and_key(pubkey: &str, nsec: &str) -> ManagedAgentRecord {
         }}"#
     ))
     .expect("sample record")
+}
+
+#[test]
+fn load_repair_uses_runtime_and_preserves_explicit_command_pins() {
+    let mut stale = record_with_key("");
+    stale.persona_id = Some("builtin:honey".to_string());
+    stale.runtime = Some("grok".to_string());
+    stale.agent_command = "claude-agent-acp".to_string();
+    stale.agent_command_override = Some("claude-agent-acp".to_string());
+    let mut pinned = stale.clone();
+    pinned.pubkey = "pinned-pubkey".to_string();
+    pinned.agent_command = "team-custom-acp".to_string();
+    pinned.agent_command_override = Some("team-custom-acp".to_string());
+
+    let mut records = vec![stale, pinned];
+    assert_eq!(repair_stale_agent_command_snapshots(&mut records), 1);
+    assert_eq!(records[0].agent_command, "grok");
+    assert_eq!(records[0].agent_command_override, None);
+    assert_eq!(records[1].agent_command, "team-custom-acp");
+}
+
+#[test]
+fn load_repair_persists_the_runtime_command_self_heal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("managed-agents.json");
+    let mut stale = record_with_key("");
+    stale.runtime = Some("grok".to_string());
+    stale.agent_command = "claude-agent-acp".to_string();
+    std::fs::write(&path, serde_json::to_vec_pretty(&vec![stale]).unwrap()).unwrap();
+
+    let loaded = load_agent_store_at(&path).unwrap();
+    assert_eq!(loaded[0].agent_command, "grok");
+    let persisted: Vec<ManagedAgentRecord> =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(persisted[0].agent_command, "grok");
 }
 
 #[test]

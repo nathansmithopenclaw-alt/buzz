@@ -465,22 +465,29 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
     record.model = snapshot.model;
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;
-    // Drop a stale create-time harness pin when the definition names a
-    // different known runtime; custom commands stay pinned.
-    if let Some(def_runtime) = persona
+    // Drop a stale create-time known-runtime pin when the definition names a
+    // different resolvable runtime (including presets such as Grok); unknown
+    // custom commands stay pinned.
+    if let Some(def_command) = persona
         .runtime
         .as_deref()
         .map(str::trim)
         .filter(|r| !r.is_empty())
-        .and_then(crate::managed_agents::known_acp_runtime_exact)
+        .and_then(crate::managed_agents::runtime_primary_command)
     {
-        if let Some(pin_runtime) = record
+        let stale_known_pin = record
             .agent_command_override
             .as_deref()
-            .and_then(crate::managed_agents::known_acp_runtime)
-        {
-            if !std::ptr::eq(pin_runtime, def_runtime) {
-                record.agent_command_override = None;
+            .filter(|pin| pin.trim() != def_command)
+            .is_some_and(|pin| crate::managed_agents::known_acp_runtime(pin).is_some());
+        if stale_known_pin {
+            record.agent_command_override = None;
+        }
+    }
+    if record.agent_command_override.is_none() {
+        if let Some(runtime_id) = record.runtime.as_deref() {
+            if let Some(command) = crate::managed_agents::runtime_primary_command(runtime_id) {
+                record.agent_command = command;
             }
         }
     }

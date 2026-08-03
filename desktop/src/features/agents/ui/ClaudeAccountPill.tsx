@@ -29,6 +29,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { cn } from "@/shared/lib/cn";
+import { claudeAccountPillShowsWarning } from "./claudeAccountPillState";
 
 function compactReset(value: string | null | undefined) {
   if (!value) return null;
@@ -122,16 +123,20 @@ export function ClaudeAccountPill({
   };
 
   const usage = current?.fiveHour?.utilization;
+  const showsWarning = claudeAccountPillShowsWarning(
+    error,
+    agent.claudeAccountShadowed,
+  );
   const label = current
     ? `${current.label}${usage == null ? "" : ` · ${Math.round(usage)}%`}`
-    : "Credentials file fallback";
+    : "Credentials file";
   const title =
     queuedSwitch?.status === "queued"
       ? "Account switch queued — the active turn will finish before restart"
-      : agent.claudeAccountSource === "credentials_file"
-        ? "Falling back to credentials file (no env token)"
-        : agent.claudeAccountShadowed
-          ? "Definition account is shadowed by a per-agent override"
+      : agent.claudeAccountShadowed
+        ? "Definition account is shadowed by a per-agent override"
+        : agent.claudeAccountSource === "credentials_file"
+          ? "Using the credentials file (no saved account selected)"
           : agent.claudeAccountSource === "instance"
             ? "Pinned by a per-agent selection"
             : agent.claudeAccountSource === "global"
@@ -144,7 +149,7 @@ export function ClaudeAccountPill({
         <Button
           className={cn(
             "h-7 max-w-64 gap-1.5 rounded-full px-2.5 text-xs",
-            error && "border-destructive/60",
+            showsWarning && "border-destructive/60",
           )}
           data-testid={`claude-account-pill-${agent.pubkey}`}
           disabled={switching}
@@ -154,8 +159,7 @@ export function ClaudeAccountPill({
         >
           {queuedSwitch?.status === "queued" ? (
             <Clock3 className="h-3.5 w-3.5 text-amber-500" />
-          ) : agent.claudeAccountSource === "credentials_file" ||
-            agent.claudeAccountShadowed ? (
+          ) : showsWarning ? (
             <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
           ) : null}
           <span className="truncate">
@@ -178,7 +182,7 @@ export function ClaudeAccountPill({
         <DropdownMenuItem
           onSelect={() => choose(CLAUDE_CREDENTIALS_FILE_ACCOUNT_ID)}
         >
-          <span className="flex-1">Credentials file fallback</span>
+          <span className="flex-1">Use credentials file</span>
           {agent.claudeAccountId === null ? (
             <Check className="h-4 w-4" />
           ) : null}

@@ -4,9 +4,6 @@ import { getProviderEffortConfig } from "./buzzAgentConfig";
 type CatalogModel = PersonaModelOption & { group: string };
 
 const ANTHROPIC_MODELS: readonly CatalogModel[] = [
-  { id: "opus", label: "Claude Opus (current)", group: "Opus" },
-  { id: "sonnet", label: "Claude Sonnet (current)", group: "Sonnet" },
-  { id: "haiku", label: "Claude Haiku (current)", group: "Haiku" },
   { id: "claude-fable-5", label: "Claude Fable 5", group: "Fable" },
   { id: "claude-opus-5", label: "Claude Opus 5", group: "Opus" },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", group: "Opus" },
@@ -45,6 +42,109 @@ const ANTHROPIC_MODELS: readonly CatalogModel[] = [
     group: "Haiku",
   },
 ];
+
+const CLAUDE_CANONICAL_IDS: Readonly<Record<string, string>> = {
+  fable: "claude-fable-5",
+  opus: "claude-opus-5",
+  sonnet: "claude-sonnet-5",
+  haiku: "claude-haiku-4-5-20251001",
+  "claude-opus-4-5": "claude-opus-4-5-20251101",
+  "claude-opus-4-1": "claude-opus-4-1-20250805",
+  "claude-opus-4": "claude-opus-4-20250514",
+  "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
+  "claude-sonnet-4": "claude-sonnet-4-20250514",
+  "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+};
+
+const CLAUDE_FAMILY_ORDER: Readonly<Record<string, number>> = {
+  Fable: 0,
+  Opus: 1,
+  Sonnet: 2,
+  Haiku: 3,
+  Other: 4,
+};
+
+function canonicalClaudeModelId(id: string): string {
+  const trimmed = id.trim();
+  return CLAUDE_CANONICAL_IDS[trimmed] ?? trimmed;
+}
+
+function mergeClaudeModelCatalog(
+  currentModel: string,
+  discovered: readonly PersonaModelOption[] | null,
+): readonly PersonaModelOption[] {
+  const liveByCanonicalId = new Map<string, PersonaModelOption>();
+  for (const option of discovered ?? []) {
+    const canonicalId = canonicalClaudeModelId(option.id);
+    if (!liveByCanonicalId.has(canonicalId)) {
+      liveByCanonicalId.set(canonicalId, option);
+    }
+  }
+
+  const merged: PersonaModelOption[] = [];
+  const emitted = new Set<string>();
+  const defaultEntry = liveByCanonicalId.get("");
+  if (defaultEntry) {
+    merged.push(defaultEntry);
+    emitted.add("");
+  }
+
+  for (const option of ANTHROPIC_MODELS) {
+    const canonicalId = canonicalClaudeModelId(option.id);
+    merged.push({
+      ...option,
+      badge: liveByCanonicalId.has(canonicalId)
+        ? "Available now"
+        : "Catalog only",
+    });
+    emitted.add(canonicalId);
+  }
+
+  for (const option of discovered ?? []) {
+    const canonicalId = canonicalClaudeModelId(option.id);
+    if (emitted.has(canonicalId)) continue;
+    merged.push({
+      ...option,
+      badge: option.id.trim() ? "Available now" : undefined,
+      group: option.id.trim() ? modelFamily(option.id) : undefined,
+    });
+    emitted.add(canonicalId);
+  }
+
+  const trimmedCurrent = currentModel.trim();
+  const currentCanonicalId = canonicalClaudeModelId(trimmedCurrent);
+  if (trimmedCurrent && !emitted.has(currentCanonicalId)) {
+    merged.push({
+      id: trimmedCurrent,
+      label: trimmedCurrent,
+      badge: "Current value",
+      group: modelFamily(trimmedCurrent),
+    });
+  }
+
+  const catalogOrder = new Map(
+    ANTHROPIC_MODELS.map((option, index) => [option.id, index]),
+  );
+  return merged.sort((left, right) => {
+    if (left.id === "") return -1;
+    if (right.id === "") return 1;
+    const leftGroup = modelFamily(left.id);
+    const rightGroup = modelFamily(right.id);
+    const familyDelta =
+      (CLAUDE_FAMILY_ORDER[leftGroup] ?? CLAUDE_FAMILY_ORDER.Other) -
+      (CLAUDE_FAMILY_ORDER[rightGroup] ?? CLAUDE_FAMILY_ORDER.Other);
+    if (familyDelta !== 0) return familyDelta;
+    const leftOrder = catalogOrder.get(canonicalClaudeModelId(left.id));
+    const rightOrder = catalogOrder.get(canonicalClaudeModelId(right.id));
+    if (leftOrder !== undefined || rightOrder !== undefined) {
+      return (
+        (leftOrder ?? Number.MAX_SAFE_INTEGER) -
+        (rightOrder ?? Number.MAX_SAFE_INTEGER)
+      );
+    }
+    return left.label.localeCompare(right.label);
+  });
+}
 
 const OPENAI_MODELS: readonly CatalogModel[] = [
   { id: "gpt-5.6", label: "GPT-5.6 (Sol alias)", group: "GPT-5.6" },
@@ -88,6 +188,9 @@ export function mergeRuntimeModelCatalog({
   provider: string;
   runtimeId: string;
 }): readonly PersonaModelOption[] {
+  if (runtimeId === "claude") {
+    return mergeClaudeModelCatalog(currentModel, discovered);
+  }
   const live = discovered ?? [];
   const liveIds = new Set(live.map((option) => option.id.trim()));
   const merged: PersonaModelOption[] = live.map((option) => ({
