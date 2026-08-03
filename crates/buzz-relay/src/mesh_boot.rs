@@ -313,24 +313,32 @@ pub(crate) async fn run_demo_echo(
     let peer = inbound.from;
     let mut stream = inbound.stream;
     tracing::info!(%session_id, %peer, "mesh demo echo: session open");
-    let mut drain_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    let shutdown = async {
+        loop {
+            if shutting_down.load(Ordering::Relaxed) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    tokio::pin!(shutdown);
     loop {
+        // `recv_validated` is not cancellation-safe after consuming a frame:
+        // keep it alive across polling intervals and cancel only for shutdown.
         let frame = tokio::select! {
-            _ = drain_tick.tick() => {
-                if shutting_down.load(Ordering::Relaxed) {
-                    if let Some(community_id) = stream.community_id() {
-                        if let Err(e) = stream.send_goodbye(community_id, GoodbyeReason::Draining).await {
-                            tracing::warn!(%session_id, "mesh demo echo: draining goodbye failed: {e}");
-                        } else {
-                            tracing::info!(%session_id, "mesh demo echo: sent draining goodbye");
-                        }
+            biased;
+            _ = &mut shutdown => {
+                if let Some(community_id) = stream.community_id() {
+                    if let Err(e) = stream.send_goodbye(community_id, GoodbyeReason::Draining).await {
+                        tracing::warn!(%session_id, "mesh demo echo: draining goodbye failed: {e}");
                     } else {
-                        let _ = stream.finish();
-                        tracing::info!(%session_id, "mesh demo echo: drain before community latch — closing");
+                        tracing::info!(%session_id, "mesh demo echo: sent draining goodbye");
                     }
-                    return;
+                } else {
+                    let _ = stream.finish();
+                    tracing::info!(%session_id, "mesh demo echo: drain before community latch — closing");
                 }
-                continue;
+                return;
             }
             frame = stream.recv_validated(&directory) => frame,
         };
