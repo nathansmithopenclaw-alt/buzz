@@ -26,6 +26,7 @@ function runtime(id, metadata = {}) {
     modelEnvVar: null,
     providerEnvVar: null,
     thinkingEnvVar: null,
+    effortModelQualifier: false,
     installHint: "",
     installInstructionsUrl: "",
     canAutoInstall: false,
@@ -122,7 +123,7 @@ test("Claude exposes native ACP effort through the harness env bridge", () => {
 test("Codex omits separate effort because model IDs own it", () => {
   const model = deriveAgentConfigFieldModel({
     config,
-    runtime: runtime("codex"),
+    runtime: runtime("codex", { effortModelQualifier: true }),
     scope: "global",
   });
 
@@ -134,6 +135,28 @@ test("Codex omits separate effort because model IDs own it", () => {
     { kind: "effort", reason: "ownedByModelId" },
   ]);
   assert.equal(field(model, "fastMode").usageNotice, null);
+});
+
+test("Codex instance edits expose effort through the saved model qualifier", () => {
+  const model = deriveAgentConfigFieldModel({
+    config: { ...config, model: "gpt-5.6-sol[ultra]" },
+    runtime: runtime("codex", { effortModelQualifier: true }),
+    scope: "instance",
+  });
+
+  assert.deepEqual(
+    model.fields.map((item) => item.kind),
+    ["model", "effort", "fastMode"],
+  );
+  assert.deepEqual(field(model, "effort").currentPersistence, {
+    kind: "modelQualifier",
+    field: "model",
+  });
+  assert.deepEqual(field(model, "effort").targetApplication, {
+    kind: "modelQualifier",
+    field: "model",
+  });
+  assert.equal(field(model, "effort").value, "ultra");
 });
 
 test("catalog mismatch cleanup is named and restricted to onboarding", () => {

@@ -163,7 +163,6 @@ pub async fn save_custom_harness(
 
     let default_args =
         crate::managed_agents::normalize_agent_args(&definition.command, definition.args.clone());
-
     Ok(AcpRuntimeCatalogEntry {
         id: definition.id,
         label: definition.label,
@@ -177,6 +176,7 @@ pub async fn save_custom_harness(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
+        effort_model_qualifier: false,
         install_hint: definition.install_hint,
         install_instructions_url: definition.install_instructions_url,
         can_auto_install: false,

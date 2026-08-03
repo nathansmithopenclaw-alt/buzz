@@ -622,6 +622,8 @@ pub struct AcpRuntimeCatalogEntry {
     pub provider_env_var: Option<String>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
+    /// Whether reasoning effort is persisted in the model id's `[level]` suffix.
+    pub effort_model_qualifier: bool,
     pub install_hint: String,
     pub install_instructions_url: String,
     /// true when at least one automated install step is available

@@ -47,6 +47,9 @@ pub(crate) struct KnownAcpRuntime {
     pub config_file_format: Option<&'static str>,
     pub supports_acp_native_config: bool, // tier 1a: config/read+write
     pub thinking_env_var: Option<&'static str>,
+    /// Whether reasoning effort is encoded as a trailing `[level]` qualifier
+    /// on the persisted model id instead of a separate environment variable.
+    pub effort_model_qualifier: bool,
     /// Env var for normalizing `max_output_tokens`. `None` when the harness
     /// does not have a first-class env var for this field (config-file only).
     pub max_tokens_env_var: Option<&'static str>,
@@ -120,5 +123,7 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
+        assert!(codex.effort_model_qualifier);
+        assert!(!claude.effort_model_qualifier);
     }
 }

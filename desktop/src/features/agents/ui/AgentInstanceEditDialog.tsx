@@ -80,17 +80,16 @@ import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
+import { parseModelEffortQualifier } from "./agentModelCatalog";
 import {
   ADD_CUSTOM_HARNESS_OPTION,
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
-
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
   ease: [0.23, 1, 0.32, 1],
 } as const;
-
 export function AgentInstanceEditDialog({
   agent,
   initialFocus,
@@ -100,10 +99,8 @@ export function AgentInstanceEditDialog({
   onUpdated,
 }: {
   agent: ManagedAgent;
-  /** Optional field to scroll/focus when the dialog opens from a card deep-link. */
   initialFocus?: EditAgentFocusTarget;
   open: boolean;
-  /** Present only when the linked definition is editable (non-built-in, resolved). Caller closes this dialog and enters definition-edit. */
   onEditLinkedPersona?: () => void;
   onOpenChange: (open: boolean) => void;
   onUpdated?: (agent: ManagedAgent) => void;
@@ -113,7 +110,6 @@ export function AgentInstanceEditDialog({
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
-
   const [name, setName] = React.useState(agent.name);
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -605,9 +601,12 @@ export function AgentInstanceEditDialog({
     showCustomInput: showCustomModelInput,
   } = useAgentDialogModelPicker({
     discoveredOptions: discoveredModelOptions,
-    effort: selectedRuntime?.thinkingEnvVar
-      ? (envVars[selectedRuntime.thinkingEnvVar] ?? "")
-      : "",
+    effort: selectedRuntime?.effortModelQualifier
+      ? (parseModelEffortQualifier(model).effort ?? "")
+      : selectedRuntime?.thinkingEnvVar
+        ? (envVars[selectedRuntime.thinkingEnvVar] ?? "")
+        : "",
+    effortModelQualifier: selectedRuntime?.effortModelQualifier ?? false,
     effortProvider: effectiveProvider,
     effortRuntimeId: selectedRuntimeId,
     fallbackOptions: [{ id: "", label: inheritedModelLabel }],
@@ -1124,6 +1123,7 @@ export function AgentInstanceEditDialog({
               inheritedEnvVars={inheritedEnvVars}
               model={model}
               nativeTuning={nativeTuning}
+              onModelChange={setModel}
               provider={effectiveProvider}
               runtime={selectedRuntime}
               scope="instance"

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  modelWithEffortQualifier,
+  parseModelEffortQualifier,
   mergeRuntimeModelCatalog,
   validateEffortSelection,
   validateModelSelection,
@@ -74,6 +76,62 @@ test("dead effort bracket qualifiers fail closed while Claude 1m stays compatibl
     /Reasoning effort/,
   );
   assert.equal(validateModelSelection("opus[1m]", "claude"), null);
+});
+
+test("Codex model qualifiers validate against live adapter effort options", () => {
+  const capability = {
+    enabled: true,
+    effortOptions: ["low", "medium", "high", "xhigh", "max", "ultra"].map(
+      (id) => ({ id }),
+    ),
+  };
+  assert.equal(
+    validateModelSelection("gpt-5.6-sol[ultra]", "codex", capability),
+    null,
+  );
+  assert.match(
+    validateModelSelection("gpt-5.6-sol[impossible]", "codex", capability),
+    /not advertised/,
+  );
+});
+
+test("model qualifier read-back and writes stay per-agent", () => {
+  assert.deepEqual(parseModelEffortQualifier("gpt-5.6-sol[xhigh]"), {
+    baseModel: "gpt-5.6-sol",
+    effort: "xhigh",
+  });
+  assert.equal(
+    modelWithEffortQualifier({
+      effort: "ultra",
+      inheritedModel: "gpt-5.6-sol[medium]",
+      model: "gpt-5.6-sol[xhigh]",
+    }),
+    "gpt-5.6-sol[ultra]",
+  );
+  assert.equal(
+    modelWithEffortQualifier({
+      effort: "high",
+      inheritedModel: "gpt-5.6-terra[medium]",
+      model: "",
+    }),
+    "gpt-5.6-terra[high]",
+  );
+  assert.equal(
+    modelWithEffortQualifier({
+      effort: "",
+      inheritedModel: "gpt-5.6-sol[medium]",
+      model: "gpt-5.6-sol[ultra]",
+    }),
+    "gpt-5.6-sol",
+  );
+  assert.equal(
+    modelWithEffortQualifier({
+      effort: "",
+      inheritedModel: "gpt-5.6-sol[medium]",
+      model: "",
+    }),
+    "",
+  );
 });
 
 test("Claude native advertised effort set is authoritative", () => {

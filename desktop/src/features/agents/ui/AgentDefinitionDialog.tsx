@@ -88,7 +88,6 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
-
 type AgentDefinitionDialogProps = {
   open: boolean;
   title: string;
@@ -936,6 +935,7 @@ export function AgentDefinitionDialog({
                   model={model}
                   nativeTuning={nativeTuning}
                   onBeforeChange={() => setHasUserChanges(true)}
+                  onModelChange={setModel}
                   provider={effectiveProvider}
                   runtime={selectedRuntime}
                   scope="definition"

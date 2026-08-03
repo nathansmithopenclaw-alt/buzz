@@ -46,6 +46,8 @@ type MockCommandAvailability = {
 type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
+  model?: string | null;
+  envVars?: Record<string, string>;
   runtime?: string | null;
   claudeAccountId?: string | null;
   claudeAccountSource?:

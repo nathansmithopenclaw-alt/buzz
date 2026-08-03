@@ -8,6 +8,10 @@ import {
   getRenderableEffortField,
 } from "../lib/agentConfigCore";
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import {
+  modelWithEffortQualifier,
+  parseModelEffortQualifier,
+} from "./agentModelCatalog";
 import { getProviderEffortConfig } from "./buzzAgentConfig";
 import {
   EffortSelectField,
@@ -20,8 +24,10 @@ export function AgentDialogEffortField({
   envVars,
   inheritedEnvVars = {},
   model,
+  nativeDefaultModel,
   nativeEffortOptions,
   onEnvVarChange,
+  onModelChange,
   provider,
   runtime,
   scope,
@@ -30,11 +36,13 @@ export function AgentDialogEffortField({
   envVars: EnvVarsValue;
   inheritedEnvVars?: EnvVarsValue;
   model: string;
+  nativeDefaultModel: string | null;
   nativeEffortOptions: ReadonlyArray<{
     id: string;
     name?: string | null;
   }> | null;
   onEnvVarChange: (key: string, value: string) => void;
+  onModelChange: (value: string) => void;
   provider: string;
   runtime: AcpRuntimeCatalogEntry | undefined;
   scope: "definition" | "instance";
@@ -59,6 +67,63 @@ export function AgentDialogEffortField({
             : "This harness does not advertise or expose a reasoning-effort setting."
         }
       />
+    );
+  }
+
+  if (
+    effortField.currentPersistence.kind === "modelQualifier" &&
+    effortField.targetApplication.kind === "modelQualifier"
+  ) {
+    const currentEffort = parseModelEffortQualifier(model).effort ?? "";
+    const inheritedEffort = nativeDefaultModel
+      ? (parseModelEffortQualifier(nativeDefaultModel).effort ?? undefined)
+      : undefined;
+    if (nativeEffortOptions === null) {
+      return (
+        <ReadOnlyEffortRow
+          explanation={
+            currentEffort
+              ? `This agent has ${currentEffort} saved in its model ID. Live Codex effort levels are still loading or unavailable.`
+              : "Live Codex effort levels are still loading or unavailable."
+          }
+        />
+      );
+    }
+    if (nativeEffortOptions.length === 0) {
+      return (
+        <ReadOnlyEffortRow explanation="The selected Codex model does not advertise reasoning-effort levels." />
+      );
+    }
+    return (
+      <div>
+        <EffortSelectField
+          availableOptions={nativeEffortOptions}
+          currentEffort={currentEffort}
+          disabled={disabled}
+          effortDefault={null}
+          effortValid={nativeEffortOptions.map((option) => option.id)}
+          htmlFor={`${scope}-agent-effort`}
+          inheritedEffort={inheritedEffort}
+          inheritFallbackLabel="Inherit (Codex default)"
+          label="Reasoning effort"
+          onChange={(effort) =>
+            onModelChange(
+              modelWithEffortQualifier({
+                effort,
+                inheritedModel: nativeDefaultModel ?? "",
+                model,
+              }),
+            )
+          }
+          showUnavailableOptions={false}
+          testId={`${scope}-agent-effort-select`}
+          useCustomSelect
+        />
+        <p className="mt-1 text-xs text-muted-foreground">
+          Saved for this agent in its model ID. Applies on the next restart;
+          your global Codex config is unchanged.
+        </p>
+      </div>
     );
   }
 
@@ -127,11 +192,12 @@ export function AgentDialogEffortSection({
   ...fieldProps
 }: Omit<
   React.ComponentProps<typeof AgentDialogEffortField>,
-  "envVars" | "nativeEffortOptions" | "onEnvVarChange"
+  "envVars" | "nativeDefaultModel" | "nativeEffortOptions" | "onEnvVarChange"
 > & {
   envVars: EnvVarsValue;
   nativeTuning: {
     effortOptions: ReadonlyArray<{ id: string; name?: string | null }> | null;
+    inheritedModel: string | null;
     fastMode: {
       configId: string | null;
       description: string | null;
@@ -152,13 +218,19 @@ export function AgentDialogEffortSection({
       return next;
     });
   };
+  const onModelChange = (value: string) => {
+    onBeforeChange?.();
+    fieldProps.onModelChange(value);
+  };
   return (
     <div className="space-y-2">
       <AgentDialogEffortField
         {...fieldProps}
         envVars={fieldProps.envVars}
+        nativeDefaultModel={nativeTuning.inheritedModel}
         nativeEffortOptions={nativeTuning.effortOptions}
         onEnvVarChange={onEnvVarChange}
+        onModelChange={onModelChange}
       />
       {validationError ? (
         <p className="text-xs text-destructive" role="alert">

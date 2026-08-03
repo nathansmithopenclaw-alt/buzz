@@ -71,7 +71,6 @@ fn common_binary_paths() -> &'static [PathBuf] {
         paths
     })
 }
-
 const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     KnownAcpRuntime {
         id: "goose",
@@ -101,6 +100,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_format: Some("yaml"),
         supports_acp_native_config: true,
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+        effort_model_qualifier: false,
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         required_normalized_fields: &["model", "provider"],
@@ -133,6 +133,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_format: Some("json"),
         supports_acp_native_config: false,
         thinking_env_var: Some("BUZZ_ACP_THINKING_EFFORT"),
+        effort_model_qualifier: false,
         max_tokens_env_var: None,
         context_limit_env_var: None,
         required_normalized_fields: &[],
@@ -165,6 +166,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_format: Some("toml"),
         supports_acp_native_config: false,
         thinking_env_var: None,
+        effort_model_qualifier: true,
         max_tokens_env_var: None,
         context_limit_env_var: None,
         required_normalized_fields: &[],
@@ -198,6 +200,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_format: None,
         supports_acp_native_config: false,
         thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
+        effort_model_qualifier: false,
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         required_normalized_fields: &["model", "provider"],
@@ -205,21 +208,16 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         auth_probe_args: None,
     },
 ];
-
-/// Skill discovery directories declared by known runtimes.
 pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
     KNOWN_ACP_RUNTIMES.iter().filter_map(|p| p.skill_dir)
 }
-
 fn workspace_root_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
-
 fn command_looks_like_path(command: &str) -> bool {
     let path = Path::new(command);
     path.is_absolute() || path.components().count() > 1
 }
-
 fn executable_basename(command: &str) -> String {
     let suffix = std::env::consts::EXE_SUFFIX;
     if suffix.is_empty() || command.ends_with(suffix) {
@@ -1446,6 +1444,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             model_env_var: runtime.model_env_var.map(str::to_string),
             provider_env_var: runtime.provider_env_var.map(str::to_string),
             thinking_env_var: runtime.thinking_env_var.map(str::to_string),
+            effort_model_qualifier: runtime.effort_model_qualifier,
             install_hint,
             install_instructions_url: install_instructions_url.to_string(),
             can_auto_install,
@@ -1604,6 +1603,7 @@ pub fn discover_acp_runtimes_from(
                 model_env_var: None,
                 provider_env_var: None,
                 thinking_env_var: None,
+                effort_model_qualifier: false,
                 install_hint: def.install_hint.clone(),
                 install_instructions_url: def.install_instructions_url.clone(),
                 // Security line: custom definitions carry no install scripts.

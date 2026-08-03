@@ -1048,6 +1048,7 @@ mod tests {
             default_env: &[],
             supports_acp_native_config: false,
             thinking_env_var: None,
+            effort_model_qualifier: false,
             max_tokens_env_var: None,
             context_limit_env_var: None,
             required_normalized_fields: &[],
@@ -1055,7 +1056,6 @@ mod tests {
             auth_probe_args: None,
         }
     }
-
     /// Returns the absolute path of the currently-running test binary as a
     /// `&'static str`.  Host-portable stand-in for a "present" binary:
     /// the path is absolute so `find_command` resolves it via `path.exists()`
@@ -1243,6 +1243,7 @@ mod tests {
             default_env: &[],
             supports_acp_native_config: false,
             thinking_env_var: None,
+            effort_model_qualifier: false,
             max_tokens_env_var: None,
             context_limit_env_var: None,
             required_normalized_fields: &[],
@@ -1250,7 +1251,6 @@ mod tests {
             auth_probe_args: None,
         }
     }
-
     /// Build a temp dir containing a `codex-acp` script with the given body,
     /// prepend it to PATH, and clear the resolve cache.  Returns the temp dir
     /// and the original PATH string for restoration.

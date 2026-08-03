@@ -516,6 +516,7 @@ export type AcpRuntimeCatalogEntry = {
   providerEnvVar: string | null;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
+  effortModelQualifier: boolean;
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
@@ -544,7 +545,6 @@ export type AcpRuntimeCatalogEntry = {
    */
   definitionEnv?: Record<string, string>;
 };
-
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
 export type AcpRuntime = AcpRuntimeCatalogEntry & {
   availability: "available";
