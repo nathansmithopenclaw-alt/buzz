@@ -1373,6 +1373,7 @@ fn parse_envelope(json_str: &str) -> Result<Envelope, String> {
         .as_str()
         .ok_or("pk must be a string")?;
     validate_hex_field(pk, 64, "pk")?;
+    validate_bip340_public_key(pk, "pk")?;
 
     // sig (required, 128-char lowercase hex)
     let sig = obj
@@ -1420,8 +1421,7 @@ fn parse_envelope(json_str: &str) -> Result<Envelope, String> {
         }
 
         // Validate oa[0] is a valid BIP-340 x-only public key (not just hex)
-        PublicKey::from_hex(owner)
-            .map_err(|e| format!("oa[0] is not a valid BIP-340 public key: {e}"))?;
+        validate_bip340_public_key(owner, "oa[0]")?;
 
         // Self-attestation is meaningless — owner must differ from signer
         if owner == pk {
@@ -1458,6 +1458,15 @@ fn validate_hex_field(val: &str, expected_len: usize, name: &str) -> Result<(), 
     {
         return Err(format!("{name} must be lowercase hex"));
     }
+    Ok(())
+}
+
+fn validate_bip340_public_key(val: &str, name: &str) -> Result<(), String> {
+    let public_key = PublicKey::from_hex(val)
+        .map_err(|e| format!("{name} is not a valid BIP-340 public key: {e}"))?;
+    public_key
+        .xonly()
+        .map_err(|e| format!("{name} is not a valid BIP-340 public key: {e}"))?;
     Ok(())
 }
 
@@ -2132,6 +2141,17 @@ Initial commit"
             r#""]}"#,
         ]
         .concat();
+        let result = parse_envelope(&json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("BIP-340"));
+    }
+
+    #[test]
+    fn test_parse_envelope_rejects_invalid_signer_pubkey() {
+        // pk is valid hex but not a valid BIP-340 point (all zeros)
+        let zero_pk = "0".repeat(64);
+        let sig_field = "a".repeat(128);
+        let json = format!(r#"{{"v":1,"pk":"{zero_pk}","sig":"{sig_field}","t":1700000000}}"#);
         let result = parse_envelope(&json);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("BIP-340"));
