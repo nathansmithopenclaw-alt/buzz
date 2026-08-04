@@ -176,6 +176,9 @@ enum Cmd {
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
+    /// Create, update, list, and deploy agent teams
+    #[command(subcommand)]
+    Teams(TeamsCmd),
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
@@ -297,6 +300,30 @@ pub enum AgentsCmd {
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=32))]
         parallelism: Option<u32>,
     },
+    /// Create an agent under an owner-granted standing delegation
+    ApplyCreate {
+        /// Stable UUID for idempotent retries after an unknown delivery outcome
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Current channel UUID; the new agent is added here after creation
+        #[arg(long)]
+        channel: String,
+        #[arg(long)]
+        display_name: String,
+        /// Agent instructions; use '-' to read from stdin
+        #[arg(long)]
+        system_prompt: String,
+        #[arg(long)]
+        runtime: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, value_enum)]
+        respond_to: Option<RespondToArg>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=32))]
+        parallelism: Option<u32>,
+    },
     /// Open a prefilled edit-agent form in the owner's Buzz Desktop
     DraftUpdate {
         /// Current channel UUID
@@ -375,6 +402,61 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+}
+
+#[derive(Subcommand)]
+pub enum TeamsCmd {
+    /// Create a team under an owner-granted standing delegation
+    Create {
+        /// Stable UUID for idempotent retries after an unknown delivery outcome
+        #[arg(long)]
+        request_id: Option<String>,
+        #[arg(long)]
+        channel: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        instructions: Option<String>,
+        /// Agent persona name or ID; repeat for each member
+        #[arg(long = "agent")]
+        agents: Vec<String>,
+    },
+    /// Update an existing team under an owner-granted standing delegation
+    Update {
+        /// Stable UUID for idempotent retries after an unknown delivery outcome
+        #[arg(long)]
+        request_id: Option<String>,
+        #[arg(long)]
+        channel: String,
+        /// Team name or ID
+        team: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        instructions: Option<String>,
+        /// Agent persona name or ID; used only with --replace-members
+        #[arg(long = "agent")]
+        agents: Vec<String>,
+        /// Replace membership with the repeated --agent values; omit to preserve
+        #[arg(long)]
+        replace_members: bool,
+    },
+    /// List owner-authored teams from the relay
+    List,
+    /// Deploy every team member to a channel and ensure each agent is running
+    AddToChannel {
+        /// Stable UUID for idempotent retries after an unknown delivery outcome
+        #[arg(long)]
+        request_id: Option<String>,
+        #[arg(long)]
+        channel: String,
+        /// Team name or ID
+        team: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1907,6 +1989,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
+        Cmd::Teams(sub) => commands::teams::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Tasks(sub) => commands::tasks::dispatch(sub, &client).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
@@ -1940,6 +2023,37 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn delegated_mutations_accept_stable_request_ids_for_safe_retry() {
+        let request_id = "70fc630c-a0ca-42e8-9392-326c5d4ef9c1";
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "agents",
+            "apply-create",
+            "--request-id",
+            request_id,
+            "--channel",
+            "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+            "--display-name",
+            "Verifier",
+            "--system-prompt",
+            "Verify the work",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "teams",
+            "create",
+            "--request-id",
+            request_id,
+            "--channel",
+            "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+            "--name",
+            "Reviewers",
+        ])
+        .is_ok());
     }
 
     #[test]
@@ -1988,6 +2102,7 @@ mod tests {
             "repos",
             "social",
             "tasks",
+            "teams",
             "upload",
             "users",
             "workflows",
@@ -2035,6 +2150,7 @@ mod tests {
         assert_eq!(
             names(&cmd, "agents"),
             vec![
+                "apply-create",
                 "archive",
                 "archived",
                 "draft-create",
@@ -2060,6 +2176,10 @@ mod tests {
         assert_eq!(
             names(&cmd, "tasks"),
             vec!["assign", "get", "list", "update"]
+        );
+        assert_eq!(
+            names(&cmd, "teams"),
+            vec!["add-to-channel", "create", "list", "update"]
         );
         assert_eq!(
             names(&cmd, "channels"),
@@ -2171,7 +2291,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 7),
+            ("agents", 8),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

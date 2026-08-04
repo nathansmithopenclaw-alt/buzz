@@ -11,6 +11,7 @@ export type AgentManagementCreateRequest = {
   type: typeof AGENT_MANAGEMENT_REQUEST;
   action: "create";
   requestId: string;
+  intent: "draft" | "apply";
   request: {
     channelId: string;
     displayName: string;
@@ -27,6 +28,7 @@ export type AgentManagementUpdateRequest = {
   type: typeof AGENT_MANAGEMENT_REQUEST;
   action: "update";
   requestId: string;
+  intent: "draft" | "apply";
   request: {
     channelId: string;
     agentName: string;
@@ -87,6 +89,16 @@ export function parseAgentManagementRequest(
   if (
     payload.type !== AGENT_MANAGEMENT_REQUEST ||
     !isText(payload.requestId) ||
+    (payload.intent !== undefined &&
+      payload.intent !== "draft" &&
+      payload.intent !== "apply") ||
+    !hasOnlyKeys(payload, [
+      "type",
+      "action",
+      "requestId",
+      "intent",
+      "request",
+    ]) ||
     (payload.action !== "create" && payload.action !== "update") ||
     typeof payload.request !== "object" ||
     payload.request === null
@@ -126,6 +138,7 @@ export function parseAgentManagementRequest(
       type: AGENT_MANAGEMENT_REQUEST,
       action: "create",
       requestId: payload.requestId,
+      intent: payload.intent === "apply" ? "apply" : "draft",
       request: {
         channelId: request.channelId,
         displayName: request.displayName,
@@ -184,6 +197,7 @@ export function parseAgentManagementRequest(
     type: AGENT_MANAGEMENT_REQUEST,
     action: "update",
     requestId: payload.requestId,
+    intent: payload.intent === "apply" ? "apply" : "draft",
     request: {
       channelId: request.channelId,
       agentName: request.agentName,

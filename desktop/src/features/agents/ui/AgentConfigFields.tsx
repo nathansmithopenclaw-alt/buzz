@@ -63,6 +63,7 @@ export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   claude_account_id: null,
   preferred_runtime: null,
   auto_approve_agent_drafts: false,
+  agent_management_delegation: null,
 };
 
 /** Baked env keys that route to structured controls, not the generic env editor. */

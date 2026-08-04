@@ -1000,6 +1000,20 @@ export type GlobalAgentConfig = {
   preferred_runtime: string | null;
   /** Apply trusted owned-agent create drafts without opening the review dialog. */
   auto_approve_agent_drafts: boolean;
+  /** Owner-signed standing delegation; null revokes it immediately. */
+  agent_management_delegation: AgentManagementDelegationGrant | null;
+};
+
+export type AgentManagementDelegationCapabilities = {
+  teams: boolean;
+  agent_creation: boolean;
+};
+
+export type AgentManagementDelegationGrant = {
+  granteePubkey: string;
+  auditChannelId: string;
+  capabilities: AgentManagementDelegationCapabilities;
+  signedEvent?: string | null;
 };
 
 /**

@@ -61,7 +61,7 @@ pub(crate) use git_bash::git_bash_available;
 pub(crate) use git_bash::{discover_git_bash, GitBashPrerequisite};
 pub(crate) use global_config::{
     load_global_agent_config, resolve_effective_model_provider, save_global_agent_config,
-    validate_global_config, GlobalAgentConfig,
+    validate_global_config, AgentManagementDelegationGrant, GlobalAgentConfig,
 };
 pub(crate) use managed_node_paths::*;
 pub use nest::*;

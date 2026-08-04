@@ -26,6 +26,120 @@ export async function applyManagedAgentAvatarRequest(
   });
 }
 
+export type ManagementRequestDisposition =
+  | "apply"
+  | "draft"
+  | "duplicate_applying"
+  | "duplicate_applied"
+  | "duplicate_draft"
+  | "duplicate_failed"
+  | "duplicate_dismissed";
+
+export type RegisterManagementRequestResult = {
+  disposition: ManagementRequestDisposition;
+  auditChannelId?: string;
+  result?: unknown;
+};
+
+export type PendingManagementRequest = {
+  requestId: string;
+  sourcePubkey: string;
+  payload: unknown;
+};
+
+export async function registerAgentManagementRequest(input: {
+  sourcePubkey: string;
+  requestId: string;
+  capability: "agent_config" | "agent_creation" | "teams";
+  intent: "apply" | "draft";
+  payload: unknown;
+}): Promise<RegisterManagementRequestResult> {
+  return invokeTauri("agent_management_ledger", {
+    command: { action: "register", ...input },
+  });
+}
+
+export async function completeAgentManagementRequest(
+  requestId: string,
+  succeeded: boolean,
+  result: unknown,
+): Promise<void> {
+  return invokeTauri("agent_management_ledger", {
+    command: { action: "complete", requestId, succeeded, result },
+  });
+}
+
+export async function beginOwnerReviewedAgentManagementRequest(
+  requestId: string,
+): Promise<void> {
+  return invokeTauri("agent_management_ledger", {
+    command: { action: "begin_owner_review", requestId },
+  });
+}
+
+export async function listPendingAgentManagementRequests(): Promise<
+  PendingManagementRequest[]
+> {
+  return invokeTauri("agent_management_ledger", {
+    command: { action: "list_pending" },
+  });
+}
+
+export async function dismissAgentManagementRequest(
+  requestId: string,
+): Promise<void> {
+  return invokeTauri("agent_management_ledger", {
+    command: { action: "dismiss", requestId },
+  });
+}
+
+export async function publishAgentCreateSecretResponse(input: {
+  requestId: string;
+  sourcePubkey: string;
+  agentPubkey: string;
+  privateKeyNsec: string;
+}): Promise<void> {
+  return invokeTauri("publish_agent_management", {
+    command: { action: "create_secret", ...input },
+  });
+}
+
+export async function getManagedAgentNsec(pubkey: string): Promise<string> {
+  return invokeTauri("get_managed_agent_nsec", { pubkey });
+}
+
+export async function publishAgentManagementAuditReceipt(input: {
+  requestId: string;
+  sourcePubkey: string;
+  requesterName: string;
+  capability: "agent_config" | "agent_creation" | "teams";
+  target: string;
+  succeeded: boolean;
+}): Promise<void> {
+  return invokeTauri("publish_agent_management", {
+    command: { action: "audit", ...input },
+  });
+}
+
+export async function publishAgentManagementDraftResult(input: {
+  requestId: string;
+  sourcePubkey: string;
+}): Promise<void> {
+  return invokeTauri("publish_agent_management", {
+    command: { action: "draft", ...input },
+  });
+}
+
+export async function publishAgentManagementResult(input: {
+  requestId: string;
+  sourcePubkey: string;
+  result: unknown;
+}): Promise<void> {
+  return invokeTauri("publish_agent_management", {
+    command: { action: "result", ...input },
+  });
+}
+
 export async function startManagedAgent(pubkey: string): Promise<ManagedAgent> {
   const response = await invokeTauri<RawManagedAgent>("start_managed_agent", {
     pubkey,

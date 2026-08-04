@@ -86,7 +86,15 @@ struct ManagementRequest<T> {
     request_type: &'static str,
     action: &'static str,
     request_id: String,
+    intent: ManagementIntent,
     request: T,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagementIntent {
+    Draft,
+    Apply,
 }
 
 #[derive(Debug, Serialize)]
@@ -269,9 +277,14 @@ fn build<T: Serialize>(
     owner: &PublicKey,
     channel_id: String,
     action: &'static str,
+    intent: ManagementIntent,
+    request_id: Option<String>,
     request: T,
 ) -> Result<BuiltDraftRequest, CliError> {
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let request_id = uuid::Uuid::parse_str(&request_id)
+        .map_err(|_| CliError::Usage(format!("invalid request UUID: {request_id}")))?
+        .to_string();
     let payload = ObserverEvent {
         seq: 0,
         timestamp: chrono::Utc::now().to_rfc3339(),
@@ -284,6 +297,7 @@ fn build<T: Serialize>(
             request_type: REQUEST_KIND,
             action,
             request_id: request_id.clone(),
+            intent,
             request,
         },
     };
@@ -309,6 +323,25 @@ pub fn build_create(
     keys: &Keys,
     owner: &PublicKey,
     draft: CreateAgentDraft,
+) -> Result<BuiltDraftRequest, CliError> {
+    build_create_with_intent(keys, owner, draft, ManagementIntent::Draft, None)
+}
+
+pub fn build_apply_create(
+    keys: &Keys,
+    owner: &PublicKey,
+    draft: CreateAgentDraft,
+    request_id: Option<String>,
+) -> Result<BuiltDraftRequest, CliError> {
+    build_create_with_intent(keys, owner, draft, ManagementIntent::Apply, request_id)
+}
+
+fn build_create_with_intent(
+    keys: &Keys,
+    owner: &PublicKey,
+    draft: CreateAgentDraft,
+    intent: ManagementIntent,
+    request_id: Option<String>,
 ) -> Result<BuiltDraftRequest, CliError> {
     let channel_id = required(draft.channel_id, "channel", 128)?;
     uuid::Uuid::parse_str(&channel_id)
@@ -340,7 +373,9 @@ pub fn build_create(
         respond_to,
         parallelism: draft.parallelism,
     };
-    build(keys, owner, channel_id, "create", request)
+    build(
+        keys, owner, channel_id, "create", intent, request_id, request,
+    )
 }
 
 pub fn build_update(
@@ -396,7 +431,15 @@ pub fn build_update(
             "include at least one field to update".into(),
         ));
     }
-    build(keys, owner, channel_id, "update", request)
+    build(
+        keys,
+        owner,
+        channel_id,
+        "update",
+        ManagementIntent::Draft,
+        None,
+        request,
+    )
 }
 
 #[cfg(test)]
@@ -493,12 +536,41 @@ mod tests {
         assert_eq!(payload["channelId"], CHANNEL);
         assert_eq!(payload["payload"]["type"], REQUEST_KIND);
         assert_eq!(payload["payload"]["action"], "create");
+        assert_eq!(payload["payload"]["intent"], "draft");
         assert_eq!(
             payload["payload"]["request"]["displayName"],
             "Research helper"
         );
         assert!(payload["payload"]["request"].get("runtime").is_none());
         assert!(payload["payload"]["request"].get("respondTo").is_none());
+    }
+
+    #[test]
+    fn apply_create_preserves_caller_request_uuid_and_apply_intent() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let request_id = "70fc630c-a0ca-42e8-9392-326c5d4ef9c1";
+        let built = build_apply_create(
+            &agent,
+            &owner.public_key(),
+            CreateAgentDraft {
+                channel_id: CHANNEL.into(),
+                display_name: "Research helper".into(),
+                system_prompt: "Find sources.".into(),
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: None,
+                parallelism: None,
+            },
+            Some(request_id.into()),
+        )
+        .unwrap();
+
+        assert_eq!(built.request_id, request_id);
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["payload"]["requestId"], request_id);
+        assert_eq!(payload["payload"]["intent"], "apply");
     }
 
     #[test]
