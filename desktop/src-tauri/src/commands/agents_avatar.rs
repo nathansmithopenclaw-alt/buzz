@@ -12,7 +12,7 @@ use crate::{
     util::now_iso,
 };
 
-use super::{reconcile_agent_profile, ProfileReconcileData};
+use super::{reconcile_agent_profile, ProfileReconcileData, ProfileReconcileOutcome};
 
 const AVATAR_APPLY_REQUEST_KIND: &str = "agent_avatar_apply_request";
 const AVATAR_AUTHORIZATION_KIND: u16 = 30_078;
@@ -21,6 +21,7 @@ const AVATAR_RECEIPT_D_TAG_PREFIX: &str = "buzz-agent-avatar-apply-receipt:";
 const MAX_AVATAR_URL_CHARS: usize = 4_096;
 const MAX_AUTHORIZATION_AGE: Duration = Duration::minutes(5);
 const MAX_FUTURE_SKEW: Duration = Duration::seconds(30);
+const AGENT_MANAGED_PROFILES_SKIP_REASON: &str = "agent_managed_profiles_enabled";
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +42,9 @@ pub struct ApplyManagedAgentAvatarResult {
     persona_id: String,
     instance_count: usize,
     reconciled_count: usize,
+    published_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reconcile_skipped: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -55,6 +59,9 @@ struct AvatarApplyReceipt<'a> {
     persona_id: &'a str,
     instance_count: usize,
     reconciled_count: usize,
+    published_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reconcile_skipped: Option<&'static str>,
 }
 
 struct ReconcileTarget {
@@ -246,11 +253,50 @@ pub async fn apply_managed_agent_avatar_request(
     .map_err(|error| format!("spawn_blocking failed: {error}"))??;
 
     let mut reconciled_count = 0;
+    let mut published_count = 0;
+    let mut reconcile_skipped = None;
     if applied {
         let state = app.state::<AppState>();
         for target in targets {
             match reconcile_agent_profile(&state, &app, &target.pubkey, &target.data).await {
-                Ok(()) => reconciled_count += 1,
+                Ok(
+                    ProfileReconcileOutcome::AlreadyCurrent | ProfileReconcileOutcome::Published,
+                ) => {
+                    reconciled_count += 1;
+                }
+                Ok(ProfileReconcileOutcome::SkippedAgentManagedProfiles) => {
+                    reconcile_skipped = Some(AGENT_MANAGED_PROFILES_SKIP_REASON);
+                    let relay_url = crate::relay::effective_agent_relay_url(
+                        &target.data.relay_url,
+                        &crate::relay::relay_ws_url_with_override(&state),
+                    );
+                    let agent_keys = match nostr::Keys::parse(&target.data.private_key_nsec) {
+                        Ok(keys) => keys,
+                        Err(error) => {
+                            eprintln!(
+                                "buzz-desktop: avatar publish failed for agent {}: failed to parse agent keys: {error}",
+                                target.pubkey
+                            );
+                            continue;
+                        }
+                    };
+                    match crate::relay::sync_agent_managed_profile_avatar(
+                        &state,
+                        &relay_url,
+                        &agent_keys,
+                        &target.data.name,
+                        &avatar_url,
+                        target.data.auth_tag.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(()) => published_count += 1,
+                        Err(error) => eprintln!(
+                            "buzz-desktop: agent-managed avatar publish failed for agent {}: {error}",
+                            target.pubkey
+                        ),
+                    }
+                }
                 Err(error) => eprintln!(
                     "buzz-desktop: avatar reconcile failed for agent {}: {error}",
                     target.pubkey
@@ -268,6 +314,8 @@ pub async fn apply_managed_agent_avatar_request(
         persona_id: &persona_id,
         instance_count,
         reconciled_count,
+        published_count,
+        reconcile_skipped,
     };
     let receipt_content = serde_json::to_string(&receipt)
         .map_err(|error| format!("serialize avatar apply receipt: {error}"))?;
@@ -294,6 +342,8 @@ pub async fn apply_managed_agent_avatar_request(
         persona_id,
         instance_count,
         reconciled_count,
+        published_count,
+        reconcile_skipped,
     })
 }
 
