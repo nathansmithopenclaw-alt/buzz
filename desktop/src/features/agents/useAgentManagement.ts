@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import {
   createInputFromRequest,
+  parseAgentManagementRequest,
   requestTargetsEditablePersona,
   updateInputFromRequest,
   type AgentManagementRequest,
@@ -32,6 +33,18 @@ import {
   type QueuedAgentManagementRequest,
 } from "./agentManagementBuffer";
 import { useGlobalAgentConfig } from "./useGlobalAgentConfig";
+import {
+  beginOwnerReviewedAgentManagementRequest,
+  completeAgentManagementRequest,
+  dismissAgentManagementRequest,
+  getManagedAgentNsec,
+  listPendingAgentManagementRequests,
+  publishAgentCreateSecretResponse,
+  publishAgentManagementAuditReceipt,
+  publishAgentManagementDraftResult,
+  publishAgentManagementResult,
+  registerAgentManagementRequest,
+} from "@/shared/api/tauriManagedAgents";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
@@ -68,6 +81,8 @@ export function useAgentManagement() {
   const bufferedRequestsRef = React.useRef<
     Array<{ agentPubkey: string; request: AgentManagementRequest }>
   >([]);
+  const registrationQueueRef = React.useRef(Promise.resolve());
+  const delegatedApplyIdsRef = React.useRef(new Set<string>());
 
   const presentNextRequest = React.useEffectEvent(() => {
     if (pendingRequestId.current !== null) return;
@@ -92,17 +107,141 @@ export function useAgentManagement() {
       ) {
         return;
       }
-      if (
-        enqueueAgentManagementRequest(
-          acceptedRequestsRef.current,
-          seenRequestIds.current,
-          { agentPubkey, request: next },
-        )
-      ) {
-        presentNextRequest();
-      }
+      registrationQueueRef.current = registrationQueueRef.current
+        .then(async () => {
+          const registered = await registerAgentManagementRequest({
+            sourcePubkey: agentPubkey,
+            requestId: next.requestId,
+            capability:
+              next.action === "create" ? "agent_creation" : "agent_config",
+            intent: next.intent,
+            payload: next,
+          });
+          if (registered.disposition === "apply") {
+            delegatedApplyIdsRef.current.add(next.requestId);
+          } else if (
+            registered.disposition === "duplicate_failed" &&
+            registered.result
+          ) {
+            const result = registered.result as Record<string, unknown>;
+            const requesterName =
+              managedAgentsRef.current?.find(
+                (agent) =>
+                  agent.pubkey.toLowerCase() === agentPubkey.toLowerCase(),
+              )?.name ?? "delegated agent";
+            await publishAgentManagementAuditReceipt({
+              requestId: next.requestId,
+              sourcePubkey: agentPubkey,
+              requesterName,
+              capability: "agent_creation",
+              target: `agent create: ${String(result.error ?? "failed")}`,
+              succeeded: false,
+            });
+            await publishAgentManagementResult({
+              requestId: next.requestId,
+              sourcePubkey: agentPubkey,
+              result: registered.result,
+            });
+            return;
+          } else if (
+            registered.disposition === "duplicate_applied" &&
+            next.action === "create" &&
+            typeof registered.result === "object" &&
+            registered.result !== null &&
+            typeof (registered.result as { pubkey?: unknown }).pubkey ===
+              "string"
+          ) {
+            const createdPubkey = (registered.result as { pubkey: string })
+              .pubkey;
+            const privateKeyNsec = await getManagedAgentNsec(createdPubkey);
+            const createdAgent = managedAgentsRef.current?.find(
+              (agent) =>
+                agent.pubkey.toLowerCase() === createdPubkey.toLowerCase(),
+            );
+            const requesterName =
+              managedAgentsRef.current?.find(
+                (agent) =>
+                  agent.pubkey.toLowerCase() === agentPubkey.toLowerCase(),
+              )?.name ?? "delegated agent";
+            await publishAgentManagementAuditReceipt({
+              requestId: next.requestId,
+              sourcePubkey: agentPubkey,
+              requesterName,
+              capability: "agent_creation",
+              target: `created agent ${createdAgent?.name ?? createdPubkey} (${createdPubkey})`,
+              succeeded: true,
+            });
+            await publishAgentCreateSecretResponse({
+              requestId: next.requestId,
+              sourcePubkey: agentPubkey,
+              agentPubkey: createdPubkey,
+              privateKeyNsec,
+            });
+            return;
+          } else if (
+            registered.disposition !== "draft" &&
+            registered.disposition !== "duplicate_draft"
+          ) {
+            return;
+          }
+          if (next.intent === "apply") {
+            await publishAgentManagementDraftResult({
+              requestId: next.requestId,
+              sourcePubkey: agentPubkey,
+            });
+          }
+          if (
+            enqueueAgentManagementRequest(
+              acceptedRequestsRef.current,
+              seenRequestIds.current,
+              { agentPubkey, request: next },
+            )
+          ) {
+            presentNextRequest();
+          }
+        })
+        .catch((cause) => {
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Could not register agent-management request.",
+          );
+        });
     },
   );
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void listPendingAgentManagementRequests()
+      .then((pending) => {
+        if (cancelled) return;
+        for (const entry of pending) {
+          const parsed = parseAgentManagementRequest(entry.payload);
+          if (!parsed || parsed.requestId !== entry.requestId) continue;
+          if (
+            enqueueAgentManagementRequest(
+              acceptedRequestsRef.current,
+              seenRequestIds.current,
+              { agentPubkey: entry.sourcePubkey, request: parsed },
+            )
+          ) {
+            presentNextRequest();
+          }
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Could not restore pending agent drafts.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   React.useEffect(() => {
     managedAgentsRef.current = managedAgentsQuery.data;
@@ -181,6 +320,10 @@ export function useAgentManagement() {
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
     revealSecret = true,
+    onCreated?: (
+      created: import("@/shared/api/types").CreateManagedAgentResponse,
+    ) => Promise<void>,
+    onFailed?: (cause: unknown) => Promise<void>,
   ): Promise<boolean> {
     if (request?.action !== "create" || "id" in input) {
       return false;
@@ -216,6 +359,7 @@ export function useAgentManagement() {
           ),
         );
         if (created.spawnError) throw new Error(created.spawnError);
+        await onCreated?.(created);
         const targetChannel = (channelsQuery.data ?? []).find(
           (channel) => channel.id === request.request.channelId,
         );
@@ -236,6 +380,7 @@ export function useAgentManagement() {
       dismiss();
       return true;
     } catch (cause) {
+      await onFailed?.(cause).catch(() => undefined);
       setError(
         cause instanceof Error ? cause.message : "Could not save this agent.",
       );
@@ -266,6 +411,15 @@ export function useAgentManagement() {
   }
 
   function dismiss() {
+    const activeRequestId = pendingRequestId.current;
+    const wasDelegatedApply = activeRequestId
+      ? delegatedApplyIdsRef.current.delete(activeRequestId)
+      : false;
+    if (activeRequestId && !wasDelegatedApply) {
+      void dismissAgentManagementRequest(activeRequestId).catch(() => {
+        // A concurrent apply completion may already have resolved it.
+      });
+    }
     pendingRequestId.current = null;
     sourceAgentPubkey.current = null;
     setRequest(null);
@@ -299,14 +453,117 @@ export function useAgentManagement() {
     return null;
   }, [currentPersona, error, matchingPersonas.length, request]);
 
+  async function completeCreateSuccess(
+    requestId: string,
+    sourcePubkey: string,
+    created: import("@/shared/api/types").CreateManagedAgentResponse,
+  ) {
+    await completeAgentManagementRequest(requestId, true, {
+      pubkey: created.agent.pubkey,
+    });
+    const requesterName =
+      managedAgentsRef.current?.find(
+        (agent) => agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
+      )?.name ?? "delegated agent";
+    await publishAgentManagementAuditReceipt({
+      requestId,
+      sourcePubkey,
+      requesterName,
+      capability: "agent_creation",
+      target: `created agent ${created.agent.name} (${created.agent.pubkey})`,
+      succeeded: true,
+    });
+    await publishAgentCreateSecretResponse({
+      requestId,
+      sourcePubkey,
+      agentPubkey: created.agent.pubkey,
+      privateKeyNsec: created.privateKeyNsec,
+    });
+  }
+
+  async function completeCreateFailure(
+    requestId: string,
+    sourcePubkey: string,
+    cause: unknown,
+  ) {
+    const message =
+      cause instanceof Error ? cause.message : "Agent creation failed.";
+    const result = { error: message };
+    await completeAgentManagementRequest(requestId, false, result);
+    const requesterName =
+      managedAgentsRef.current?.find(
+        (agent) => agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
+      )?.name ?? "delegated agent";
+    await publishAgentManagementAuditReceipt({
+      requestId,
+      sourcePubkey,
+      requesterName,
+      capability: "agent_creation",
+      target: `agent create: ${message}`,
+      succeeded: false,
+    });
+    await publishAgentManagementResult({
+      requestId,
+      sourcePubkey,
+      result,
+    });
+  }
+
+  async function submitReviewedCreate(
+    input: CreatePersonaInput | UpdatePersonaInput,
+    intent: AgentCreateIntent,
+    backendIntent: BackendIntent | null,
+  ): Promise<boolean> {
+    const requestId = pendingRequestId.current;
+    const sourcePubkey = sourceAgentPubkey.current;
+    if (
+      request?.action !== "create" ||
+      !requestId ||
+      !sourcePubkey ||
+      intent !== "definition_start" ||
+      delegatedApplyIdsRef.current.has(requestId)
+    ) {
+      return submitCreate(input, intent, backendIntent);
+    }
+    try {
+      await beginOwnerReviewedAgentManagementRequest(requestId);
+      // Reuse the apply-finalization path while the ledger itself retains the
+      // owner-reviewed provenance for the audit wording.
+      delegatedApplyIdsRef.current.add(requestId);
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Could not approve this agent request.",
+      );
+      return false;
+    }
+    return submitCreate(
+      input,
+      intent,
+      backendIntent,
+      true,
+      (created) => completeCreateSuccess(requestId, sourcePubkey, created),
+      (cause) => completeCreateFailure(requestId, sourcePubkey, cause),
+    );
+  }
+
   const autoApproveCreate = React.useEffectEvent(
     async (requestId: string, input: CreatePersonaInput): Promise<void> => {
       if (request?.requestId !== requestId) return;
+      const delegated = delegatedApplyIdsRef.current.has(requestId);
+      const sourcePubkey = sourceAgentPubkey.current;
       const submitted = await submitCreate(
         input,
         "definition_start",
         null,
         false,
+        delegated && sourcePubkey
+          ? (created) => completeCreateSuccess(requestId, sourcePubkey, created)
+          : undefined,
+        delegated && sourcePubkey
+          ? (cause) => completeCreateFailure(requestId, sourcePubkey, cause)
+          : undefined,
       );
       if (!submitted && pendingRequestId.current === requestId) {
         setFailedAutoApprovalRequestId(requestId);
@@ -316,7 +573,6 @@ export function useAgentManagement() {
 
   React.useEffect(() => {
     if (
-      !globalConfig.auto_approve_agent_drafts ||
       request?.action !== "create" ||
       !createInitialValues ||
       failedAutoApprovalRequestId === request.requestId ||
@@ -324,6 +580,10 @@ export function useAgentManagement() {
     ) {
       return;
     }
+    const delegated = delegatedApplyIdsRef.current.has(request.requestId);
+    const legacyAutoApprove =
+      request.intent === "draft" && globalConfig.auto_approve_agent_drafts;
+    if (!delegated && !legacyAutoApprove) return;
     const requestId = request.requestId;
     autoApprovingRequestId.current = requestId;
     void autoApproveCreate(requestId, createInitialValues).finally(() => {
@@ -339,8 +599,9 @@ export function useAgentManagement() {
   ]);
 
   const hideAutoApprovedCreate =
-    globalConfig.auto_approve_agent_drafts &&
     request?.action === "create" &&
+    (delegatedApplyIdsRef.current.has(request.requestId) ||
+      (request.intent === "draft" && globalConfig.auto_approve_agent_drafts)) &&
     failedAutoApprovalRequestId !== request.requestId;
 
   return {
@@ -353,7 +614,7 @@ export function useAgentManagement() {
     isPending,
     runtimes: runtimesQuery.data ?? [],
     runtimesLoading: runtimesQuery.isLoading,
-    submitCreate,
+    submitCreate: submitReviewedCreate,
     submitUpdate,
     dismiss,
   };

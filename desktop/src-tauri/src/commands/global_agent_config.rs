@@ -11,8 +11,9 @@
 //! honest way to deliver new env vars to a running process — the env is baked
 //! at spawn time and cannot be mutated in place.
 
+use nostr::{EventBuilder, JsonUtil, Kind};
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::{
     app_state::AppState,
@@ -46,7 +47,11 @@ pub struct GlobalAgentConfigSaveResult {
 /// been written yet.
 #[tauri::command]
 pub fn get_global_agent_config(app: AppHandle) -> Result<GlobalAgentConfig, String> {
-    load_global_agent_config(&app)
+    let config = load_global_agent_config(&app)?;
+    if let Some(grant) = &config.agent_management_delegation {
+        grant.validate(&app.state::<AppState>().signing_keys()?.public_key())?;
+    }
+    Ok(config)
 }
 
 /// Validate and persist a new global agent configuration, then auto-restart
@@ -62,9 +67,12 @@ pub fn get_global_agent_config(app: AppHandle) -> Result<GlobalAgentConfig, Stri
 /// the count of agents successfully restarted.
 #[tauri::command]
 pub async fn set_global_agent_config(
-    config: GlobalAgentConfig,
+    mut config: GlobalAgentConfig,
     app: AppHandle,
 ) -> Result<GlobalAgentConfigSaveResult, String> {
+    let owner_keys = app.state::<AppState>().signing_keys()?;
+    let old_config = load_global_agent_config(&app).unwrap_or_default();
+    prepare_delegation_signature(&mut config, &old_config, &owner_keys)?;
     // ── Phase 1: disk write (sync, spawn_blocking) ────────────────────────
     //
     // Validate, snapshot old config, write new config, collect pre-filter
@@ -74,13 +82,20 @@ pub async fn set_global_agent_config(
     let app_for_write = app.clone();
     let phase1 = tokio::task::spawn_blocking(move || {
         validate_global_config(&config)?;
-
-        let old_global = load_global_agent_config(&app_for_write).unwrap_or_default();
-
-        save_global_agent_config(&app_for_write, &config)?;
-
-        // Re-read from disk so the returned value reflects the strip-on-write pass.
-        let new_global = load_global_agent_config(&app_for_write)?;
+        let (old_global, new_global) = {
+            // Serialize the grant write with request classification so a
+            // concurrent revoke cannot authorize one last stale apply.
+            let state = app_for_write.state::<AppState>();
+            let _guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|error| error.to_string())?;
+            let old_global = load_global_agent_config(&app_for_write).unwrap_or_default();
+            save_global_agent_config(&app_for_write, &config)?;
+            // Re-read from disk so the returned value reflects strip-on-write.
+            let new_global = load_global_agent_config(&app_for_write)?;
+            (old_global, new_global)
+        };
 
         // Pre-filter: identify agents that look eligible before taking any locks.
         // This is a hint only; definitive eligibility check happens under lock
@@ -129,6 +144,37 @@ pub async fn set_global_agent_config(
         restarted_count,
         failed_restart_count,
     })
+}
+
+fn prepare_delegation_signature(
+    config: &mut GlobalAgentConfig,
+    old_config: &GlobalAgentConfig,
+    owner_keys: &nostr::Keys,
+) -> Result<(), String> {
+    let Some(grant) = config.agent_management_delegation.as_mut() else {
+        return Ok(());
+    };
+    grant.payload.grantee_pubkey = nostr::PublicKey::parse(grant.payload.grantee_pubkey.trim())
+        .map_err(|error| format!("invalid delegation grantee pubkey: {error}"))?
+        .to_hex();
+    grant.payload.audit_channel_id = uuid::Uuid::parse_str(grant.payload.audit_channel_id.trim())
+        .map_err(|_| "invalid delegation audit channel UUID".to_string())?
+        .to_string();
+    if let Some(old_grant) = &old_config.agent_management_delegation {
+        if old_grant.payload == grant.payload
+            && old_grant.validate(&owner_keys.public_key()).is_ok()
+        {
+            grant.signed_event.clone_from(&old_grant.signed_event);
+            return Ok(());
+        }
+    }
+    let content = serde_json::to_string(&grant.payload)
+        .map_err(|error| format!("failed to serialize delegation grant: {error}"))?;
+    let event = EventBuilder::new(Kind::Custom(30_078), content)
+        .sign_with_keys(owner_keys)
+        .map_err(|error| format!("failed to sign delegation grant: {error}"))?;
+    grant.signed_event = Some(event.as_json());
+    grant.validate(&owner_keys.public_key())
 }
 
 /// Outcome of a single per-agent restart attempt in Phase 2.

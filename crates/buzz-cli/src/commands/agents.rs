@@ -1,11 +1,13 @@
-use buzz_core::kind::KIND_IA_ARCHIVED_LIST;
+use buzz_core::{kind::KIND_IA_ARCHIVED_LIST, observer::decrypt_observer_payload};
 use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identity_request};
 use nostr::{Event, Keys, Kind, PublicKey, ToBech32};
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 
 use crate::agent_management::{
-    build_create, build_set_avatar, build_update, CreateAgentDraft, UpdateAgentDraft,
+    build_apply_create, build_create, build_set_avatar, build_update, CreateAgentDraft,
+    UpdateAgentDraft,
 };
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -107,6 +109,67 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     "Draft sent to Buzz Desktop. The owner's Desktop policy decides whether it is applied automatically or opened for review."
                         .into(),
                 );
+            }
+            println!("{output}");
+            Ok(())
+        }
+
+        AgentsCmd::ApplyCreate {
+            request_id,
+            channel,
+            display_name,
+            system_prompt,
+            runtime,
+            provider,
+            model,
+            respond_to,
+            parallelism,
+        } => {
+            let owner = require_owner(client)?;
+            let built = build_apply_create(
+                client.keys(),
+                &owner,
+                CreateAgentDraft {
+                    channel_id: channel,
+                    display_name,
+                    system_prompt: read_or_stdin(&system_prompt)?,
+                    runtime,
+                    provider,
+                    model,
+                    respond_to: respond_to.map(RespondToArg::to_wire),
+                    parallelism,
+                },
+                request_id,
+            )?;
+            let response = client.publish_ephemeral_event(built.event).await?;
+            let outcome =
+                wait_for_create_secret_response(client, &owner, &built.request_id).await?;
+            let mut output: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            if let Some(obj) = output.as_object_mut() {
+                obj.insert("request_id".into(), built.request_id.into());
+                obj.insert("action".into(), built.action.into());
+                match outcome {
+                    CreateApplyOutcome::Created(secret) => {
+                        obj.insert("applied".into(), true.into());
+                        obj.insert("pubkey".into(), secret.pubkey.into());
+                        obj.insert("nsec".into(), secret.nsec.into());
+                        obj.insert(
+                            "message".into(),
+                            "Buzz Desktop created and started the agent. The nsec is returned once for immediate backup to SmithCrafts-Infra."
+                                .into(),
+                        );
+                    }
+                    CreateApplyOutcome::QueuedForReview => {
+                        obj.insert("applied".into(), false.into());
+                        obj.insert("queued_for_review".into(), true.into());
+                        obj.insert(
+                            "message".into(),
+                            "The create scope is not granted; Buzz Desktop queued this request for owner review."
+                                .into(),
+                        );
+                    }
+                }
             }
             println!("{output}");
             Ok(())
@@ -222,6 +285,116 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
 
         AgentsCmd::Archived => cmd_archived(client).await,
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentCreateSecretResponse {
+    #[serde(rename = "type")]
+    response_type: String,
+    request_id: String,
+    pubkey: String,
+    nsec: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentCreateFailureResponse {
+    #[serde(rename = "type")]
+    response_type: String,
+    request_id: String,
+    succeeded: bool,
+    result: serde_json::Value,
+}
+
+enum CreateApplyOutcome {
+    Created(AgentCreateSecretResponse),
+    QueuedForReview,
+}
+
+async fn wait_for_create_secret_response(
+    client: &BuzzClient,
+    owner: &PublicKey,
+    request_id: &str,
+) -> Result<CreateApplyOutcome, CliError> {
+    let d_tag = format!("buzz-agent-create-result:{request_id}");
+    let failure_d_tag = format!("buzz-agent-management-result:{request_id}");
+    let filter = serde_json::json!({
+        "kinds": [30_078],
+        "authors": [owner.to_hex()],
+        "#d": [d_tag, failure_d_tag],
+        "#p": [client.keys().public_key().to_hex()],
+        "limit": 1,
+    });
+    for _ in 0..120 {
+        let raw = client.query(&filter).await?;
+        let events: Vec<Event> = serde_json::from_str(&raw)
+            .map_err(|error| CliError::Other(format!("invalid create-result query: {error}")))?;
+        if let Some(event) = events.into_iter().find(|event| {
+            event.kind == Kind::Custom(30_078) && event.pubkey == *owner && event.verify().is_ok()
+        }) {
+            let event_d = event.tags.iter().find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("d"))
+                    .then(|| parts.get(1).cloned())
+                    .flatten()
+            });
+            if event_d.as_deref() == Some(failure_d_tag.as_str()) {
+                let response: AgentCreateFailureResponse =
+                    decrypt_observer_payload(client.keys(), &event).map_err(|error| {
+                        CliError::Other(format!("invalid encrypted create failure: {error}"))
+                    })?;
+                if response.response_type != "agent_management_apply_result"
+                    || response.request_id != request_id
+                {
+                    return Err(CliError::Other(
+                        "encrypted create failure does not match the request".into(),
+                    ));
+                }
+                if !response.succeeded && response.result["queuedForReview"] == true {
+                    return Ok(CreateApplyOutcome::QueuedForReview);
+                }
+                if response.succeeded {
+                    return Err(CliError::Other(
+                        "encrypted create terminal result had an invalid success shape".into(),
+                    ));
+                }
+                return Err(CliError::Other(
+                    response.result["error"]
+                        .as_str()
+                        .unwrap_or("Desktop could not create the agent")
+                        .to_string(),
+                ));
+            }
+            let response: AgentCreateSecretResponse =
+                decrypt_observer_payload(client.keys(), &event).map_err(|error| {
+                    CliError::Other(format!("invalid encrypted create result: {error}"))
+                })?;
+            if response.response_type != "agent_create_secret_response"
+                || response.request_id != request_id
+            {
+                return Err(CliError::Other(
+                    "encrypted create result does not match the request".into(),
+                ));
+            }
+            let pubkey = PublicKey::parse(response.pubkey.trim())
+                .map_err(|error| CliError::Other(format!("invalid created pubkey: {error}")))?;
+            let keys = Keys::parse(response.nsec.trim())
+                .map_err(|error| CliError::Other(format!("invalid created nsec: {error}")))?;
+            if keys.public_key() != pubkey {
+                return Err(CliError::Other(
+                    "created nsec does not match the returned pubkey".into(),
+                ));
+            }
+            return Ok(CreateApplyOutcome::Created(response));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    Err(CliError::DeliveryUnknown(
+        format!(
+            "create request {request_id} reached the relay, but no encrypted Desktop result arrived within 60 seconds; retry with --request-id {request_id}"
+        ),
+    ))
 }
 
 async fn wait_for_avatar_receipt(

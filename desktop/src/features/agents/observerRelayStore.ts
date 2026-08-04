@@ -15,6 +15,10 @@ import {
   parseAgentAvatarApplyRequest,
   type AgentAvatarApplyRequest,
 } from "./agentAvatarApply";
+import {
+  parseAgentTeamManagementRequest,
+  type AgentTeamManagementRequest,
+} from "./agentTeamManagement";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
@@ -110,6 +114,9 @@ const agentManagementListeners = new Set<
 >();
 const agentAvatarApplyListeners = new Set<
   (agentPubkey: string, request: AgentAvatarApplyRequest) => void
+>();
+const agentTeamManagementListeners = new Set<
+  (agentPubkey: string, request: AgentTeamManagementRequest) => void
 >();
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
@@ -411,6 +418,14 @@ async function handleRelayObserverEvent(
         listener(agentPubkey, avatarApplyRequest);
       }
     }
+    const teamManagementRequest = parseAgentTeamManagementRequest(
+      parsed.payload,
+    );
+    if (teamManagementRequest) {
+      for (const listener of agentTeamManagementListeners) {
+        listener(agentPubkey, teamManagementRequest);
+      }
+    }
     if (parsed.kind === "session_config_captured") {
       void putAgentSessionConfig(agentPubkey, parsed.payload);
       onSessionConfigCaptured?.(agentPubkey);
@@ -548,6 +563,16 @@ export function subscribeAgentAvatarApplyRequests(
   void ensureRelayObserverSubscription();
   return () => {
     agentAvatarApplyListeners.delete(listener);
+  };
+}
+
+export function subscribeAgentTeamManagementRequests(
+  listener: (agentPubkey: string, request: AgentTeamManagementRequest) => void,
+) {
+  agentTeamManagementListeners.add(listener);
+  void ensureRelayObserverSubscription();
+  return () => {
+    agentTeamManagementListeners.delete(listener);
   };
 }
 
@@ -780,6 +805,7 @@ export function resetAgentObserverStore() {
   latestLiveSessionByAgentChannel.clear();
   agentManagementListeners.clear();
   agentAvatarApplyListeners.clear();
+  agentTeamManagementListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

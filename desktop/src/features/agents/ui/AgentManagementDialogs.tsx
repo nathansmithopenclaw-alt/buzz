@@ -1,10 +1,13 @@
 import { useAgentManagement } from "@/features/agents/useAgentManagement";
+import { useAgentTeamManagement } from "@/features/agents/useAgentTeamManagement";
 import { AgentDialog } from "./AgentDialog";
 import { SecretRevealDialog } from "./SecretRevealDialog";
+import { AgentTeamManagementReviewDialog } from "./AgentTeamManagementReviewDialog";
 
 /** Global review surfaces opened by owned agents through the Buzz harness. */
 export function AgentManagementDialogs() {
   const management = useAgentManagement();
+  const teamManagement = useAgentTeamManagement();
 
   return (
     <>
@@ -55,6 +58,17 @@ export function AgentManagementDialogs() {
           title="Edit agent"
         />
       ) : null}
+      <AgentTeamManagementReviewDialog
+        error={teamManagement.reviewError}
+        isPending={teamManagement.isReviewPending}
+        onApprove={() => {
+          void teamManagement.approvePendingReview();
+        }}
+        onDismiss={() => {
+          void teamManagement.dismissPendingReview();
+        }}
+        request={teamManagement.pendingReview?.request ?? null}
+      />
     </>
   );
 }

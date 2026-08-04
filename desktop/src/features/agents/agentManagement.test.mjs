@@ -16,6 +16,7 @@ function createPayload(overrides = {}) {
     type: AGENT_MANAGEMENT_REQUEST,
     action: "create",
     requestId: "request-1",
+    intent: "draft",
     request: {
       channelId: CHANNEL_ID,
       displayName: "Research helper",
@@ -29,6 +30,23 @@ test("parses the narrow no-secret create request", () => {
   assert.deepEqual(
     parseAgentManagementRequest(createPayload()),
     createPayload(),
+  );
+});
+
+test("defaults legacy requests to draft and preserves explicit apply intent", () => {
+  const legacy = createPayload();
+  delete legacy.intent;
+  assert.equal(parseAgentManagementRequest(legacy)?.intent, "draft");
+  assert.equal(
+    parseAgentManagementRequest(createPayload({ intent: "apply" }))?.intent,
+    "apply",
+  );
+});
+
+test("rejects unknown management intent values", () => {
+  assert.equal(
+    parseAgentManagementRequest(createPayload({ intent: "owner-bypass" })),
+    null,
   );
 });
 
@@ -109,6 +127,7 @@ test("uses an agent's current name, never an internal profile ID", () => {
     type: AGENT_MANAGEMENT_REQUEST,
     action: "update",
     requestId: "request-3",
+    intent: "draft",
     request: {
       channelId: CHANNEL_ID,
       agentName: "Review helper",
@@ -168,6 +187,7 @@ test("accepts an empty instance name pool to clear it", () => {
     type: AGENT_MANAGEMENT_REQUEST,
     action: "update",
     requestId: "request-clear-name-pool",
+    intent: "draft",
     request: {
       channelId: CHANNEL_ID,
       agentName: "Review helper",

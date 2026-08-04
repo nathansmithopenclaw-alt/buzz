@@ -98,7 +98,6 @@ fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
         eprintln!("buzz-desktop: failed to set initial window backing: {error}");
     }
 }
-
 #[cfg(target_os = "macos")]
 async fn clear_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -106,15 +105,12 @@ async fn clear_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<
         eprintln!("buzz-desktop: failed to clear initial window backing: {error}");
     }
 }
-
 #[cfg(target_os = "macos")]
 async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tauri::Window<R>) {
     const MAX_POLLS: usize = 120;
     const REQUIRED_STABLE_POLLS: usize = 4;
-
     let mut previous_bounds = None;
     let mut stable_polls = 0;
-
     for _ in 0..MAX_POLLS {
         // Accept whatever geometry the window-state plugin restores — maximized
         // or a normal saved size. macOS applies the restore asynchronously, so
@@ -126,7 +122,6 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
             (Ok(position), Ok(size)) => Some((position.x, position.y, size.width, size.height)),
             _ => None,
         };
-
         if bounds.is_some() && bounds == previous_bounds {
             stable_polls += 1;
             if stable_polls >= REQUIRED_STABLE_POLLS {
@@ -136,7 +131,6 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
             stable_polls = 0;
         }
         previous_bounds = bounds;
-
         tokio::time::sleep(std::time::Duration::from_millis(16)).await;
     }
 
@@ -803,6 +797,8 @@ pub fn run() {
             list_managed_agents,
             get_managed_agent_nsec,
             apply_managed_agent_avatar_request,
+            agent_management_ledger,
+            publish_agent_management,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,
