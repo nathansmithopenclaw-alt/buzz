@@ -1367,7 +1367,7 @@ pub(crate) use deploy::resolve_deploy_model_provider;
 mod profile;
 #[cfg(test)]
 use profile::{profile_needs_sync, resolve_legacy_avatar};
-pub(crate) use profile::{reconcile_agent_profile, ProfileReconcileData};
+pub(crate) use profile::{reconcile_agent_profile, ProfileReconcileData, ProfileReconcileOutcome};
 
 #[cfg(test)]
 #[path = "agents_tests.rs"]

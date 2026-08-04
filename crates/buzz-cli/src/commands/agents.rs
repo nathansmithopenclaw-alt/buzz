@@ -51,10 +51,21 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     receipt["reconciledCount"].clone(),
                 );
                 obj.insert(
-                    "message".into(),
-                    "Buzz Desktop persisted the avatar to the definition and linked instances, then completed immediate profile reconciliation."
-                        .into(),
+                    "published_count".into(),
+                    receipt
+                        .get("publishedCount")
+                        .cloned()
+                        .unwrap_or_else(|| 0.into()),
                 );
+                if let Some(reason) = receipt.get("reconcileSkipped") {
+                    obj.insert("reconcile_skipped".into(), reason.clone());
+                }
+                let message = if receipt.get("reconcileSkipped").is_some() {
+                    "Buzz Desktop persisted the avatar to the definition and linked instances, skipped automatic reconciliation because Agent-managed profiles is enabled, and published agent-signed profile updates instead."
+                } else {
+                    "Buzz Desktop persisted the avatar to the definition and linked instances, then completed immediate profile reconciliation."
+                };
+                obj.insert("message".into(), message.into());
             }
             println!("{output}");
             Ok(())
@@ -241,12 +252,7 @@ async fn wait_for_avatar_receipt(
                 && receipt["targetPubkey"] == target_pubkey
                 && receipt["url"] == avatar_url;
             if matches && receipt["applied"] == true {
-                if receipt["instanceCount"] != receipt["reconciledCount"] {
-                    return Err(CliError::Other(
-                        "Buzz Desktop persisted the avatar, but one or more linked instance profiles failed immediate reconciliation"
-                            .into(),
-                    ));
-                }
+                validate_avatar_receipt_delivery(&receipt)?;
                 return Ok(receipt);
             }
             if matches {
@@ -261,6 +267,42 @@ async fn wait_for_avatar_receipt(
         "avatar request was accepted by the relay, but no Desktop apply receipt arrived within 10 seconds; local persistence outcome is unknown"
             .into(),
     ))
+}
+
+fn validate_avatar_receipt_delivery(receipt: &serde_json::Value) -> Result<(), CliError> {
+    let instance_count = receipt["instanceCount"]
+        .as_u64()
+        .ok_or_else(|| CliError::Other("avatar receipt has an invalid instance count".into()))?;
+    let reconciled_count = receipt["reconciledCount"]
+        .as_u64()
+        .ok_or_else(|| CliError::Other("avatar receipt has an invalid reconciled count".into()))?;
+    let published_count = receipt
+        .get("publishedCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let reconcile_skipped = receipt
+        .get("reconcileSkipped")
+        .and_then(serde_json::Value::as_str);
+
+    match reconcile_skipped {
+        None if reconciled_count == instance_count && published_count == 0 => Ok(()),
+        None => Err(CliError::Other(
+            "Buzz Desktop persisted the avatar, but one or more linked instance profiles failed immediate update"
+                .into(),
+        )),
+        Some("agent_managed_profiles_enabled")
+            if reconciled_count + published_count == instance_count =>
+        {
+            Ok(())
+        }
+        Some("agent_managed_profiles_enabled") => Err(CliError::Other(
+            "Buzz Desktop persisted the avatar, but one or more linked instance profiles failed immediate update"
+                .into(),
+        )),
+        Some(reason) => Err(CliError::Other(format!(
+            "Buzz Desktop persisted the avatar, but returned an unknown reconciliation skip reason: {reason}"
+        ))),
+    }
 }
 
 const DESKTOP_KEYRING_SERVICE: &str = "buzz-desktop";
@@ -576,6 +618,39 @@ mod tests {
 
     fn hex128(c: char) -> String {
         std::iter::repeat_n(c, 128).collect()
+    }
+
+    #[test]
+    fn avatar_receipt_accepts_desktop_reconciliation_mode() {
+        let receipt = json!({
+            "instanceCount": 2,
+            "reconciledCount": 2,
+            "publishedCount": 0,
+        });
+        validate_avatar_receipt_delivery(&receipt).expect("reconciled receipt");
+    }
+
+    #[test]
+    fn avatar_receipt_accepts_agent_managed_publish_mode_with_honest_skip() {
+        let receipt = json!({
+            "instanceCount": 2,
+            "reconciledCount": 0,
+            "publishedCount": 2,
+            "reconcileSkipped": "agent_managed_profiles_enabled",
+        });
+        validate_avatar_receipt_delivery(&receipt).expect("agent-managed receipt");
+    }
+
+    #[test]
+    fn avatar_receipt_rejects_false_success_when_reconciliation_was_skipped() {
+        let receipt = json!({
+            "instanceCount": 2,
+            "reconciledCount": 0,
+            "publishedCount": 0,
+            "reconcileSkipped": "agent_managed_profiles_enabled",
+        });
+        let error = validate_avatar_receipt_delivery(&receipt).unwrap_err();
+        assert!(error.to_string().contains("failed immediate update"));
     }
 
     // --- (b) auth-selection matrix: extract_owner_auth_tag ---

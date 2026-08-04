@@ -9,6 +9,17 @@ use crate::managed_agents::managed_agent_avatar_url;
 
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProfileReconcileOutcome {
+    AlreadyCurrent,
+    Published,
+    SkippedAgentManagedProfiles,
+}
+
+fn profile_reconcile_enabled(flag: &std::sync::atomic::AtomicBool) -> bool {
+    flag.load(std::sync::atomic::Ordering::Acquire)
+}
+
 pub(crate) struct ProfileReconcileData {
     pub(crate) private_key_nsec: String,
     pub(crate) name: String,
@@ -71,7 +82,7 @@ pub(crate) async fn reconcile_agent_profile(
     app: &AppHandle,
     agent_pubkey: &str,
     data: &ProfileReconcileData,
-) -> Result<(), String> {
+) -> Result<ProfileReconcileOutcome, String> {
     use crate::relay::{query_agent_profile, sync_managed_agent_profile};
 
     // An explicit per-agent relay wins; an empty one falls back to the active
@@ -81,11 +92,8 @@ pub(crate) async fn reconcile_agent_profile(
         &relay_ws_url_with_override(state),
     );
 
-    if !state
-        .managed_agent_profile_reconcile_enabled
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        return Ok(());
+    if !profile_reconcile_enabled(&state.managed_agent_profile_reconcile_enabled) {
+        return Ok(ProfileReconcileOutcome::SkippedAgentManagedProfiles);
     }
 
     // Query the relay for the agent's existing kind:0 profile.
@@ -137,17 +145,14 @@ pub(crate) async fn reconcile_agent_profile(
     };
 
     if !profile_needs_sync(existing.as_ref(), &data.name, expected_avatar.as_deref()) {
-        return Ok(());
+        return Ok(ProfileReconcileOutcome::AlreadyCurrent);
     }
 
     let agent_keys = Keys::parse(&data.private_key_nsec)
         .map_err(|e| format!("failed to parse agent keys: {e}"))?;
 
-    if !state
-        .managed_agent_profile_reconcile_enabled
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        return Ok(());
+    if !profile_reconcile_enabled(&state.managed_agent_profile_reconcile_enabled) {
+        return Ok(ProfileReconcileOutcome::SkippedAgentManagedProfiles);
     }
 
     sync_managed_agent_profile(
@@ -158,7 +163,8 @@ pub(crate) async fn reconcile_agent_profile(
         expected_avatar.as_deref(),
         data.auth_tag.as_deref(),
     )
-    .await
+    .await?;
+    Ok(ProfileReconcileOutcome::Published)
 }
 
 /// Decide whether a published profile is missing or stale relative to the
@@ -176,6 +182,24 @@ pub(super) fn profile_needs_sync(
             let picture_matches = info.picture.as_deref() == expected_avatar;
             !name_matches || !picture_matches
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::profile_reconcile_enabled;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn reconciliation_guard_tracks_agent_managed_profiles_both_ways() {
+        let reconcile_enabled = AtomicBool::new(true);
+        assert!(profile_reconcile_enabled(&reconcile_enabled));
+
+        reconcile_enabled.store(false, Ordering::Release);
+        assert!(!profile_reconcile_enabled(&reconcile_enabled));
+
+        reconcile_enabled.store(true, Ordering::Release);
+        assert!(profile_reconcile_enabled(&reconcile_enabled));
     }
 }
 

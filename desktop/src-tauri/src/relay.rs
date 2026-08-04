@@ -406,6 +406,14 @@ fn build_profile_event(
 ) -> Result<nostr::Event, String> {
     let builder = crate::events::build_profile(Some(display_name), None, avatar_url, None, None)?;
 
+    sign_managed_agent_profile_event(builder, agent_keys, auth_tag_json)
+}
+
+fn sign_managed_agent_profile_event(
+    builder: nostr::EventBuilder,
+    agent_keys: &nostr::Keys,
+    auth_tag_json: Option<&str>,
+) -> Result<nostr::Event, String> {
     let builder = if let Some(tag_json) = auth_tag_json {
         // Bridge nostr 0.37 PublicKey → nostr 0.36 PublicKey via hex encoding.
         let agent_pubkey_hex = agent_keys.public_key().to_hex();
@@ -431,6 +439,40 @@ fn build_profile_event(
         .map_err(|e| format!("failed to sign profile event: {e}"))
 }
 
+fn build_agent_managed_avatar_event(
+    agent_keys: &nostr::Keys,
+    existing: Option<&AgentProfileInfo>,
+    fallback_display_name: &str,
+    avatar_url: &str,
+    auth_tag_json: Option<&str>,
+) -> Result<nostr::Event, String> {
+    let mut metadata = existing
+        .map(|profile| profile.metadata.clone())
+        .unwrap_or_default();
+    if metadata
+        .get("display_name")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        metadata.insert(
+            "display_name".into(),
+            serde_json::Value::String(fallback_display_name.into()),
+        );
+    }
+    metadata.insert(
+        "picture".into(),
+        serde_json::Value::String(avatar_url.into()),
+    );
+    let builder = nostr::EventBuilder::new(
+        nostr::Kind::Metadata,
+        serde_json::Value::Object(metadata).to_string(),
+    )
+    .custom_created_at(crate::managed_agents::persona_events::monotonic_created_at(
+        existing.map(|profile| profile.created_at),
+    ));
+    sign_managed_agent_profile_event(builder, agent_keys, auth_tag_json)
+}
+
 // ── Managed-agent profile sync ──────────────────────────────────────────────
 
 /// Sync a managed agent's kind:0 profile event to the relay using NIP-98 auth.
@@ -448,6 +490,40 @@ pub async fn sync_managed_agent_profile(
     crate::relay_admission::wait_for_rate_limit().await;
     // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
     let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
+    submit_managed_agent_profile_event(state, relay_url, agent_keys, event, auth_tag).await
+}
+
+/// Apply an explicit owner-directed avatar change while the agent-managed
+/// profiles experiment is enabled. The event is signed by the agent and merges
+/// the relay-owned profile fields so Desktop does not restore its local name or
+/// erase the agent's about/NIP-05 metadata.
+pub async fn sync_agent_managed_profile_avatar(
+    state: &AppState,
+    relay_url: &str,
+    agent_keys: &nostr::Keys,
+    fallback_display_name: &str,
+    avatar_url: &str,
+    auth_tag: Option<&str>,
+) -> Result<(), String> {
+    crate::relay_admission::wait_for_rate_limit().await;
+    let existing = query_agent_profile(state, relay_url, &agent_keys.public_key().to_hex()).await?;
+    let event = build_agent_managed_avatar_event(
+        agent_keys,
+        existing.as_ref(),
+        fallback_display_name,
+        avatar_url,
+        auth_tag,
+    )?;
+    submit_managed_agent_profile_event(state, relay_url, agent_keys, event, auth_tag).await
+}
+
+async fn submit_managed_agent_profile_event(
+    state: &AppState,
+    relay_url: &str,
+    agent_keys: &nostr::Keys,
+    event: nostr::Event,
+    auth_tag: Option<&str>,
+) -> Result<(), String> {
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
@@ -488,8 +564,8 @@ pub async fn sync_managed_agent_profile(
 /// backend — always the active workspace relay — so the query targets the host
 /// the profile is actually published to.
 ///
-/// Returns the parsed profile content (display_name, picture) if a kind:0 event
-/// exists for the given pubkey, or `None` if no profile is published.
+/// Returns the parsed fields, full metadata object, and event timestamp if a
+/// kind:0 event exists for the given pubkey, or `None` if no profile is published.
 pub async fn query_agent_profile(
     state: &AppState,
     relay_url: &str,
@@ -520,6 +596,8 @@ pub async fn query_agent_profile(
             .get("picture")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        metadata: content.as_object().cloned().unwrap_or_default(),
+        created_at: event.created_at.as_secs() as i64,
     }))
 }
 
@@ -528,6 +606,8 @@ pub async fn query_agent_profile(
 pub struct AgentProfileInfo {
     pub display_name: Option<String>,
     pub picture: Option<String>,
+    pub metadata: serde_json::Map<String, serde_json::Value>,
+    pub created_at: i64,
 }
 
 // ── Signed-event submission ─────────────────────────────────────────────────
@@ -603,9 +683,9 @@ pub async fn submit_signed_event_with_keys(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-        extract_retry_in_hint, parse_command_response, relay_http_base_url,
-        MALFORMED_RESPONSE_MESSAGE,
+        build_agent_managed_avatar_event, build_profile_event, classify_intercepted_response,
+        effective_agent_relay_url, extract_retry_in_hint, parse_command_response,
+        relay_http_base_url, AgentProfileInfo, MALFORMED_RESPONSE_MESSAGE,
     };
     use serde::Deserialize;
 
@@ -963,6 +1043,52 @@ mod tests {
         assert_eq!(auth_tags.len(), 0, "expected no auth tags");
 
         assert_eq!(event.kind, nostr::Kind::Metadata);
+    }
+
+    #[test]
+    fn agent_managed_avatar_event_preserves_relay_profile_and_uses_agent_signature() {
+        use nostr::JsonUtil;
+
+        let agent_keys = nostr::Keys::generate();
+        let metadata = serde_json::json!({
+            "display_name": "Relay-chosen name",
+            "name": "relay-handle",
+            "picture": "https://relay.example/old.png",
+            "about": "Agent-written bio",
+            "nip05": "agent@example.com",
+            "banner": "https://relay.example/banner.png",
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let existing = AgentProfileInfo {
+            display_name: Some("Relay-chosen name".into()),
+            picture: Some("https://relay.example/old.png".into()),
+            metadata,
+            created_at: nostr::Timestamp::now().as_secs() as i64,
+        };
+
+        let event = build_agent_managed_avatar_event(
+            &agent_keys,
+            Some(&existing),
+            "Desktop name",
+            "https://relay.example/new.png",
+            None,
+        )
+        .expect("build merged profile");
+        let content: serde_json::Value = serde_json::from_str(&event.content).unwrap();
+
+        assert_eq!(event.pubkey, agent_keys.public_key());
+        assert!(event.verify().is_ok());
+        assert_eq!(content["display_name"], "Relay-chosen name");
+        assert_eq!(content["name"], "relay-handle");
+        assert_eq!(content["about"], "Agent-written bio");
+        assert_eq!(content["nip05"], "agent@example.com");
+        assert_eq!(content["banner"], "https://relay.example/banner.png");
+        assert_eq!(content["picture"], "https://relay.example/new.png");
+        assert!(event.created_at.as_secs() as i64 > existing.created_at);
+        assert_eq!(event.kind, nostr::Kind::Metadata);
+        assert!(!event.as_json().is_empty());
     }
 
     #[test]
