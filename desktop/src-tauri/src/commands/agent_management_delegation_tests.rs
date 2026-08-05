@@ -118,8 +118,7 @@ fn startup_restore_fails_applying_and_keeps_drafts_in_creation_order() {
 fn startup_restore_does_not_fail_an_apply_registered_after_the_cutoff() {
     let mut ledger = AgentManagementState::default();
     register_in_ledger(&mut ledger, "request-a".into(), request(true)).unwrap();
-    ledger.requests.get_mut("request-a").unwrap().updated_at =
-        "2026-08-04T00:00:03Z".into();
+    ledger.requests.get_mut("request-a").unwrap().updated_at = "2026-08-04T00:00:03Z".into();
     let cutoff = chrono::DateTime::parse_from_rfc3339("2026-08-04T00:00:02Z").unwrap();
 
     let (restored, changed) = restore_requests(&mut ledger, cutoff);
@@ -195,15 +194,14 @@ fn consolidated_ipc_contract_accepts_camel_case_fields() {
         }
     ));
 
-    let create_secret: AgentManagementPublishCommand =
-        serde_json::from_value(serde_json::json!({
-            "action": "create_secret",
-            "requestId": "b2f095a4-664b-4b41-a6fd-4460fa38e520",
-            "sourcePubkey": "11".repeat(32),
-            "agentPubkey": "22".repeat(32),
-            "privateKeyNsec": "nsec1example"
-        }))
-        .unwrap();
+    let create_secret: AgentManagementPublishCommand = serde_json::from_value(serde_json::json!({
+        "action": "create_secret",
+        "requestId": "b2f095a4-664b-4b41-a6fd-4460fa38e520",
+        "sourcePubkey": "11".repeat(32),
+        "agentPubkey": "22".repeat(32),
+        "privateKeyNsec": "nsec1example"
+    }))
+    .unwrap();
     assert!(matches!(
         create_secret,
         AgentManagementPublishCommand::CreateSecret { .. }

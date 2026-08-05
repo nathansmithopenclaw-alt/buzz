@@ -715,10 +715,7 @@ fn restore_requests(
             .then_with(|| left.request_id.cmp(&right.request_id))
     });
     (
-        restored
-            .into_iter()
-            .map(|(_, request)| request)
-            .collect(),
+        restored.into_iter().map(|(_, request)| request).collect(),
         changed,
     )
 }
@@ -784,7 +781,9 @@ pub enum AgentManagementLedgerCommand {
     BeginOwnerReview {
         request_id: String,
     },
-    Restore { startup_cutoff: String },
+    Restore {
+        startup_cutoff: String,
+    },
     Dismiss {
         request_id: String,
     },

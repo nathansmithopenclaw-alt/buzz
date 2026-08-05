@@ -166,12 +166,7 @@ pub(super) async fn publish_agent_management_applying_result(
             nostr::Timestamp::now().as_secs().saturating_sub(1),
         )),
     )?;
-    crate::relay::submit_signed_event_with_keys(
-        &event,
-        &app.state::<AppState>(),
-        &owner_keys,
-        None,
-    )
-    .await
-    .map(|_| ())
+    crate::relay::submit_signed_event_with_keys(&event, &app.state::<AppState>(), &owner_keys, None)
+        .await
+        .map(|_| ())
 }
