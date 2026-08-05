@@ -47,12 +47,18 @@ function isText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function isOptionalText(value: unknown): value is string | undefined {
-  return value === undefined || typeof value === "string";
+function isOptionalText(value: unknown): value is string | null | undefined {
+  return value == null || typeof value === "string";
 }
 
 function isMembers(value: unknown): value is string[] {
   return Array.isArray(value) && value.length <= 100 && value.every(isText);
+}
+
+function isOptionalMembers(
+  value: unknown,
+): value is string[] | null | undefined {
+  return value == null || isMembers(value);
 }
 
 function onlyKeys(value: Record<string, unknown>, keys: readonly string[]) {
@@ -116,7 +122,7 @@ export function parseAgentTeamManagementRequest(
       !isOptionalText(request.name) ||
       !isOptionalText(request.description) ||
       !isOptionalText(request.instructions) ||
-      (request.members !== undefined && !isMembers(request.members)) ||
+      !isOptionalMembers(request.members) ||
       !onlyKeys(request, [
         "channelId",
         "team",
@@ -133,7 +139,18 @@ export function parseAgentTeamManagementRequest(
       action: "update",
       requestId: payload.requestId,
       intent: "apply",
-      request: request as TeamUpdateRequest["request"],
+      request: {
+        channelId: request.channelId,
+        team: request.team,
+        ...(typeof request.name === "string" ? { name: request.name } : {}),
+        ...(typeof request.description === "string"
+          ? { description: request.description }
+          : {}),
+        ...(typeof request.instructions === "string"
+          ? { instructions: request.instructions }
+          : {}),
+        ...(Array.isArray(request.members) ? { members: request.members } : {}),
+      },
     };
   }
   if (

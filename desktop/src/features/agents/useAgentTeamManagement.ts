@@ -15,11 +15,12 @@ import {
   beginOwnerReviewedAgentManagementRequest,
   completeAgentManagementRequest,
   dismissAgentManagementRequest,
-  listPendingAgentManagementRequests,
+  publishAgentManagementApplyingResult,
   publishAgentManagementAuditReceipt,
   publishAgentManagementDraftResult,
   publishAgentManagementResult,
   registerAgentManagementRequest,
+  restoreAgentManagementRequests,
 } from "@/shared/api/tauriManagedAgents";
 import type { AgentPersona } from "@/shared/api/types";
 import {
@@ -134,6 +135,13 @@ export function useAgentTeamManagement() {
             intent: "apply",
             payload: request,
           });
+      if (registered.disposition === "duplicate_applying") {
+        await publishAgentManagementApplyingResult({
+          requestId: request.requestId,
+          sourcePubkey,
+        });
+        return;
+      }
       if (
         (registered.disposition === "duplicate_applied" ||
           registered.disposition === "duplicate_failed") &&
@@ -357,12 +365,35 @@ export function useAgentTeamManagement() {
 
   React.useEffect(() => {
     let cancelled = false;
-    void listPendingAgentManagementRequests()
-      .then((pending) => {
+    void restoreAgentManagementRequests()
+      .then(async (restored) => {
         if (cancelled) return;
-        for (const entry of pending) {
+        for (const entry of restored) {
           const request = parseAgentTeamManagementRequest(entry.payload);
           if (!request || request.requestId !== entry.requestId) continue;
+          if (entry.disposition === "failed" && entry.result) {
+            const result = entry.result as Record<string, unknown>;
+            const requesterName =
+              managedAgentsRef.current?.find(
+                (agent) =>
+                  agent.pubkey.toLowerCase() ===
+                  entry.sourcePubkey.toLowerCase(),
+              )?.name ?? "delegated agent";
+            await publishAgentManagementAuditReceipt({
+              requestId: entry.requestId,
+              sourcePubkey: entry.sourcePubkey,
+              requesterName,
+              capability: "teams",
+              target: `team operation: ${String(result.error ?? "failed")}`,
+              succeeded: false,
+            }).catch(() => undefined);
+            await publishAgentManagementResult({
+              requestId: entry.requestId,
+              sourcePubkey: entry.sourcePubkey,
+              result: entry.result,
+            });
+            continue;
+          }
           enqueueReview({ sourcePubkey: entry.sourcePubkey, request });
         }
       })

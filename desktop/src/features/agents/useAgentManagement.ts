@@ -38,12 +38,10 @@ import {
   completeAgentManagementRequest,
   dismissAgentManagementRequest,
   getManagedAgentNsec,
-  listPendingAgentManagementRequests,
   publishAgentCreateSecretResponse,
   publishAgentManagementAuditReceipt,
-  publishAgentManagementDraftResult,
   publishAgentManagementResult,
-  registerAgentManagementRequest,
+  restoreAgentManagementRequests,
 } from "@/shared/api/tauriManagedAgents";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
@@ -53,6 +51,7 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import { registerAndRouteAgentManagementRequest } from "./agentManagementRegistration";
 
 export function useAgentManagement() {
   const queryClient = useQueryClient();
@@ -109,20 +108,18 @@ export function useAgentManagement() {
       }
       registrationQueueRef.current = registrationQueueRef.current
         .then(async () => {
-          const registered = await registerAgentManagementRequest({
-            sourcePubkey: agentPubkey,
-            requestId: next.requestId,
-            capability:
-              next.action === "create" ? "agent_creation" : "agent_config",
-            intent: next.intent,
-            payload: next,
-          });
-          if (registered.disposition === "apply") {
+          const route = await registerAndRouteAgentManagementRequest(
+            agentPubkey,
+            next,
+          );
+          if (route.kind === "delegated_apply") {
             delegatedApplyIdsRef.current.add(next.requestId);
           } else if (
-            registered.disposition === "duplicate_failed" &&
-            registered.result
+            route.kind === "terminal_duplicate" &&
+            route.registered.disposition === "duplicate_failed" &&
+            route.registered.result
           ) {
+            const registered = route.registered;
             const result = registered.result as Record<string, unknown>;
             const requesterName =
               managedAgentsRef.current?.find(
@@ -136,7 +133,7 @@ export function useAgentManagement() {
               capability: "agent_creation",
               target: `agent create: ${String(result.error ?? "failed")}`,
               succeeded: false,
-            });
+            }).catch(() => undefined);
             await publishAgentManagementResult({
               requestId: next.requestId,
               sourcePubkey: agentPubkey,
@@ -144,15 +141,17 @@ export function useAgentManagement() {
             });
             return;
           } else if (
-            registered.disposition === "duplicate_applied" &&
+            route.kind === "terminal_duplicate" &&
+            route.registered.disposition === "duplicate_applied" &&
             next.action === "create" &&
-            typeof registered.result === "object" &&
-            registered.result !== null &&
-            typeof (registered.result as { pubkey?: unknown }).pubkey ===
+            typeof route.registered.result === "object" &&
+            route.registered.result !== null &&
+            typeof (route.registered.result as { pubkey?: unknown }).pubkey ===
               "string"
           ) {
-            const createdPubkey = (registered.result as { pubkey: string })
-              .pubkey;
+            const createdPubkey = (
+              route.registered.result as { pubkey: string }
+            ).pubkey;
             const privateKeyNsec = await getManagedAgentNsec(createdPubkey);
             const createdAgent = managedAgentsRef.current?.find(
               (agent) =>
@@ -178,17 +177,8 @@ export function useAgentManagement() {
               privateKeyNsec,
             });
             return;
-          } else if (
-            registered.disposition !== "draft" &&
-            registered.disposition !== "duplicate_draft"
-          ) {
+          } else if (route.kind !== "draft") {
             return;
-          }
-          if (next.intent === "apply") {
-            await publishAgentManagementDraftResult({
-              requestId: next.requestId,
-              sourcePubkey: agentPubkey,
-            });
           }
           if (
             enqueueAgentManagementRequest(
@@ -212,12 +202,35 @@ export function useAgentManagement() {
 
   React.useEffect(() => {
     let cancelled = false;
-    void listPendingAgentManagementRequests()
-      .then((pending) => {
+    void restoreAgentManagementRequests()
+      .then(async (restored) => {
         if (cancelled) return;
-        for (const entry of pending) {
+        for (const entry of restored) {
           const parsed = parseAgentManagementRequest(entry.payload);
           if (!parsed || parsed.requestId !== entry.requestId) continue;
+          if (entry.disposition === "failed" && entry.result) {
+            const result = entry.result as Record<string, unknown>;
+            const requesterName =
+              managedAgentsRef.current?.find(
+                (agent) =>
+                  agent.pubkey.toLowerCase() ===
+                  entry.sourcePubkey.toLowerCase(),
+              )?.name ?? "delegated agent";
+            await publishAgentManagementAuditReceipt({
+              requestId: entry.requestId,
+              sourcePubkey: entry.sourcePubkey,
+              requesterName,
+              capability: entry.capability,
+              target: `agent ${parsed.action}: ${String(result.error ?? "failed")}`,
+              succeeded: false,
+            }).catch(() => undefined);
+            await publishAgentManagementResult({
+              requestId: entry.requestId,
+              sourcePubkey: entry.sourcePubkey,
+              result: entry.result,
+            });
+            continue;
+          }
           if (
             enqueueAgentManagementRequest(
               acceptedRequestsRef.current,

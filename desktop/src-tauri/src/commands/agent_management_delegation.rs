@@ -17,6 +17,11 @@ use crate::{
     util::now_iso,
 };
 
+mod result_publication;
+use result_publication::{
+    publish_agent_management_applying_result, publish_agent_management_result,
+};
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegatedCapability {
@@ -52,6 +57,10 @@ struct RequestLedgerEntry {
     audit_event: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     secret_response_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result_event: Option<String>,
+    #[serde(default = "legacy_result_was_published")]
+    result_published: bool,
     status: RequestStatus,
     created_at: String,
     updated_at: String,
@@ -63,6 +72,14 @@ struct RequestLedgerEntry {
 struct AgentManagementState {
     #[serde(default)]
     requests: BTreeMap<String, RequestLedgerEntry>,
+}
+
+// Before result publication was tracked, terminal paths published immediately.
+// Treat legacy terminal entries as already delivered so an upgrade does not
+// replay every historical failure; startup recovery explicitly resets this for
+// interrupted `applying` entries.
+fn legacy_result_was_published() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,10 +106,21 @@ pub struct RegisterManagementRequestResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PendingManagementRequest {
+pub struct RestoredManagementRequest {
     pub request_id: String,
     pub source_pubkey: String,
+    pub capability: DelegatedCapability,
     pub payload: Value,
+    pub disposition: RestoredManagementRequestDisposition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoredManagementRequestDisposition {
+    Draft,
+    Failed,
 }
 
 fn state_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -192,6 +220,8 @@ fn register_in_ledger(
             owner_reviewed: false,
             audit_event: None,
             secret_response_event: None,
+            result_event: None,
+            result_published: false,
             status,
             created_at: now.clone(),
             updated_at: now,
@@ -572,16 +602,6 @@ pub async fn publish_agent_management_audit_receipt(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ManagementApplyResult<'a> {
-    #[serde(rename = "type")]
-    result_type: &'static str,
-    request_id: &'a str,
-    succeeded: bool,
-    result: &'a Value,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ManagementDraftResult<'a> {
     #[serde(rename = "type")]
     result_type: &'static str,
@@ -641,98 +661,85 @@ pub async fn publish_agent_management_draft_result(
     .map(|_| ())
 }
 
-pub async fn publish_agent_management_result(
-    request_id: String,
-    source_pubkey: String,
-    result: Value,
-    app: AppHandle,
-) -> Result<(), String> {
-    let request_id = canonical_request_id(&request_id)?;
-    if value_contains_secret(&result) {
-        return Err("management result must not contain secrets".into());
-    }
-    let source = PublicKey::parse(source_pubkey.trim())
-        .map_err(|error| format!("invalid management requester pubkey: {error}"))?;
-    let source_hex = source.to_hex();
-    let succeeded = {
-        let state_handle = app.state::<AppState>();
-        let _guard = state_handle
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|error| error.to_string())?;
-        let ledger = load_state(&app)?;
-        let entry = ledger
-            .requests
-            .get(&request_id)
-            .ok_or("management request is not registered")?;
-        if !matches!(entry.status, RequestStatus::Applied | RequestStatus::Failed)
-            || entry.source_pubkey != source_hex
-            || entry.result.as_ref() != Some(&result)
-        {
-            return Err("management result does not match the applied request".into());
+fn restore_requests(
+    ledger: &mut AgentManagementState,
+    startup_cutoff: chrono::DateTime<chrono::FixedOffset>,
+) -> (Vec<RestoredManagementRequest>, bool) {
+    let interrupted_result = serde_json::json!({
+        "code": "interrupted_during_apply",
+        "error": "Desktop restarted while this management request was applying; retry with a new request id"
+    });
+    let mut changed = false;
+    for entry in ledger.requests.values_mut() {
+        let predates_startup = chrono::DateTime::parse_from_rfc3339(&entry.updated_at)
+            .map(|updated_at| updated_at < startup_cutoff)
+            .unwrap_or(true);
+        if entry.status == RequestStatus::Applying && predates_startup {
+            entry.status = RequestStatus::Failed;
+            entry.updated_at = now_iso();
+            entry.result = Some(interrupted_result.clone());
+            entry.result_event = None;
+            entry.result_published = false;
+            changed = true;
         }
-        entry.status == RequestStatus::Applied
-    };
-    let owner_keys = app.state::<AppState>().signing_keys()?;
-    let content = encrypt_observer_payload(
-        &owner_keys,
-        &source,
-        &ManagementApplyResult {
-            result_type: "agent_management_apply_result",
-            request_id: &request_id,
-            succeeded,
-            result: &result,
-        },
-    )
-    .map_err(|error| format!("failed to encrypt management result: {error}"))?;
-    let d_tag = format!("buzz-agent-management-result:{request_id}");
-    let d = Tag::parse(["d", d_tag.as_str()])
-        .map_err(|error| format!("failed to build result d tag: {error}"))?;
-    let p = Tag::parse(["p", source_hex.as_str()])
-        .map_err(|error| format!("failed to build result p tag: {error}"))?;
-    crate::relay::submit_event_with_keys(
-        EventBuilder::new(Kind::Custom(30_078), content).tags([d, p]),
-        &app.state::<AppState>(),
-        &owner_keys,
-        None,
-    )
-    .await
-    .map(|_| ())
-}
+    }
 
-fn pending_requests(ledger: AgentManagementState) -> Vec<PendingManagementRequest> {
-    let mut pending = ledger
+    let mut restored = ledger
         .requests
-        .into_iter()
-        .filter(|(_, entry)| entry.status == RequestStatus::PendingDraft)
+        .iter()
+        .filter(|(_, entry)| {
+            entry.status == RequestStatus::PendingDraft
+                || (entry.status == RequestStatus::Failed && !entry.result_published)
+        })
         .map(|(request_id, entry)| {
             (
-                entry.created_at,
-                PendingManagementRequest {
-                    request_id,
-                    source_pubkey: entry.source_pubkey,
-                    payload: entry.payload,
+                entry.created_at.clone(),
+                RestoredManagementRequest {
+                    request_id: request_id.clone(),
+                    source_pubkey: entry.source_pubkey.clone(),
+                    capability: entry.capability,
+                    payload: entry.payload.clone(),
+                    disposition: if entry.status == RequestStatus::PendingDraft {
+                        RestoredManagementRequestDisposition::Draft
+                    } else {
+                        RestoredManagementRequestDisposition::Failed
+                    },
+                    result: entry.result.clone(),
                 },
             )
         })
         .collect::<Vec<_>>();
-    pending.sort_by(|(left_time, left), (right_time, right)| {
+    restored.sort_by(|(left_time, left), (right_time, right)| {
         left_time
             .cmp(right_time)
             .then_with(|| left.request_id.cmp(&right.request_id))
     });
-    pending.into_iter().map(|(_, request)| request).collect()
+    (
+        restored
+            .into_iter()
+            .map(|(_, request)| request)
+            .collect(),
+        changed,
+    )
 }
 
-pub fn list_pending_agent_management_requests(
+pub fn restore_agent_management_requests(
+    startup_cutoff: String,
     app: AppHandle,
-) -> Result<Vec<PendingManagementRequest>, String> {
+) -> Result<Vec<RestoredManagementRequest>, String> {
+    let startup_cutoff = chrono::DateTime::parse_from_rfc3339(startup_cutoff.trim())
+        .map_err(|_| "invalid agent-management startup cutoff".to_string())?;
     let state_handle = app.state::<AppState>();
     let _guard = state_handle
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    Ok(pending_requests(load_state(&app)?))
+    let mut ledger = load_state(&app)?;
+    let (restored, changed) = restore_requests(&mut ledger, startup_cutoff);
+    if changed {
+        save_state(&app, &ledger)?;
+    }
+    Ok(restored)
 }
 
 pub fn dismiss_agent_management_request(request_id: String, app: AppHandle) -> Result<(), String> {
@@ -777,7 +784,7 @@ pub enum AgentManagementLedgerCommand {
     BeginOwnerReview {
         request_id: String,
     },
-    ListPending,
+    Restore { startup_cutoff: String },
     Dismiss {
         request_id: String,
     },
@@ -817,8 +824,8 @@ pub fn agent_management_ledger(
             begin_owner_reviewed_agent_management_request(request_id, app)?;
             Ok(Value::Null)
         }
-        AgentManagementLedgerCommand::ListPending => {
-            serde_json::to_value(list_pending_agent_management_requests(app)?)
+        AgentManagementLedgerCommand::Restore { startup_cutoff } => {
+            serde_json::to_value(restore_agent_management_requests(startup_cutoff, app)?)
                 .map_err(|error| error.to_string())
         }
         AgentManagementLedgerCommand::Dismiss { request_id } => {
@@ -850,6 +857,10 @@ pub enum AgentManagementPublishCommand {
         succeeded: bool,
     },
     Draft {
+        request_id: String,
+        source_pubkey: String,
+    },
+    Applying {
         request_id: String,
         source_pubkey: String,
     },
@@ -905,6 +916,10 @@ pub async fn publish_agent_management(
             request_id,
             source_pubkey,
         } => publish_agent_management_draft_result(request_id, source_pubkey, app).await,
+        AgentManagementPublishCommand::Applying {
+            request_id,
+            source_pubkey,
+        } => publish_agent_management_applying_result(request_id, source_pubkey, app).await,
         AgentManagementPublishCommand::Result {
             request_id,
             source_pubkey,

@@ -38,7 +38,9 @@ struct ObserverEnvelope<T> {
 struct CreateTeamRequest {
     channel_id: String,
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
     members: Vec<String>,
 }
@@ -48,9 +50,13 @@ struct CreateTeamRequest {
 struct UpdateTeamRequest {
     channel_id: String,
     team: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     members: Option<Vec<String>>,
 }
 
@@ -59,6 +65,44 @@ struct UpdateTeamRequest {
 struct AddTeamToChannelRequest {
     channel_id: String,
     team: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_omits_absent_optional_fields() {
+        let value = serde_json::to_value(CreateTeamRequest {
+            channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
+            name: "Review team".into(),
+            description: None,
+            instructions: None,
+            members: Vec::new(),
+        })
+        .unwrap();
+
+        assert!(value.get("description").is_none());
+        assert!(value.get("instructions").is_none());
+        assert_eq!(value["members"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn update_omits_all_absent_optional_fields() {
+        let value = serde_json::to_value(UpdateTeamRequest {
+            channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
+            team: "Review team".into(),
+            name: None,
+            description: None,
+            instructions: None,
+            members: None,
+        })
+        .unwrap();
+
+        for field in ["name", "description", "instructions", "members"] {
+            assert!(value.get(field).is_none(), "{field} serialized as null");
+        }
+    }
 }
 
 fn require_owner(client: &BuzzClient) -> Result<PublicKey, CliError> {
