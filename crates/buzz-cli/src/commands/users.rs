@@ -1,5 +1,5 @@
 use buzz_core::kind::KIND_MANAGED_AGENT;
-use nostr::PublicKey;
+use nostr::{PublicKey, Tag};
 
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
@@ -372,35 +372,56 @@ pub async fn cmd_set_profile(
     // Read-merge-write: fetch current profile, merge in the new fields, then sign.
     let current = fetch_current_profile(client).await?;
 
+    let builder = build_profile_update(&current, display_name, avatar_url, about, nip05_handle)?;
+
+    let event = client.sign_event(builder)?;
+
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
+fn build_profile_update(
+    current: &CurrentProfile,
+    display_name: Option<&str>,
+    avatar_url: Option<&str>,
+    about: Option<&str>,
+    nip05_handle: Option<&str>,
+) -> Result<nostr::EventBuilder, CliError> {
     // Merge: caller-supplied fields win; fall back to current profile values.
     let merged_name = display_name
         .map(|s| s.to_string())
         .or_else(|| {
             current
+                .metadata
                 .get("display_name")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
         })
         .or_else(|| {
             current
+                .metadata
                 .get("name")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
         });
     let merged_picture = avatar_url.map(|s| s.to_string()).or_else(|| {
         current
+            .metadata
             .get("picture")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     });
     let merged_about = about.map(|s| s.to_string()).or_else(|| {
         current
+            .metadata
             .get("about")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     });
     let merged_nip05 = nip05_handle.map(|s| s.to_string()).or_else(|| {
         current
+            .metadata
             .get("nip05")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
@@ -413,20 +434,21 @@ pub async fn cmd_set_profile(
         merged_about.as_deref(),
         merged_nip05.as_deref(),
     )
-    .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?;
+    .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?
+    .tags(current.tags.clone());
 
-    let event = client.sign_event(builder)?;
-
-    let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
-    Ok(())
+    Ok(builder)
 }
 
 /// Fetch the current user's profile metadata via POST /query (kind:0).
-/// Returns the parsed content JSON object, or an empty object if no profile exists.
-async fn fetch_current_profile(
-    client: &BuzzClient,
-) -> Result<serde_json::Map<String, serde_json::Value>, CliError> {
+/// Returns the parsed content and tags, or an empty snapshot if no profile exists.
+#[derive(Default)]
+struct CurrentProfile {
+    metadata: serde_json::Map<String, serde_json::Value>,
+    tags: Vec<Tag>,
+}
+
+async fn fetch_current_profile(client: &BuzzClient) -> Result<CurrentProfile, CliError> {
     let my_pk = client.keys().public_key().to_hex();
     let filter = serde_json::json!({
         "kinds": [0],
@@ -438,10 +460,10 @@ async fn fetch_current_profile(
         .map_err(|e| CliError::Other(format!("failed to parse profile query: {e}")))?;
 
     let Some(arr) = events.as_array() else {
-        return Ok(serde_json::Map::new());
+        return Ok(CurrentProfile::default());
     };
     let Some(event) = arr.first() else {
-        return Ok(serde_json::Map::new());
+        return Ok(CurrentProfile::default());
     };
     // kind:0 content is a JSON string containing the profile fields
     let content_str = event
@@ -449,7 +471,12 @@ async fn fetch_current_profile(
         .and_then(|c| c.as_str())
         .unwrap_or("{}");
     let content: serde_json::Value = serde_json::from_str(content_str).unwrap_or_default();
-    Ok(content.as_object().cloned().unwrap_or_default())
+    let tags = serde_json::from_value(event.get("tags").cloned().unwrap_or_default())
+        .map_err(|e| CliError::Other(format!("failed to parse profile tags: {e}")))?;
+    Ok(CurrentProfile {
+        metadata: content.as_object().cloned().unwrap_or_default(),
+        tags,
+    })
 }
 
 /// Get presence status for users — query kind:40902 presence snapshot events.
@@ -574,11 +601,56 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        owned_agent_pubkeys_from_events, owner_scoped_profiles, owner_verification,
-        presence_subject,
+        build_profile_update, owned_agent_pubkeys_from_events, owner_scoped_profiles,
+        owner_verification, presence_subject, CurrentProfile,
     };
-    use nostr::Keys;
+    use nostr::{Keys, Tag};
     use serde_json::json;
+
+    #[test]
+    fn set_profile_republish_preserves_valid_nip_oa_and_other_tags() {
+        let owner_keys = Keys::generate();
+        let keys = Keys::generate();
+        let auth_tag: Tag = serde_json::from_str(
+            &buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &keys.public_key(), "kind=0").unwrap(),
+        )
+        .unwrap();
+        let client_tag = Tag::parse(["client", "buzz"]).unwrap();
+        let current = CurrentProfile {
+            metadata: json!({
+                "display_name": "Bolt",
+                "picture": "https://example.com/old.png",
+                "about": "old bio"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            tags: vec![auth_tag.clone(), client_tag.clone()],
+        };
+
+        let event = build_profile_update(
+            &current,
+            None,
+            Some("https://example.com/new.png"),
+            None,
+            None,
+        )
+        .expect("build merged profile")
+        .sign_with_keys(&keys)
+        .expect("sign merged profile");
+
+        assert_eq!(
+            event.tags.iter().cloned().collect::<Vec<_>>(),
+            vec![auth_tag, client_tag]
+        );
+        let preserved_auth = serde_json::to_string(event.tags.first().unwrap()).unwrap();
+        buzz_sdk::nip_oa::verify_auth_tag(&preserved_auth, &event.pubkey)
+            .expect("preserved auth tag remains a valid NIP-OA attestation");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&event.content).unwrap()["picture"],
+            "https://example.com/new.png"
+        );
+    }
 
     #[test]
     fn owned_agent_lookup_matches_exact_name_case_insensitively() {

@@ -402,19 +402,22 @@ fn build_profile_event(
     agent_keys: &nostr::Keys,
     display_name: &str,
     avatar_url: Option<&str>,
+    prior_tags: &[nostr::Tag],
     auth_tag_json: Option<&str>,
 ) -> Result<nostr::Event, String> {
     let builder = crate::events::build_profile(Some(display_name), None, avatar_url, None, None)?;
 
-    sign_managed_agent_profile_event(builder, agent_keys, auth_tag_json)
+    sign_managed_agent_profile_event(builder, agent_keys, prior_tags, auth_tag_json)
 }
 
 fn sign_managed_agent_profile_event(
     builder: nostr::EventBuilder,
     agent_keys: &nostr::Keys,
+    prior_tags: &[nostr::Tag],
     auth_tag_json: Option<&str>,
 ) -> Result<nostr::Event, String> {
-    let builder = if let Some(tag_json) = auth_tag_json {
+    let mut tags = prior_tags.to_vec();
+    if let Some(tag_json) = auth_tag_json {
         // Bridge nostr 0.37 PublicKey → nostr 0.36 PublicKey via hex encoding.
         let agent_pubkey_hex = agent_keys.public_key().to_hex();
         let compat_pubkey = nostr::PublicKey::from_hex(&agent_pubkey_hex)
@@ -429,12 +432,13 @@ fn sign_managed_agent_profile_event(
             .map_err(|e| format!("failed to parse verified auth tag: {e}"))?;
         let tag = nostr::Tag::parse(compat_tag.as_slice())
             .map_err(|e| format!("failed to convert auth tag to nostr 0.37: {e}"))?;
-        builder.tags([tag])
-    } else {
-        builder
-    };
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
 
     builder
+        .tags(tags)
         .sign_with_keys(agent_keys)
         .map_err(|e| format!("failed to sign profile event: {e}"))
 }
@@ -470,7 +474,10 @@ fn build_agent_managed_avatar_event(
     .custom_created_at(crate::managed_agents::persona_events::monotonic_created_at(
         existing.map(|profile| profile.created_at),
     ));
-    sign_managed_agent_profile_event(builder, agent_keys, auth_tag_json)
+    let prior_tags = existing
+        .map(|profile| profile.tags.as_slice())
+        .unwrap_or_default();
+    sign_managed_agent_profile_event(builder, agent_keys, prior_tags, auth_tag_json)
 }
 
 // ── Managed-agent profile sync ──────────────────────────────────────────────
@@ -487,9 +494,47 @@ pub async fn sync_managed_agent_profile(
     avatar_url: Option<&str>,
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
+    // Fail before any network access if the outgoing profile itself violates
+    // the secret-egress boundary. The final event is rebuilt after the read so
+    // it can retain the prior kind:0 tags.
+    let preview = build_profile_event(agent_keys, display_name, avatar_url, &[], auth_tag)?;
+    crate::egress_guard::assert_no_key_backup_bytes(
+        preview.as_json().as_bytes(),
+        "agent profile sync",
+    )?;
+
+    let existing = query_agent_profile(state, relay_url, &agent_keys.public_key().to_hex()).await?;
+    sync_managed_agent_profile_from_snapshot(
+        state,
+        relay_url,
+        agent_keys,
+        display_name,
+        avatar_url,
+        auth_tag,
+        existing.as_ref(),
+    )
+    .await
+}
+
+/// Publish from a profile snapshot already fetched by the caller. Reconcile
+/// uses this form so its final experiment-guard check remains immediately
+/// adjacent to the write instead of opening another network-sized TOCTOU gap.
+pub(crate) async fn sync_managed_agent_profile_from_snapshot(
+    state: &AppState,
+    relay_url: &str,
+    agent_keys: &nostr::Keys,
+    display_name: &str,
+    avatar_url: Option<&str>,
+    auth_tag: Option<&str>,
+    existing: Option<&AgentProfileInfo>,
+) -> Result<(), String> {
     crate::relay_admission::wait_for_rate_limit().await;
-    // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
-    let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
+    // A kind:0 is a full snapshot: preserve every prior tag verbatim and add
+    // the stored NIP-OA attestation only when it is not already present.
+    let prior_tags = existing
+        .map(|profile| profile.tags.as_slice())
+        .unwrap_or_default();
+    let event = build_profile_event(agent_keys, display_name, avatar_url, prior_tags, auth_tag)?;
     submit_managed_agent_profile_event(state, relay_url, agent_keys, event, auth_tag).await
 }
 
@@ -597,6 +642,7 @@ pub async fn query_agent_profile(
             .and_then(|v| v.as_str())
             .map(str::to_string),
         metadata: content.as_object().cloned().unwrap_or_default(),
+        tags: event.tags.iter().cloned().collect(),
         created_at: event.created_at.as_secs() as i64,
     }))
 }
@@ -607,6 +653,7 @@ pub struct AgentProfileInfo {
     pub display_name: Option<String>,
     pub picture: Option<String>,
     pub metadata: serde_json::Map<String, serde_json::Value>,
+    pub tags: Vec<nostr::Tag>,
     pub created_at: i64,
 }
 
@@ -1017,7 +1064,7 @@ mod tests {
     fn profile_event_with_valid_auth_tag() {
         let agent_keys = nostr::Keys::generate();
         let tag_json = make_valid_auth_tag(&agent_keys);
-        let event = build_profile_event(&agent_keys, "TestBot", None, Some(&tag_json))
+        let event = build_profile_event(&agent_keys, "TestBot", None, &[], Some(&tag_json))
             .expect("should succeed with a valid auth tag");
 
         // Exactly one "auth" tag must be present.
@@ -1035,7 +1082,7 @@ mod tests {
     #[test]
     fn profile_event_without_auth_tag() {
         let agent_keys = nostr::Keys::generate();
-        let event = build_profile_event(&agent_keys, "TestBot", None, None)
+        let event = build_profile_event(&agent_keys, "TestBot", None, &[], None)
             .expect("should succeed without an auth tag");
 
         // No "auth" tags should be present.
@@ -1069,6 +1116,7 @@ mod tests {
             display_name: Some("Relay-chosen name".into()),
             picture: Some("https://relay.example/old.png".into()),
             metadata,
+            tags: vec![serde_json::from_str(&make_valid_auth_tag(&agent_keys)).unwrap()],
             created_at: nostr::Timestamp::now().as_secs() as i64,
         };
 
@@ -1092,7 +1140,25 @@ mod tests {
         assert_eq!(content["picture"], "https://relay.example/new.png");
         assert!(event.created_at.as_secs() as i64 > existing.created_at);
         assert_eq!(event.kind, nostr::Kind::Metadata);
+        assert_eq!(
+            event.tags.iter().cloned().collect::<Vec<_>>(),
+            existing.tags
+        );
         assert!(!event.as_json().is_empty());
+    }
+
+    #[test]
+    fn reconciled_profile_event_preserves_every_prior_tag() {
+        let agent_keys = nostr::Keys::generate();
+        let prior_tags = vec![
+            serde_json::from_str(&make_valid_auth_tag(&agent_keys)).unwrap(),
+            nostr::Tag::parse(["client", "buzz"]).unwrap(),
+        ];
+
+        let event = build_profile_event(&agent_keys, "TestBot", None, &prior_tags, None)
+            .expect("build reconciled profile");
+
+        assert_eq!(event.tags.iter().cloned().collect::<Vec<_>>(), prior_tags);
     }
 
     #[test]
@@ -1100,7 +1166,7 @@ mod tests {
         let agent_keys = nostr::Keys::generate();
         // Structurally valid JSON array but with a bogus signature — verification must fail.
         let bad_json = format!(r#"["auth","{}","","{}"]"#, "a".repeat(64), "b".repeat(128));
-        let result = build_profile_event(&agent_keys, "TestBot", None, Some(&bad_json));
+        let result = build_profile_event(&agent_keys, "TestBot", None, &[], Some(&bad_json));
         assert!(result.is_err(), "should reject an invalid auth tag");
         assert!(
             result.unwrap_err().contains("verification failed"),

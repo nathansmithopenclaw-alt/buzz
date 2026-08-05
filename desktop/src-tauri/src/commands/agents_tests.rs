@@ -342,6 +342,7 @@ fn profile(name: Option<&str>, picture: Option<&str>) -> crate::relay::AgentProf
         display_name: name.map(str::to_string),
         picture: picture.map(str::to_string),
         metadata: serde_json::Map::new(),
+        tags: Vec::new(),
         created_at: 0,
     }
 }

@@ -156,6 +156,12 @@ struct OwnerCache {
     siblings: std::sync::Mutex<HashMap<String, bool>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiblingCheck {
+    Verified(bool),
+    Unavailable(&'static str),
+}
+
 impl OwnerCache {
     fn new(initial: Option<String>) -> Self {
         Self {
@@ -174,8 +180,12 @@ impl OwnerCache {
         self.siblings.lock().ok()?.get(author).copied()
     }
 
-    /// Cache a sibling lookup result.
-    fn cache_sibling(&self, author: String, is_sibling: bool) {
+    /// Cache only a conclusive sibling lookup result. Transient lookup
+    /// failures must be retried by the next inbound event.
+    fn cache_sibling_check(&self, author: String, check: SiblingCheck) {
+        let SiblingCheck::Verified(is_sibling) = check else {
+            return;
+        };
         if let Ok(mut map) = self.siblings.lock() {
             // Cap at 256 entries to prevent unbounded growth.
             if map.len() >= 256 {
@@ -211,9 +221,30 @@ async fn is_owner_or_sibling(
     }
 
     // Query the author's kind:0 profile to check for NIP-OA auth tag.
-    let is_sibling = check_sibling_via_profile(author, my_owner, rest_client).await;
-    owner_cache.cache_sibling(author.to_string(), is_sibling);
-    is_sibling
+    let check = check_sibling_via_profile(author, my_owner, rest_client).await;
+    owner_cache.cache_sibling_check(author.to_string(), check);
+    match check {
+        SiblingCheck::Verified(is_sibling) => is_sibling,
+        SiblingCheck::Unavailable(reason) => {
+            tracing::debug!(author, reason, "sibling profile check unavailable");
+            false
+        }
+    }
+}
+
+fn author_gate_drop_reason(respond_to: &RespondTo, is_dm: bool) -> &'static str {
+    if matches!(respond_to, RespondTo::Nobody) {
+        "respond_to_nobody"
+    } else if is_dm {
+        "dm_author_is_not_owner_or_verified_sibling"
+    } else {
+        match respond_to {
+            RespondTo::OwnerOnly => "author_is_not_owner_or_verified_sibling",
+            RespondTo::Allowlist => "author_is_not_owner_sibling_or_allowlisted",
+            RespondTo::Anyone => "author_rejected",
+            RespondTo::Nobody => unreachable!(),
+        }
+    }
 }
 
 /// Inbound author gate decision: does this author's event fire a turn?
@@ -293,12 +324,12 @@ async fn check_sibling_via_profile(
     author: &str,
     expected_owner: &str,
     rest_client: &relay::RestClient,
-) -> bool {
+) -> SiblingCheck {
     let filter = nostr::Filter::new()
         .kind(nostr::Kind::Metadata)
         .author(match nostr::PublicKey::from_hex(author) {
             Ok(pk) => pk,
-            Err(_) => return false,
+            Err(_) => return SiblingCheck::Verified(false),
         })
         .limit(1);
 
@@ -306,28 +337,37 @@ async fn check_sibling_via_profile(
         .await
     {
         Ok(Ok(v)) => v,
-        _ => return false, // timeout or error — fail closed
+        Ok(Err(_)) => return SiblingCheck::Unavailable("relay_query_failed"),
+        Err(_) => return SiblingCheck::Unavailable("relay_query_timeout"),
     };
 
+    check_sibling_profile_response(&resp, author, expected_owner)
+}
+
+fn check_sibling_profile_response(
+    resp: &serde_json::Value,
+    author: &str,
+    expected_owner: &str,
+) -> SiblingCheck {
     // Look for an "auth" tag in the profile event.
     let events = match resp.as_array() {
         Some(arr) => arr,
-        None => return false,
+        None => return SiblingCheck::Unavailable("malformed_profile_response"),
     };
     let event = match events.first() {
         Some(e) => e,
-        None => return false,
+        None => return SiblingCheck::Unavailable("missing_profile"),
     };
     let tags = match event.get("tags").and_then(|t| t.as_array()) {
         Some(t) => t,
-        None => return false,
+        None => return SiblingCheck::Unavailable("malformed_profile_tags"),
     };
 
     // Find ["auth", owner_pk, conditions, sig] and verify the Schnorr signature.
     // Don't trust the relay — verify ourselves.
     let agent_pk = match nostr::PublicKey::from_hex(author) {
         Ok(pk) => pk,
-        Err(_) => return false,
+        Err(_) => return SiblingCheck::Verified(false),
     };
 
     for tag in tags {
@@ -351,7 +391,7 @@ async fn check_sibling_via_profile(
         match buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent_pk) {
             Ok(_) => {
                 tracing::debug!(author, expected_owner, "sibling verified via NIP-OA");
-                return true;
+                return SiblingCheck::Verified(true);
             }
             Err(e) => {
                 tracing::debug!(author, "NIP-OA auth tag verification failed: {e}");
@@ -359,7 +399,7 @@ async fn check_sibling_via_profile(
         }
     }
 
-    false
+    SiblingCheck::Verified(false)
 }
 
 /// Observer frames are published at a global rate of AT MOST ONE relay frame
@@ -2496,13 +2536,27 @@ async fn tokio_main() -> Result<()> {
                                 )
                                 .await;
                                 if !allowed {
-                                    tracing::debug!(
-                                        channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
-                                        mode = %config.respond_to,
-                                        is_dm,
-                                        "inbound author gate — dropping event"
-                                    );
+                                    let reason =
+                                        author_gate_drop_reason(&config.respond_to, is_dm);
+                                    if event_mentions_agent(&buzz_event.event, &pubkey_hex) {
+                                        tracing::warn!(
+                                            channel_id = %buzz_event.channel_id,
+                                            author = %author,
+                                            mode = %config.respond_to,
+                                            is_dm,
+                                            reason,
+                                            "inbound author gate — dropping p-tagged mention"
+                                        );
+                                    } else {
+                                        tracing::debug!(
+                                            channel_id = %buzz_event.channel_id,
+                                            author = %author,
+                                            mode = %config.respond_to,
+                                            is_dm,
+                                            reason,
+                                            "inbound author gate — dropping event"
+                                        );
+                                    }
                                     continue;
                                 }
                             }
@@ -4937,10 +4991,81 @@ mod author_gate_tests {
     /// Owner + a known sibling, none of them on the explicit allowlist.
     fn cache_with_sibling() -> OwnerCache {
         let cache = OwnerCache::new(Some(OWNER.into()));
-        cache.cache_sibling(SIBLING.into(), true);
-        cache.cache_sibling(STRANGER.into(), false);
-        cache.cache_sibling(EXTERNAL.into(), false);
+        cache.cache_sibling_check(SIBLING.into(), SiblingCheck::Verified(true));
+        cache.cache_sibling_check(STRANGER.into(), SiblingCheck::Verified(false));
+        cache.cache_sibling_check(EXTERNAL.into(), SiblingCheck::Verified(false));
         cache
+    }
+
+    #[test]
+    fn transient_sibling_lookup_is_not_cached() {
+        let cache = OwnerCache::new(Some(OWNER.into()));
+
+        cache.cache_sibling_check(
+            SIBLING.into(),
+            SiblingCheck::Unavailable("relay_query_timeout"),
+        );
+
+        assert_eq!(cache.is_known_sibling(SIBLING), None);
+        cache.cache_sibling_check(SIBLING.into(), SiblingCheck::Verified(true));
+        assert_eq!(cache.is_known_sibling(SIBLING), Some(true));
+    }
+
+    #[test]
+    fn missing_profile_is_retryable_but_present_non_sibling_is_cacheable() {
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let owner = nostr::Keys::generate().public_key().to_hex();
+
+        assert_eq!(
+            check_sibling_profile_response(&serde_json::json!([]), &author, &owner),
+            SiblingCheck::Unavailable("missing_profile")
+        );
+        assert_eq!(
+            check_sibling_profile_response(
+                &serde_json::json!([{"pubkey": author.clone(), "kind": 0, "tags": []}]),
+                &author,
+                &owner,
+            ),
+            SiblingCheck::Verified(false)
+        );
+    }
+
+    #[test]
+    fn profile_with_valid_owner_attestation_is_verified_sibling() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let auth_tag_json =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "kind=0").unwrap();
+        let auth_tag: nostr::Tag = serde_json::from_str(&auth_tag_json).unwrap();
+        let event = nostr::EventBuilder::new(nostr::Kind::Metadata, "{}")
+            .tags([auth_tag])
+            .sign_with_keys(&agent)
+            .unwrap();
+
+        assert_eq!(
+            check_sibling_profile_response(
+                &serde_json::json!([event]),
+                &agent.public_key().to_hex(),
+                &owner.public_key().to_hex(),
+            ),
+            SiblingCheck::Verified(true)
+        );
+    }
+
+    #[test]
+    fn p_tagged_author_gate_drop_reasons_are_operator_actionable() {
+        assert_eq!(
+            author_gate_drop_reason(&RespondTo::OwnerOnly, false),
+            "author_is_not_owner_or_verified_sibling"
+        );
+        assert_eq!(
+            author_gate_drop_reason(&RespondTo::Allowlist, true),
+            "dm_author_is_not_owner_or_verified_sibling"
+        );
+        assert_eq!(
+            author_gate_drop_reason(&RespondTo::Nobody, false),
+            "respond_to_nobody"
+        );
     }
 
     #[tokio::test]
