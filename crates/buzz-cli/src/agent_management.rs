@@ -542,7 +542,10 @@ mod tests {
             "Research helper"
         );
         assert!(payload["payload"]["request"].get("runtime").is_none());
+        assert!(payload["payload"]["request"].get("provider").is_none());
+        assert!(payload["payload"]["request"].get("model").is_none());
         assert!(payload["payload"]["request"].get("respondTo").is_none());
+        assert!(payload["payload"]["request"].get("parallelism").is_none());
     }
 
     #[test]
@@ -571,6 +574,10 @@ mod tests {
         let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
         assert_eq!(payload["payload"]["requestId"], request_id);
         assert_eq!(payload["payload"]["intent"], "apply");
+        let request = &payload["payload"]["request"];
+        for field in ["runtime", "provider", "model", "respondTo", "parallelism"] {
+            assert!(request.get(field).is_none(), "{field} serialized as null");
+        }
     }
 
     #[test]

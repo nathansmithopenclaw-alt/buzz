@@ -30,6 +30,46 @@ test("parses the strict no-secret team create contract", () => {
   assert.deepEqual(parseAgentTeamManagementRequest(request), request);
 });
 
+test("parses CLI create payloads with omitted optionals", () => {
+  const request = createRequest();
+  delete request.request.description;
+  delete request.request.instructions;
+  assert.deepEqual(parseAgentTeamManagementRequest(request), request);
+});
+
+test("normalizes legacy null optionals to absent", () => {
+  const create = createRequest();
+  create.request.description = null;
+  create.request.instructions = null;
+  assert.deepEqual(parseAgentTeamManagementRequest(create), {
+    ...create,
+    request: {
+      channelId: create.request.channelId,
+      name: create.request.name,
+      members: create.request.members,
+    },
+  });
+
+  const update = {
+    type: AGENT_TEAM_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "2d9c20e2-ab9b-4858-a65c-75cf6c84f891",
+    intent: "apply",
+    request: {
+      channelId: CHANNEL_ID,
+      team: "Review team",
+      name: null,
+      description: null,
+      instructions: null,
+      members: null,
+    },
+  };
+  assert.deepEqual(parseAgentTeamManagementRequest(update), {
+    ...update,
+    request: { channelId: CHANNEL_ID, team: "Review team" },
+  });
+});
+
 test("requires apply intent and rejects extra authority or secret fields", () => {
   assert.equal(
     parseAgentTeamManagementRequest(createRequest({ intent: "draft" })),

@@ -41,11 +41,16 @@ export type RegisterManagementRequestResult = {
   result?: unknown;
 };
 
-export type PendingManagementRequest = {
+export type RestoredManagementRequest = {
   requestId: string;
   sourcePubkey: string;
   payload: unknown;
+  capability: "agent_config" | "agent_creation" | "teams";
+  disposition: "draft" | "failed";
+  result?: unknown;
 };
+
+const agentManagementStartupCutoff = new Date().toISOString();
 
 export async function registerAgentManagementRequest(input: {
   sourcePubkey: string;
@@ -77,11 +82,14 @@ export async function beginOwnerReviewedAgentManagementRequest(
   });
 }
 
-export async function listPendingAgentManagementRequests(): Promise<
-  PendingManagementRequest[]
+export async function restoreAgentManagementRequests(): Promise<
+  RestoredManagementRequest[]
 > {
   return invokeTauri("agent_management_ledger", {
-    command: { action: "list_pending" },
+    command: {
+      action: "restore",
+      startupCutoff: agentManagementStartupCutoff,
+    },
   });
 }
 
@@ -127,6 +135,15 @@ export async function publishAgentManagementDraftResult(input: {
 }): Promise<void> {
   return invokeTauri("publish_agent_management", {
     command: { action: "draft", ...input },
+  });
+}
+
+export async function publishAgentManagementApplyingResult(input: {
+  requestId: string;
+  sourcePubkey: string;
+}): Promise<void> {
+  return invokeTauri("publish_agent_management", {
+    command: { action: "applying", ...input },
   });
 }
 
