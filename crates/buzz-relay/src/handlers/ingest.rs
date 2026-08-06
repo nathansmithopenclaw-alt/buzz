@@ -32,8 +32,10 @@ use buzz_core::kind::{
     KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_TRACKER_COMMENT, KIND_TRACKER_DISPATCH_ACTION, KIND_TRACKER_ISSUE, KIND_TRACKER_REVISION,
+    KIND_TRACKER_SERVICE_HEARTBEAT, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -266,7 +268,12 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_STREAM_MESSAGE_DIFF
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
-        | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
+        | KIND_FORUM_COMMENT
+        | KIND_TRACKER_ISSUE
+        | KIND_TRACKER_REVISION
+        | KIND_TRACKER_COMMENT
+        | KIND_TRACKER_DISPATCH_ACTION
+        | KIND_TRACKER_SERVICE_HEARTBEAT => Ok(Scope::MessagesWrite),
         KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
             Ok(Scope::AdminChannels)
         }
@@ -493,6 +500,11 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
             | KIND_FORUM_COMMENT
+            | KIND_TRACKER_ISSUE
+            | KIND_TRACKER_REVISION
+            | KIND_TRACKER_COMMENT
+            | KIND_TRACKER_DISPATCH_ACTION
+            | KIND_TRACKER_SERVICE_HEARTBEAT
             // NIP-29 admin kinds (except CREATE_GROUP which creates the channel)
             | KIND_NIP29_PUT_USER
             | KIND_NIP29_REMOVE_USER
@@ -2769,6 +2781,25 @@ mod tests {
                 requires_h_channel_scope(kind),
                 "kind {kind} should require h"
             );
+        }
+    }
+
+    #[test]
+    fn tracker_kinds_require_message_write_and_h_scope() {
+        let dummy = make_dummy_event();
+        for kind in [
+            KIND_TRACKER_ISSUE,
+            KIND_TRACKER_REVISION,
+            KIND_TRACKER_COMMENT,
+            KIND_TRACKER_DISPATCH_ACTION,
+            KIND_TRACKER_SERVICE_HEARTBEAT,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).expect("registered Tracker kind"),
+                Scope::MessagesWrite
+            );
+            assert!(requires_h_channel_scope(kind));
+            assert!(!is_global_only_kind(kind));
         }
     }
 

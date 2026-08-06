@@ -101,6 +101,17 @@ pub const KIND_AGENT_ENGRAM: u32 = 30174;
 /// author-only (see [`AUTHOR_ONLY_KINDS`]). See `docs/nips/NIP-ER.md`.
 pub const KIND_EVENT_REMINDER: u32 = 30300;
 
+/// NIP-BT: immutable Tracker issue root.
+pub const KIND_TRACKER_ISSUE: u32 = 40020;
+/// NIP-BT: immutable Tracker issue revision.
+pub const KIND_TRACKER_REVISION: u32 = 40021;
+/// NIP-BT: immutable Tracker issue comment.
+pub const KIND_TRACKER_COMMENT: u32 = 40022;
+/// NIP-BT: idempotent action emitted by a Tracker dispatcher.
+pub const KIND_TRACKER_DISPATCH_ACTION: u32 = 40023;
+/// NIP-BT: service heartbeat projected latest per service identity.
+pub const KIND_TRACKER_SERVICE_HEARTBEAT: u32 = 40024;
+
 /// NIP-PL: encrypted push lease (parameterized replaceable, author-only).
 ///
 /// The source event contains endpoint-bearing NIP-44 ciphertext and is readable
@@ -630,6 +641,11 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_AGENT_PROFILE,
     KIND_AGENT_ENGRAM,
     KIND_EVENT_REMINDER,
+    KIND_TRACKER_ISSUE,
+    KIND_TRACKER_REVISION,
+    KIND_TRACKER_COMMENT,
+    KIND_TRACKER_DISPATCH_ACTION,
+    KIND_TRACKER_SERVICE_HEARTBEAT,
     KIND_PERSONA,
     KIND_TEAM,
     KIND_MANAGED_AGENT,
