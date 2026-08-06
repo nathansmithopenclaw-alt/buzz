@@ -635,6 +635,12 @@ pub enum TasksCmd {
         /// Verification method
         #[arg(long = "verify", default_value = "not specified")]
         verification: String,
+        /// Correlated Tracker issue UUID (task-envelope v2)
+        #[arg(long)]
+        tracker_issue_id: Option<String>,
+        /// Dispatcher idempotency request UUID (task-envelope v2)
+        #[arg(long)]
+        dispatch_request_id: Option<String>,
         /// Human-readable message text; use '-' for stdin
         #[arg(long)]
         content: String,

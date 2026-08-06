@@ -11,7 +11,7 @@ use buzz_core::kind::{
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
     KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    KIND_THREAD_SUMMARY, KIND_TRACKER_ISSUE, KIND_TRACKER_REVISION,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -242,6 +242,14 @@ pub async fn validate_standard_deletion_event(
         if parts.len() < 2 {
             return Err(anyhow::anyhow!("invalid a-tag format"));
         }
+        if parts[0]
+            .parse::<u32>()
+            .is_ok_and(tracker_state_is_nip09_protected)
+        {
+            return Err(anyhow::anyhow!(
+                "tracker issue roots and revisions cannot be deleted"
+            ));
+        }
         let target_pubkey_bytes =
             hex::decode(parts[1]).map_err(|_| anyhow::anyhow!("invalid pubkey in a-tag"))?;
         if target_pubkey_bytes != actor_bytes
@@ -262,6 +270,12 @@ pub async fn validate_standard_deletion_event(
             .await?
             .ok_or_else(|| anyhow::anyhow!("target event not found"))?;
 
+        if tracker_state_is_nip09_protected(target_event.event.kind.as_u16() as u32) {
+            return Err(anyhow::anyhow!(
+                "tracker issue roots and revisions cannot be deleted"
+            ));
+        }
+
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
         if target_author != actor_bytes
@@ -275,6 +289,10 @@ pub async fn validate_standard_deletion_event(
     }
 
     Ok(())
+}
+
+fn tracker_state_is_nip09_protected(kind: u32) -> bool {
+    matches!(kind, KIND_TRACKER_ISSUE | KIND_TRACKER_REVISION)
 }
 
 /// Returns `true` if `actor_bytes` is the NIP-OA owner of **any** active owner-role
@@ -3363,6 +3381,15 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracker_roots_and_revisions_are_nip09_protected_but_comments_are_redactable() {
+        assert!(tracker_state_is_nip09_protected(KIND_TRACKER_ISSUE));
+        assert!(tracker_state_is_nip09_protected(KIND_TRACKER_REVISION));
+        assert!(!tracker_state_is_nip09_protected(
+            buzz_core::kind::KIND_TRACKER_COMMENT
+        ));
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {
