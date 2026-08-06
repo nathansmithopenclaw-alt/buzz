@@ -189,6 +189,7 @@ fn print_write_with_task(resp: &str, task_id: Uuid, status: TaskStatus) {
     println!("{value}");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn assign(
     client: &BuzzClient,
     channel: String,
@@ -196,6 +197,8 @@ async fn assign(
     title: String,
     deliverables: Vec<String>,
     verification: String,
+    tracker_issue_id: Option<String>,
+    dispatch_request_id: Option<String>,
     content: String,
 ) -> Result<(), CliError> {
     let channel = parse_uuid(&channel)?;
@@ -216,6 +219,20 @@ async fn assign(
         },
         blocked_on: None,
         notes: None,
+        tracker_issue_id: tracker_issue_id
+            .as_deref()
+            .map(|value| {
+                Uuid::parse_str(value)
+                    .map_err(|_| CliError::Usage(format!("invalid Tracker issue UUID: {value}")))
+            })
+            .transpose()?,
+        dispatch_request_id: dispatch_request_id
+            .as_deref()
+            .map(|value| {
+                Uuid::parse_str(value)
+                    .map_err(|_| CliError::Usage(format!("invalid dispatch request UUID: {value}")))
+            })
+            .transpose()?,
     }
     .validate()
     .map_err(|error| sdk_error("invalid task envelope", error))?;
@@ -375,6 +392,8 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
             title,
             deliverables,
             verification,
+            tracker_issue_id,
+            dispatch_request_id,
             content,
         } => {
             assign(
@@ -384,6 +403,8 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
                 title,
                 deliverables,
                 verification,
+                tracker_issue_id,
+                dispatch_request_id,
                 content,
             )
             .await

@@ -453,7 +453,7 @@ mod tests {
             channel_id: Uuid::nil(),
             created_at,
             envelope: TaskEnvelope {
-                v: 1,
+                v: 2,
                 task_id: Uuid::nil(),
                 status: TaskStatus::Assigned,
                 assignee: "22".repeat(32),
@@ -466,6 +466,8 @@ mod tests {
                 },
                 blocked_on: None,
                 notes: None,
+                tracker_issue_id: None,
+                dispatch_request_id: None,
             },
         }
     }

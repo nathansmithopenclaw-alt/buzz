@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{SdkError, ThreadRef};
 
 /// Current task-envelope schema version.
-pub const TASK_ENVELOPE_VERSION: u8 = 1;
+pub const TASK_ENVELOPE_VERSION: u8 = 2;
 /// Standard NIP-23 hashtag used to discover task-envelope messages.
 pub const TASK_DISCOVERY_HASHTAG: &str = "buzz-task";
 
@@ -159,15 +159,26 @@ pub struct TaskEnvelope {
     pub blocked_on: Option<String>,
     /// Optional lifecycle note.
     pub notes: Option<String>,
+    /// Tracker issue correlated with this execution task, when any.
+    #[serde(default)]
+    pub tracker_issue_id: Option<Uuid>,
+    /// Idempotency key assigned by the dispatcher for this execution request.
+    #[serde(default)]
+    pub dispatch_request_id: Option<Uuid>,
 }
 
 impl TaskEnvelope {
     /// Validate and normalize an envelope before build or after parse.
     pub fn validate(mut self) -> Result<Self, SdkError> {
-        if self.v != TASK_ENVELOPE_VERSION {
+        if !matches!(self.v, 1 | TASK_ENVELOPE_VERSION) {
             return Err(SdkError::InvalidInput(format!(
-                "task envelope v must be {TASK_ENVELOPE_VERSION}"
+                "task envelope v must be 1 or {TASK_ENVELOPE_VERSION}"
             )));
+        }
+        if self.v == 1 && (self.tracker_issue_id.is_some() || self.dispatch_request_id.is_some()) {
+            return Err(SdkError::InvalidInput(
+                "task envelope v1 cannot carry Tracker correlation fields".into(),
+            ));
         }
         self.assignee = normalize_pubkey(&self.assignee, "assignee")?;
         self.assigner = normalize_pubkey(&self.assigner, "assigner")?;
@@ -277,6 +288,11 @@ pub fn append_task_envelope(
     envelope: &TaskEnvelope,
 ) -> Result<String, SdkError> {
     let envelope = envelope.clone().validate()?;
+    if envelope.v != TASK_ENVELOPE_VERSION {
+        return Err(SdkError::InvalidInput(format!(
+            "new task messages must use task envelope v{TASK_ENVELOPE_VERSION}"
+        )));
+    }
     let json = serde_json::to_string_pretty(&envelope).map_err(|error| {
         SdkError::InvalidInput(format!("task envelope serialization failed: {error}"))
     })?;
@@ -415,12 +431,13 @@ fn normalize_optional(
 #[cfg(test)]
 mod tests {
     use nostr::Keys;
+    use serde::Deserialize;
 
     use super::*;
 
     fn envelope(status: TaskStatus) -> TaskEnvelope {
         TaskEnvelope {
-            v: 1,
+            v: TASK_ENVELOPE_VERSION,
             task_id: Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap(),
             status,
             assignee: "aa".repeat(32),
@@ -436,6 +453,8 @@ mod tests {
             },
             blocked_on: None,
             notes: None,
+            tracker_issue_id: None,
+            dispatch_request_id: None,
         }
     }
 
@@ -467,7 +486,7 @@ mod tests {
         assert!(parse_task_envelope("```buzz-task\nnot-json\n```").is_err());
         let content = append_task_envelope("human", &envelope(TaskStatus::Done)).unwrap();
         assert!(parse_task_envelope(&format!("{content}\ntrailing text")).is_err());
-        assert!(parse_task_envelope(&content.replace("\"v\": 1", "\"v\": 2")).is_err());
+        assert!(parse_task_envelope(&content.replace("\"v\": 2", "\"v\": 3")).is_err());
     }
 
     #[test]
@@ -527,5 +546,60 @@ mod tests {
             mk(11, "b", TaskStatus::Verified),
         ]);
         assert_eq!(current[&task_id].envelope.status, TaskStatus::Verified);
+    }
+
+    #[test]
+    fn v2_tracker_correlation_round_trips() {
+        let tracker_issue_id = Uuid::new_v4();
+        let dispatch_request_id = Uuid::new_v4();
+        let mut task = envelope(TaskStatus::Assigned);
+        task.tracker_issue_id = Some(tracker_issue_id);
+        task.dispatch_request_id = Some(dispatch_request_id);
+        let content = append_task_envelope("dispatch", &task).unwrap();
+        let parsed = parse_task_envelope(&content).unwrap();
+        assert_eq!(parsed.v, TASK_ENVELOPE_VERSION);
+        assert_eq!(parsed.tracker_issue_id, Some(tracker_issue_id));
+        assert_eq!(parsed.dispatch_request_id, Some(dispatch_request_id));
+    }
+
+    #[test]
+    fn v2_reader_preserves_historical_v1_envelopes() {
+        let content = append_task_envelope("legacy", &envelope(TaskStatus::Assigned)).unwrap();
+        let legacy = content
+            .replace("\"v\": 2", "\"v\": 1")
+            .replace(",\n  \"tracker_issue_id\": null", "")
+            .replace(",\n  \"dispatch_request_id\": null", "");
+        let parsed = parse_task_envelope(&legacy).unwrap();
+        assert_eq!(parsed.v, 1);
+        assert_eq!(parsed.tracker_issue_id, None);
+        assert_eq!(parsed.dispatch_request_id, None);
+    }
+
+    #[test]
+    fn v1_deny_unknown_reader_fails_loud_on_v2() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct LegacyEnvelope {
+            v: u8,
+            task_id: Uuid,
+            status: TaskStatus,
+            assignee: String,
+            assigner: String,
+            title: String,
+            deliverables: Vec<TaskDeliverable>,
+            verification: TaskVerification,
+            blocked_on: Option<String>,
+            notes: Option<String>,
+        }
+
+        let content = append_task_envelope("dispatch", &envelope(TaskStatus::Assigned)).unwrap();
+        let json = content
+            .split_once("```buzz-task\n")
+            .expect("task fence")
+            .1
+            .strip_suffix("\n```")
+            .expect("closing fence");
+        assert!(serde_json::from_str::<LegacyEnvelope>(json).is_err());
     }
 }
