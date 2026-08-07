@@ -25,7 +25,6 @@ import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
-import { ClaudeAccountPill } from "./ClaudeAccountPill";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
@@ -180,9 +179,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                           )
                         }
                       />
-                      {profileAgent?.supportsClaudeAccounts ? (
-                        <ClaudeAccountPill agent={profileAgent} compact />
-                      ) : null}
                     </div>
                   )}
                   agent={profileAgent}
@@ -391,11 +387,7 @@ function StandaloneAgentCard({
 
   return (
     <AgentIdentityCard
-      actions={
-        agent.supportsClaudeAccounts ? (
-          <ClaudeAccountPill agent={agent} compact />
-        ) : null
-      }
+      actions={null}
       ariaLabel={`${title} agent profile`}
       avatar={
         <AgentRuntimeAvatarControl

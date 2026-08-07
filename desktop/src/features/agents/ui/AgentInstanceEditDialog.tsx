@@ -74,6 +74,7 @@ import { getBakedModelInheritLabel } from "./bakedEnvHelpers";
 import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
+import { EditAgentClaudeAccountField } from "./EditAgentClaudeAccountField";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
@@ -158,15 +159,12 @@ export function AgentInstanceEditDialog({
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
 
-  // Runtime selector: defaults to "custom" until the dialog opens and the
-  // catalog loads. The open-effect re-derives the correct id from the catalog.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
 
   // Tracks whether the user has made an in-dialog runtime selection.
   const runtimeTouched = React.useRef(false);
 
-  // Reset form state only when the dialog opens or when switching to a different agent.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — including agent fields would re-fire on every 5s poll and wipe edits
+  // biome-ignore lint/correctness/useExhaustiveDependencies: agent fields poll every 5s and would wipe edits
   React.useEffect(() => {
     if (open) {
       setName(agent.name);
@@ -614,6 +612,7 @@ export function AgentInstanceEditDialog({
     model,
     modelFieldVisible: true,
     nativeEffortOptions: nativeTuning.effortOptions,
+    persistedModel: agent.model,
     provider: providerForDiscovery,
     runtimeId: prospectiveRuntimeId,
   });
@@ -932,6 +931,8 @@ export function AgentInstanceEditDialog({
               onModeChange={setRespondTo}
               variant="persona"
             />
+
+            <EditAgentClaudeAccountField agent={agent} />
 
             {/* Provider (runtime) */}
             <div className="space-y-1.5">

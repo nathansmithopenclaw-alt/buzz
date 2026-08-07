@@ -1,5 +1,5 @@
 import * as React from "react";
-import { AlertTriangle, Check, ChevronDown, Clock3 } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, Clock3, Info } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
@@ -31,16 +31,8 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { claudeAccountPillShowsWarning } from "./claudeAccountPillState";
 
-function compactReset(value: string | null | undefined) {
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return `resets ${date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
-}
-
 export function ClaudeAccountPill({
   agent,
-  compact = false,
 }: {
   agent: ManagedAgent;
   compact?: boolean;
@@ -122,14 +114,8 @@ export function ClaudeAccountPill({
     }
   };
 
-  const usage = current?.fiveHour?.utilization;
-  const showsWarning = claudeAccountPillShowsWarning(
-    error,
-    agent.claudeAccountShadowed,
-  );
-  const label = current
-    ? `${current.label}${usage == null ? "" : ` · ${Math.round(usage)}%`}`
-    : "Credentials file";
+  const showsWarning = claudeAccountPillShowsWarning(error);
+  const label = current?.label ?? "Credentials file";
   const title =
     queuedSwitch?.status === "queued"
       ? "Account switch queued — the active turn will finish before restart"
@@ -161,6 +147,8 @@ export function ClaudeAccountPill({
             <Clock3 className="h-3.5 w-3.5 text-amber-500" />
           ) : showsWarning ? (
             <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
+          ) : agent.claudeAccountShadowed ? (
+            <Info className="h-3.5 w-3.5 text-muted-foreground" />
           ) : null}
           <span className="truncate">
             {queuedSwitch?.status === "queued"
@@ -169,11 +157,6 @@ export function ClaudeAccountPill({
                 ? "Applying…"
                 : label}
           </span>
-          {!compact ? (
-            <span className="hidden text-muted-foreground xl:inline">
-              {compactReset(current?.fiveHour?.resetsAt)}
-            </span>
-          ) : null}
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
@@ -196,13 +179,7 @@ export function ClaudeAccountPill({
             <span className="flex-1">
               <span className="block">{account.label}</span>
               <span className="block text-xs text-muted-foreground">
-                {account.usageStatus === "available"
-                  ? `${Math.round(account.fiveHour?.utilization ?? 0)}% · ${compactReset(account.fiveHour?.resetsAt) ?? "reset unavailable"}`
-                  : account.usageStatus === "scope_insufficient"
-                    ? "Meter needs interactive-login token"
-                    : account.usageStatus === "stale"
-                      ? "Usage temporarily rate limited"
-                      : "Usage unavailable"}
+                Saved account
               </span>
             </span>
             {agent.claudeAccountId === account.id ? (

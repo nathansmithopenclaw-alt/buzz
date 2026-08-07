@@ -9,7 +9,7 @@ import {
   validateModelSelection,
 } from "./agentModelCatalog.ts";
 
-test("Claude catalog canonicalizes aliases, adds Opus 5, and orders families", () => {
+test("Claude catalog canonicalizes aliases, keeps 1m variants selectable, and orders families", () => {
   const options = mergeRuntimeModelCatalog({
     currentModel: "team-private-model",
     discovered: [
@@ -35,13 +35,13 @@ test("Claude catalog canonicalizes aliases, adds Opus 5, and orders families", (
   );
   assert.equal(
     options.filter((option) => option.group === "Opus").length,
-    7,
+    8,
     "the live alias and canonical id collapse to one Opus 4.5 row",
   );
   assert.equal(
     options.length,
-    14,
-    "13 canonical catalog rows plus one custom value",
+    18,
+    "17 catalog rows including 1m variants plus one custom value",
   );
   assert.deepEqual(
     [...new Set(options.map((option) => option.group).filter(Boolean))],
@@ -53,6 +53,7 @@ test("Claude catalog canonicalizes aliases, adds Opus 5, and orders families", (
       .map((option) => option.id),
     [
       "claude-opus-5",
+      "opus[1m]",
       "claude-opus-4-8",
       "claude-opus-4-7",
       "claude-opus-4-6",
@@ -73,9 +74,29 @@ test("Claude catalog canonicalizes aliases, adds Opus 5, and orders families", (
 test("dead effort bracket qualifiers fail closed while Claude 1m stays compatible", () => {
   assert.match(
     validateModelSelection("gpt-5.6-sol[ultra]", "buzz-agent"),
-    /Reasoning effort/,
+    /Model qualifier/,
   );
   assert.equal(validateModelSelection("opus[1m]", "claude"), null);
+  assert.equal(validateModelSelection("claude-fable-5[1m]", "claude"), null);
+});
+
+test("an unchanged persisted model never wedges unrelated edits", () => {
+  assert.equal(
+    validateModelSelection("legacy-model[quirk]", "claude", {
+      enabled: false,
+      effortOptions: null,
+      persistedModel: "legacy-model[quirk]",
+    }),
+    null,
+  );
+  assert.match(
+    validateModelSelection("changed-model[quirk]", "claude", {
+      enabled: false,
+      effortOptions: null,
+      persistedModel: "legacy-model[quirk]",
+    }),
+    /not accepted/,
+  );
 });
 
 test("Codex model qualifiers validate against live adapter effort options", () => {

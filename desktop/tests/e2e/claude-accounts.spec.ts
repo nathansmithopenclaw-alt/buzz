@@ -46,6 +46,15 @@ async function commandCount(page: Page, command: string) {
   );
 }
 
+async function openAgentEditDialog(page: Page, agentName: string) {
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByRole("button", { name: `${agentName} agent profile` })
+    .click();
+  await page.getByTestId("user-profile-edit-agent").click();
+  await expect(page.getByTestId("edit-agent-dialog")).toBeVisible();
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page, {
     managedAgents: [
@@ -96,7 +105,7 @@ test("switch requested mid-turn waits for completion before restart", async ({
 }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await waitForBridge(page);
-  await page.getByTestId("open-agents-view").click();
+  await openAgentEditDialog(page, "Helm");
   await seedTurn(page, "turn_started");
 
   const pill = page.getByTestId(`claude-account-pill-${CLAUDE_AGENT}`);
@@ -130,12 +139,12 @@ test("unassigned Claude agent exposes credentials-file fallback", async ({
     ],
   });
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  await page.getByTestId("open-agents-view").click();
+  await openAgentEditDialog(page, "Anvil");
 
   const pill = page.getByTestId(`claude-account-pill-${CLAUDE_AGENT}`);
-  await expect(pill).toContainText("Credentials file fallback");
+  await expect(pill).toContainText("Credentials file");
   await expect(pill).toHaveAttribute(
     "title",
-    "Falling back to credentials file (no env token)",
+    "Using the credentials file (no saved account selected)",
   );
 });

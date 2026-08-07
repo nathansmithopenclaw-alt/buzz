@@ -5,7 +5,13 @@ type CatalogModel = PersonaModelOption & { group: string };
 
 const ANTHROPIC_MODELS: readonly CatalogModel[] = [
   { id: "claude-fable-5", label: "Claude Fable 5", group: "Fable" },
+  {
+    id: "claude-fable-5[1m]",
+    label: "Claude Fable 5 (1M context)",
+    group: "Fable",
+  },
   { id: "claude-opus-5", label: "Claude Opus 5", group: "Opus" },
+  { id: "opus[1m]", label: "Claude Opus (1M context)", group: "Opus" },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", group: "Opus" },
   { id: "claude-opus-4-7", label: "Claude Opus 4.7", group: "Opus" },
   { id: "claude-opus-4-6", label: "Claude Opus 4.6", group: "Opus" },
@@ -25,6 +31,11 @@ const ANTHROPIC_MODELS: readonly CatalogModel[] = [
     group: "Opus",
   },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", group: "Sonnet" },
+  {
+    id: "sonnet[1m]",
+    label: "Claude Sonnet (1M context)",
+    group: "Sonnet",
+  },
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", group: "Sonnet" },
   {
     id: "claude-sonnet-4-5-20250929",
@@ -41,6 +52,7 @@ const ANTHROPIC_MODELS: readonly CatalogModel[] = [
     label: "Claude Haiku 4.5 (2025-10-01)",
     group: "Haiku",
   },
+  { id: "haiku[1m]", label: "Claude Haiku (1M context)", group: "Haiku" },
 ];
 
 const CLAUDE_CANONICAL_IDS: Readonly<Record<string, string>> = {
@@ -240,8 +252,17 @@ export function validateModelSelection(
   qualifierCapability?: {
     enabled: boolean;
     effortOptions: ReadonlyArray<{ id: string }> | null;
+    persistedModel?: string | null;
   },
 ): string | null {
+  // An existing stored value must not wedge unrelated edits. Preserve it
+  // byte-for-byte unless the user explicitly changes the model field.
+  if (
+    qualifierCapability?.persistedModel !== undefined &&
+    model === qualifierCapability.persistedModel
+  ) {
+    return null;
+  }
   const trimmed = model.trim();
   const qualifier = trimmed.match(/^(.*)\[([^\]]+)]$/);
   if (!qualifier) return null;
@@ -249,7 +270,9 @@ export function validateModelSelection(
   if (
     runtimeId === "claude" &&
     value.toLowerCase() === "1m" &&
-    /(?:opus|sonnet|haiku)/i.test(base)
+    /^(?:claude-|fable(?:$|-)|opus(?:$|-)|sonnet(?:$|-)|haiku(?:$|-))/i.test(
+      base.trim(),
+    )
   ) {
     return null;
   }
@@ -261,7 +284,7 @@ export function validateModelSelection(
       ? null
       : `Reasoning effort ${value} is not advertised for ${base}.`;
   }
-  return `Remove [${value}] from the model ID and choose it in Reasoning effort instead. Bracket qualifiers are not accepted by this harness.`;
+  return `Model qualifier [${value}] is not accepted by this harness. Choose a supported model variant or enter an unqualified model ID.`;
 }
 
 export function parseModelEffortQualifier(model: string): {
