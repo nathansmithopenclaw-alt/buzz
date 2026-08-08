@@ -16,14 +16,13 @@ fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 #[test]
 fn delegated_env_validation_rejects_reserved_and_derived_keys_explicitly() {
-    let reserved = validate_delegated_env_vars(&map(&[("BUZZ_PRIVATE_KEY", "secret")]))
-        .unwrap_err();
+    let reserved =
+        validate_delegated_env_vars(&map(&[("BUZZ_PRIVATE_KEY", "secret")])).unwrap_err();
     assert!(reserved.contains("reserved by Buzz"));
     assert!(reserved.contains("BUZZ_PRIVATE_KEY"));
     assert!(!reserved.contains("secret"));
 
-    let derived = validate_delegated_env_vars(&map(&[("GOOSE_MODEL", "shadow")]))
-        .unwrap_err();
+    let derived = validate_delegated_env_vars(&map(&[("GOOSE_MODEL", "shadow")])).unwrap_err();
     assert!(derived.contains("derived from provider/model"));
     assert!(derived.contains("GOOSE_MODEL"));
     assert!(!derived.contains("shadow"));

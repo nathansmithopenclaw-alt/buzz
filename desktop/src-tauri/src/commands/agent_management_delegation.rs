@@ -10,9 +10,9 @@ use tauri::{AppHandle, Manager};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        load_global_agent_config, validate_delegated_env_vars,
+        load_global_agent_config,
         storage::{atomic_write_json_restricted, managed_agents_base_dir},
-        AgentManagementDelegationGrant,
+        validate_delegated_env_vars, AgentManagementDelegationGrant,
     },
     util::now_iso,
 };
@@ -253,7 +253,10 @@ fn register_in_ledger(
 }
 
 fn request_env_vars(payload: &Value) -> Result<Option<BTreeMap<String, String>>, String> {
-    let Some(value) = payload.get("request").and_then(|request| request.get("envVars")) else {
+    let Some(value) = payload
+        .get("request")
+        .and_then(|request| request.get("envVars"))
+    else {
         return Ok(None);
     };
     serde_json::from_value(value.clone())
