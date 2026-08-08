@@ -39,10 +39,20 @@ export async function registerAndRouteAgentManagementRequest(
   request: AgentManagementRequest,
   bridge: RegistrationBridge = registrationBridge,
 ): Promise<AgentManagementRegistrationRoute> {
+  const updateChanges = request.action === "update" ? request.request : null;
+  const capability =
+    request.action === "create"
+      ? "agent_creation"
+      : updateChanges?.envVars &&
+          Object.keys(updateChanges).every((key) =>
+            ["channelId", "agentName", "envVars"].includes(key),
+          )
+        ? "env_vars"
+        : "agent_config";
   const registered = await bridge.register({
     sourcePubkey: agentPubkey,
     requestId: request.requestId,
-    capability: request.action === "create" ? "agent_creation" : "agent_config",
+    capability,
     intent: request.intent,
     payload: request,
   });

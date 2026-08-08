@@ -237,6 +237,34 @@ pub fn validate_user_env_keys(env_vars: &BTreeMap<String, String>) -> Result<(),
     Ok(())
 }
 
+/// Validate env vars crossing the standing-delegation boundary. Derived
+/// provider/model keys are rejected here as well as reserved keys: delegated
+/// callers must use the structured provider/model fields instead of creating
+/// shadow state that the edit UI cannot represent truthfully.
+pub(crate) fn validate_delegated_env_vars(
+    env_vars: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    validate_user_env_keys(env_vars)?;
+    let mut derived: Vec<&str> = env_vars
+        .keys()
+        .filter(|key| {
+            DERIVED_PROVIDER_MODEL_ENV_KEYS
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(key))
+        })
+        .map(String::as_str)
+        .collect();
+    derived.sort_unstable();
+    derived.dedup();
+    if !derived.is_empty() {
+        return Err(format!(
+            "the following env vars are derived from provider/model settings and cannot be set by delegation: {}",
+            derived.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// Per-value byte cap for env values. 32 KiB is generous for credentials,
 /// JWT-ish tokens, certs etc., but small enough that a malformed IPC
 /// caller can't blow up the persona/agent JSON file. Tune up if real

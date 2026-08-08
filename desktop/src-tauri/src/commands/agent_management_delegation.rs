@@ -10,7 +10,7 @@ use tauri::{AppHandle, Manager};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        load_global_agent_config,
+        load_global_agent_config, validate_delegated_env_vars,
         storage::{atomic_write_json_restricted, managed_agents_base_dir},
         AgentManagementDelegationGrant,
     },
@@ -27,6 +27,7 @@ use result_publication::{
 pub enum DelegatedCapability {
     AgentConfig,
     AgentCreation,
+    EnvVars,
     Teams,
 }
 
@@ -87,6 +88,7 @@ fn legacy_result_was_published() -> bool {
 pub enum ManagementRequestDisposition {
     Apply,
     Draft,
+    Rejected,
     DuplicateApplying,
     DuplicateApplied,
     DuplicateDraft,
@@ -163,6 +165,7 @@ fn capability_enabled(
     match capability {
         DelegatedCapability::AgentConfig => false,
         DelegatedCapability::AgentCreation => grant.payload.capabilities.agent_creation,
+        DelegatedCapability::EnvVars => grant.payload.capabilities.env_vars,
         DelegatedCapability::Teams => grant.payload.capabilities.teams,
     }
 }
@@ -174,6 +177,7 @@ struct NewLedgerRequest {
     payload: Value,
     authorized: bool,
     audit_channel_id: Option<String>,
+    rejection: Option<String>,
 }
 
 fn register_in_ledger(
@@ -203,7 +207,14 @@ fn register_in_ledger(
     }
 
     let now = now_iso();
-    let status = if request.authorized {
+    let rejection_result = request
+        .rejection
+        .as_ref()
+        .map(|error| serde_json::json!({ "code": "invalid_env_vars", "error": error }));
+    let rejected = rejection_result.is_some();
+    let status = if rejected {
+        RequestStatus::Failed
+    } else if request.authorized {
         RequestStatus::Applying
     } else {
         RequestStatus::PendingDraft
@@ -225,18 +236,43 @@ fn register_in_ledger(
             status,
             created_at: now.clone(),
             updated_at: now,
-            result: None,
+            result: rejection_result.clone(),
         },
     );
     Ok(RegisterManagementRequestResult {
-        disposition: if request.authorized {
+        disposition: if rejected {
+            ManagementRequestDisposition::Rejected
+        } else if request.authorized {
             ManagementRequestDisposition::Apply
         } else {
             ManagementRequestDisposition::Draft
         },
         audit_channel_id: request.audit_channel_id,
-        result: None,
+        result: rejection_result,
     })
+}
+
+fn request_env_vars(payload: &Value) -> Result<Option<BTreeMap<String, String>>, String> {
+    let Some(value) = payload.get("request").and_then(|request| request.get("envVars")) else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| "envVars must be an object with string values".to_string())
+}
+
+fn env_fingerprint_summary(payload: &Value) -> Option<String> {
+    let env_vars = request_env_vars(payload).ok().flatten()?;
+    if env_vars.is_empty() {
+        return None;
+    }
+    Some(
+        env_vars
+            .into_iter()
+            .map(|(key, value)| format!("{key}=sha256:{}", hex::encode(Sha256::digest(value))))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 /// Durably classify a request before any side effect.
@@ -274,10 +310,20 @@ pub fn register_agent_management_request(
     let audit_channel_id = grant
         .as_ref()
         .map(|grant| grant.payload.audit_channel_id.clone());
+    let env_vars = request_env_vars(&payload)?;
     let authorized = intent == "apply"
         && grant.as_ref().is_some_and(|grant| {
-            grant.payload.grantee_pubkey == source && capability_enabled(grant, capability)
+            grant.payload.grantee_pubkey == source
+                && capability_enabled(grant, capability)
+                && (env_vars.is_none() || grant.payload.capabilities.env_vars)
         });
+    let rejection = if authorized {
+        env_vars
+            .as_ref()
+            .and_then(|values| validate_delegated_env_vars(values).err())
+    } else {
+        None
+    };
 
     let mut ledger = load_state(&app)?;
     let result = register_in_ledger(
@@ -290,6 +336,7 @@ pub fn register_agent_management_request(
             payload,
             authorized,
             audit_channel_id,
+            rejection,
         },
     )?;
     save_state(&app, &ledger)?;
@@ -487,7 +534,7 @@ pub async fn publish_agent_management_audit_receipt(
         .map_err(|error| format!("invalid management requester pubkey: {error}"))?;
     let owner_keys = app.state::<AppState>().signing_keys()?;
     let source_hex = source.to_hex();
-    let (channel, stored_audit_event, owner_reviewed) = {
+    let (channel, stored_audit_event, owner_reviewed, env_summary) = {
         let state_handle = app.state::<AppState>();
         let _guard = state_handle
             .managed_agents_store_lock
@@ -519,6 +566,7 @@ pub async fn publish_agent_management_audit_receipt(
                 .ok_or("management request has no authorization audit channel")?,
             entry.audit_event.clone(),
             entry.owner_reviewed,
+            env_fingerprint_summary(&entry.payload),
         )
     };
     let safe_name: String = requester_name
@@ -534,6 +582,7 @@ pub async fn publish_agent_management_audit_receipt(
     let capability_label = match capability {
         DelegatedCapability::AgentConfig => "agent config",
         DelegatedCapability::AgentCreation => "agent creation",
+        DelegatedCapability::EnvVars => "agent env vars",
         DelegatedCapability::Teams => "teams",
     };
     let outcome = if succeeded { "applied" } else { "failed" };
@@ -542,10 +591,14 @@ pub async fn publish_agent_management_audit_receipt(
     } else {
         "delegated"
     };
-    let content = format!(
+    let mut content = format!(
         "@{safe_name} {authority} {capability_label} {outcome}: {safe_target}\n\nRequest: `{}`",
         request_id
     );
+    if let Some(summary) = env_summary {
+        content.push_str("\nEnv fingerprints: ");
+        content.push_str(&summary);
+    }
     let h = Tag::parse(["h", channel.as_str()])
         .map_err(|error| format!("failed to build audit channel tag: {error}"))?;
     let p = Tag::parse(["p", source_hex.as_str()])

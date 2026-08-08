@@ -35,6 +35,7 @@ fn signed_delegation_grant(owner: &Keys, grantee_pubkey: String) -> AgentManagem
         capabilities: AgentManagementDelegationCapabilities {
             teams: true,
             agent_creation: true,
+            env_vars: true,
         },
     };
     let event = EventBuilder::new(

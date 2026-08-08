@@ -82,6 +82,20 @@ test("parses and maps full non-secret create configuration", () => {
   });
 });
 
+test("maps delegated env vars without losing values containing equals", () => {
+  const payload = createPayload({ intent: "apply" });
+  payload.request.envVars = {
+    OPENAI_HOST: "http://100.80.202.75:4000",
+    OPENAI_API_KEY: "dummy=with=equals",
+  };
+  const parsed = parseAgentManagementRequest(payload);
+  assert.ok(parsed && parsed.action === "create");
+  assert.deepEqual(
+    createInputFromRequest(parsed).envVars,
+    payload.request.envVars,
+  );
+});
+
 test("rejects invalid create behavior values", () => {
   for (const [field, value] of [
     ["respondTo", "allowlist"],
@@ -196,6 +210,32 @@ test("accepts an empty instance name pool to clear it", () => {
   };
 
   assert.deepEqual(parseAgentManagementRequest(payload), payload);
+});
+
+test("env-only update merges requested keys into the existing definition", () => {
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-env-update",
+    intent: "apply",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      envVars: { OPENAI_HOST: "http://lane" },
+    },
+  };
+  const parsed = parseAgentManagementRequest(payload);
+  assert.ok(parsed && parsed.action === "update");
+  const updated = updateInputFromRequest(parsed, {
+    id: "persona-1",
+    displayName: "Review helper",
+    systemPrompt: "Review changes.",
+    envVars: { PRESERVED: "yes" },
+  });
+  assert.deepEqual(updated.envVars, {
+    PRESERVED: "yes",
+    OPENAI_HOST: "http://lane",
+  });
 });
 
 test("rejects invalid optional update text instead of silently dropping it", () => {

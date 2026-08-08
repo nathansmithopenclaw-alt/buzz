@@ -21,6 +21,7 @@ export type AgentManagementCreateRequest = {
     model?: string;
     respondTo?: RespondToMode;
     parallelism?: number;
+    envVars?: Record<string, string>;
   };
 };
 
@@ -40,6 +41,7 @@ export type AgentManagementUpdateRequest = {
     respondTo?: RespondToMode;
     parallelism?: number;
     namePool?: string[];
+    envVars?: Record<string, string>;
   };
 };
 
@@ -70,6 +72,20 @@ function isNamePool(value: unknown): value is string[] | undefined {
   return (
     value === undefined ||
     (Array.isArray(value) && value.length <= 100 && value.every(isText))
+  );
+}
+
+function isEnvVars(
+  value: unknown,
+): value is Record<string, string> | undefined {
+  return (
+    value === undefined ||
+    (typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      Object.entries(value).every(
+        ([key, entry]) => key.length > 0 && typeof entry === "string",
+      ))
   );
 }
 
@@ -114,6 +130,7 @@ export function parseAgentManagementRequest(
       !isOptionalText(request.model) ||
       !isRespondTo(request.respondTo) ||
       !isParallelism(request.parallelism) ||
+      !isEnvVars(request.envVars) ||
       !hasOnlyKeys(request, [
         "channelId",
         "displayName",
@@ -123,6 +140,7 @@ export function parseAgentManagementRequest(
         "model",
         "respondTo",
         "parallelism",
+        "envVars",
       ])
     ) {
       return null;
@@ -148,6 +166,7 @@ export function parseAgentManagementRequest(
         ...(isText(request.model) ? { model: request.model } : {}),
         ...(request.respondTo ? { respondTo: request.respondTo } : {}),
         ...(request.parallelism ? { parallelism: request.parallelism } : {}),
+        ...(request.envVars ? { envVars: request.envVars } : {}),
       },
     };
   }
@@ -161,6 +180,7 @@ export function parseAgentManagementRequest(
     !isRespondTo(request.respondTo) ||
     !isParallelism(request.parallelism) ||
     !isNamePool(request.namePool) ||
+    !isEnvVars(request.envVars) ||
     !hasOnlyKeys(request, [
       "channelId",
       "agentName",
@@ -172,6 +192,7 @@ export function parseAgentManagementRequest(
       "respondTo",
       "parallelism",
       "namePool",
+      "envVars",
     ]) ||
     !isText(request.channelId) ||
     !isText(request.agentName)
@@ -191,6 +212,7 @@ export function parseAgentManagementRequest(
     ...(request.respondTo ? { respondTo: request.respondTo } : {}),
     ...(request.parallelism ? { parallelism: request.parallelism } : {}),
     ...(request.namePool ? { namePool: request.namePool } : {}),
+    ...(request.envVars ? { envVars: request.envVars } : {}),
   };
   if (Object.keys(changes).length === 0) return null;
   return {
@@ -221,6 +243,7 @@ export function createInputFromRequest(
     ...(request.request.runtime ? { runtime: request.request.runtime } : {}),
     ...(request.request.provider ? { provider: request.request.provider } : {}),
     ...(request.request.model ? { model: request.request.model } : {}),
+    ...(request.request.envVars ? { envVars: request.request.envVars } : {}),
     ...(request.request.respondTo || request.request.parallelism
       ? {
           behavior: {
@@ -247,6 +270,9 @@ export function updateInputFromRequest(
     provider: changes.provider ?? current.provider,
     model: changes.model ?? current.model,
     namePool: changes.namePool ?? current.namePool,
+    ...(changes.envVars
+      ? { envVars: { ...(current.envVars ?? {}), ...changes.envVars } }
+      : {}),
     ...(behaviorChanged
       ? {
           behavior: {

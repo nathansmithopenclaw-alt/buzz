@@ -116,7 +116,8 @@ export function useAgentManagement() {
             delegatedApplyIdsRef.current.add(next.requestId);
           } else if (
             route.kind === "terminal_duplicate" &&
-            route.registered.disposition === "duplicate_failed" &&
+            (route.registered.disposition === "duplicate_failed" ||
+              route.registered.disposition === "rejected") &&
             route.registered.result
           ) {
             const registered = route.registered;
@@ -130,14 +131,40 @@ export function useAgentManagement() {
               requestId: next.requestId,
               sourcePubkey: agentPubkey,
               requesterName,
-              capability: "agent_creation",
-              target: `agent create: ${String(result.error ?? "failed")}`,
+              capability:
+                next.action === "create" ? "agent_creation" : "env_vars",
+              target: `agent ${next.action}: ${String(result.error ?? "failed")}`,
               succeeded: false,
             }).catch(() => undefined);
             await publishAgentManagementResult({
               requestId: next.requestId,
               sourcePubkey: agentPubkey,
               result: registered.result,
+            });
+            return;
+          } else if (
+            route.kind === "terminal_duplicate" &&
+            route.registered.disposition === "duplicate_applied" &&
+            next.action === "update" &&
+            route.registered.result
+          ) {
+            const requesterName =
+              managedAgentsRef.current?.find(
+                (agent) =>
+                  agent.pubkey.toLowerCase() === agentPubkey.toLowerCase(),
+              )?.name ?? "delegated agent";
+            await publishAgentManagementAuditReceipt({
+              requestId: next.requestId,
+              sourcePubkey: agentPubkey,
+              requesterName,
+              capability: "env_vars",
+              target: `updated agent ${next.request.agentName}`,
+              succeeded: true,
+            });
+            await publishAgentManagementResult({
+              requestId: next.requestId,
+              sourcePubkey: agentPubkey,
+              result: route.registered.result,
             });
             return;
           } else if (
@@ -401,7 +428,11 @@ export function useAgentManagement() {
     }
   }
 
-  async function submitUpdate(input: CreatePersonaInput | UpdatePersonaInput) {
+  async function performUpdate(
+    input: CreatePersonaInput | UpdatePersonaInput,
+    onUpdated?: () => Promise<void>,
+    onFailed?: (cause: unknown) => Promise<void>,
+  ) {
     if (request?.action !== "update" || !("id" in input)) {
       return false;
     }
@@ -409,6 +440,7 @@ export function useAgentManagement() {
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
       await updatePersonaMutation.mutateAsync(input);
+      await onUpdated?.();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
@@ -416,11 +448,16 @@ export function useAgentManagement() {
       dismiss();
       return true;
     } catch (cause) {
+      await onFailed?.(cause).catch(() => undefined);
       setError(
         cause instanceof Error ? cause.message : "Could not save this agent.",
       );
       return false;
     }
+  }
+
+  async function submitUpdate(input: CreatePersonaInput | UpdatePersonaInput) {
+    return performUpdate(input);
   }
 
   function dismiss() {
@@ -522,6 +559,52 @@ export function useAgentManagement() {
     });
   }
 
+  async function completeUpdateSuccess(
+    requestId: string,
+    sourcePubkey: string,
+    agentName: string,
+  ) {
+    const result = { agentName, envUpdated: true };
+    await completeAgentManagementRequest(requestId, true, result);
+    const requesterName =
+      managedAgentsRef.current?.find(
+        (agent) => agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
+      )?.name ?? "delegated agent";
+    await publishAgentManagementAuditReceipt({
+      requestId,
+      sourcePubkey,
+      requesterName,
+      capability: "env_vars",
+      target: `updated agent ${agentName}`,
+      succeeded: true,
+    });
+    await publishAgentManagementResult({ requestId, sourcePubkey, result });
+  }
+
+  async function completeUpdateFailure(
+    requestId: string,
+    sourcePubkey: string,
+    cause: unknown,
+  ) {
+    const message =
+      cause instanceof Error ? cause.message : "Agent env update failed.";
+    const result = { error: message };
+    await completeAgentManagementRequest(requestId, false, result);
+    const requesterName =
+      managedAgentsRef.current?.find(
+        (agent) => agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
+      )?.name ?? "delegated agent";
+    await publishAgentManagementAuditReceipt({
+      requestId,
+      sourcePubkey,
+      requesterName,
+      capability: "env_vars",
+      target: `agent env update: ${message}`,
+      succeeded: false,
+    });
+    await publishAgentManagementResult({ requestId, sourcePubkey, result });
+  }
+
   async function submitReviewedCreate(
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
@@ -584,6 +667,28 @@ export function useAgentManagement() {
     },
   );
 
+  const autoApproveUpdate = React.useEffectEvent(
+    async (requestId: string, input: UpdatePersonaInput): Promise<void> => {
+      if (request?.requestId !== requestId || request.action !== "update")
+        return;
+      const sourcePubkey = sourceAgentPubkey.current;
+      if (!sourcePubkey) return;
+      const submitted = await performUpdate(
+        input,
+        () =>
+          completeUpdateSuccess(
+            requestId,
+            sourcePubkey,
+            request.request.agentName,
+          ),
+        (cause) => completeUpdateFailure(requestId, sourcePubkey, cause),
+      );
+      if (!submitted && pendingRequestId.current === requestId) {
+        setFailedAutoApprovalRequestId(requestId);
+      }
+    },
+  );
+
   React.useEffect(() => {
     if (
       request?.action !== "create" ||
@@ -611,14 +716,37 @@ export function useAgentManagement() {
     request,
   ]);
 
+  React.useEffect(() => {
+    if (
+      request?.action !== "update" ||
+      !editInitialValues ||
+      !delegatedApplyIdsRef.current.has(request.requestId) ||
+      failedAutoApprovalRequestId === request.requestId ||
+      autoApprovingRequestId.current === request.requestId
+    ) {
+      return;
+    }
+    const requestId = request.requestId;
+    autoApprovingRequestId.current = requestId;
+    void autoApproveUpdate(requestId, editInitialValues).finally(() => {
+      if (autoApprovingRequestId.current === requestId) {
+        autoApprovingRequestId.current = null;
+      }
+    });
+  }, [editInitialValues, failedAutoApprovalRequestId, request]);
+
   const hideAutoApprovedCreate =
     request?.action === "create" &&
     (delegatedApplyIdsRef.current.has(request.requestId) ||
       (request.intent === "draft" && globalConfig.auto_approve_agent_drafts)) &&
     failedAutoApprovalRequestId !== request.requestId;
+  const hideAutoApprovedUpdate =
+    request?.action === "update" &&
+    delegatedApplyIdsRef.current.has(request.requestId) &&
+    failedAutoApprovalRequestId !== request.requestId;
 
   return {
-    request: hideAutoApprovedCreate ? null : request,
+    request: hideAutoApprovedCreate || hideAutoApprovedUpdate ? null : request,
     createInitialValues,
     editInitialValues,
     editError,

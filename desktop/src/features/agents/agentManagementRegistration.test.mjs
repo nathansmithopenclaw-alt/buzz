@@ -76,3 +76,30 @@ test("revoked apply publishes queued-for-review only for the draft disposition",
   assert.deepEqual(route, { kind: "draft" });
   assert.equal(calls.length, 1);
 });
+
+test("env-only update registers against the narrow env_vars capability", async () => {
+  const calls = [];
+  const envUpdate = {
+    ...request,
+    action: "update",
+    request: {
+      channelId: request.request.channelId,
+      agentName: "Goose colleague",
+      envVars: { OPENAI_HOST: "http://lane" },
+    },
+  };
+  const route = await registerAndRouteAgentManagementRequest(
+    "11".repeat(32),
+    envUpdate,
+    {
+      register: async (input) => {
+        calls.push(input);
+        return { disposition: "apply" };
+      },
+      publishApplying: async () => {},
+      publishDraft: async () => {},
+    },
+  );
+  assert.deepEqual(route, { kind: "delegated_apply" });
+  assert.equal(calls[0].capability, "env_vars");
+});
