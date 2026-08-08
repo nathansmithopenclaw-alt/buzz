@@ -100,6 +100,101 @@ async function pickDropdownOption(
 }
 
 test.describe("edit agent dialog", () => {
+  test("preserves Claude 1m context while saving effort and shows account controls honestly", async ({
+    page,
+  }) => {
+    const agentName = "Claude 1M Agent";
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: TEST_IDENTITIES.charlie.pubkey,
+          name: agentName,
+          runtime: "claude",
+          model: "claude-fable-5[1m]",
+          envVars: { BUZZ_ACP_THINKING_EFFORT: "low" },
+          claudeAccountId: "account-a",
+          claudeAccountSource: "instance",
+          claudeAccountShadowed: true,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+      discoverAgentModels: {
+        models: [
+          { id: "claude-fable-5[1m]", name: "Claude Fable 5 (1M context)" },
+          { id: "opus[1m]", name: "Claude Opus (1M context)" },
+        ],
+        supportsSwitching: true,
+        agentDefaultModel: "claude-fable-5[1m]",
+        selectedModel: "claude-fable-5[1m]",
+        effortConfigId: "effort",
+        effortOptions: ["low", "medium", "high"].map((id) => ({
+          id,
+          name: id[0].toUpperCase() + id.slice(1),
+        })),
+      },
+    });
+
+    await openSettledEditDialog(page, agentName);
+    const dialog = page.getByTestId("edit-agent-dialog");
+    const submit = page.getByTestId("edit-agent-dialog-submit");
+    const model = page.locator("#edit-agent-model");
+    const effort = page.getByTestId("instance-agent-effort-select");
+    const account = page.getByTestId(
+      `claude-account-pill-${TEST_IDENTITIES.charlie.pubkey}`,
+    );
+
+    await expect(dialog.getByRole("alert")).toHaveCount(0);
+    await expect(model).toContainText("Claude Fable 5 (1M context)");
+    await model.click();
+    await expect(
+      page.getByRole("menuitemradio", { name: /Claude Opus \(1M context\)/ }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    await expect(account).toBeVisible();
+    await expect(account).toHaveAttribute(
+      "title",
+      "Definition account is shadowed by a per-agent override",
+    );
+    await expect(account).not.toHaveClass(/border-destructive/);
+    await expect(account).not.toContainText("82%");
+    await expect(account).not.toContainText(/reset/i);
+
+    await expect(effort).toHaveAttribute("data-value", "low");
+    await effort.click();
+    await page.getByTestId("instance-agent-effort-select-option-high").click();
+    await expect(submit).toBeEnabled();
+    await submit.click();
+    await expect(dialog).not.toBeVisible();
+
+    const updatePayload = await page.evaluate(() => {
+      const entries = (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
+            command: string;
+            payload: { input?: Record<string, unknown> };
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_PAYLOADS__;
+      return entries?.findLast(
+        (entry) => entry.command === "update_managed_agent",
+      )?.payload.input;
+    });
+    expect(updatePayload?.model).toBeUndefined();
+    expect(
+      (updatePayload?.envVars as Record<string, string> | undefined)
+        ?.BUZZ_ACP_THINKING_EFFORT,
+    ).toBe("high");
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(model).toContainText("Claude Fable 5 (1M context)");
+    await expect(effort).toHaveAttribute("data-value", "high");
+    await dialog.screenshot({
+      path: "test-results/claude-1m/01-fable-1m-effort-readback.png",
+    });
+  });
+
   test("saves and reads back a Codex model-qualified effort", async ({
     page,
   }) => {
@@ -629,12 +724,16 @@ test.describe("edit agent dialog", () => {
     await model.click();
     for (const [, name] of canonicalClaudeCatalog) {
       await expect(
-        page.getByRole("menuitemradio").filter({ hasText: name }),
+        page
+          .getByRole("menuitemradio")
+          .filter({ has: page.getByText(name, { exact: true }) }),
       ).toBeAttached();
     }
     for (const [, aliasName] of advertisedClaudeCatalog.slice(0, 3)) {
       await expect(
-        page.getByRole("menuitemradio").filter({ hasText: aliasName }),
+        page
+          .getByRole("menuitemradio")
+          .filter({ has: page.getByText(aliasName, { exact: true }) }),
       ).toHaveCount(0);
     }
     await page.getByRole("menu").screenshot({
