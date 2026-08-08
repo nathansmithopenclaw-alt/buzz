@@ -6,8 +6,8 @@ use serde_json::json;
 use std::collections::HashMap;
 
 use crate::agent_management::{
-    build_apply_create, build_create, build_set_avatar, build_update, CreateAgentDraft,
-    UpdateAgentDraft,
+    build_apply_create, build_apply_update, build_create, build_set_avatar, build_update,
+    parse_env_vars, CreateAgentDraft, UpdateAgentDraft,
 };
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -95,6 +95,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     model,
                     respond_to: respond_to.map(RespondToArg::to_wire),
                     parallelism,
+                    env_vars: Default::default(),
                 },
             )?;
             let response = client.publish_ephemeral_event(built.event).await?;
@@ -124,6 +125,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             model,
             respond_to,
             parallelism,
+            env,
         } => {
             let owner = require_owner(client)?;
             let built = build_apply_create(
@@ -138,6 +140,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     model,
                     respond_to: respond_to.map(RespondToArg::to_wire),
                     parallelism,
+                    env_vars: parse_env_vars(env)?,
                 },
                 request_id,
             )?;
@@ -175,6 +178,48 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             Ok(())
         }
 
+        AgentsCmd::ApplyUpdate {
+            request_id,
+            channel,
+            agent_name,
+            env,
+        } => {
+            let owner = require_owner(client)?;
+            let built = build_apply_update(
+                client.keys(),
+                &owner,
+                UpdateAgentDraft {
+                    channel_id: channel,
+                    agent_name,
+                    display_name: None,
+                    system_prompt: None,
+                    runtime: None,
+                    provider: None,
+                    model: None,
+                    respond_to: None,
+                    parallelism: None,
+                    name_pool: None,
+                    env_vars: parse_env_vars(env)?,
+                },
+                request_id,
+            )?;
+            let response = client.publish_ephemeral_event(built.event).await?;
+            let outcome = wait_for_management_result(client, &owner, &built.request_id).await?;
+            let mut output: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            if let Some(obj) = output.as_object_mut() {
+                obj.insert("request_id".into(), built.request_id.into());
+                obj.insert("action".into(), built.action.into());
+                obj.insert("applied".into(), outcome.succeeded.into());
+                if outcome.result["queuedForReview"] == true {
+                    obj.insert("queued_for_review".into(), true.into());
+                }
+                obj.insert("result".into(), outcome.result);
+            }
+            println!("{output}");
+            Ok(())
+        }
+
         AgentsCmd::DraftUpdate {
             channel,
             agent_name,
@@ -202,6 +247,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     respond_to: respond_to.map(RespondToArg::to_wire),
                     parallelism,
                     name_pool: instance_name_pool,
+                    env_vars: Default::default(),
                 },
             )?;
             let response = client.publish_ephemeral_event(built.event).await?;
@@ -305,6 +351,55 @@ struct AgentCreateFailureResponse {
     request_id: String,
     succeeded: bool,
     result: serde_json::Value,
+}
+
+async fn wait_for_management_result(
+    client: &BuzzClient,
+    owner: &PublicKey,
+    request_id: &str,
+) -> Result<AgentCreateFailureResponse, CliError> {
+    let d_tag = format!("buzz-agent-management-result:{request_id}");
+    let filter = serde_json::json!({
+        "kinds": [30_078],
+        "authors": [owner.to_hex()],
+        "#d": [d_tag],
+        "#p": [client.keys().public_key().to_hex()],
+        "limit": 1,
+    });
+    for _ in 0..120 {
+        let raw = client.query(&filter).await?;
+        let events: Vec<Event> = serde_json::from_str(&raw).map_err(|error| {
+            CliError::Other(format!("invalid management-result query: {error}"))
+        })?;
+        if let Some(event) = events.into_iter().find(|event| {
+            event.kind == Kind::Custom(30_078) && event.pubkey == *owner && event.verify().is_ok()
+        }) {
+            let response: AgentCreateFailureResponse =
+                decrypt_observer_payload(client.keys(), &event).map_err(|error| {
+                    CliError::Other(format!("invalid encrypted management result: {error}"))
+                })?;
+            if response.response_type != "agent_management_apply_result"
+                || response.request_id != request_id
+            {
+                return Err(CliError::Other(
+                    "encrypted management result does not match the request".into(),
+                ));
+            }
+            if !response.succeeded && response.result["queuedForReview"] != true {
+                return Err(CliError::Other(
+                    response.result["error"]
+                        .as_str()
+                        .unwrap_or("Desktop could not update the agent")
+                        .to_string(),
+                ));
+            }
+            return Ok(response);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    Err(CliError::DeliveryUnknown(format!(
+        "management request {request_id} reached the relay, but no encrypted Desktop result arrived within 60 seconds; retry with --request-id {request_id}"
+    )))
 }
 
 enum CreateApplyOutcome {

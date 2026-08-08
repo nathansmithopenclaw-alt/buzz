@@ -3,6 +3,7 @@
 use buzz_core::observer::{encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY};
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 use crate::error::CliError;
 
@@ -31,6 +32,8 @@ pub struct CreateAgentDraft {
     pub respond_to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_vars: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +57,8 @@ pub struct UpdateAgentDraft {
     pub parallelism: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_pool: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_vars: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +82,8 @@ struct ValidatedUpdateAgentDraft {
     parallelism: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name_pool: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    env_vars: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -272,6 +279,30 @@ fn optional_name_pool(value: Option<String>) -> Result<Option<Vec<String>>, CliE
     Ok(Some(names))
 }
 
+pub fn parse_env_vars(values: Vec<String>) -> Result<BTreeMap<String, String>, CliError> {
+    let mut env_vars = BTreeMap::new();
+    for entry in values {
+        let (key, value) = entry.split_once('=').ok_or_else(|| {
+            CliError::Usage("--env must use KEY=VALUE (the value may contain '=')".into())
+        })?;
+        let mut chars = key.chars();
+        if !matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+            || !chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+        {
+            return Err(CliError::Usage(format!(
+                "invalid environment variable name: {key}"
+            )));
+        }
+        if value.as_bytes().contains(&0) {
+            return Err(CliError::Usage(format!(
+                "environment variable {key} contains a NUL byte"
+            )));
+        }
+        env_vars.insert(key.to_owned(), value.to_owned());
+    }
+    Ok(env_vars)
+}
+
 fn build<T: Serialize>(
     keys: &Keys,
     owner: &PublicKey,
@@ -372,6 +403,7 @@ fn build_create_with_intent(
         model: optional(draft.model, "model")?,
         respond_to,
         parallelism: draft.parallelism,
+        env_vars: draft.env_vars,
     };
     build(
         keys, owner, channel_id, "create", intent, request_id, request,
@@ -382,6 +414,25 @@ pub fn build_update(
     keys: &Keys,
     owner: &PublicKey,
     draft: UpdateAgentDraft,
+) -> Result<BuiltDraftRequest, CliError> {
+    build_update_with_intent(keys, owner, draft, ManagementIntent::Draft, None)
+}
+
+pub fn build_apply_update(
+    keys: &Keys,
+    owner: &PublicKey,
+    draft: UpdateAgentDraft,
+    request_id: Option<String>,
+) -> Result<BuiltDraftRequest, CliError> {
+    build_update_with_intent(keys, owner, draft, ManagementIntent::Apply, request_id)
+}
+
+fn build_update_with_intent(
+    keys: &Keys,
+    owner: &PublicKey,
+    draft: UpdateAgentDraft,
+    intent: ManagementIntent,
+    request_id: Option<String>,
 ) -> Result<BuiltDraftRequest, CliError> {
     let channel_id = required(draft.channel_id, "channel", 128)?;
     uuid::Uuid::parse_str(&channel_id)
@@ -417,6 +468,7 @@ pub fn build_update(
         respond_to,
         parallelism: draft.parallelism,
         name_pool: optional_name_pool(draft.name_pool)?,
+        env_vars: draft.env_vars,
     };
     if request.display_name.is_none()
         && request.system_prompt.is_none()
@@ -426,19 +478,14 @@ pub fn build_update(
         && request.respond_to.is_none()
         && request.parallelism.is_none()
         && request.name_pool.is_none()
+        && request.env_vars.is_empty()
     {
         return Err(CliError::Usage(
             "include at least one field to update".into(),
         ));
     }
     build(
-        keys,
-        owner,
-        channel_id,
-        "update",
-        ManagementIntent::Draft,
-        None,
-        request,
+        keys, owner, channel_id, "update", intent, request_id, request,
     )
 }
 
@@ -507,6 +554,7 @@ mod tests {
                 model: None,
                 respond_to: None,
                 parallelism: None,
+                env_vars: Default::default(),
             },
         )
         .unwrap();
@@ -565,6 +613,7 @@ mod tests {
                 model: None,
                 respond_to: None,
                 parallelism: None,
+                env_vars: Default::default(),
             },
             Some(request_id.into()),
         )
@@ -578,6 +627,67 @@ mod tests {
         for field in ["runtime", "provider", "model", "respondTo", "parallelism"] {
             assert!(request.get(field).is_none(), "{field} serialized as null");
         }
+    }
+
+    #[test]
+    fn delegated_env_create_and_update_preserve_values_byte_for_byte() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let env_vars = parse_env_vars(vec![
+            "OPENAI_HOST=http://100.80.202.75:4000".into(),
+            "OPENAI_API_KEY=dummy=with=equals".into(),
+        ])
+        .unwrap();
+        let created = build_apply_create(
+            &agent,
+            &owner.public_key(),
+            CreateAgentDraft {
+                channel_id: CHANNEL.into(),
+                display_name: "Goose colleague".into(),
+                system_prompt: "Work locally.".into(),
+                runtime: None,
+                provider: Some("openai".into()),
+                model: Some("local-v4".into()),
+                respond_to: None,
+                parallelism: None,
+                env_vars: env_vars.clone(),
+            },
+            None,
+        )
+        .unwrap();
+        let create_payload: serde_json::Value =
+            decrypt_observer_payload(&owner, &created.event).unwrap();
+        assert_eq!(
+            create_payload["payload"]["request"]["envVars"]["OPENAI_API_KEY"],
+            "dummy=with=equals"
+        );
+
+        let updated = build_apply_update(
+            &agent,
+            &owner.public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Goose colleague".into(),
+                display_name: None,
+                system_prompt: None,
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: None,
+                parallelism: None,
+                name_pool: None,
+                env_vars,
+            },
+            None,
+        )
+        .unwrap();
+        let update_payload: serde_json::Value =
+            decrypt_observer_payload(&owner, &updated.event).unwrap();
+        assert_eq!(update_payload["payload"]["intent"], "apply");
+        assert_eq!(
+            update_payload["payload"]["request"]["envVars"]["OPENAI_HOST"],
+            "http://100.80.202.75:4000"
+        );
     }
 
     #[test]
@@ -596,6 +706,7 @@ mod tests {
                 model: Some("gpt-5".into()),
                 respond_to: Some("anyone".into()),
                 parallelism: Some(4),
+                env_vars: Default::default(),
             },
         )
         .unwrap();
@@ -626,6 +737,7 @@ mod tests {
                 respond_to: None,
                 parallelism: None,
                 name_pool: None,
+                env_vars: Default::default(),
             },
         )
         .unwrap_err();
@@ -650,6 +762,7 @@ mod tests {
                 respond_to: None,
                 parallelism: Some(6),
                 name_pool: Some("Alpha, Beta".into()),
+                env_vars: Default::default(),
             },
         )
         .unwrap();
@@ -679,6 +792,7 @@ mod tests {
                 respond_to: None,
                 parallelism: None,
                 name_pool: Some(String::new()),
+                env_vars: Default::default(),
             },
         )
         .unwrap();
@@ -704,6 +818,7 @@ mod tests {
                 model: None,
                 respond_to: None,
                 parallelism: None,
+                env_vars: Default::default(),
             },
         )
         .unwrap_err();
