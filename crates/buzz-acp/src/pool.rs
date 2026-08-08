@@ -32,6 +32,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
     resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
+    TurnDeliveryEvidence,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -89,6 +90,7 @@ fn is_channel_report_kind(kind: u32) -> bool {
 #[derive(Clone, Debug)]
 struct PublicationWatch {
     channel_id: Uuid,
+    trigger_event_id: String,
     observed_at_start: u64,
     turn_started_at: nostr::Timestamp,
     thread_tags: ThreadTags,
@@ -1675,6 +1677,7 @@ fn publication_watch_for_batch(
     }
     Some(PublicationWatch {
         channel_id: batch.channel_id,
+        trigger_event_id: trigger.event.id.to_hex(),
         observed_at_start: tracker.snapshot(batch.channel_id),
         turn_started_at: nostr::Timestamp::now(),
         thread_tags,
@@ -1748,19 +1751,68 @@ async fn self_authored_report_exists(watch: &PublicationWatch, rest: &RestClient
     }
 }
 
-fn publication_silence_notice_content(turn_id: &str) -> String {
-    format!(
-        "⚠️ A mention-triggered turn completed with no channel report \
-         (turn_outcome: outcome=ok, fate=completed). Inspect the local agent \
-         transcript/log for turn `{turn_id}`; the runtime may have been unable \
-         to publish its result."
-    )
+#[derive(Debug, PartialEq, Eq)]
+enum PublicationSilenceDisposition {
+    ChosenSilence,
+    LoudFailure(String),
+}
+
+fn publication_silence_disposition(
+    turn_id: &str,
+    evidence: &TurnDeliveryEvidence,
+) -> PublicationSilenceDisposition {
+    if evidence.publish_attempt_count == 0 && evidence.final_answer_present {
+        return PublicationSilenceDisposition::ChosenSilence;
+    }
+
+    let (shape, detail) = if evidence.publish_attempt_count == 0 {
+        (
+            "no_final_output",
+            "The turn produced no final answer and made no channel publish attempt.",
+        )
+    } else if evidence.publish_failure_count > 0 {
+        (
+            "publish_failed",
+            "A channel publish attempt failed or was rejected, and no report reached the relay.",
+        )
+    } else {
+        (
+            "publish_attempt_no_report",
+            "The turn attempted to publish, but no report reached the relay.",
+        )
+    };
+    let snippet = evidence
+        .final_answer_snippet
+        .as_deref()
+        .map(|snippet| format!(" Final answer snippet: {snippet:?}."))
+        .unwrap_or_default();
+    PublicationSilenceDisposition::LoudFailure(format!(
+        "⚠️ Mention-triggered turn delivery failed (`failure_shape: {shape}`). \
+         {detail}{snippet} Inspect the local agent transcript/log for turn `{turn_id}`."
+    ))
+}
+
+async fn emit_publication_silence_surface(
+    rest: &RestClient,
+    watch: &PublicationWatch,
+    turn_id: &str,
+    evidence: &TurnDeliveryEvidence,
+) {
+    match publication_silence_disposition(turn_id, evidence) {
+        PublicationSilenceDisposition::ChosenSilence => {
+            reaction_add(rest, &watch.trigger_event_id, REACTION_CHOSEN_SILENCE).await;
+        }
+        PublicationSilenceDisposition::LoudFailure(content) => {
+            post_failure_notice(rest, watch.channel_id, &watch.thread_tags, &content).await;
+        }
+    }
 }
 
 fn spawn_publication_silence_notice(
     ctx: &Arc<PromptContext>,
     watch: Option<PublicationWatch>,
     turn_id: &str,
+    evidence: TurnDeliveryEvidence,
 ) {
     let Some(watch) = watch else {
         return;
@@ -1779,14 +1831,7 @@ fn spawn_publication_silence_notice(
             Some(false) => {}
             Some(true) | None => return,
         }
-        let content = publication_silence_notice_content(&turn_id);
-        post_failure_notice(
-            &ctx.rest_client,
-            watch.channel_id,
-            &watch.thread_tags,
-            &content,
-        )
-        .await;
+        emit_publication_silence_surface(&ctx.rest_client, &watch, &turn_id, &evidence).await;
     });
 }
 
@@ -2555,6 +2600,7 @@ pub async fn run_prompt_task(
                             &ctx,
                             publication_watch,
                             &turn_id,
+                            agent.acp.turn_delivery_evidence(),
                         );
                         send_prompt_result(
                             &result_tx,
@@ -2644,7 +2690,12 @@ pub async fn run_prompt_task(
             )
             .await;
 
-            spawn_publication_silence_notice(&ctx, publication_watch, &turn_id);
+            spawn_publication_silence_notice(
+                &ctx,
+                publication_watch,
+                &turn_id,
+                agent.acp.turn_delivery_evidence(),
+            );
 
             send_prompt_result(
                 &result_tx,
@@ -4262,6 +4313,8 @@ async fn publish_agent_turn_metric(
 
 const REACTION_SEEN: &str = "👀";
 const REACTION_WORKING: &str = "💬";
+/// Persistent, non-error receipt for a completed turn that intentionally chose silence.
+const REACTION_CHOSEN_SILENCE: &str = "✓";
 
 /// Best-effort timeout for a single reaction REST call.
 const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
@@ -6879,6 +6932,52 @@ mod tests {
         )
     }
 
+    async fn publication_surface_client() -> (
+        RestClient,
+        tokio::sync::oneshot::Receiver<serde_json::Value>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind publication surface test server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept surface request");
+            let mut request = vec![0; 16_384];
+            let read = socket
+                .read(&mut request)
+                .await
+                .expect("read surface request");
+            request.truncate(read);
+            let separator = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .expect("HTTP request has header separator");
+            let body = serde_json::from_slice(&request[separator + 4..])
+                .expect("surface request has JSON body");
+            let _ = body_tx.send(body);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                )
+                .await
+                .expect("write surface response");
+        });
+        (
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+            body_rx,
+            server,
+        )
+    }
+
     #[test]
     fn publication_tracker_counts_only_visible_channel_reports() {
         let tracker = ChannelPublicationTracker::default();
@@ -6909,6 +7008,7 @@ mod tests {
                 .expect("p-tagged batch should be watched even with a custom prompt tag");
 
         assert!(publication_missing(&watch, &tracker));
+        assert_eq!(watch.trigger_event_id, trigger_id);
         assert_eq!(
             watch.thread_tags.root_event_id.as_deref(),
             Some(trigger_id.as_str())
@@ -7021,16 +7121,111 @@ mod tests {
     }
 
     #[test]
-    fn publication_silence_notice_is_metadata_only() {
-        let content = publication_silence_notice_content("turn-123");
+    fn final_answer_without_publish_attempt_is_chosen_silence() {
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.final_answer_present = true;
+        evidence.final_answer_snippet = Some("No further action required.".to_string());
+
         assert_eq!(
-            content,
-            "⚠️ A mention-triggered turn completed with no channel report \
-             (turn_outcome: outcome=ok, fate=completed). Inspect the local agent \
-             transcript/log for turn `turn-123`; the runtime may have been unable \
-             to publish its result."
+            publication_silence_disposition("turn-123", &evidence),
+            PublicationSilenceDisposition::ChosenSilence
         );
-        assert!(!content.contains("rejected content"));
+    }
+
+    #[test]
+    fn missing_final_output_gets_loud_failure_shape() {
+        let disposition =
+            publication_silence_disposition("turn-123", &TurnDeliveryEvidence::default());
+        let PublicationSilenceDisposition::LoudFailure(content) = disposition else {
+            panic!("missing output must remain loud");
+        };
+        assert!(content.contains("failure_shape: no_final_output"));
+        assert!(content.contains("turn `turn-123`"));
+    }
+
+    #[test]
+    fn failed_publish_gets_loud_shape_and_bounded_final_snippet() {
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.final_answer_present = true;
+        evidence.final_answer_snippet = Some("Safe final answer".to_string());
+        evidence.publish_attempt_count = 1;
+        evidence.publish_failure_count = 1;
+        let disposition = publication_silence_disposition("turn-456", &evidence);
+        let PublicationSilenceDisposition::LoudFailure(content) = disposition else {
+            panic!("failed publish must remain loud");
+        };
+        assert!(content.contains("failure_shape: publish_failed"));
+        assert!(content.contains("Final answer snippet: \"Safe final answer\""));
+        assert!(!content.contains("rawInput"));
+        assert!(!content.contains("rawOutput"));
+    }
+
+    #[test]
+    fn unconfirmed_publish_gets_no_report_failure_shape() {
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.publish_attempt_count = 1;
+        let disposition = publication_silence_disposition("turn-789", &evidence);
+        let PublicationSilenceDisposition::LoudFailure(content) = disposition else {
+            panic!("unconfirmed publish must remain loud");
+        };
+        assert!(content.contains("failure_shape: publish_attempt_no_report"));
+    }
+
+    #[tokio::test]
+    async fn chosen_silence_surface_is_quiet_reaction_on_trigger() {
+        let agent_keys = nostr::Keys::generate();
+        let tracker = ChannelPublicationTracker::default();
+        let channel = Uuid::new_v4();
+        let batch = addressed_batch(channel, &agent_keys);
+        let watch =
+            publication_watch_for_batch(Some(&batch), &agent_keys.public_key().to_hex(), &tracker)
+                .unwrap();
+        let trigger_id = watch.trigger_event_id.clone();
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.final_answer_present = true;
+        evidence.final_answer_snippet = Some("No further action required.".to_string());
+        let (rest, body_rx, server) = publication_surface_client().await;
+
+        emit_publication_silence_surface(&rest, &watch, "turn-quiet", &evidence).await;
+
+        let event = body_rx.await.expect("captured reaction event");
+        assert_eq!(event["kind"], json!(7));
+        assert_eq!(event["content"], json!(REACTION_CHOSEN_SILENCE));
+        assert!(event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag == &json!(["e", trigger_id])));
+        server.await.expect("publication surface server");
+    }
+
+    #[tokio::test]
+    async fn failed_publish_surface_is_loud_threaded_warning() {
+        let agent_keys = nostr::Keys::generate();
+        let tracker = ChannelPublicationTracker::default();
+        let channel = Uuid::new_v4();
+        let batch = addressed_batch(channel, &agent_keys);
+        let watch =
+            publication_watch_for_batch(Some(&batch), &agent_keys.public_key().to_hex(), &tracker)
+                .unwrap();
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.publish_attempt_count = 1;
+        evidence.publish_failure_count = 1;
+        let (rest, body_rx, server) = publication_surface_client().await;
+
+        emit_publication_silence_surface(&rest, &watch, "turn-loud", &evidence).await;
+
+        let event = body_rx.await.expect("captured warning event");
+        assert_eq!(event["kind"], json!(9));
+        assert!(event["content"]
+            .as_str()
+            .unwrap()
+            .contains("failure_shape: publish_failed"));
+        assert!(event["content"]
+            .as_str()
+            .unwrap()
+            .contains("turn `turn-loud`"));
+        server.await.expect("publication surface server");
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────

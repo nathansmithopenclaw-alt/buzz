@@ -9,6 +9,7 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use futures_util::StreamExt;
+use std::collections::HashSet;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
@@ -19,6 +20,98 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+
+/// Maximum number of Unicode scalar values retained from an agent's final answer.
+///
+/// This is deliberately small because the text may be surfaced in a failure notice.
+/// Tool inputs and outputs are never retained here.
+const FINAL_ANSWER_SNIPPET_CHARS: usize = 160;
+
+/// Delivery evidence collected from ACP updates for one prompt turn.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TurnDeliveryEvidence {
+    /// Whether the agent emitted any non-whitespace final-answer text.
+    pub final_answer_present: bool,
+    /// Whitespace-normalized, bounded final-answer text. Never tool content.
+    pub final_answer_snippet: Option<String>,
+    /// Number of distinct `buzz messages send` tool calls observed.
+    pub publish_attempt_count: usize,
+    /// Number of those calls that emitted a failed/error update.
+    pub publish_failure_count: usize,
+    publish_tool_ids: HashSet<String>,
+    failed_publish_tool_ids: HashSet<String>,
+}
+
+impl TurnDeliveryEvidence {
+    fn record_final_answer_chunk(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.final_answer_present = true;
+        let combined = match self.final_answer_snippet.take() {
+            Some(existing) => format!("{existing} {text}"),
+            None => text.to_owned(),
+        };
+        self.final_answer_snippet = normalized_snippet(&combined, FINAL_ANSWER_SNIPPET_CHARS);
+    }
+
+    fn record_tool_call(&mut self, update: &serde_json::Value) {
+        if !value_contains_buzz_message_send(update.get("rawInput")) {
+            return;
+        }
+        let Some(tool_id) = update.get("toolCallId").and_then(|value| value.as_str()) else {
+            return;
+        };
+        if self.publish_tool_ids.insert(tool_id.to_owned()) {
+            self.publish_attempt_count += 1;
+        }
+    }
+
+    fn record_tool_call_update(&mut self, update: &serde_json::Value) {
+        let Some(tool_id) = update.get("toolCallId").and_then(|value| value.as_str()) else {
+            return;
+        };
+        if !self.publish_tool_ids.contains(tool_id) {
+            return;
+        }
+        let failed = update.get("status").and_then(|value| value.as_str()) == Some("failed")
+            || update
+                .pointer("/rawOutput/isError")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+            || update.pointer("/rawOutput/error").is_some();
+        if failed && self.failed_publish_tool_ids.insert(tool_id.to_owned()) {
+            self.publish_failure_count += 1;
+        }
+    }
+}
+
+fn normalized_snippet(text: &str, max_chars: usize) -> Option<String> {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut chars = normalized.chars();
+    let snippet: String = chars.by_ref().take(max_chars).collect();
+    Some(if chars.next().is_some() {
+        format!("{snippet}…")
+    } else {
+        snippet
+    })
+}
+
+fn value_contains_buzz_message_send(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::String(text)) => text.contains("buzz messages send"),
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .any(|value| value_contains_buzz_message_send(Some(value))),
+        Some(serde_json::Value::Object(values)) => values
+            .values()
+            .any(|value| value_contains_buzz_message_send(Some(value))),
+        _ => false,
+    }
+}
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -211,6 +304,9 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Evidence used to distinguish an intentional silent completion from a
+    /// failed or missing channel publication.
+    turn_delivery_evidence: TurnDeliveryEvidence,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,7 +646,13 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_delivery_evidence: TurnDeliveryEvidence::default(),
         })
+    }
+
+    /// Return a snapshot of the current turn's delivery evidence.
+    pub(crate) fn turn_delivery_evidence(&self) -> TurnDeliveryEvidence {
+        self.turn_delivery_evidence.clone()
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -751,6 +853,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.turn_delivery_evidence = TurnDeliveryEvidence::default();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1714,11 +1817,13 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    self.turn_delivery_evidence.record_final_answer_chunk(text);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
             }
             "tool_call" => {
+                self.turn_delivery_evidence.record_tool_call(update);
                 let title = update
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -1731,6 +1836,7 @@ impl AcpClient {
                 true
             }
             "tool_call_update" => {
+                self.turn_delivery_evidence.record_tool_call_update(update);
                 let tool_id = update
                     .get("toolCallId")
                     .and_then(|v| v.as_str())
@@ -3531,6 +3637,67 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn delivery_evidence_records_only_final_answer_text() {
+        let mut client = spawn_inert_client().await;
+        for text in ["No further", "\n action   required."] {
+            let message = serde_json::json!({
+                "params": { "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "text": text }
+                }}
+            });
+            let _ = client.handle_session_update(&message);
+        }
+
+        let evidence = client.turn_delivery_evidence();
+        assert!(evidence.final_answer_present);
+        assert_eq!(
+            evidence.final_answer_snippet.as_deref(),
+            Some("No further action required.")
+        );
+        assert_eq!(evidence.publish_attempt_count, 0);
+    }
+
+    #[tokio::test]
+    async fn delivery_evidence_tracks_nested_publish_attempt_and_failure() {
+        let mut client = spawn_inert_client().await;
+        let call = serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "publish-1",
+                "rawInput": { "cmd": ["buzz", "messages", "send"], "shell": "buzz messages send --content -" }
+            }}
+        });
+        let failed = serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "publish-1",
+                "status": "completed",
+                "rawOutput": { "isError": true, "error": "approval rejected" }
+            }}
+        });
+        let _ = client.handle_session_update(&call);
+        let _ = client.handle_session_update(&failed);
+        // Duplicate updates must not inflate the counters.
+        let _ = client.handle_session_update(&call);
+        let _ = client.handle_session_update(&failed);
+
+        let evidence = client.turn_delivery_evidence();
+        assert_eq!(evidence.publish_attempt_count, 1);
+        assert_eq!(evidence.publish_failure_count, 1);
+        assert!(!evidence.final_answer_present);
+        assert!(evidence.final_answer_snippet.is_none());
+    }
+
+    #[test]
+    fn final_answer_snippet_is_unicode_safe_and_bounded() {
+        let text = "🪿".repeat(FINAL_ANSWER_SNIPPET_CHARS + 5);
+        let snippet = normalized_snippet(&text, FINAL_ANSWER_SNIPPET_CHARS).unwrap();
+        assert_eq!(snippet.chars().count(), FINAL_ANSWER_SNIPPET_CHARS + 1);
+        assert!(snippet.ends_with('…'));
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
