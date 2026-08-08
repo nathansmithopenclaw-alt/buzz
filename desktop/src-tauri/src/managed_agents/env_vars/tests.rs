@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use super::{
     display_invalid_key, is_derived_provider_model_key, is_legacy_provider_model_env_key,
-    is_reserved_env_key, is_well_formed_env_key, merged_user_env, validate_user_env_keys,
-    DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_TOTAL_BYTES, MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
+    is_reserved_env_key, is_well_formed_env_key, merged_user_env, validate_delegated_env_vars,
+    validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_TOTAL_BYTES,
+    MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
 };
 
 fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -11,6 +12,21 @@ fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .iter()
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect()
+}
+
+#[test]
+fn delegated_env_validation_rejects_reserved_and_derived_keys_explicitly() {
+    let reserved = validate_delegated_env_vars(&map(&[("BUZZ_PRIVATE_KEY", "secret")]))
+        .unwrap_err();
+    assert!(reserved.contains("reserved by Buzz"));
+    assert!(reserved.contains("BUZZ_PRIVATE_KEY"));
+    assert!(!reserved.contains("secret"));
+
+    let derived = validate_delegated_env_vars(&map(&[("GOOSE_MODEL", "shadow")]))
+        .unwrap_err();
+    assert!(derived.contains("derived from provider/model"));
+    assert!(derived.contains("GOOSE_MODEL"));
+    assert!(!derived.contains("shadow"));
 }
 
 // ── merged_user_env: layering ──────────────────────────────────────

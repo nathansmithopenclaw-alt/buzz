@@ -300,6 +300,21 @@ pub enum AgentsCmd {
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=32))]
         parallelism: Option<u32>,
     },
+    /// Set environment variables on an agent under a standing delegation
+    ApplyUpdate {
+        /// Stable UUID for idempotent retries after an unknown delivery outcome
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Current channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Current name of the personal agent to update
+        #[arg(long)]
+        agent_name: String,
+        /// Per-agent environment variable; repeat for each KEY=VALUE
+        #[arg(long = "env", required = true)]
+        env: Vec<String>,
+    },
     /// Create an agent under an owner-granted standing delegation
     ApplyCreate {
         /// Stable UUID for idempotent retries after an unknown delivery outcome
@@ -323,6 +338,9 @@ pub enum AgentsCmd {
         respond_to: Option<RespondToArg>,
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=32))]
         parallelism: Option<u32>,
+        /// Per-agent environment variable; repeat for each KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
     },
     /// Open a prefilled edit-agent form in the owner's Buzz Desktop
     DraftUpdate {
@@ -2157,6 +2175,7 @@ mod tests {
             names(&cmd, "agents"),
             vec![
                 "apply-create",
+                "apply-update",
                 "archive",
                 "archived",
                 "draft-create",
@@ -2297,7 +2316,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 8),
+            ("agents", 9),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

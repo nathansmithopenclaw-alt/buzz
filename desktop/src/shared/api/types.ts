@@ -1007,6 +1007,7 @@ export type GlobalAgentConfig = {
 export type AgentManagementDelegationCapabilities = {
   teams: boolean;
   agent_creation: boolean;
+  env_vars: boolean;
 };
 
 export type AgentManagementDelegationGrant = {

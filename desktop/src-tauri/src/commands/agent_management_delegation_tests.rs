@@ -8,7 +8,52 @@ fn request(authorized: bool) -> NewLedgerRequest {
         payload: serde_json::json!({"action": "create"}),
         authorized,
         audit_channel_id: Some("7c07e659-3610-42f4-9a5e-1e9973c09da9".into()),
+        rejection: None,
     }
+}
+
+#[test]
+fn delegated_env_rejection_is_durable_and_replays_without_apply() {
+    let mut ledger = AgentManagementState::default();
+    let mut rejected = request(true);
+    rejected.capability = DelegatedCapability::EnvVars;
+    rejected.payload = serde_json::json!({
+        "action": "update",
+        "request": {"envVars": {"BUZZ_PRIVATE_KEY": "must-never-leak"}}
+    });
+    rejected.rejection = Some(
+        "the following env vars are reserved by Buzz and cannot be overridden: BUZZ_PRIVATE_KEY"
+            .into(),
+    );
+    let result = register_in_ledger(&mut ledger, "request-env".into(), rejected).unwrap();
+    assert!(matches!(
+        result.disposition,
+        ManagementRequestDisposition::Rejected
+    ));
+    assert_eq!(ledger.requests["request-env"].status, RequestStatus::Failed);
+    assert_eq!(result.result.unwrap()["code"], "invalid_env_vars");
+
+    let mut replay = request(true);
+    replay.capability = DelegatedCapability::EnvVars;
+    replay.payload = ledger.requests["request-env"].payload.clone();
+    replay.rejection = Some("different transient text is ignored on replay".into());
+    let duplicate = register_in_ledger(&mut ledger, "request-env".into(), replay).unwrap();
+    assert!(matches!(
+        duplicate.disposition,
+        ManagementRequestDisposition::DuplicateFailed
+    ));
+}
+
+#[test]
+fn env_fingerprint_summary_never_contains_values() {
+    let payload = serde_json::json!({
+        "request": {"envVars": {"OPENAI_API_KEY": "dummy-secret", "OPENAI_HOST": "http://lane"}}
+    });
+    let summary = env_fingerprint_summary(&payload).unwrap();
+    assert!(summary.contains("OPENAI_API_KEY=sha256:"));
+    assert!(summary.contains("OPENAI_HOST=sha256:"));
+    assert!(!summary.contains("dummy-secret"));
+    assert!(!summary.contains("http://lane"));
 }
 
 #[test]

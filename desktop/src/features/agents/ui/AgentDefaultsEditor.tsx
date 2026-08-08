@@ -359,6 +359,7 @@ export function AgentDefaultsEditor({
                       capabilities: config.agent_management_delegation
                         ?.capabilities ?? {
                         agent_creation: false,
+                        env_vars: false,
                         teams: false,
                       },
                     },
@@ -396,6 +397,7 @@ export function AgentDefaultsEditor({
             {(
               [
                 ["agent_creation", "Create agents"],
+                ["env_vars", "Set agent environment variables"],
                 ["teams", "Create and update teams"],
               ] as const
             ).map(([capability, label]) => (

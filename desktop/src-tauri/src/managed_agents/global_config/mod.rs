@@ -41,6 +41,8 @@ pub struct AgentManagementDelegationCapabilities {
     pub teams: bool,
     #[serde(default)]
     pub agent_creation: bool,
+    #[serde(default)]
+    pub env_vars: bool,
 }
 
 /// Canonical content signed by the Desktop owner.

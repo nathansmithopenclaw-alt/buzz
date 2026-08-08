@@ -32,6 +32,7 @@ export type ManagementRequestDisposition =
   | "duplicate_applying"
   | "duplicate_applied"
   | "duplicate_draft"
+  | "rejected"
   | "duplicate_failed"
   | "duplicate_dismissed";
 
@@ -45,7 +46,7 @@ export type RestoredManagementRequest = {
   requestId: string;
   sourcePubkey: string;
   payload: unknown;
-  capability: "agent_config" | "agent_creation" | "teams";
+  capability: "agent_config" | "agent_creation" | "env_vars" | "teams";
   disposition: "draft" | "failed";
   result?: unknown;
 };
@@ -55,7 +56,7 @@ const agentManagementStartupCutoff = new Date().toISOString();
 export async function registerAgentManagementRequest(input: {
   sourcePubkey: string;
   requestId: string;
-  capability: "agent_config" | "agent_creation" | "teams";
+  capability: "agent_config" | "agent_creation" | "env_vars" | "teams";
   intent: "apply" | "draft";
   payload: unknown;
 }): Promise<RegisterManagementRequestResult> {
@@ -120,7 +121,7 @@ export async function publishAgentManagementAuditReceipt(input: {
   requestId: string;
   sourcePubkey: string;
   requesterName: string;
-  capability: "agent_config" | "agent_creation" | "teams";
+  capability: "agent_config" | "agent_creation" | "env_vars" | "teams";
   target: string;
   succeeded: boolean;
 }): Promise<void> {
