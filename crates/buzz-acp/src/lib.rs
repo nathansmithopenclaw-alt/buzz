@@ -3336,6 +3336,7 @@ fn handle_prompt_result(
         PromptSource::Heartbeat => None,
     };
     let turn_id = result.turn_id.clone();
+    let delivery_evidence = result.agent.acp.turn_delivery_evidence();
     if let Some(ref observer) = observer {
         observer.emit(
             "turn_outcome",
@@ -3344,6 +3345,10 @@ fn handle_prompt_result(
             serde_json::json!({
                 "outcome": outcome_label,
                 "fate": delivery_fate,
+                "finalOutputPresent": delivery_evidence.final_answer_present,
+                "finalAnswerSnippet": delivery_evidence.final_answer_snippet,
+                "publishAttemptCount": delivery_evidence.publish_attempt_count,
+                "publishFailureCount": delivery_evidence.publish_failure_count,
             }),
         );
     }
