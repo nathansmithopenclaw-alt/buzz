@@ -133,7 +133,7 @@ pub fn taskkill_tree(pid: u32) -> Result<(), String> {
 pub fn finish_spawn(
     child: std::process::Child,
     log_path: std::path::PathBuf,
-    spawn_config_hash: u64,
+    spawn_config: super::spawn_snapshot::SpawnConfigSnapshot,
     claude_account_id: Option<String>,
     claude_token_fingerprint: Option<String>,
     claude_account_source: String,
@@ -152,7 +152,7 @@ pub fn finish_spawn(
     super::ManagedAgentProcess {
         child,
         log_path,
-        spawn_config_hash,
+        spawn_config,
         claude_account_id,
         claude_token_fingerprint,
         claude_account_source,

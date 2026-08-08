@@ -1,7 +1,7 @@
 import { useAgentManagement } from "@/features/agents/useAgentManagement";
 import { useAgentTeamManagement } from "@/features/agents/useAgentTeamManagement";
+import { AgentCardDialogs } from "./AgentCardViewerDialog";
 import { AgentDialog } from "./AgentDialog";
-import { SecretRevealDialog } from "./SecretRevealDialog";
 import { AgentTeamManagementReviewDialog } from "./AgentTeamManagementReviewDialog";
 
 /** Global review surfaces opened by owned agents through the Buzz harness. */
@@ -24,20 +24,7 @@ export function AgentManagementDialogs() {
           }}
           onSubmitDefinition={management.submitCreate}
           runtimes={management.runtimes}
-          runtimesLoading={management.runtimesLoading}
-        />
-      ) : null}
-      {management.createdAgent ? (
-        <SecretRevealDialog
-          attachmentFailure={management.attachmentFailure}
-          created={management.createdAgent}
-          isRetryingAttachment={management.isRetryingAttachment}
-          onOpenChange={(open) => {
-            if (!open) management.dismissCreatedAgent();
-          }}
-          onRetryAttachment={() => {
-            void management.retryAttachment();
-          }}
+          runtimeCatalogStatus={management.runtimeCatalogStatus}
         />
       ) : null}
       {management.request?.action === "update" ? (
@@ -53,11 +40,12 @@ export function AgentManagementDialogs() {
           onSubmit={management.submitUpdate}
           open
           runtimes={management.runtimes}
-          runtimesLoading={management.runtimesLoading}
+          runtimeCatalogStatus={management.runtimeCatalogStatus}
           submitLabel="Save changes"
           title="Edit agent"
         />
       ) : null}
+      <AgentCardDialogs />
       <AgentTeamManagementReviewDialog
         error={teamManagement.reviewError}
         isPending={teamManagement.isReviewPending}

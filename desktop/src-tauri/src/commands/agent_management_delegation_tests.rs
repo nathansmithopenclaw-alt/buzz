@@ -1,4 +1,5 @@
 use super::*;
+use nostr::ToBech32;
 
 fn request(authorized: bool) -> NewLedgerRequest {
     NewLedgerRequest {
@@ -10,6 +11,12 @@ fn request(authorized: bool) -> NewLedgerRequest {
         audit_channel_id: Some("7c07e659-3610-42f4-9a5e-1e9973c09da9".into()),
         rejection: None,
     }
+}
+
+fn mark_applied(ledger: &mut AgentManagementState, request_id: &str, pubkey: String) {
+    let entry = ledger.requests.get_mut(request_id).unwrap();
+    entry.status = RequestStatus::Applied;
+    entry.result = Some(serde_json::json!({"pubkey": pubkey}));
 }
 
 #[test]
@@ -94,6 +101,79 @@ fn applying_replay_survives_serialization_without_reminting() {
         ManagementRequestDisposition::DuplicateApplying
     ));
     assert_eq!(after_restart.requests.len(), 1);
+}
+
+#[test]
+fn create_secret_response_is_owner_signed_and_reuses_exact_ciphertext() {
+    let owner = Keys::generate();
+    let source = Keys::generate();
+    let agent = Keys::generate();
+    let request_id = "b2f095a4-664b-4b41-a6fd-4460fa38e520";
+    let mut ledger = AgentManagementState::default();
+    let mut applied = request(true);
+    applied.source_pubkey = source.public_key().to_hex();
+    register_in_ledger(&mut ledger, request_id.into(), applied).unwrap();
+    mark_applied(&mut ledger, request_id, agent.public_key().to_hex());
+
+    let (first, created) = retained_agent_create_secret_event(
+        &mut ledger,
+        request_id,
+        &source.public_key(),
+        &agent,
+        &agent.secret_key().to_bech32().unwrap(),
+        &owner,
+    )
+    .unwrap();
+    assert!(created);
+    assert_eq!(first.kind, Kind::Custom(30_078));
+    assert_eq!(first.pubkey, owner.public_key());
+
+    let (replay, created_again) = retained_agent_create_secret_event(
+        &mut ledger,
+        request_id,
+        &source.public_key(),
+        &agent,
+        &agent.secret_key().to_bech32().unwrap(),
+        &owner,
+    )
+    .unwrap();
+    assert!(!created_again);
+    assert_eq!(replay.id, first.id);
+    assert_eq!(replay.content, first.content);
+}
+
+#[test]
+fn create_secret_response_rejects_wrong_request_authority_or_agent() {
+    let owner = Keys::generate();
+    let source = Keys::generate();
+    let wrong_source = Keys::generate();
+    let agent = Keys::generate();
+    let wrong_agent = Keys::generate();
+    let request_id = "b2f095a4-664b-4b41-a6fd-4460fa38e520";
+    let mut ledger = AgentManagementState::default();
+    let mut applied = request(true);
+    applied.source_pubkey = source.public_key().to_hex();
+    register_in_ledger(&mut ledger, request_id.into(), applied).unwrap();
+    mark_applied(&mut ledger, request_id, agent.public_key().to_hex());
+
+    for (candidate_source, candidate_agent) in [
+        (wrong_source.public_key(), &agent),
+        (source.public_key(), &wrong_agent),
+    ] {
+        assert_eq!(
+            retained_agent_create_secret_event(
+                &mut ledger,
+                request_id,
+                &candidate_source,
+                candidate_agent,
+                &candidate_agent.secret_key().to_bech32().unwrap(),
+                &owner,
+            )
+            .unwrap_err(),
+            "create secret response does not match the applied request"
+        );
+    }
+    assert!(ledger.requests[request_id].secret_response_event.is_none());
 }
 
 #[test]

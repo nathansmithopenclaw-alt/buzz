@@ -1,4 +1,4 @@
-import { LogIn } from "lucide-react";
+import { LogIn, SquareTerminal } from "lucide-react";
 import type * as React from "react";
 
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
@@ -18,8 +18,12 @@ import {
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  toggleTerminalPanel,
+  useTerminalPanel,
+} from "@/features/terminal/terminalPanelStore";
 
 const DM_HEADER_AVATAR_SIZE = 32;
 const DM_HEADER_AVATAR_STATUS_GEOMETRY = scaleProfileAvatarStatusGeometry(
@@ -86,7 +90,22 @@ export function ChannelScreenHeader({
     !activeChannel.archivedAt &&
     onJoinChannel;
 
-  const actions = activeChannel ? (
+  const terminalPanel = useTerminalPanel();
+  const terminalButton = activeChannel ? (
+    <Button
+      aria-label={
+        terminalPanel.mode === "closed" ? "Open Buzz Term" : "Hide Buzz Term"
+      }
+      onClick={toggleTerminalPanel}
+      size="icon"
+      title="Buzz Term (⌘J)"
+      type="button"
+      variant={terminalPanel.mode === "closed" ? "outline" : "secondary"}
+    >
+      <SquareTerminal />
+    </Button>
+  ) : null;
+  const channelActions = activeChannel ? (
     showJoinButton ? (
       <Button
         disabled={isJoining}
@@ -108,6 +127,12 @@ export function ChannelScreenHeader({
         variant={actionsVariant}
       />
     )
+  ) : null;
+  const actions = activeChannel ? (
+    <div className="flex items-center gap-1">
+      {terminalButton}
+      {channelActions}
+    </div>
   ) : null;
 
   if (!showHeaderContent) {

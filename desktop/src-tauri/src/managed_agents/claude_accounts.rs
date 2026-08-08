@@ -206,14 +206,6 @@ pub fn effective_claude_account<'a>(
     }
 }
 
-pub fn effective_claude_account_id<'a>(
-    record: &'a ManagedAgentRecord,
-    definitions: &'a [AgentDefinition],
-    global: &'a crate::managed_agents::GlobalAgentConfig,
-) -> Option<&'a str> {
-    effective_claude_account(record, definitions, global).0
-}
-
 pub struct ClaudeAccountRuntimeSummary {
     pub account_id: Option<String>,
     pub source: String,

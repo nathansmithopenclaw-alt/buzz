@@ -17,7 +17,11 @@ identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO")"
     exit 1
 }
 
-for bin in buzz-desktop buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+BINS=(buzz-desktop buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+if [[ "$TARGET" != *windows* ]]; then
+    BINS+=(buzz-backend-kubernetes)
+fi
+for bin in "${BINS[@]}"; do
     [[ -x "$MACOS/$bin" ]] || {
         echo "Error: bundled executable missing or not executable: $MACOS/$bin" >&2
         exit 1

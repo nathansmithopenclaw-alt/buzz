@@ -17,7 +17,9 @@ use crate::{
     util::now_iso,
 };
 
+mod create_secret_response;
 mod result_publication;
+use create_secret_response::retained_agent_create_secret_event;
 use result_publication::{
     publish_agent_management_applying_result, publish_agent_management_result,
 };
@@ -429,16 +431,6 @@ fn value_contains_secret(value: &Value) -> bool {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentCreateSecretResponse<'a> {
-    #[serde(rename = "type")]
-    response_type: &'static str,
-    request_id: &'a str,
-    pubkey: &'a str,
-    nsec: &'a str,
-}
-
 /// Publish the one-time create secret response as owner-signed NIP-44
 /// ciphertext addressed only to the grantee. The public audit receipt and the
 /// durable request ledger never receives the plaintext tuple. The exact signed
@@ -460,8 +452,6 @@ pub async fn publish_agent_create_secret_response(
     if agent_keys.public_key() != agent {
         return Err("created agent secret does not match its pubkey".into());
     }
-    let source_hex = source.to_hex();
-    let agent_hex = agent.to_hex();
     let owner_keys = app.state::<AppState>().signing_keys()?;
     let secret_event = {
         let state_handle = app.state::<AppState>();
@@ -470,48 +460,18 @@ pub async fn publish_agent_create_secret_response(
             .lock()
             .map_err(|error| error.to_string())?;
         let mut ledger = load_state(&app)?;
-        let entry = ledger
-            .requests
-            .get_mut(&request_id)
-            .ok_or("management request is not registered")?;
-        let recorded_pubkey = entry
-            .result
-            .as_ref()
-            .and_then(|value| value.get("pubkey"))
-            .and_then(Value::as_str);
-        if entry.status != RequestStatus::Applied
-            || entry.source_pubkey != source_hex
-            || entry.capability != DelegatedCapability::AgentCreation
-            || recorded_pubkey != Some(agent_hex.as_str())
-        {
-            return Err("create secret response does not match the applied request".into());
-        }
-        if let Some(raw) = &entry.secret_response_event {
-            Event::from_json(raw)
-                .map_err(|error| format!("stored create-secret response is invalid: {error}"))?
-        } else {
-            let response = AgentCreateSecretResponse {
-                response_type: "agent_create_secret_response",
-                request_id: &request_id,
-                pubkey: &agent_hex,
-                nsec: private_key_nsec.trim(),
-            };
-            let encrypted = encrypt_observer_payload(&owner_keys, &source, &response)
-                .map_err(|error| format!("failed to encrypt create result: {error}"))?;
-            let d_tag = format!("buzz-agent-create-result:{request_id}");
-            let d = Tag::parse(["d", d_tag.as_str()])
-                .map_err(|error| format!("failed to build create-result d tag: {error}"))?;
-            let p = Tag::parse(["p", source_hex.as_str()])
-                .map_err(|error| format!("failed to build create-result p tag: {error}"))?;
-            let event = EventBuilder::new(Kind::Custom(30_078), encrypted)
-                .tags([d, p])
-                .sign_with_keys(&owner_keys)
-                .map_err(|error| format!("failed to sign create result: {error}"))?;
-            entry.secret_response_event = Some(event.as_json());
-            entry.updated_at = now_iso();
+        let (event, created) = retained_agent_create_secret_event(
+            &mut ledger,
+            &request_id,
+            &source,
+            &agent_keys,
+            private_key_nsec.trim(),
+            &owner_keys,
+        )?;
+        if created {
             save_state(&app, &ledger)?;
-            event
         }
+        event
     };
     crate::relay::submit_signed_event_with_keys(
         &secret_event,

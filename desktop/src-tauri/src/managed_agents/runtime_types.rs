@@ -8,7 +8,7 @@ use super::AcpAvailabilityStatus;
 pub struct ManagedAgentProcess {
     pub child: Child,
     pub log_path: PathBuf,
-    pub spawn_config_hash: u64,
+    pub spawn_config: super::spawn_snapshot::SpawnConfigSnapshot,
     pub claude_account_id: Option<String>,
     pub claude_token_fingerprint: Option<String>,
     pub claude_account_source: String,

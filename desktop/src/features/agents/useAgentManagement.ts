@@ -359,7 +359,7 @@ export function useAgentManagement() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
-    revealSecret = true,
+    _revealSecret = true,
     onCreated?: (
       created: import("@/shared/api/types").CreateManagedAgentResponse,
     ) => Promise<void>,
@@ -403,14 +403,10 @@ export function useAgentManagement() {
         const targetChannel = (channelsQuery.data ?? []).find(
           (channel) => channel.id === request.request.channelId,
         );
-        await createdAgentAttachment.presentCreatedAgent(
-          created,
-          {
-            id: request.request.channelId,
-            name: targetChannel?.name ?? "this channel",
-          },
-          revealSecret,
-        );
+        await createdAgentAttachment.presentCreatedAgent(created, {
+          id: request.request.channelId,
+          name: targetChannel?.name ?? "this channel",
+        });
       }
 
       await Promise.all([
@@ -754,7 +750,11 @@ export function useAgentManagement() {
     ...createdAgentAttachment,
     isPending,
     runtimes: runtimesQuery.data ?? [],
-    runtimesLoading: runtimesQuery.isLoading,
+    runtimeCatalogStatus: runtimesQuery.isLoading
+      ? ("loading" as const)
+      : runtimesQuery.isError
+        ? ("error" as const)
+        : ("ready" as const),
     submitCreate: submitReviewedCreate,
     submitUpdate,
     dismiss,

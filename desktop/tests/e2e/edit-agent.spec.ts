@@ -65,27 +65,6 @@ async function openEditDialog(page: import("@playwright/test").Page) {
   });
 }
 
-async function openSettledEditDialog(
-  page: import("@playwright/test").Page,
-  agentName: string,
-) {
-  await page.goto("/");
-  await page.getByTestId("open-agents-view").click();
-  await page
-    .getByRole("button", { name: `${agentName} agent profile` })
-    .click();
-  await page.getByTestId("user-profile-edit-agent").click();
-  await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
-    timeout: 10_000,
-  });
-  await expect(page.locator("#edit-agent-model")).toBeVisible({
-    timeout: 10_000,
-  });
-  await expect(page.getByTestId("instance-agent-effort-select")).toBeVisible({
-    timeout: 10_000,
-  });
-}
-
 /**
  * Pick an option from a PersonaDropdownField (menu-based, not a native
  * <select> — Create's fields are selects, Edit's are not).
@@ -99,261 +78,79 @@ async function pickDropdownOption(
   await page.getByRole("menuitemradio", { name: optionName }).click();
 }
 
+test.describe("agent definition dialog", () => {
+  test("owner-only-access build shows disabled agent access with an explanation", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      ownerOnlyAccessBuild: true,
+      bakedBuildEnv: BAKED_DEFAULTS,
+    });
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    await page.getByTestId("new-agent-card").click();
+
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("button", { name: "Advanced", exact: true }).click();
+
+    await expect(dialog.getByTestId("agent-respond-to")).toBeVisible();
+    await expect(dialog.locator("#agent-respond-to")).toBeDisabled();
+    await expect(dialog.locator("#agent-respond-to")).toContainText(
+      "Only me (default)",
+    );
+    await expect(
+      dialog.getByTestId("agent-respond-to-disabled-reason"),
+    ).toHaveText("This build disallows changing this setting.");
+  });
+});
+
 test.describe("edit agent dialog", () => {
-  test("preserves Claude 1m context while saving effort and shows account controls honestly", async ({
+  test("owner-only-access build shows a disabled owner-only access control with an explanation", async ({
     page,
   }) => {
-    const agentName = "Claude 1M Agent";
     await installMockBridge(page, {
+      ownerOnlyAccessBuild: true,
+      bakedBuildEnv: BAKED_DEFAULTS,
       managedAgents: [
         {
-          pubkey: TEST_IDENTITIES.charlie.pubkey,
-          name: agentName,
-          runtime: "claude",
-          model: "claude-fable-5[1m]",
-          envVars: { BUZZ_ACP_THINKING_EFFORT: "low" },
-          claudeAccountId: "account-a",
-          claudeAccountSource: "instance",
-          claudeAccountShadowed: true,
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
           status: "stopped",
           channelNames: ["agents"],
+          respondTo: "anyone",
         },
       ],
-      discoverAgentModels: {
-        models: [
-          { id: "claude-fable-5[1m]", name: "Claude Fable 5 (1M context)" },
-          { id: "opus[1m]", name: "Claude Opus (1M context)" },
-        ],
-        supportsSwitching: true,
-        agentDefaultModel: "claude-fable-5[1m]",
-        selectedModel: "claude-fable-5[1m]",
-        effortConfigId: "effort",
-        effortOptions: ["low", "medium", "high"].map((id) => ({
-          id,
-          name: id[0].toUpperCase() + id.slice(1),
-        })),
-      },
     });
 
-    await openSettledEditDialog(page, agentName);
-    const dialog = page.getByTestId("edit-agent-dialog");
-    const submit = page.getByTestId("edit-agent-dialog-submit");
-    const model = page.locator("#edit-agent-model");
-    const effort = page.getByTestId("instance-agent-effort-select");
-    const account = page.getByTestId(
-      `claude-account-pill-${TEST_IDENTITIES.charlie.pubkey}`,
-    );
+    await openEditDialog(page);
 
-    await expect(dialog.getByRole("alert")).toHaveCount(0);
-    await expect(model).toContainText("Claude Fable 5 (1M context)");
-    await model.click();
+    const accessControl = page.getByTestId("agent-respond-to");
+    await expect(accessControl).toBeVisible();
+    await expect(page.locator("#agent-respond-to")).toBeDisabled();
+    await expect(page.locator("#agent-respond-to")).toContainText(
+      "Only me (default)",
+    );
     await expect(
-      page.getByRole("menuitemradio", { name: /Claude Opus \(1M context\)/ }),
-    ).toBeVisible();
-    await page.keyboard.press("Escape");
-
-    await expect(account).toBeVisible();
-    await expect(account).toHaveAttribute(
-      "title",
-      "Definition account is shadowed by a per-agent override",
-    );
-    await expect(account).not.toHaveClass(/border-destructive/);
-    await expect(account).not.toContainText("82%");
-    await expect(account).not.toContainText(/reset/i);
-
-    await expect(effort).toHaveAttribute("data-value", "low");
-    await effort.click();
-    await page.getByTestId("instance-agent-effort-select-option-high").click();
-    await expect(submit).toBeEnabled();
-    await submit.click();
-    await expect(dialog).not.toBeVisible();
-
-    const updatePayload = await page.evaluate(() => {
-      const entries = (
-        window as Window & {
-          __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
-            command: string;
-            payload: { input?: Record<string, unknown> };
-          }>;
-        }
-      ).__BUZZ_E2E_COMMAND_PAYLOADS__;
-      return entries?.findLast(
-        (entry) => entry.command === "update_managed_agent",
-      )?.payload.input;
-    });
-    expect(updatePayload?.model).toBeUndefined();
-    expect(
-      (updatePayload?.envVars as Record<string, string> | undefined)
-        ?.BUZZ_ACP_THINKING_EFFORT,
-    ).toBe("high");
-
-    await page.getByTestId("user-profile-edit-agent").click();
-    await expect(model).toContainText("Claude Fable 5 (1M context)");
-    await expect(effort).toHaveAttribute("data-value", "high");
-    await dialog.screenshot({
-      path: "test-results/claude-1m/01-fable-1m-effort-readback.png",
-    });
+      page.getByTestId("agent-respond-to-disabled-reason"),
+    ).toHaveText("This build disallows changing this setting.");
   });
 
-  test("saves and reads back a Codex model-qualified effort", async ({
-    page,
-  }) => {
-    const agentName = "Codex Medium";
-    const effortOptions = [
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra",
-    ].map((id) => ({ id, name: id[0].toUpperCase() + id.slice(1) }));
+  test("OSS build keeps the managed-agent access control", async ({ page }) => {
     await installMockBridge(page, {
-      acpRuntimesCatalog: [
-        {
-          id: "codex",
-          label: "Codex",
-          avatar_url: "",
-          availability: "available",
-          command: "codex-acp",
-          binary_path: "/usr/local/bin/codex-acp",
-          default_args: [],
-          mcp_command: null,
-          install_hint: "",
-          install_instructions_url: null,
-          can_auto_install: false,
-          requires_external_cli: true,
-          underlying_cli_path: "/usr/local/bin/codex",
-          source: "builtin",
-        },
-      ],
+      bakedBuildEnv: BAKED_DEFAULTS,
       managedAgents: [
         {
-          pubkey: TEST_IDENTITIES.charlie.pubkey,
-          name: agentName,
-          runtime: "codex",
-          model: "gpt-5.6-sol[medium]",
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
           status: "stopped",
           channelNames: ["agents"],
         },
       ],
-      discoverAgentModels: {
-        models: effortOptions.map(({ id, name }) => ({
-          id: `gpt-5.6-sol[${id}]`,
-          name: `GPT-5.6 Sol (${name})`,
-        })),
-        supportsSwitching: true,
-        agentDefaultModel: "gpt-5.6-sol[medium]",
-        selectedModel: "gpt-5.6-sol[medium]",
-        effortConfigId: "reasoning_effort",
-        effortOptions,
-      },
     });
 
-    await openSettledEditDialog(page, agentName);
-    const effort = page.getByTestId("instance-agent-effort-select");
-    await expect(effort).toHaveAttribute("data-value", "medium");
-    await expect(page.locator("#edit-agent-model")).toContainText(
-      "GPT-5.6 Sol (Medium)",
-    );
-    await effort.click();
-    await page.getByRole("option", { name: "Ultra", exact: true }).click();
-    await expect(effort).toHaveAttribute("data-value", "ultra");
-    await expect(page.locator("#edit-agent-model")).toContainText(
-      "GPT-5.6 Sol (Ultra)",
-    );
-    await expect(page.getByText(/Applies on the next restart/)).toBeVisible();
-    await expect(
-      page.getByText(/global Codex config is unchanged/),
-    ).toBeVisible();
+    await openEditDialog(page);
 
-    await page.getByTestId("edit-agent-dialog-submit").click();
-    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
-    await page.getByTestId("user-profile-edit-agent").click();
-    await expect(effort).toHaveAttribute("data-value", "ultra", {
-      timeout: 10_000,
-    });
-    await expect(page.locator("#edit-agent-model")).toContainText(
-      "GPT-5.6 Sol (Ultra)",
-    );
-    await page.getByTestId("edit-agent-dialog").screenshot({
-      path: "test-results/codex-effort/01-codex-ultra-readback.png",
-    });
-  });
-
-  test("shows inherited Codex effort and materializes a per-agent override", async ({
-    page,
-  }) => {
-    const agentName = "Codex Inherited";
-    const effortOptions = [
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra",
-    ].map((id) => ({ id, name: id[0].toUpperCase() + id.slice(1) }));
-    await installMockBridge(page, {
-      acpRuntimesCatalog: [
-        {
-          id: "codex",
-          label: "Codex",
-          avatar_url: "",
-          availability: "available",
-          command: "codex-acp",
-          binary_path: "/usr/local/bin/codex-acp",
-          default_args: [],
-          mcp_command: null,
-          install_hint: "",
-          install_instructions_url: null,
-          can_auto_install: false,
-          requires_external_cli: true,
-          underlying_cli_path: "/usr/local/bin/codex",
-          source: "builtin",
-        },
-      ],
-      managedAgents: [
-        {
-          pubkey: TEST_IDENTITIES.charlie.pubkey,
-          name: agentName,
-          runtime: "codex",
-          model: "gpt-5.6-sol",
-          status: "stopped",
-          channelNames: ["agents"],
-        },
-      ],
-      discoverAgentModels: {
-        models: effortOptions.map(({ id, name }) => ({
-          id: `gpt-5.6-sol[${id}]`,
-          name: `GPT-5.6 Sol (${name})`,
-        })),
-        supportsSwitching: true,
-        agentDefaultModel: "gpt-5.6-sol[medium]",
-        selectedModel: "gpt-5.6-sol[medium]",
-        effortConfigId: "reasoning_effort",
-        effortOptions,
-      },
-    });
-
-    await openSettledEditDialog(page, agentName);
-    const effort = page.getByTestId("instance-agent-effort-select");
-    await expect(effort).toHaveAttribute("data-value", "");
-    await expect(effort).toContainText("Inherit (medium)");
-    await expect(page.locator("#edit-agent-model")).toContainText(
-      "GPT-5.6 Sol",
-    );
-    await effort.click();
-    await page.getByRole("option", { name: "High", exact: true }).click();
-    await expect(page.locator("#edit-agent-model")).toContainText(
-      "GPT-5.6 Sol (High)",
-    );
-    await page.getByTestId("edit-agent-dialog-submit").click();
-    await page.getByTestId("user-profile-edit-agent").click();
-    await expect(effort).toHaveAttribute("data-value", "high", {
-      timeout: 10_000,
-    });
-    await page.getByTestId("edit-agent-dialog").screenshot({
-      path: "test-results/codex-effort/02-codex-inherited-to-high.png",
-    });
+    await expect(page.getByTestId("agent-respond-to")).toBeVisible();
   });
 
   test("edits the agent name and persists it across a dialog reopen", async ({

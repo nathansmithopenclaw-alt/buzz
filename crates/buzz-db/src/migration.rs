@@ -12,6 +12,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 /// Run all pending Buzz database migrations.
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
+    reconcile_fold_migration_27(pool).await?;
     reject_legacy_nip_rs_cardinality_ambiguity(pool).await?;
     MIGRATOR.run(pool).await?;
     // The replica-fence proof (see `replica_fence`) requires the commit-time
@@ -22,6 +23,84 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     // guard, so migration fails closed if any is missing. (The fence probe
     // re-runs this same check at startup on non-migrating relays.)
     crate::replica_fence::verify_floor_guard_catalog(pool).await?;
+    Ok(())
+}
+
+/// Reconcile the one version collision created by the T6 upstream fold.
+///
+/// The Smith Crafts line shipped `0027_community_hosts`; upstream independently
+/// shipped `0027_channels_id_lookup_index` and then `0028_long_reaction_payloads`.
+/// Fresh databases use the upstream numbering and apply community hosts as
+/// version 29. A database that already applied the Smith Crafts version 27 has
+/// the exact version-29 checksum, so move that ledger row forward before SQLx
+/// validates checksums. No schema is reverted or replayed.
+async fn reconcile_fold_migration_27(pool: &PgPool) -> Result<()> {
+    let migrations_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
+            .fetch_one(pool)
+            .await?;
+    if migrations_table.is_none() {
+        return Ok(());
+    }
+
+    let canonical_27 = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 27)
+        .expect("migration 27 must remain the upstream channel-id index");
+    let community_hosts_29 = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 29)
+        .expect("migration 29 must be the renumbered community-host migration");
+
+    let mut transaction = pool.begin().await?;
+    // Serialize the ledger rewrite across concurrently starting relay
+    // processes. SQLx subsequently takes its own advisory migration lock.
+    sqlx::query("LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *transaction)
+        .await?;
+
+    let applied_27: Option<(Vec<u8>, bool)> =
+        sqlx::query_as("SELECT checksum, success FROM _sqlx_migrations WHERE version = 27")
+            .fetch_optional(&mut *transaction)
+            .await?;
+
+    match applied_27 {
+        None => {}
+        Some((checksum, true)) if checksum.as_slice() == canonical_27.checksum.as_ref() => {}
+        Some((checksum, true)) if checksum.as_slice() == community_hosts_29.checksum.as_ref() => {
+            let version_29_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 29)",
+            )
+            .fetch_one(&mut *transaction)
+            .await?;
+            if version_29_exists {
+                return Err(crate::DbError::InvalidData(
+                    "T6 migration reconciliation blocked: both the legacy community-host version 27 and version 29 are recorded"
+                        .into(),
+                ));
+            }
+
+            sqlx::query(
+                "UPDATE _sqlx_migrations \
+                 SET version = 29, description = 'community hosts' \
+                 WHERE version = 27 AND success",
+            )
+            .execute(&mut *transaction)
+            .await?;
+        }
+        Some((_checksum, false)) => {
+            return Err(crate::DbError::InvalidData(
+                "T6 migration reconciliation blocked: migration 27 is recorded as failed".into(),
+            ));
+        }
+        Some((_checksum, true)) => {
+            return Err(crate::DbError::InvalidData(
+                "T6 migration reconciliation blocked: migration 27 has an unknown checksum".into(),
+            ));
+        }
+    }
+
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -100,7 +179,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
@@ -562,7 +641,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 27);
+        assert_eq!(migrations.len(), 29);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -920,11 +999,39 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
-
-        // Community host aliases are additive so brownfield canonical hosts
-        // are backfilled without changing the checksum-frozen initial schema.
+        // Channel-id lookup index (0027): serves the tenant-independent
+        // `channels` lookups that carry no community_id predicate, which no
+        // community_id-leading index can satisfy. Covering + partial so the
+        // planner can go index-only; asserted NOT UNIQUE because `id` alone is
+        // not unique in this table (the same channel id may exist under more
+        // than one community), so a unique index would encode a false
+        // constraint and fail to build on such a database.
         assert_eq!(migrations[26].version, 27);
-        let community_hosts = migrations[26].sql.as_str();
+        let channel_id_index = migrations[26].sql.as_str();
+        assert!(channel_id_index.contains("idx_channels_id_live"));
+        assert!(channel_id_index.contains("INCLUDE (community_id)"));
+        assert!(channel_id_index.contains("WHERE deleted_at IS NULL"));
+        assert!(
+            !channel_id_index.contains("CREATE UNIQUE INDEX"),
+            "channels.id is not unique across communities — index must not be UNIQUE",
+        );
+        assert!(
+            desired_schema.contains("idx_channels_id_live"),
+            "desired-state schema must carry the channel-id lookup index",
+        );
+
+        assert_eq!(migrations[27].version, 28);
+        let long_reactions = migrations[27].sql.as_str();
+        assert!(
+            long_reactions.contains("ALTER TABLE reactions ALTER COLUMN emoji TYPE VARCHAR(66)")
+        );
+        assert!(desired_schema.contains("emoji               VARCHAR(66) NOT NULL"));
+
+        // Community host aliases were the colliding Smith Crafts 0027. The
+        // fold moves them forward to 0029 so upstream 0027/0028 retain their
+        // published checksums and both fresh and brownfield databases converge.
+        assert_eq!(migrations[28].version, 29);
+        let community_hosts = migrations[28].sql.as_str();
         assert!(community_hosts.contains("CREATE TABLE community_hosts"));
         assert!(community_hosts.contains("CREATE UNIQUE INDEX idx_community_hosts_host"));
         assert!(community_hosts.contains("SELECT host, id FROM communities"));
@@ -1105,6 +1212,34 @@ mod tests {
         .expect("read applied migrations")
     }
 
+    async fn assert_t6_fold_objects(pool: &PgPool) {
+        let channel_index: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('idx_channels_id_live')::text")
+                .fetch_one(pool)
+                .await
+                .expect("read channel-id index");
+        assert_eq!(channel_index.as_deref(), Some("idx_channels_id_live"));
+
+        let community_hosts: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('community_hosts')::text")
+                .fetch_one(pool)
+                .await
+                .expect("read community-host table");
+        assert_eq!(community_hosts.as_deref(), Some("community_hosts"));
+
+        let reaction_width: i32 = sqlx::query_scalar(
+            "SELECT character_maximum_length::int \
+             FROM information_schema.columns \
+             WHERE table_schema = 'public' \
+               AND table_name = 'reactions' \
+               AND column_name = 'emoji'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("read reaction emoji width");
+        assert_eq!(reaction_width, 66);
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn pre_0007_ambiguous_nip_rs_data_blocks_without_mutation_and_allows_retry() {
@@ -1172,7 +1307,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(27));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(29));
     }
 
     #[tokio::test]
@@ -1294,5 +1429,95 @@ mod tests {
             search_expression.contains("ELSE NULL::tsvector"),
             "fresh installs must default non-allowlisted kinds to NULL: {search_expression}"
         );
+        assert_t6_fold_objects(&pool).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn upstream_0028_upgrade_applies_renumbered_community_hosts() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(28, &pool)
+            .await
+            .expect("apply upstream migrations through 28");
+
+        let community_id = uuid::Uuid::new_v4();
+        let host = format!("upstream-upgrade-{}.example", community_id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .expect("insert pre-29 community");
+
+        run_migrations(&pool)
+            .await
+            .expect("apply renumbered community-host migration");
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(29));
+        assert_t6_fold_objects(&pool).await;
+        let mapped: uuid::Uuid = sqlx::query_scalar(
+            "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
+        )
+        .bind(&host)
+        .fetch_one(&pool)
+        .await
+        .expect("community-host migration backfills existing host");
+        assert_eq!(mapped, community_id);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn smith_crafts_0027_upgrade_reconciles_ledger_and_applies_upstream_migrations() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(26, &pool)
+            .await
+            .expect("apply common migrations through 26");
+
+        let community_id = uuid::Uuid::new_v4();
+        let host = format!("smith-upgrade-{}.example", community_id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .expect("insert pre-collision community");
+
+        sqlx::raw_sql(include_str!("../../../migrations/0029_community_hosts.sql"))
+            .execute(&pool)
+            .await
+            .expect("simulate shipped Smith Crafts migration 27");
+        let community_hosts = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 29)
+            .expect("renumbered community-host migration");
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) \
+             VALUES (27, 'community hosts', true, $1, 0)",
+        )
+        .bind(community_hosts.checksum.as_ref())
+        .execute(&pool)
+        .await
+        .expect("record legacy community-host migration as version 27");
+
+        run_migrations(&pool)
+            .await
+            .expect("reconcile version collision and apply upstream 27/28");
+        assert_eq!(
+            applied_versions(&pool).await,
+            (1_i64..=29).collect::<Vec<_>>()
+        );
+        assert_t6_fold_objects(&pool).await;
+        let mapped: uuid::Uuid = sqlx::query_scalar(
+            "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
+        )
+        .bind(&host)
+        .fetch_one(&pool)
+        .await
+        .expect("legacy community-host data remains present");
+        assert_eq!(mapped, community_id);
     }
 }
