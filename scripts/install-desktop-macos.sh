@@ -18,8 +18,22 @@ if [[ ! -d "$BUILT_APP" ]]; then
     exit 1
 fi
 
-if pgrep -x buzz-desktop >/dev/null 2>&1; then
-    echo "Error: Buzz Desktop is running. Quit it normally, then rerun this installer." >&2
+# Fail-closed run detection: `pgrep -x buzz-desktop` returns false negatives on
+# some hosts (measured 2026-08-10: it missed a live buzz-desktop pid that ps and
+# lsof both saw, and two rollout watchers tore the bundle mid-ditto as a result).
+# Any single instrument reporting "running" blocks the install. The ps probe
+# covers helper processes (buzz-acp et al) whose open handles tear a concurrent
+# copy even after the main app exits.
+RUNNING_EVIDENCE=""
+if [[ -n "$(ps -axo comm= | awk -v p="$DEST/" 'index($0,p)==1')" ]]; then
+    RUNNING_EVIDENCE="ps"
+elif [[ -d "$DEST" ]] && lsof +D "$DEST" >/dev/null 2>&1; then
+    RUNNING_EVIDENCE="lsof"
+elif pgrep -x buzz-desktop >/dev/null 2>&1; then
+    RUNNING_EVIDENCE="pgrep"
+fi
+if [[ -n "$RUNNING_EVIDENCE" ]]; then
+    echo "Error: Buzz Desktop is running (detected via: $RUNNING_EVIDENCE). Quit it normally, then rerun this installer." >&2
     exit 2
 fi
 
