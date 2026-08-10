@@ -601,6 +601,9 @@ pub struct PromptContext {
     pub permission_mode: PermissionMode,
     /// Native ACP effort value to apply after the model selection.
     pub thinking_effort: Option<String>,
+    /// Whether effort is a harness default that may be skipped when the active
+    /// model advertises no native effort option.
+    pub thinking_effort_is_default: bool,
     /// Native Fast mode state to apply after model and effort selection.
     pub fast_mode: Option<bool>,
     /// Agent identity — used to derive the NIP-AE conversation key at
@@ -1124,15 +1127,23 @@ async fn create_session_and_apply_model(
             .or_else(|| resp.raw.get("configOptions"))
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        applied_config_options = Some(
-            apply_thinking_effort(
-                &mut agent.acp,
-                &resp.session_id,
-                desired_effort,
-                &advertised,
-            )
-            .await?,
-        );
+        if should_skip_thinking_effort(&advertised, ctx.thinking_effort_is_default) {
+            tracing::info!(
+                target: "pool::effort",
+                configured_effort = desired_effort,
+                "skipping harness-default effort because the selected model advertises no native effort option"
+            );
+        } else {
+            applied_config_options = Some(
+                apply_thinking_effort(
+                    &mut agent.acp,
+                    &resp.session_id,
+                    desired_effort,
+                    &advertised,
+                )
+                .await?,
+            );
+        }
     }
 
     if let Some(enabled) = ctx.fast_mode {
@@ -1347,16 +1358,7 @@ fn resolve_thinking_effort_config_id<'a>(
     config_options: &'a serde_json::Value,
     desired: &str,
 ) -> Result<&'a str, AcpError> {
-    let effort_option = config_options.as_array().and_then(|options| {
-        options.iter().find(|option| {
-            option
-                .get("id")
-                .or_else(|| option.get("configId"))
-                .and_then(|value| value.as_str())
-                == Some("effort")
-                || option.get("category").and_then(|value| value.as_str()) == Some("thought_level")
-        })
-    });
+    let effort_option = thinking_effort_option(config_options);
     let config_id = effort_option
         .and_then(|option| option.get("id").or_else(|| option.get("configId")))
         .and_then(|value| value.as_str())
@@ -1379,6 +1381,26 @@ fn resolve_thinking_effort_config_id<'a>(
         )));
     }
     Ok(config_id)
+}
+
+fn thinking_effort_option(config_options: &serde_json::Value) -> Option<&serde_json::Value> {
+    config_options.as_array().and_then(|options| {
+        options.iter().find(|option| {
+            option
+                .get("id")
+                .or_else(|| option.get("configId"))
+                .and_then(|value| value.as_str())
+                == Some("effort")
+                || option.get("category").and_then(|value| value.as_str()) == Some("thought_level")
+        })
+    })
+}
+
+fn should_skip_thinking_effort(
+    config_options: &serde_json::Value,
+    thinking_effort_is_default: bool,
+) -> bool {
+    thinking_effort_is_default && thinking_effort_option(config_options).is_none()
 }
 
 async fn apply_fast_mode(
@@ -7108,6 +7130,7 @@ mod tests {
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
             thinking_effort: None,
+            thinking_effort_is_default: false,
             fast_mode: None,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
@@ -7972,6 +7995,23 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not available"));
+    }
+
+    #[test]
+    fn harness_default_effort_skips_only_when_the_option_is_missing() {
+        let advertised = json!([{
+            "id": "effort",
+            "options": [{"value": "high"}]
+        }]);
+        let missing = json!([]);
+
+        assert!(should_skip_thinking_effort(&missing, true));
+        assert!(!should_skip_thinking_effort(&missing, false));
+        assert!(!should_skip_thinking_effort(&advertised, true));
+
+        // A harness default skips only the missing-option case. An advertised
+        // option with a bad value still reaches strict resolver validation.
+        assert!(resolve_thinking_effort_config_id(&advertised, "ultra").is_err());
     }
 
     #[test]

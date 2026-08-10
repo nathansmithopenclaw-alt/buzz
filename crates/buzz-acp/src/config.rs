@@ -449,6 +449,17 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_THINKING_EFFORT")]
     pub thinking_effort: Option<String>,
 
+    /// Treat configured effort as a harness default: if the active model
+    /// advertises no native effort option, continue without applying it.
+    /// Desktop derives this marker from env-layer provenance; explicit
+    /// per-agent effort remains strict.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT",
+        default_value_t = false
+    )]
+    pub thinking_effort_is_default: bool,
+
     /// Desired Fast mode state. Applied through the adapter's native ACP
     /// model-config option after the selected model is active.
     #[arg(long, env = "BUZZ_ACP_FAST_MODE")]
@@ -567,6 +578,9 @@ pub struct Config {
     pub model: Option<String>,
     /// Desired native ACP effort value, validated against session/new.
     pub thinking_effort: Option<String>,
+    /// Whether effort came from the Desktop harness-default layer and may be
+    /// skipped when the active model exposes no effort option.
+    pub thinking_effort_is_default: bool,
     /// Desired native ACP Fast mode state, validated against session/new.
     pub fast_mode: Option<bool>,
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
@@ -1088,6 +1102,7 @@ impl Config {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let thinking_effort_is_default = args.thinking_effort_is_default;
         let fast_mode = args.fast_mode;
 
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
@@ -1139,6 +1154,7 @@ impl Config {
             memory_enabled: args.memory && !args.no_memory,
             model,
             thinking_effort,
+            thinking_effort_is_default,
             fast_mode,
             session_title: args
                 .session_title
@@ -1516,6 +1532,7 @@ mod tests {
             memory_enabled: true,
             model: None,
             thinking_effort: None,
+            thinking_effort_is_default: false,
             fast_mode: None,
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
@@ -2253,6 +2270,23 @@ channels = "ALL"
         let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
         assert!(args.is_err(), "bool flags do not take an explicit value");
         assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+    }
+
+    #[test]
+    fn harness_default_effort_marker_defaults_strict_and_accepts_cli_flag() {
+        let key = "0".repeat(64);
+        assert!(
+            !CliArgs::parse_from(["buzz-acp", "--private-key", &key]).thinking_effort_is_default
+        );
+        assert!(
+            CliArgs::parse_from([
+                "buzz-acp",
+                "--private-key",
+                &key,
+                "--thinking-effort-is-default",
+            ])
+            .thinking_effort_is_default
+        );
     }
 
     #[test]

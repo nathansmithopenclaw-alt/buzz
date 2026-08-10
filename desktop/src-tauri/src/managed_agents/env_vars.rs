@@ -275,6 +275,21 @@ pub(crate) fn merged_user_env(
     merged
 }
 
+/// Whether `key` reaches the child from the Desktop global env layer.
+///
+/// Global env is the lowest user-settable layer. A persona or agent entry is
+/// explicit even when it repeats the same value, so presence in either higher
+/// layer makes this return false. Definition and baked env sit below global
+/// and therefore cannot win while the global key is present.
+pub(crate) fn env_var_comes_from_global_default(
+    key: &str,
+    persona_env: &BTreeMap<String, String>,
+    agent_env: &BTreeMap<String, String>,
+    global_env: &BTreeMap<String, String>,
+) -> bool {
+    global_env.contains_key(key) && !persona_env.contains_key(key) && !agent_env.contains_key(key)
+}
+
 /// Validate env vars crossing the standing-delegation boundary. Derived
 /// provider/model keys are rejected here as well as reserved keys: delegated
 /// callers must use the structured provider/model fields instead of creating
