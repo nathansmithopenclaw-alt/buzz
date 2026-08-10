@@ -777,6 +777,17 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    // Carry trusted provenance for generic ACP effort. A Desktop-global value
+    // is a harness default and may be ignored when the active model exposes no
+    // effort option; persona/agent values remain explicit and fail loud. Clear
+    // any ambient marker first, then set only the Desktop-derived result.
+    let persona_env = super::env_vars::live_persona_env(&personas, record.persona_id.as_deref());
+    apply_thinking_effort_provenance(
+        &mut command,
+        &persona_env,
+        &record.env_vars,
+        &global.env_vars,
+    );
     // Structured model state wins over stale free-form BUZZ_ACP_MODEL values.
     if let Some(model) = effective_model.as_deref() {
         command.env("BUZZ_ACP_MODEL", model);
@@ -927,6 +938,28 @@ pub fn spawn_agent_child(
 
 fn child_rust_log_filter() -> String {
     child_rust_log_filter_from(std::env::var("RUST_LOG").ok().as_deref())
+}
+
+const ACP_EFFORT_KEY: &str = "BUZZ_ACP_THINKING_EFFORT";
+const ACP_EFFORT_DEFAULT_KEY: &str = "BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT";
+
+fn apply_thinking_effort_provenance(
+    command: &mut std::process::Command,
+    persona_env: &std::collections::BTreeMap<String, String>,
+    agent_env: &std::collections::BTreeMap<String, String>,
+    global_env: &std::collections::BTreeMap<String, String>,
+) {
+    // Never inherit or accept a forged marker. Desktop sets it only when the
+    // effective generic effort came from the global default layer.
+    command.env_remove(ACP_EFFORT_DEFAULT_KEY);
+    if super::env_vars::env_var_comes_from_global_default(
+        ACP_EFFORT_KEY,
+        persona_env,
+        agent_env,
+        global_env,
+    ) {
+        command.env(ACP_EFFORT_DEFAULT_KEY, "true");
+    }
 }
 
 fn child_rust_log_filter_from(existing: Option<&str>) -> String {

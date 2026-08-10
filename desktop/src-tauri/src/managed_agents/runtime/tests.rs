@@ -16,6 +16,37 @@ fn child_logs_always_include_model_application_evidence() {
     );
 }
 
+#[test]
+fn spawn_effort_provenance_marks_global_defaults_but_not_explicit_overrides() {
+    const EFFORT: &str = "BUZZ_ACP_THINKING_EFFORT";
+    const MARKER: &str = "BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT";
+    let global = BTreeMap::from([(EFFORT.to_string(), "high".to_string())]);
+
+    let mut default_command = std::process::Command::new("env");
+    default_command.env_clear();
+    super::apply_thinking_effort_provenance(
+        &mut default_command,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &global,
+    );
+    let default_env = String::from_utf8(default_command.output().unwrap().stdout).unwrap();
+    assert!(default_env
+        .lines()
+        .any(|line| line == format!("{MARKER}=true")));
+
+    let mut explicit_command = std::process::Command::new("env");
+    explicit_command.env_clear();
+    super::apply_thinking_effort_provenance(
+        &mut explicit_command,
+        &BTreeMap::new(),
+        &BTreeMap::from([(EFFORT.to_string(), "high".to_string())]),
+        &global,
+    );
+    let explicit_env = String::from_utf8(explicit_command.output().unwrap().stdout).unwrap();
+    assert!(!explicit_env.lines().any(|line| line.starts_with(MARKER)));
+}
+
 // ── desktop binary name tests ───────────────────────────────────────────
 
 #[test]

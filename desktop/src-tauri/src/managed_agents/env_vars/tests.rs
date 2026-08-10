@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use super::{
-    display_invalid_key, is_derived_provider_model_key, is_legacy_provider_model_env_key,
-    is_reserved_env_key, is_well_formed_env_key, merged_user_env, validate_delegated_env_vars,
-    validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_TOTAL_BYTES,
-    MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
+    display_invalid_key, env_var_comes_from_global_default, is_derived_provider_model_key,
+    is_legacy_provider_model_env_key, is_reserved_env_key, is_well_formed_env_key, merged_user_env,
+    validate_delegated_env_vars, validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS,
+    MAX_ENV_TOTAL_BYTES, MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
 };
 
 fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -97,6 +97,37 @@ fn merged_env_does_not_mutate_inputs() {
     assert_eq!(agent.get("A").map(String::as_str), Some("2"));
 }
 
+#[test]
+fn effort_provenance_marks_only_an_unoverridden_global_value_as_default() {
+    const KEY: &str = "BUZZ_ACP_THINKING_EFFORT";
+    let global = map(&[(KEY, "high")]);
+
+    assert!(env_var_comes_from_global_default(
+        KEY,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &global,
+    ));
+    assert!(!env_var_comes_from_global_default(
+        KEY,
+        &map(&[(KEY, "high")]),
+        &BTreeMap::new(),
+        &global,
+    ));
+    assert!(!env_var_comes_from_global_default(
+        KEY,
+        &BTreeMap::new(),
+        &map(&[(KEY, "high")]),
+        &global,
+    ));
+    assert!(!env_var_comes_from_global_default(
+        KEY,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    ));
+}
+
 // ── reserved-key filter ────────────────────────────────────────────
 
 #[test]
@@ -158,6 +189,13 @@ fn reserved_keys_include_agent_owner_for_legacy_records() {
     let agent = map(&[("BUZZ_ACP_AGENT_OWNER", "imposter")]);
     let merged = merged_user_env(&BTreeMap::new(), &agent);
     assert!(merged.is_empty());
+}
+
+#[test]
+fn reserved_keys_include_desktop_derived_effort_provenance() {
+    assert!(is_reserved_env_key("BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT"));
+    let agent = map(&[("BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT", "true")]);
+    assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
 }
 
 #[test]
