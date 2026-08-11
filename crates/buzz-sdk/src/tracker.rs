@@ -3,10 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 
-use buzz_core::kind::{KIND_TRACKER_COMMENT, KIND_TRACKER_ISSUE, KIND_TRACKER_REVISION};
+use buzz_core::kind::{
+    KIND_PROJECT, KIND_TRACKER_COMMENT, KIND_TRACKER_ISSUE, KIND_TRACKER_PROJECT_ACTIVITY,
+    KIND_TRACKER_REVISION,
+};
 use chrono::{TimeZone, Timelike};
 use chrono_tz::Tz;
-use nostr::Event;
+use nostr::{Event, EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -20,7 +23,7 @@ pub const TRACKER_DISCOVERY_TAG: &str = "buzz-tracker";
 pub const MAX_FUTURE_SKEW_SECONDS: u64 = 300;
 
 /// Stable Tracker workflow states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueStatus {
     /// Awaiting triage.
@@ -46,8 +49,33 @@ impl IssueStatus {
     }
 }
 
+impl std::fmt::Display for IssueStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(status_str(*self))
+    }
+}
+
+impl FromStr for IssueStatus {
+    type Err = SdkError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "triage" => Ok(Self::Triage),
+            "backlog" => Ok(Self::Backlog),
+            "todo" => Ok(Self::Todo),
+            "in_progress" => Ok(Self::InProgress),
+            "in_review" => Ok(Self::InReview),
+            "done" => Ok(Self::Done),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => invalid(
+                "status must be triage, backlog, todo, in_progress, in_review, done, or cancelled",
+            ),
+        }
+    }
+}
+
 /// Issue priority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Priority {
     /// Immediate owner decision or incident response.
     P0,
@@ -57,6 +85,26 @@ pub enum Priority {
     P2,
     /// Low priority.
     P3,
+}
+
+impl std::fmt::Display for Priority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(priority_str(*self))
+    }
+}
+
+impl FromStr for Priority {
+    type Err = SdkError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "P0" | "p0" => Ok(Self::P0),
+            "P1" | "p1" => Ok(Self::P1),
+            "P2" | "p2" => Ok(Self::P2),
+            "P3" | "p3" => Ok(Self::P3),
+            _ => invalid("priority must be P0, P1, P2, or P3"),
+        }
+    }
 }
 
 /// Due-date precision.
@@ -93,6 +141,36 @@ pub struct ImportProvenance {
     pub source_url: Option<String>,
     /// Import timestamp.
     pub imported_at: u64,
+    /// Original source creation timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_created_at: Option<String>,
+    /// Original source update timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_updated_at: Option<String>,
+    /// Original source completion timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_completed_at: Option<String>,
+    /// Original source cancellation timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_cancelled_at: Option<String>,
+    /// Whether the source record was archived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    /// Source-system estimate points (never converted to minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_points: Option<u32>,
+    /// Complete export SHA-256 used for this import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_sha256: Option<String>,
+    /// Importer implementation version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub importer_version: Option<String>,
+    /// Original human author identity as source data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_author: Option<String>,
+    /// Legacy labels retained during pilot reconciliation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub legacy_labels: Vec<String>,
 }
 
 /// External reference identity.
@@ -382,6 +460,148 @@ pub struct TrackerComment {
     pub parent_event: Option<String>,
 }
 
+/// Current Tracker-managed NIP-MP project head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerProject {
+    /// Immutable Tracker project UUID from `buzz-project-id`.
+    pub project_id: Uuid,
+    /// Workspace Tracker stream from `buzz-workspace`.
+    pub workspace_id: Uuid,
+    /// Current NIP-MP address key (`d` tag).
+    pub slug: String,
+    /// Human-facing name.
+    pub name: String,
+    /// Ordered statuses enabled for this project.
+    pub statuses: Vec<IssueStatus>,
+    /// Default channel for issue creation/dispatch.
+    pub default_channel_id: Option<Uuid>,
+    /// Default dispatch verification contract.
+    pub default_verify: Option<String>,
+    /// Project signer.
+    pub author_pubkey: String,
+    /// Current head event ID.
+    pub revision_event_id: String,
+    /// Current head timestamp.
+    pub updated_at: u64,
+}
+
+/// Snapshot stored in append-only project activity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackerProjectSnapshot {
+    /// Immutable project UUID.
+    pub project_id: Uuid,
+    /// Current slug.
+    pub slug: String,
+    /// Human-facing name.
+    pub name: String,
+    /// Ordered workflow statuses.
+    pub statuses: Vec<IssueStatus>,
+    /// Default home channel.
+    pub default_channel_id: Option<Uuid>,
+    /// Default dispatch verification method.
+    pub default_verify: Option<String>,
+    /// NIP-MP head event ID represented by this snapshot.
+    pub revision_event_id: String,
+}
+
+impl From<&TrackerProject> for TrackerProjectSnapshot {
+    fn from(project: &TrackerProject) -> Self {
+        Self {
+            project_id: project.project_id,
+            slug: project.slug.clone(),
+            name: project.name.clone(),
+            statuses: project.statuses.clone(),
+            default_channel_id: project.default_channel_id,
+            default_verify: project.default_verify.clone(),
+            revision_event_id: project.revision_event_id.clone(),
+        }
+    }
+}
+
+/// Project activity operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectActivityOperation {
+    /// First Tracker-managed project head.
+    Create,
+    /// Metadata/workflow update without an address change.
+    Update,
+    /// Slug/address change.
+    Rename,
+}
+
+/// Strict append-only M20 project activity content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectActivity {
+    /// Tracker schema version.
+    pub v: u8,
+    /// Activity operation.
+    pub op: ProjectActivityOperation,
+    /// Immutable project UUID.
+    pub project_id: Uuid,
+    /// Idempotency request ID.
+    pub request_id: Uuid,
+    /// Previous snapshot (absent only for create).
+    pub before: Option<TrackerProjectSnapshot>,
+    /// New snapshot.
+    pub after: TrackerProjectSnapshot,
+}
+
+/// Parsed project activity event metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerProjectActivity {
+    /// Signed event ID.
+    pub event_id: String,
+    /// Signing pubkey.
+    pub author_pubkey: String,
+    /// Workspace stream.
+    pub workspace_id: Uuid,
+    /// Creation timestamp.
+    pub created_at: u64,
+    /// Strict activity content.
+    pub activity: ProjectActivity,
+}
+
+/// Project projection diagnostics that do not hide valid heads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProjectDiagnostic {
+    /// More than one current signer-owned head claims one immutable UUID.
+    DuplicateProjectId {
+        /// Immutable project UUID.
+        project_id: Uuid,
+        /// Canonical event ID.
+        canonical: String,
+        /// Rejected event ID.
+        rejected: String,
+    },
+    /// More than one signer-owned head claims one slug.
+    DuplicateSlug {
+        /// Conflicting slug.
+        slug: String,
+        /// Canonical project UUID.
+        canonical: Uuid,
+        /// Conflicting project UUID.
+        conflicting: Uuid,
+    },
+    /// An upstream project lacks Tracker identity tags.
+    UnmanagedCoordinate {
+        /// NIP-MP coordinate that may still be referenced.
+        coordinate: String,
+    },
+}
+
+/// Shared SDK projection of current Tracker-managed projects.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrackerProjectProjection {
+    /// Canonical current projects keyed by immutable UUID.
+    pub projects: BTreeMap<Uuid, TrackerProject>,
+    /// Non-fatal identity/slug diagnostics.
+    pub diagnostics: Vec<ProjectDiagnostic>,
+}
+
 /// Parsed Tracker payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackerPayload {
@@ -570,6 +790,347 @@ pub struct TrackerFold {
     pub diagnostics: Vec<FoldDiagnostic>,
 }
 
+/// Build a strict kind-40020 Tracker issue root.
+pub fn build_tracker_issue(stream_id: Uuid, root: &IssueRoot) -> Result<EventBuilder, SdkError> {
+    validate_uuid_v4(stream_id, "stream_id")?;
+    validate_root(root)?;
+    let mut tags = common_tracker_tags(stream_id, root.issue_id, root.request_id)?;
+    tags.push(tracker_tag(&["subject", &root.title])?);
+    tags.push(tracker_tag(&["status", status_str(root.status)])?);
+    tags.push(tracker_tag(&["identifier", &root.identifier])?);
+    if let Some(priority) = root.priority {
+        tags.push(tracker_tag(&["priority", priority_str(priority)])?);
+    }
+    if let Some(assignee) = &root.assignee {
+        tags.push(tracker_tag(&["p", assignee, "", "assignee"])?);
+    }
+    if let Some(project_id) = root.project_id {
+        tags.push(tracker_tag(&["project", &project_id.to_string()])?);
+    }
+    if let Some(due) = &root.due {
+        tags.push(tracker_tag(&[
+            "due",
+            &due.value.to_string(),
+            due_precision_str(due.precision),
+            &due.timezone,
+        ])?);
+    }
+    if let Some(estimate) = root.estimate_minutes {
+        tags.push(tracker_tag(&[
+            "estimate",
+            &estimate.to_string(),
+            "minutes",
+        ])?);
+    }
+    if let Some(channel_id) = root.home_channel_id {
+        tags.push(tracker_tag(&["home", &channel_id.to_string()])?);
+    }
+    if let Some(source_event) = &root.source_event_id {
+        tags.push(tracker_tag(&["e", source_event, "", "source"])?);
+    }
+    for label in &root.labels {
+        tags.push(tracker_tag(&["l", label])?);
+    }
+    for external in &root.external_refs {
+        tags.push(tracker_tag(&[
+            "external_ref",
+            &external.kind,
+            &external.reference,
+        ])?);
+    }
+    tracker_json_builder(KIND_TRACKER_ISSUE, root, tags)
+}
+
+/// Build a strict kind-40021 Tracker issue revision.
+pub fn build_tracker_revision(
+    stream_id: Uuid,
+    revision: &IssueRevision,
+) -> Result<EventBuilder, SdkError> {
+    validate_uuid_v4(stream_id, "stream_id")?;
+    validate_revision(revision)?;
+    let mut tags = common_tracker_tags(stream_id, revision.issue_id, revision.request_id)?;
+    tags.push(tracker_tag(&["e", &revision.root_event, "", "root"])?);
+    tags.push(tracker_tag(&["e", &revision.parent_event, "", "reply"])?);
+    tags.push(tracker_tag(&["revision", &revision.revision.to_string()])?);
+    if let Some(value) = &revision.set.title {
+        tags.push(tracker_tag(&["subject", value])?);
+    }
+    if let Some(value) = revision.set.status {
+        tags.push(tracker_tag(&["status", status_str(value)])?);
+    }
+    if let Some(value) = &revision.set.identifier {
+        tags.push(tracker_tag(&["identifier", value])?);
+    }
+    if let Some(value) = revision.set.priority {
+        tags.push(tracker_tag(&["priority", priority_str(value)])?);
+    }
+    if let Some(value) = &revision.set.assignee {
+        tags.push(tracker_tag(&["p", value, "", "assignee"])?);
+    }
+    if let Some(value) = revision.set.project_id {
+        tags.push(tracker_tag(&["project", &value.to_string()])?);
+    }
+    if let Some(value) = &revision.set.due {
+        tags.push(tracker_tag(&[
+            "due",
+            &value.value.to_string(),
+            due_precision_str(value.precision),
+            &value.timezone,
+        ])?);
+    }
+    if let Some(value) = revision.set.estimate_minutes {
+        tags.push(tracker_tag(&["estimate", &value.to_string(), "minutes"])?);
+    }
+    if let Some(value) = revision.set.home_channel_id {
+        tags.push(tracker_tag(&["home", &value.to_string()])?);
+    }
+    if let Some(values) = &revision.set.labels {
+        for value in values {
+            tags.push(tracker_tag(&["l", value])?);
+        }
+    }
+    for value in &revision.clear {
+        tags.push(tracker_tag(&["clear", value])?);
+    }
+    for (operation, values) in [
+        ("add", &revision.relations.add),
+        ("remove", &revision.relations.remove),
+    ] {
+        for value in values {
+            tags.push(tracker_tag(&[
+                "relation",
+                operation,
+                relation_str(value.kind),
+                &value.target_root_event,
+            ])?);
+        }
+    }
+    for (operation, values) in [
+        ("add", &revision.external_refs.add),
+        ("remove", &revision.external_refs.remove),
+    ] {
+        for value in values {
+            tags.push(tracker_tag(&[
+                "external_ref",
+                operation,
+                &value.kind,
+                &value.reference,
+            ])?);
+        }
+    }
+    tracker_json_builder(KIND_TRACKER_REVISION, revision, tags)
+}
+
+/// Build a strict kind-40022 Tracker issue comment.
+pub fn build_tracker_comment(
+    stream_id: Uuid,
+    root_event: &str,
+    parent_event: Option<&str>,
+    comment: &IssueComment,
+    mentions: &[String],
+) -> Result<EventBuilder, SdkError> {
+    validate_uuid_v4(stream_id, "stream_id")?;
+    validate_comment(comment)?;
+    validate_hex(root_event, "root_event")?;
+    if let Some(parent_event) = parent_event {
+        validate_hex(parent_event, "parent_event")?;
+    }
+    let mut tags = common_tracker_tags(stream_id, comment.issue_id, comment.request_id)?;
+    tags.push(tracker_tag(&["e", root_event, "", "root"])?);
+    if let Some(parent_event) = parent_event {
+        tags.push(tracker_tag(&["e", parent_event, "", "reply"])?);
+    }
+    let mut seen = HashSet::new();
+    for mention in mentions {
+        validate_hex(mention, "mention")?;
+        if seen.insert(mention) {
+            tags.push(tracker_tag(&["p", mention])?);
+        }
+    }
+    tracker_json_builder(KIND_TRACKER_COMMENT, comment, tags)
+}
+
+/// Parse one current kind-30621 head carrying M20 Tracker identity tags.
+pub fn parse_tracker_project(event: &Event) -> Result<TrackerProject, SdkError> {
+    event.verify().map_err(|error| {
+        SdkError::InvalidInput(format!("project signature verification failed: {error}"))
+    })?;
+    if event.kind.as_u16() as u32 != KIND_PROJECT {
+        return invalid("Tracker project must be kind 30621");
+    }
+    crate::builders::validate_project_envelope(
+        &event.tags.iter().cloned().collect::<Vec<_>>(),
+        &event.content,
+    )?;
+    let slug = singleton_string_tag(event, "d")?;
+    let project_id = singleton_uuid_value_tag(event, "buzz-project-id", &[4, 5])?;
+    let workspace_id = singleton_uuid_value_tag(event, "buzz-workspace", &[4])?;
+    let name = optional_string_tag(event, "name")?.unwrap_or_else(|| slug.clone());
+    if name.trim().is_empty() || name.len() > 256 {
+        return invalid("project name must be 1..=256 bytes");
+    }
+    let status_tags = tag_values(event, "buzz-status");
+    let statuses = if status_tags.is_empty() {
+        default_project_statuses()
+    } else {
+        let mut values = Vec::with_capacity(status_tags.len());
+        let mut seen = HashSet::new();
+        for tag in status_tags {
+            if tag.len() != 2 {
+                return invalid("buzz-status tags must contain exactly one value");
+            }
+            let status = IssueStatus::from_str(&tag[1])?;
+            if !seen.insert(status) {
+                return invalid("buzz-status values must be unique");
+            }
+            values.push(status);
+        }
+        values
+    };
+    let default_channel_id = optional_string_tag(event, "buzz-channel")?
+        .map(|value| parse_canonical_uuid(&value, "buzz-channel", &[4]))
+        .transpose()?;
+    let default_verify = optional_string_tag(event, "buzz-default-verify")?;
+    if default_verify
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return invalid("buzz-default-verify cannot be empty");
+    }
+    Ok(TrackerProject {
+        project_id,
+        workspace_id,
+        slug,
+        name,
+        statuses,
+        default_channel_id,
+        default_verify,
+        author_pubkey: event.pubkey.to_hex(),
+        revision_event_id: event.id.to_hex(),
+        updated_at: event.created_at.as_secs(),
+    })
+}
+
+/// Fold current project heads by immutable UUID and surface collisions.
+pub fn fold_tracker_projects(
+    events: impl IntoIterator<Item = Event>,
+    workspace_id: Uuid,
+    managed_signer: &str,
+) -> TrackerProjectProjection {
+    let mut projection = TrackerProjectProjection::default();
+    let mut parsed = Vec::new();
+    for event in events {
+        match parse_tracker_project(&event) {
+            Ok(project) if project.workspace_id == workspace_id => parsed.push(project),
+            Err(_) if event.kind.as_u16() as u32 == KIND_PROJECT => {
+                if let Some(slug) = tag_values(&event, "d").first().and_then(|tag| tag.get(1)) {
+                    projection
+                        .diagnostics
+                        .push(ProjectDiagnostic::UnmanagedCoordinate {
+                            coordinate: format!("30621:{}:{slug}", event.pubkey.to_hex()),
+                        });
+                }
+            }
+            _ => {}
+        }
+    }
+    parsed.sort_by(|left, right| {
+        (left.updated_at, left.revision_event_id.as_str())
+            .cmp(&(right.updated_at, right.revision_event_id.as_str()))
+    });
+    for project in parsed {
+        if project.author_pubkey != managed_signer {
+            continue;
+        }
+        if let Some(previous) = projection
+            .projects
+            .insert(project.project_id, project.clone())
+        {
+            projection
+                .diagnostics
+                .push(ProjectDiagnostic::DuplicateProjectId {
+                    project_id: project.project_id,
+                    canonical: project.revision_event_id.clone(),
+                    rejected: previous.revision_event_id,
+                });
+        }
+    }
+    let mut slugs = BTreeMap::<String, Uuid>::new();
+    for project in projection.projects.values() {
+        if let Some(canonical) = slugs.insert(project.slug.clone(), project.project_id) {
+            projection
+                .diagnostics
+                .push(ProjectDiagnostic::DuplicateSlug {
+                    slug: project.slug.clone(),
+                    canonical,
+                    conflicting: project.project_id,
+                });
+        }
+    }
+    projection
+}
+
+/// Build one immutable kind-40025 project activity event.
+pub fn build_tracker_project_activity(
+    workspace_id: Uuid,
+    activity: &ProjectActivity,
+    project_author: &str,
+) -> Result<EventBuilder, SdkError> {
+    validate_uuid_v4(workspace_id, "workspace_id")?;
+    validate_project_activity(activity)?;
+    validate_hex(project_author, "project_author")?;
+    let coordinate = format!("{KIND_PROJECT}:{project_author}:{}", activity.after.slug);
+    let tags = vec![
+        tracker_tag(&["h", &workspace_id.to_string()])?,
+        tracker_tag(&["d", &activity.project_id.to_string()])?,
+        tracker_tag(&["t", "buzz-tracker-project"])?,
+        tracker_tag(&["request", &activity.request_id.to_string()])?,
+        tracker_tag(&["a", &coordinate])?,
+    ];
+    tracker_json_builder(KIND_TRACKER_PROJECT_ACTIVITY, activity, tags)
+}
+
+/// Parse and validate one immutable project activity event.
+pub fn parse_tracker_project_activity(
+    event: &Event,
+    now: u64,
+) -> Result<TrackerProjectActivity, SdkError> {
+    event.verify().map_err(|error| {
+        SdkError::InvalidInput(format!(
+            "project activity signature verification failed: {error}"
+        ))
+    })?;
+    if event.kind.as_u16() as u32 != KIND_TRACKER_PROJECT_ACTIVITY {
+        return invalid("project activity must be kind 40025");
+    }
+    if event.created_at.as_secs() > now.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+        return invalid("Tracker event timestamp exceeds 300-second future-skew limit");
+    }
+    validate_allowed_tags(event, &["h", "d", "t", "request", "a", "auth"])?;
+    let workspace_id = singleton_uuid_value_tag(event, "h", &[4])?;
+    let project_id = singleton_uuid_value_tag(event, "d", &[4, 5])?;
+    let request_id = singleton_uuid_value_tag(event, "request", &[4, 5])?;
+    require_exact_tag(event, "t", "buzz-tracker-project")?;
+    let activity: ProjectActivity = strict_json(&event.content)?;
+    validate_project_activity(&activity)?;
+    if activity.project_id != project_id || activity.request_id != request_id {
+        return invalid("project activity content disagrees with d/request tags");
+    }
+    let expected_coordinate = format!(
+        "{KIND_PROJECT}:{}:{}",
+        event.pubkey.to_hex(),
+        activity.after.slug
+    );
+    require_exact_tag(event, "a", &expected_coordinate)?;
+    Ok(TrackerProjectActivity {
+        event_id: event.id.to_hex(),
+        author_pubkey: event.pubkey.to_hex(),
+        workspace_id,
+        created_at: event.created_at.as_secs(),
+        activity,
+    })
+}
+
 /// Parse and validate a signed Tracker event against current wall time.
 pub fn parse_tracker_event(event: &Event, now: u64) -> Result<TrackerEvent, SdkError> {
     event.verify().map_err(|error| {
@@ -588,10 +1149,10 @@ pub fn parse_tracker_event(event: &Event, now: u64) -> Result<TrackerEvent, SdkE
     if created_at > now.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
         return invalid("Tracker event timestamp exceeds 300-second future-skew limit");
     }
-    let stream_id = singleton_uuid_tag(event, "h")?;
-    let issue_id = singleton_uuid_tag(event, "d")?;
+    let stream_id = singleton_uuid_value_tag(event, "h", &[4])?;
+    let issue_id = singleton_uuid_value_tag(event, "d", &[4, 5])?;
     require_discovery_tag(event)?;
-    let request_tag = optional_uuid_tag(event, "request")?;
+    let request_tag = optional_uuid_value_tag(event, "request", &[4, 5])?;
     let payload = match kind {
         KIND_TRACKER_ISSUE => {
             validate_allowed_tags(
@@ -613,6 +1174,7 @@ pub fn parse_tracker_event(event: &Event, now: u64) -> Result<TrackerEvent, SdkE
                     "l",
                     "request",
                     "external_ref",
+                    "auth",
                 ],
             )?;
             let root: IssueRoot = strict_json(&event.content)?;
@@ -646,6 +1208,7 @@ pub fn parse_tracker_event(event: &Event, now: u64) -> Result<TrackerEvent, SdkE
                     "clear",
                     "relation",
                     "external_ref",
+                    "auth",
                 ],
             )?;
             let revision: IssueRevision = strict_json(&event.content)?;
@@ -657,7 +1220,7 @@ pub fn parse_tracker_event(event: &Event, now: u64) -> Result<TrackerEvent, SdkE
             TrackerPayload::Revision(revision)
         }
         KIND_TRACKER_COMMENT => {
-            validate_allowed_tags(event, &["h", "d", "t", "e", "p", "request"])?;
+            validate_allowed_tags(event, &["h", "d", "t", "e", "p", "request", "auth"])?;
             let comment: IssueComment = strict_json(&event.content)?;
             validate_comment(&comment)?;
             if comment.issue_id != issue_id || comment.request_id != request_tag {
@@ -1196,11 +1759,130 @@ fn graph_reaches(
     })
 }
 
+fn tracker_tag(parts: &[&str]) -> Result<Tag, SdkError> {
+    Tag::parse(parts.iter().copied()).map_err(|error| SdkError::InvalidTag(error.to_string()))
+}
+
+fn tracker_json_builder<T: Serialize>(
+    kind: u32,
+    content: &T,
+    tags: Vec<Tag>,
+) -> Result<EventBuilder, SdkError> {
+    let content = serde_json::to_string(content).map_err(|error| {
+        SdkError::InvalidInput(format!("Tracker content serialization failed: {error}"))
+    })?;
+    if content.len() > 64 * 1024 {
+        return Err(SdkError::ContentTooLarge {
+            max: 64 * 1024,
+            got: content.len(),
+        });
+    }
+    Ok(EventBuilder::new(Kind::Custom(kind as u16), content).tags(tags))
+}
+
+fn common_tracker_tags(
+    stream_id: Uuid,
+    issue_id: Uuid,
+    request_id: Option<Uuid>,
+) -> Result<Vec<Tag>, SdkError> {
+    let mut tags = vec![
+        tracker_tag(&["h", &stream_id.to_string()])?,
+        tracker_tag(&["d", &issue_id.to_string()])?,
+        tracker_tag(&["t", TRACKER_DISCOVERY_TAG])?,
+    ];
+    if let Some(request_id) = request_id {
+        tags.push(tracker_tag(&["request", &request_id.to_string()])?);
+    }
+    Ok(tags)
+}
+
+/// Built-in ordered workflow used when a project omits explicit statuses.
+pub fn default_project_statuses() -> Vec<IssueStatus> {
+    vec![
+        IssueStatus::Triage,
+        IssueStatus::Backlog,
+        IssueStatus::Todo,
+        IssueStatus::InProgress,
+        IssueStatus::InReview,
+        IssueStatus::Done,
+        IssueStatus::Cancelled,
+    ]
+}
+
+fn validate_project_snapshot(snapshot: &TrackerProjectSnapshot) -> Result<(), SdkError> {
+    validate_uuid_versions(snapshot.project_id, "project_id", &[4, 5])?;
+    if snapshot.slug.trim().is_empty() || snapshot.slug.len() > 1024 {
+        return invalid("project slug must be 1..=1024 bytes");
+    }
+    if snapshot.name.trim().is_empty() || snapshot.name.len() > 256 {
+        return invalid("project name must be 1..=256 bytes");
+    }
+    if snapshot.statuses.is_empty() {
+        return invalid("project statuses cannot be empty");
+    }
+    let statuses: HashSet<_> = snapshot.statuses.iter().copied().collect();
+    if statuses.len() != snapshot.statuses.len() {
+        return invalid("project statuses must be unique");
+    }
+    if let Some(channel_id) = snapshot.default_channel_id {
+        validate_uuid_v4(channel_id, "default_channel_id")?;
+    }
+    if snapshot
+        .default_verify
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty() || value.len() > 2048)
+    {
+        return invalid("default_verify must be 1..=2048 bytes when set");
+    }
+    validate_hex(&snapshot.revision_event_id, "revision_event_id")?;
+    Ok(())
+}
+
+fn validate_project_activity(activity: &ProjectActivity) -> Result<(), SdkError> {
+    if activity.v != TRACKER_VERSION {
+        return invalid("invalid Tracker project activity version");
+    }
+    validate_uuid_versions(activity.project_id, "project_id", &[4, 5])?;
+    validate_uuid_versions(activity.request_id, "request_id", &[4, 5])?;
+    validate_project_snapshot(&activity.after)?;
+    if activity.after.project_id != activity.project_id {
+        return invalid("project activity after snapshot disagrees with project_id");
+    }
+    if let Some(before) = &activity.before {
+        validate_project_snapshot(before)?;
+        if before.project_id != activity.project_id {
+            return invalid("project activity before snapshot disagrees with project_id");
+        }
+    }
+    match activity.op {
+        ProjectActivityOperation::Create if activity.before.is_some() => {
+            invalid("project create activity cannot have a before snapshot")
+        }
+        ProjectActivityOperation::Update
+            if activity
+                .before
+                .as_ref()
+                .is_none_or(|before| before.slug != activity.after.slug) =>
+        {
+            invalid("project update activity requires unchanged slug")
+        }
+        ProjectActivityOperation::Rename
+            if activity
+                .before
+                .as_ref()
+                .is_none_or(|before| before.slug == activity.after.slug) =>
+        {
+            invalid("project rename activity requires a changed slug")
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_root(root: &IssueRoot) -> Result<(), SdkError> {
     if root.v != TRACKER_VERSION || root.op != "create" {
         return invalid("invalid Tracker root version/op");
     }
-    validate_uuid_v4(root.issue_id, "issue_id")?;
+    validate_uuid_versions(root.issue_id, "issue_id", &[4, 5])?;
     validate_identifier(&root.identifier)?;
     validate_title(&root.title)?;
     validate_optional_pubkey(root.assignee.as_deref())?;
@@ -1219,7 +1901,10 @@ fn validate_root(root: &IssueRoot) -> Result<(), SdkError> {
         validate_hex(source_event_id, "source_event_id")?;
     }
     if let Some(request_id) = root.request_id {
-        validate_uuid_v4(request_id, "request_id")?;
+        validate_uuid_versions(request_id, "request_id", &[4, 5])?;
+    }
+    if let Some(import) = &root.import {
+        validate_import_provenance(import)?;
     }
     Ok(())
 }
@@ -1230,9 +1915,12 @@ fn validate_revision(revision: &IssueRevision) -> Result<(), SdkError> {
     }
     validate_hex(&revision.root_event, "root_event")?;
     validate_hex(&revision.parent_event, "parent_event")?;
-    validate_uuid_v4(revision.issue_id, "issue_id")?;
+    validate_uuid_versions(revision.issue_id, "issue_id", &[4, 5])?;
     if let Some(request_id) = revision.request_id {
-        validate_uuid_v4(request_id, "request_id")?;
+        validate_uuid_versions(request_id, "request_id", &[4, 5])?;
+    }
+    if let Some(import) = &revision.import {
+        validate_import_provenance(import)?;
     }
     if let Some(value) = &revision.set.identifier {
         validate_identifier(value)?;
@@ -1317,9 +2005,61 @@ fn validate_comment(comment: &IssueComment) -> Result<(), SdkError> {
     if comment.v != TRACKER_VERSION || comment.body.trim().is_empty() {
         return invalid("invalid Tracker comment");
     }
-    validate_uuid_v4(comment.issue_id, "issue_id")?;
+    validate_uuid_versions(comment.issue_id, "issue_id", &[4, 5])?;
     if let Some(request_id) = comment.request_id {
-        validate_uuid_v4(request_id, "request_id")?;
+        validate_uuid_versions(request_id, "request_id", &[4, 5])?;
+    }
+    if let Some(import) = &comment.import {
+        validate_import_provenance(import)?;
+    }
+    Ok(())
+}
+
+fn validate_import_provenance(import: &ImportProvenance) -> Result<(), SdkError> {
+    if import.system.trim().is_empty() || import.system.len() > 64 {
+        return invalid("import system must contain 1..=64 bytes");
+    }
+    if import.external_id.trim().is_empty() || import.external_id.len() > 256 {
+        return invalid("import external_id must contain 1..=256 bytes");
+    }
+    if import.imported_at == 0 {
+        return invalid("import imported_at must be positive");
+    }
+    for (name, value, limit) in [
+        ("source_url", import.source_url.as_deref(), 2048),
+        ("importer_version", import.importer_version.as_deref(), 128),
+        ("original_author", import.original_author.as_deref(), 512),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty() || value.len() > limit) {
+            return Err(SdkError::InvalidInput(format!(
+                "import {name} must contain 1..={limit} bytes"
+            )));
+        }
+    }
+    for (name, value) in [
+        ("source_created_at", import.source_created_at.as_deref()),
+        ("source_updated_at", import.source_updated_at.as_deref()),
+        ("source_completed_at", import.source_completed_at.as_deref()),
+        ("source_cancelled_at", import.source_cancelled_at.as_deref()),
+    ] {
+        if value.is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_err()) {
+            return Err(SdkError::InvalidInput(format!(
+                "import {name} must be RFC 3339"
+            )));
+        }
+    }
+    if import.export_sha256.as_deref().is_some_and(|value| {
+        value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return invalid("import export_sha256 must be 64 hexadecimal characters");
+    }
+    if import.legacy_labels.len() > 64
+        || import
+            .legacy_labels
+            .iter()
+            .any(|value| value.trim().is_empty() || value.len() > 256)
+    {
+        return invalid("import legacy_labels must contain at most 64 non-empty 256-byte values");
     }
     Ok(())
 }
@@ -1405,10 +2145,24 @@ fn validate_hex(value: &str, field: &str) -> Result<(), SdkError> {
 }
 
 fn validate_uuid_v4(value: Uuid, field: &str) -> Result<(), SdkError> {
-    if value.get_version_num() != 4 {
-        return invalid(&format!("{field} must be a UUIDv4"));
+    validate_uuid_versions(value, field, &[4])
+}
+
+fn validate_uuid_versions(value: Uuid, field: &str, versions: &[usize]) -> Result<(), SdkError> {
+    if !versions.contains(&value.get_version_num()) {
+        return invalid(&format!("{field} has an unsupported UUID version"));
     }
     Ok(())
+}
+
+fn parse_canonical_uuid(value: &str, field: &str, versions: &[usize]) -> Result<Uuid, SdkError> {
+    let parsed = Uuid::parse_str(value)
+        .map_err(|_| SdkError::InvalidInput(format!("{field} must be a UUID")))?;
+    validate_uuid_versions(parsed, field, versions)?;
+    if parsed.to_string() != value {
+        return invalid(&format!("{field} must be a canonical lowercase UUID"));
+    }
+    Ok(parsed)
 }
 
 fn strict_json<T: for<'de> Deserialize<'de>>(content: &str) -> Result<T, SdkError> {
@@ -1416,34 +2170,46 @@ fn strict_json<T: for<'de> Deserialize<'de>>(content: &str) -> Result<T, SdkErro
         .map_err(|error| SdkError::InvalidInput(format!("malformed Tracker JSON: {error}")))
 }
 
-fn singleton_uuid_tag(event: &Event, name: &str) -> Result<Uuid, SdkError> {
+fn singleton_uuid_value_tag(
+    event: &Event,
+    name: &str,
+    versions: &[usize],
+) -> Result<Uuid, SdkError> {
     let tags = tag_values(event, name);
     if tags.len() != 1 || tags[0].len() != 2 {
         return invalid(&format!("requires exactly one well-formed {name} tag"));
     }
-    let value = Uuid::parse_str(&tags[0][1])
-        .map_err(|_| SdkError::InvalidInput(format!("{name} tag must be a UUIDv4")))?;
-    if value.get_version_num() != 4 || value.to_string() != tags[0][1] {
-        return invalid(&format!("{name} tag must be a canonical lowercase UUIDv4"));
-    }
-    Ok(value)
+    parse_canonical_uuid(&tags[0][1], &format!("{name} tag"), versions)
 }
 
-fn optional_uuid_tag(event: &Event, name: &str) -> Result<Option<Uuid>, SdkError> {
+fn optional_uuid_value_tag(
+    event: &Event,
+    name: &str,
+    versions: &[usize],
+) -> Result<Option<Uuid>, SdkError> {
     let tags = tag_values(event, name);
     if tags.len() > 1 || tags.first().is_some_and(|tag| tag.len() != 2) {
         return invalid(&format!("{name} tag must be unique and well formed"));
     }
     tags.first()
-        .map(|tag| {
-            let value = Uuid::parse_str(&tag[1])
-                .map_err(|_| SdkError::InvalidInput(format!("{name} tag must be a UUIDv4")))?;
-            if value.get_version_num() != 4 || value.to_string() != tag[1] {
-                return invalid(&format!("{name} tag must be a canonical lowercase UUIDv4"));
-            }
-            Ok(value)
-        })
+        .map(|tag| parse_canonical_uuid(&tag[1], &format!("{name} tag"), versions))
         .transpose()
+}
+
+fn singleton_string_tag(event: &Event, name: &str) -> Result<String, SdkError> {
+    let tags = tag_values(event, name);
+    if tags.len() != 1 || tags[0].len() != 2 || tags[0][1].is_empty() {
+        return invalid(&format!("requires exactly one non-empty {name} tag"));
+    }
+    Ok(tags[0][1].clone())
+}
+
+fn optional_string_tag(event: &Event, name: &str) -> Result<Option<String>, SdkError> {
+    let tags = tag_values(event, name);
+    if tags.len() > 1 || tags.first().is_some_and(|tag| tag.len() != 2) {
+        return invalid(&format!("{name} tag must be unique and well formed"));
+    }
+    Ok(tags.first().map(|tag| tag[1].clone()))
 }
 
 fn require_discovery_tag(event: &Event) -> Result<(), SdkError> {
@@ -1880,6 +2646,36 @@ mod tests {
                 .expect("fixture issue"),
             folded.diagnostics,
         )
+    }
+
+    #[test]
+    fn import_provenance_omits_additive_fields_when_empty() {
+        let provenance = ImportProvenance {
+            system: "linear".into(),
+            external_id: "LIN-1".into(),
+            source_url: None,
+            imported_at: 1,
+            source_created_at: None,
+            source_updated_at: None,
+            source_completed_at: None,
+            source_cancelled_at: None,
+            archived: None,
+            estimate_points: None,
+            export_sha256: None,
+            importer_version: None,
+            original_author: None,
+            legacy_labels: vec![],
+        };
+
+        assert_eq!(
+            serde_json::to_value(provenance).unwrap(),
+            serde_json::json!({
+                "system": "linear",
+                "external_id": "LIN-1",
+                "source_url": null,
+                "imported_at": 1,
+            })
+        );
     }
 
     #[test]
@@ -2495,5 +3291,111 @@ mod tests {
         assert_eq!(write.source_issue_id, target);
         assert_eq!(write.relation.kind, RelationType::Blocks);
         assert_eq!(write.relation.target_issue_id, source);
+    }
+
+    #[test]
+    fn public_root_builder_round_trips_with_managed_auth_tag() {
+        let keys = Keys::generate();
+        let assignee = Keys::generate();
+        let stream = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let request = Uuid::new_v4();
+        let root = IssueRoot {
+            v: TRACKER_VERSION,
+            op: "create".into(),
+            issue_id: issue,
+            identifier: "SC-1".into(),
+            title: "Builder round trip".into(),
+            body: "body".into(),
+            status: IssueStatus::Todo,
+            priority: Some(Priority::P1),
+            assignee: Some(assignee.public_key().to_hex()),
+            project_id: None,
+            due: None,
+            estimate_minutes: Some(90),
+            home_channel_id: Some(Uuid::new_v4()),
+            source_event_id: None,
+            workflow: "default-v1".into(),
+            labels: vec!["area:tracker".into()],
+            external_refs: vec![ExternalRef {
+                kind: "linear".into(),
+                reference: "SMI-1".into(),
+            }],
+            request_id: Some(request),
+            import: None,
+        };
+        let auth = Tag::parse(["auth", &"1".repeat(64), "", &"2".repeat(128)]).expect("auth tag");
+        let event = build_tracker_issue(stream, &root)
+            .expect("builder")
+            .tag(auth)
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .expect("signed event");
+        let parsed = parse_tracker_event(&event, 100).expect("strict parse");
+        assert_eq!(parsed.issue_id, issue);
+        assert!(matches!(parsed.payload, TrackerPayload::Root(value) if value == root));
+    }
+
+    #[test]
+    fn deterministic_import_uuid_v5_round_trips() {
+        let keys = Keys::generate();
+        let stream = Uuid::new_v4();
+        let issue = Uuid::parse_str("6ba7b812-9dad-51d1-80b4-00c04fd430c8").unwrap();
+        let request = Uuid::parse_str("6ba7b813-9dad-51d1-80b4-00c04fd430c8").unwrap();
+        let mut root = match root(stream, Uuid::new_v4(), "root", 1, MEMBER).payload {
+            TrackerPayload::Root(root) => root,
+            _ => unreachable!(),
+        };
+        root.issue_id = issue;
+        root.request_id = Some(request);
+        let event = build_tracker_issue(stream, &root)
+            .expect("UUIDv5 builder")
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .expect("signed event");
+        assert_eq!(
+            parse_tracker_event(&event, 100).expect("parse").issue_id,
+            issue
+        );
+    }
+
+    #[test]
+    fn project_head_and_activity_round_trip() {
+        let keys = Keys::generate();
+        let workspace = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let tags = vec![
+            Tag::parse(["d", "tracker-core"]).unwrap(),
+            Tag::parse(["name", "Tracker Core"]).unwrap(),
+            Tag::parse(["buzz-project-id", &project_id.to_string()]).unwrap(),
+            Tag::parse(["buzz-workspace", &workspace.to_string()]).unwrap(),
+            Tag::parse(["buzz-status", "triage"]).unwrap(),
+            Tag::parse(["buzz-status", "done"]).unwrap(),
+        ];
+        let head = crate::build_project_with_tags("", tags)
+            .unwrap()
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let project = parse_tracker_project(&head).expect("project parse");
+        assert_eq!(project.project_id, project_id);
+        assert_eq!(project.statuses, [IssueStatus::Triage, IssueStatus::Done]);
+
+        let activity = ProjectActivity {
+            v: TRACKER_VERSION,
+            op: ProjectActivityOperation::Create,
+            project_id,
+            request_id: Uuid::new_v4(),
+            before: None,
+            after: TrackerProjectSnapshot::from(&project),
+        };
+        let event =
+            build_tracker_project_activity(workspace, &activity, &keys.public_key().to_hex())
+                .unwrap()
+                .custom_created_at(Timestamp::from(101))
+                .sign_with_keys(&keys)
+                .unwrap();
+        let parsed = parse_tracker_project_activity(&event, 101).expect("activity parse");
+        assert_eq!(parsed.activity, activity);
     }
 }

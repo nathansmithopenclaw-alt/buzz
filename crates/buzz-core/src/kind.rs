@@ -111,6 +111,8 @@ pub const KIND_TRACKER_COMMENT: u32 = 40022;
 pub const KIND_TRACKER_DISPATCH_ACTION: u32 = 40023;
 /// NIP-BT: service heartbeat projected latest per service identity.
 pub const KIND_TRACKER_SERVICE_HEARTBEAT: u32 = 40024;
+/// NIP-BT: immutable project configuration activity (M20 history stream).
+pub const KIND_TRACKER_PROJECT_ACTIVITY: u32 = 40025;
 
 /// NIP-PL: encrypted push lease (parameterized replaceable, author-only).
 ///
@@ -668,6 +670,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_TRACKER_COMMENT,
     KIND_TRACKER_DISPATCH_ACTION,
     KIND_TRACKER_SERVICE_HEARTBEAT,
+    KIND_TRACKER_PROJECT_ACTIVITY,
     KIND_PERSONA,
     KIND_TEAM,
     KIND_MANAGED_AGENT,

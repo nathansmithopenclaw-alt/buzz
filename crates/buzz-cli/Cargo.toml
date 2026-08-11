@@ -44,6 +44,7 @@ uuid = { workspace = true }
 
 # RFC3339 observer timestamps for owner-reviewed agent draft requests
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 
 # Typed event builders for all write operations
 buzz-sdk = { workspace = true }

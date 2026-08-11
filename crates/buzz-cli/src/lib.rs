@@ -5,7 +5,7 @@ mod error;
 mod links;
 mod validate;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
@@ -186,6 +186,9 @@ enum Cmd {
     /// Assign, update, list, and inspect task envelopes
     #[command(subcommand)]
     Tasks(TasksCmd),
+    /// Manage workspace Tracker issues, boards, projects, and dispatches
+    #[command(subcommand)]
+    Track(TrackCmd),
     /// Create, configure, and manage channels
     #[command(subcommand)]
     Channels(ChannelsCmd),
@@ -727,6 +730,341 @@ pub enum TasksCmd {
         /// Task UUID
         #[arg(long)]
         task: String,
+    },
+}
+
+#[derive(Args, Clone)]
+pub struct TrackMutationArgs {
+    /// Caller-supplied idempotency UUID; generated when omitted
+    #[arg(long)]
+    request_id: Option<String>,
+    /// Human-readable mutation/transition rationale; '-' reads stdin
+    #[arg(long)]
+    reason: Option<String>,
+    /// Require this current folded revision event ID
+    #[arg(long)]
+    if_revision: Option<String>,
+    /// Typed import provenance JSON; importer-only
+    #[arg(long, hide = true)]
+    import_json: Option<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct TrackFilterArgs {
+    /// Workspace Tracker stream UUID
+    #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+    workspace: Option<String>,
+    /// Optional home-channel filter
+    #[arg(long)]
+    channel: Option<String>,
+    /// Status filter; repeatable (OR)
+    #[arg(long)]
+    status: Vec<String>,
+    /// Priority filter; repeatable (OR), including none
+    #[arg(long)]
+    priority: Vec<String>,
+    /// Assignee filter; repeatable (OR)
+    #[arg(long)]
+    assignee: Vec<String>,
+    /// Project UUID/slug/none filter; repeatable (OR)
+    #[arg(long)]
+    project: Vec<String>,
+    /// Required label; repeatable (AND)
+    #[arg(long)]
+    label: Vec<String>,
+    /// Alternative label; repeatable (OR)
+    #[arg(long = "label-any")]
+    label_any: Vec<String>,
+    /// Due-date upper bound (YYYY-MM-DD)
+    #[arg(long)]
+    due_before: Option<String>,
+    /// Due-date lower bound (YYYY-MM-DD)
+    #[arg(long)]
+    due_after: Option<String>,
+    /// Only overdue non-terminal issues
+    #[arg(long)]
+    overdue: bool,
+    /// Case-insensitive title/body/identifier search
+    #[arg(long)]
+    query: Option<String>,
+    /// Include done/cancelled issues
+    #[arg(long)]
+    include_closed: bool,
+    /// Maximum result count
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=500))]
+    limit: u32,
+    /// Exclusive opaque continuation cursor
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Sort key: created, updated, priority, due, or identifier
+    #[arg(long, default_value = "priority")]
+    sort: String,
+    /// Sort order: asc or desc
+    #[arg(long, default_value = "desc")]
+    order: String,
+    /// Only issues updated at/after unix or RFC3339 time
+    #[arg(long)]
+    updated_since: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum TrackCmd {
+    /// Create one workspace Tracker issue
+    Create {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        /// Deterministic issue UUID; importer-only
+        #[arg(long, hide = true)]
+        issue_id: Option<String>,
+        /// Preserved display identifier; importer-only
+        #[arg(long, hide = true)]
+        identifier: Option<String>,
+        #[arg(long)]
+        channel: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long, default_value = "")]
+        body: String,
+        #[arg(long, default_value = "triage")]
+        status: String,
+        #[arg(long)]
+        priority: Option<String>,
+        #[arg(long)]
+        assignee: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        label: Vec<String>,
+        #[arg(long)]
+        due: Option<String>,
+        #[arg(long, default_value = "America/New_York")]
+        tz: String,
+        #[arg(long)]
+        estimate: Option<String>,
+        #[arg(long)]
+        origin_message: Option<String>,
+        #[arg(long)]
+        external_id: Vec<String>,
+        #[command(flatten)]
+        mutation: TrackMutationArgs,
+    },
+    /// Append a sparse field-level issue revision
+    Update {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        priority: Option<String>,
+        #[arg(long)]
+        assignee: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        due: Option<String>,
+        #[arg(long, default_value = "America/New_York")]
+        tz: String,
+        #[arg(long)]
+        estimate: Option<String>,
+        #[arg(long)]
+        add_label: Vec<String>,
+        #[arg(long)]
+        remove_label: Vec<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[command(flatten)]
+        mutation: TrackMutationArgs,
+    },
+    /// List folded current issue summaries
+    List {
+        #[command(flatten)]
+        filters: TrackFilterArgs,
+    },
+    /// Get one folded issue and optional history
+    Get {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        no_history: bool,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        include_comments: bool,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        include_linked_tasks: bool,
+    },
+    /// Group folded issues into board buckets
+    Board {
+        #[command(flatten)]
+        filters: TrackFilterArgs,
+        #[arg(long, default_value = "status")]
+        group_by: String,
+        #[arg(long)]
+        columns: Option<String>,
+        #[arg(long)]
+        include_empty: bool,
+        #[arg(long)]
+        count_only: bool,
+    },
+    /// Append an issue comment
+    Comment {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        content: String,
+        #[arg(long)]
+        reply_to: Option<String>,
+        #[arg(long)]
+        mention: Vec<String>,
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Typed import provenance JSON; importer-only
+        #[arg(long, hide = true)]
+        import_json: Option<String>,
+    },
+    /// Add/remove a canonical issue relation
+    Relate {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        #[arg(long)]
+        issue: String,
+        #[arg(long = "type")]
+        relation_type: String,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        remove: bool,
+        #[command(flatten)]
+        mutation: TrackMutationArgs,
+    },
+    /// Add/remove a typed external reference
+    Link {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        #[arg(long)]
+        issue: String,
+        #[arg(long = "type")]
+        link_type: String,
+        #[arg(long = "ref")]
+        reference: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        remove: bool,
+        #[command(flatten)]
+        mutation: TrackMutationArgs,
+    },
+    /// Create a task envelope and reciprocal issue link
+    Dispatch {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        assignee: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long = "deliverable")]
+        deliverables: Vec<String>,
+        #[arg(long = "verify")]
+        verification: Option<String>,
+        #[arg(long)]
+        content: Option<String>,
+        #[arg(long)]
+        replace_active: bool,
+        #[arg(long, default_value = "todo")]
+        set_status: String,
+        #[command(flatten)]
+        mutation: TrackMutationArgs,
+    },
+    /// Stream ordered Tracker activity as NDJSON
+    Watch {
+        #[command(flatten)]
+        filters: TrackFilterArgs,
+        #[arg(long = "event-type")]
+        event_type: Vec<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        heartbeat: u64,
+        #[arg(long, default_value_t = 0)]
+        backfill: u32,
+    },
+    /// Manage Tracker metadata on NIP-MP project heads
+    #[command(subcommand)]
+    Project(TrackProjectCmd),
+}
+
+#[derive(Subcommand)]
+pub enum TrackProjectCmd {
+    /// Create a Tracker-managed project
+    Create {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        /// Deterministic project UUID; importer-only
+        #[arg(long, hide = true)]
+        project_id: Option<String>,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        status: Vec<String>,
+        #[arg(long)]
+        default_channel: Option<String>,
+        #[arg(long)]
+        default_verify: Option<String>,
+        #[command(flatten)]
+        mutation: TrackMutationArgs,
+    },
+    /// Update or atomically rename a Tracker-managed project
+    Update {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        slug: Option<String>,
+        #[arg(long)]
+        status: Vec<String>,
+        #[arg(long)]
+        default_channel: Option<String>,
+        #[arg(long)]
+        default_verify: Option<String>,
+        #[arg(long)]
+        map_status: Vec<String>,
+        #[command(flatten)]
+        mutation: TrackMutationArgs,
+    },
+    /// List Tracker-managed projects
+    List {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=500))]
+        limit: u32,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Get a Tracker-managed project by UUID or slug
+    Get {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        #[arg(long)]
+        project: String,
     },
 }
 
@@ -2201,6 +2539,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Teams(sub) => commands::teams::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Tasks(sub) => commands::tasks::dispatch(sub, &client).await,
+        Cmd::Track(sub) => commands::track::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
@@ -2359,6 +2698,7 @@ mod tests {
             "social",
             "tasks",
             "teams",
+            "track",
             "upload",
             "users",
             "workflows",
@@ -2433,6 +2773,13 @@ mod tests {
         assert_eq!(
             names(&cmd, "tasks"),
             vec!["assign", "get", "list", "update"]
+        );
+        assert_eq!(
+            names(&cmd, "track"),
+            vec![
+                "board", "comment", "create", "dispatch", "get", "link", "list", "project",
+                "relate", "update", "watch"
+            ]
         );
         assert_eq!(
             names(&cmd, "teams"),

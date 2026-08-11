@@ -47,7 +47,7 @@ fn parse_deliverable(value: &str) -> Result<TaskDeliverable, CliError> {
     })
 }
 
-fn parse_deliverables(values: &[String]) -> Result<Vec<TaskDeliverable>, CliError> {
+pub(crate) fn parse_deliverables(values: &[String]) -> Result<Vec<TaskDeliverable>, CliError> {
     values
         .iter()
         .map(|value| parse_deliverable(value))
@@ -62,7 +62,7 @@ fn parse_task_events(values: Vec<serde_json::Value>) -> Vec<TaskEnvelopeEvent> {
         .collect()
 }
 
-async fn query_task_events(
+pub(crate) async fn query_task_events(
     client: &BuzzClient,
     channel: Option<Uuid>,
 ) -> Result<Vec<TaskEnvelopeEvent>, CliError> {
@@ -114,7 +114,7 @@ fn profile_name(event: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn resolve_assignee(
+pub(crate) async fn resolve_assignee(
     client: &BuzzClient,
     channel: Uuid,
     value: &str,
