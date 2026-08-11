@@ -1,0 +1,48 @@
+{
+  "complete_export": true,
+  "workspace_id": "linear-workspace-1",
+  "issues": [
+    {
+      "id": "linear-issue-1",
+      "identifier": "SC-1",
+      "title": "Imported open issue",
+      "description": "Source body",
+      "createdAt": "2026-08-01T12:00:00Z",
+      "updatedAt": "2026-08-02T12:00:00Z",
+      "creator": { "id": "linear-user-1" },
+      "assignee": { "id": "linear-user-1" },
+      "priority": 2,
+      "estimate": 3,
+      "dueDate": "2026-08-20",
+      "team": { "key": "SC" },
+      "state": { "id": "linear-state-started", "name": "Started" },
+      "project": { "id": "linear-project-1", "name": "Dispatch" },
+      "labels": [{ "name": "Area:Tracker" }],
+      "relations": [{ "type": "blocks", "target": { "id": "linear-issue-2" } }],
+      "links": [{ "type": "pull_request", "url": "https://example.test/pr/1" }],
+      "comments": [
+        {
+          "id": "linear-comment-1",
+          "body": "Imported comment",
+          "createdAt": "2026-08-01T13:00:00Z",
+          "user": { "id": "linear-user-1" }
+        }
+      ]
+    },
+    {
+      "id": "linear-issue-2",
+      "identifier": "SC-2",
+      "title": "Imported closed issue",
+      "description": "Closed source body",
+      "createdAt": "2026-07-01T12:00:00Z",
+      "updatedAt": "2026-07-03T12:00:00Z",
+      "completedAt": "2026-07-03T12:00:00Z",
+      "archived": true,
+      "creator": { "id": "linear-user-1" },
+      "state": { "id": "linear-state-completed", "name": "Completed" },
+      "project": { "id": "linear-project-1", "name": "Dispatch" },
+      "team": { "key": "SC" }
+    }
+  ],
+  "projects": [{ "id": "linear-project-1", "name": "Dispatch" }]
+}

@@ -918,7 +918,7 @@ async fn steer_rejected_on_run_id_mismatch() {
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
 
-    let p_id = h
+    let _p_id = h
         .send(
             "session/prompt",
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
@@ -937,21 +937,11 @@ async fn steer_rejected_on_run_id_mismatch() {
         )
         .await;
 
-    let mut saw_reject = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(s_id) {
-            assert_eq!(
-                v["error"]["code"], -32602,
-                "mismatched runId must be rejected"
-            );
-            saw_reject = true;
-        } else if v["id"] == json!(p_id) {
-            // Turn finishes normally regardless of the rejected steer.
-            break;
-        }
-    }
-    assert!(saw_reject, "run-id mismatch was not rejected");
+    let v = h.recv_until(|value| value["id"] == json!(s_id)).await;
+    assert_eq!(
+        v["error"]["code"], -32602,
+        "mismatched runId must be rejected"
+    );
     h.shutdown().await;
 }
 

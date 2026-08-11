@@ -1,0 +1,6 @@
+{
+  "linear-issue-1": {
+    "event_id": "4444444444444444444444444444444444444444444444444444444444444444",
+    "labels": ["priority:P1", "due:2026-08-20", "project:dispatch", "linear:linear-issue-1"]
+  }
+}

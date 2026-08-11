@@ -948,6 +948,7 @@ dependencies = [
  "buzz-ws-client",
  "bytes",
  "chrono",
+ "chrono-tz",
  "clap",
  "diffy",
  "dirs",

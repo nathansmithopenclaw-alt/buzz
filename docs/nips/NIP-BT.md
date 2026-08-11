@@ -6,7 +6,8 @@
 
 This document defines an append-only, workspace-scoped issue protocol for
 Nostr collaboration systems. It allocates immutable issue, revision, and
-comment kinds, plus dispatcher-action and service-heartbeat kinds. Current
+comment kinds, a project-activity kind, plus dispatcher-action and
+service-heartbeat kinds. Current
 state is a deterministic projection produced by a strict shared folder; relay
 arrival order and replaceable-event semantics do not select state.
 
@@ -19,15 +20,16 @@ arrival order and replaceable-event semantics do not select state.
 | 40022 | `TRACKER_COMMENT` | Immutable comment; NIP-09 may redact it |
 | 40023 | `TRACKER_DISPATCH_ACTION` | Immutable idempotent automation action |
 | 40024 | `TRACKER_SERVICE_HEARTBEAT` | Latest heartbeat per service identity |
+| 40025 | `TRACKER_PROJECT_ACTIVITY` | Immutable project update/rename history |
 
-All five kinds are workspace-channel scoped and MUST carry exactly one
+All six kinds are workspace-channel scoped and MUST carry exactly one
 `["h", "<tracker-stream-uuid>"]` tag. A deployment provides one Tracker
 stream UUID through workspace configuration; protocol implementations MUST
 NOT hardcode organization names, stream IDs, identifier prefixes, roles, or
 routing tables.
 
 Kinds 40020, 40021, and 40022 additionally carry exactly one issue identity
-tag `["d", "<uuid-v4>"]` and exactly one discovery tag
+tag `["d", "<uuid-v4-or-v5>"]` and exactly one discovery tag
 `["t", "buzz-tracker"]`. The issue root event ID remains part of every state
 reference so an accidental duplicate UUID cannot retarget a relation.
 
@@ -91,6 +93,12 @@ When multiple issues in one stream claim an identifier, the issue whose root
 has the smaller `(created_at, event_id)` is canonical; all other claims remain
 visible as collision diagnostics.
 
+Importer-generated issue and request IDs MAY use UUIDv5. Interactive CLI
+writes use UUIDv4. Import provenance is strict typed data: source system and
+external ID, source URL/timestamps, import timestamp, archived state, source
+estimate points, export SHA-256, importer version, original author, and legacy
+pilot labels. It never changes the Nostr signer or event `created_at`.
+
 ## Revisions (40021)
 
 A revision carries exactly one root marker, parent marker, and revision tag:
@@ -148,6 +156,29 @@ A valid NIP-09 deletion may redact a comment. Projections retain a redaction
 marker at the comment's original activity position. NIP-09 deletion requests
 targeting 40020 roots or 40021 revisions MUST be rejected; administrative
 erasure is a distinct governed operation and does not rewrite normal history.
+
+## Projects and project activity (30621, 40025)
+
+Tracker reuses the NIP-MP kind-30621 project entity. Its `d` tag is the
+human-readable slug. A Tracker-managed head additionally carries
+`["buzz-project-id", "<immutable-uuid>"]` and
+`["buzz-workspace", "<tracker-stream-uuid>"]`, plus ordered workflow status
+tags and optional channel/verification defaults. The shared SDK projection
+maps the immutable UUID to the signer's current coordinate at read time;
+issues store only that UUID.
+
+Slug uniqueness is enforced by CLI/projection scope among the workspace
+signer's managed projects. A rename publishes the same project UUID at the
+new `d` address and a NIP-09 deletion for the old kind-30621 address. A relay
+cannot enforce uniqueness across signers. Cross-signer upstream NIP-MP heads
+without Tracker UUID/workspace tags may be referenced by coordinate with a
+warning, but are not Tracker-manageable.
+
+Every project create, update, or rename also publishes immutable kind 40025.
+Its strict content contains `v`, `op`, `project_id`, `request_id`, and complete
+before/after snapshots. Tags include `h`, `t:buzz-tracker-project-activity`,
+`d:<project-uuid>`, and `request`. This activity stream—not retention of old
+replaceable heads—is the readable project revision history.
 
 ## Dispatcher actions (40023)
 
@@ -219,8 +250,12 @@ until the consuming harness has the v2 SDK.
 
 ## Subscription shapes
 
-Consumers bootstrap one stream with filters for kinds 40020–40024 plus `#h`,
+Consumers bootstrap one stream with filters for kinds 40020–40025 plus `#h`,
 then incrementally subscribe by the same stream. Detail reads add `#d`; request
 reconciliation adds `#request`; label/triage queries add `#l` but always feed
 the complete issue history to the shared folder before claiming current
 state. Raw relay filters are candidate indexes, not current-state queries.
+Consumers persist a local projection and a composite `(created_at,event_id)`
+cursor. Refresh queries are inclusive at the last timestamp and deduplicate by
+event ID, so same-second events cannot be skipped. Naively refetching and
+refolding the full stream for every command is not conformant.

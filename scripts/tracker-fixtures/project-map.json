@@ -1,0 +1,10 @@
+{
+  "linear-project-1": {
+    "project_id": "22222222-2222-4222-8222-222222222222",
+    "name": "Dispatch",
+    "slug": "dispatch",
+    "statuses": ["triage", "backlog", "todo", "in_progress", "in_review", "done", "cancelled"],
+    "default_channel_id": "33333333-3333-4333-8333-333333333333",
+    "default_verify": "Exact-head verification"
+  }
+}
