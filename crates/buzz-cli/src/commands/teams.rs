@@ -67,44 +67,6 @@ struct AddTeamToChannelRequest {
     team: String,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn create_omits_absent_optional_fields() {
-        let value = serde_json::to_value(CreateTeamRequest {
-            channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
-            name: "Review team".into(),
-            description: None,
-            instructions: None,
-            members: Vec::new(),
-        })
-        .unwrap();
-
-        assert!(value.get("description").is_none());
-        assert!(value.get("instructions").is_none());
-        assert_eq!(value["members"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn update_omits_all_absent_optional_fields() {
-        let value = serde_json::to_value(UpdateTeamRequest {
-            channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
-            team: "Review team".into(),
-            name: None,
-            description: None,
-            instructions: None,
-            members: None,
-        })
-        .unwrap();
-
-        for field in ["name", "description", "instructions", "members"] {
-            assert!(value.get(field).is_none(), "{field} serialized as null");
-        }
-    }
-}
-
 fn require_owner(client: &BuzzClient) -> Result<PublicKey, CliError> {
     let owner = client
         .auth_tag_owner_hex()
@@ -346,6 +308,44 @@ pub async fn dispatch(command: TeamsCmd, client: &BuzzClient) -> Result<(), CliE
                     .map_err(|error| CliError::Other(error.to_string()))?
             );
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_omits_absent_optional_fields() {
+        let value = serde_json::to_value(CreateTeamRequest {
+            channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
+            name: "Review team".into(),
+            description: None,
+            instructions: None,
+            members: Vec::new(),
+        })
+        .unwrap();
+
+        assert!(value.get("description").is_none());
+        assert!(value.get("instructions").is_none());
+        assert_eq!(value["members"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn update_omits_all_absent_optional_fields() {
+        let value = serde_json::to_value(UpdateTeamRequest {
+            channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
+            team: "Review team".into(),
+            name: None,
+            description: None,
+            instructions: None,
+            members: None,
+        })
+        .unwrap();
+
+        for field in ["name", "description", "instructions", "members"] {
+            assert!(value.get(field).is_none(), "{field} serialized as null");
         }
     }
 }
