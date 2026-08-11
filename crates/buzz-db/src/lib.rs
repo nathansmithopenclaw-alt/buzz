@@ -4952,6 +4952,126 @@ impl Db {
         ))
     }
 
+    /// Atomically publish a NIP-IA archived-identities snapshot under a single
+    /// transaction-scoped advisory lock.
+    ///
+    /// The lock covers the canonical-row read, event construction, and snapshot
+    /// replacement. Concurrent publishers for the same community therefore read
+    /// state in publication order instead of allowing an older read to overwrite
+    /// a newer snapshot after signing.
+    pub async fn publish_nipia_archival_list_locked(
+        &self,
+        community_id: CommunityId,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<(StoredEvent, bool, usize)> {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        let kind_i32 = buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32;
+        let pubkey_bytes = relay_keypair.public_key().to_bytes();
+        let lock_key =
+            event_replacement_lock_key(community_id, kind_i32, pubkey_bytes.as_slice(), None);
+
+        let mut tx = self.pool.begin().await?;
+
+        // Acquire the snapshot lock before reading the archive table. Archive
+        // mutations need not take this lock: once a publisher acquires it, its
+        // read observes every mutation committed before that publication turn.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        let rows = sqlx::query(
+            "SELECT pubkey FROM archived_identities \
+             WHERE community_id = $1 ORDER BY archived_at ASC, pubkey ASC",
+        )
+        .bind(community_id.as_uuid())
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let archived_count = rows.len();
+        let mut tags: Vec<Tag> = Vec::with_capacity(archived_count + 1);
+        tags.push(
+            Tag::parse(["-"])
+                .map_err(|e| DbError::InvalidData(format!("failed to build '-' tag: {e}")))?,
+        );
+        for row in &rows {
+            let pubkey: String = row.try_get("pubkey")?;
+            tags.push(
+                Tag::parse(["p", &pubkey])
+                    .map_err(|e| DbError::InvalidData(format!("failed to build p tag: {e}")))?,
+            );
+        }
+
+        let event = EventBuilder::new(Kind::Custom(kind_i32 as u16), "")
+            .tags(tags)
+            .sign_with_keys(relay_keypair)
+            .map_err(|e| DbError::InvalidData(format!("failed to sign kind:{kind_i32}: {e}")))?;
+
+        let created_at_secs = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+        let sig_bytes = event.sig.serialize();
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let received_at = chrono::Utc::now();
+        let d_tag = crate::event::extract_d_tag(&event);
+
+        // Relay snapshots are authoritative current state. Replace
+        // unconditionally so two updates within the same Nostr timestamp second
+        // are not decided by event-id ordering instead of publication order.
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+             AND channel_id IS NULL AND deleted_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .execute(&mut *tx)
+        .await?;
+
+        let insert_result = sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(pubkey_bytes.as_slice())
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(received_at)
+        .bind::<Option<Uuid>>(None)
+        .bind(d_tag.as_deref())
+        .execute(&mut *tx)
+        .await?;
+
+        let was_inserted = insert_result.rows_affected() > 0;
+        if !was_inserted {
+            tx.rollback().await?;
+            return Ok((
+                StoredEvent::with_received_at(event, received_at, None, false),
+                false,
+                archived_count,
+            ));
+        }
+
+        tx.commit().await?;
+
+        if let Err(e) = crate::insert_mentions(&self.pool, community_id, &event, None).await {
+            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+        }
+
+        Ok((
+            StoredEvent::with_received_at(event, received_at, None, true),
+            true,
+            archived_count,
+        ))
+    }
+
     /// Atomically replace a NIP-33 parameterized replaceable event (kind 30000–39999).
     ///
     /// Keeps only the event with the highest `created_at` per `(kind, pubkey, d_tag)`.
@@ -5298,6 +5418,106 @@ mod tests {
             .await
             .expect("insert community");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nipia_snapshot_lock_precedes_archived_identity_read() {
+        use nostr::Keys;
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url().await)
+            .await
+            .expect("connect admin to create scratch db");
+        let (pool, scratch_name) = create_scratch_db(&admin, "nipia_snapshot_lock").await;
+        let db = Db::from_pool(pool.clone());
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let relay_keys = Keys::generate();
+        let first_pubkey = "a".repeat(64);
+        let second_pubkey = "b".repeat(64);
+        let actor = "c".repeat(64);
+        let first_request = "d".repeat(64);
+        let second_request = "e".repeat(64);
+
+        assert!(db
+            .archive(
+                community,
+                &first_pubkey,
+                "self",
+                &actor,
+                None,
+                None,
+                &first_request,
+            )
+            .await
+            .expect("archive first identity"));
+
+        let lock_key = event_replacement_lock_key(
+            community,
+            buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32,
+            relay_keys.public_key().to_bytes().as_slice(),
+            None,
+        );
+        let mut blocker = db.pool.begin().await.expect("begin blocker transaction");
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *blocker)
+            .await
+            .expect("hold NIP-IA snapshot lock");
+
+        let publish_db = db.clone();
+        let publish_keys = relay_keys.clone();
+        let publish_task = tokio::spawn(async move {
+            publish_db
+                .publish_nipia_archival_list_locked(community, &publish_keys)
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !publish_task.is_finished(),
+            "snapshot publication must wait for the per-community lock before reading"
+        );
+
+        assert!(db
+            .archive(
+                community,
+                &second_pubkey,
+                "self",
+                &actor,
+                None,
+                None,
+                &second_request,
+            )
+            .await
+            .expect("archive second identity while publisher waits"));
+        blocker.commit().await.expect("release snapshot lock");
+
+        let (stored, was_inserted, archived_count) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), publish_task)
+                .await
+                .expect("snapshot publication timed out")
+                .expect("snapshot task panicked")
+                .expect("publish snapshot");
+        assert!(was_inserted, "snapshot should be stored");
+        assert_eq!(archived_count, 2);
+
+        let mut snapshot_pubkeys = stored
+            .event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("p") && parts.len() >= 2)
+                    .then(|| parts[1].clone())
+            })
+            .collect::<Vec<_>>();
+        snapshot_pubkeys.sort_unstable();
+        assert_eq!(snapshot_pubkeys, vec![first_pubkey, second_pubkey]);
+
+        drop(db);
+        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]

@@ -3129,31 +3129,16 @@ pub async fn reconcile_channel_events(
 ///
 /// Queries all current archived identities and emits a relay-signed,
 /// NIP-70-protected replaceable-by-convention snapshot with bare `p` tags.
+/// The read, event construction, and replacement are serialized per community
+/// in Postgres so a snapshot built from older state cannot overwrite a newer one.
 pub async fn publish_nipia_archival_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let archived = state.db.list_archived(tenant.community()).await?;
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
-
-    let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
-    tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
-
-    for identity in &archived {
-        tags.push(
-            Tag::parse(["p", &identity.pubkey])
-                .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
-        );
-    }
-
-    let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
-        .tags(tags)
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
-
-    let (stored, was_inserted) = state
+    let (stored, was_inserted, archived_count) = state
         .db
-        .replace_addressable_event(tenant.community(), &event, None)
+        .publish_nipia_archival_list_locked(tenant.community(), &state.relay_keypair)
         .await?;
     if was_inserted {
         dispatch_persistent_event(
@@ -3167,10 +3152,7 @@ pub async fn publish_nipia_archival_list(
         .await;
     }
 
-    info!(
-        archived_count = archived.len(),
-        "NIP-IA archived identities list published"
-    );
+    info!(archived_count, "NIP-IA archived identities list published");
     Ok(())
 }
 
