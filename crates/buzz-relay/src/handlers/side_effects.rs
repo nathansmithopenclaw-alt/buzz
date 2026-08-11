@@ -2165,14 +2165,40 @@ async fn handle_a_tag_deletion(
                     }
                 }
             }
+
+            // Workflow definitions have two read models: the relational row
+            // used by the engine and the parameterized kind-30620 event used
+            // by Nostr list/get reads. Keep both in sync on deletion.
+            let pubkey_bytes = hex::decode(pubkey_hex)
+                .map_err(|e| anyhow::anyhow!("invalid pubkey hex in a-tag {pubkey_hex}: {e}"))?;
+            let deleted = state
+                .db
+                .soft_delete_by_coordinate(
+                    tenant.community(),
+                    buzz_core::kind::KIND_WORKFLOW_DEF as i32,
+                    &pubkey_bytes,
+                    d_tag,
+                    event.created_at.as_secs() as i64,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to soft-delete workflow definition {pubkey_hex}:{d_tag}: {e}"
+                    )
+                })?;
+            tracing::debug!(
+                d_tag,
+                deleted,
+                "NIP-09 workflow deletion synchronized definition event"
+            );
         }
         // Generic NIP-33 (parameterized-replaceable) soft-delete by coordinate.
         //
-        // Listed after the workflow branch so workflow's bespoke deletion
-        // (which doesn't soft-delete the `events` row by design — that's a
-        // separate concern) takes precedence. For every other addressable
-        // kind, including kind:30023 (NIP-23 long-form), we soft-delete the
-        // live row matching `(kind, pubkey, d_tag)` so REQs stop returning it.
+        // Listed after the workflow branch so workflow's bespoke relational
+        // deletion and cache invalidation take precedence. For every other
+        // addressable kind, including kind:30023 (NIP-23 long-form), we
+        // soft-delete the live row matching `(kind, pubkey, d_tag)` so REQs
+        // stop returning it.
         // See https://github.com/block/sprout/issues/714.
         k if is_parameterized_replaceable(k) => {
             let pubkey_bytes = match hex::decode(pubkey_hex) {

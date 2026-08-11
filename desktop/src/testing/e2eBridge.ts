@@ -3619,6 +3619,62 @@ function handleGetRunApprovals(_args: { workflowId: string; runId: string }) {
   return [];
 }
 
+const mockApprovalResolutions = new Map<
+  string,
+  { status: string; note: string | null; created_at: number }
+>();
+const MOCK_APPROVAL_RESOLUTIONS_STORAGE_KEY =
+  "buzz-e2e-workflow-approval-resolutions";
+
+function persistedMockApprovalResolutions() {
+  try {
+    return JSON.parse(
+      localStorage.getItem(MOCK_APPROVAL_RESOLUTIONS_STORAGE_KEY) ?? "{}",
+    ) as Record<
+      string,
+      { status: string; note: string | null; created_at: number }
+    >;
+  } catch {
+    return {};
+  }
+}
+
+async function approvalTokenHash(token: string) {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(token),
+  );
+  return Array.from(new Uint8Array(digest), (value) =>
+    value.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+async function handleApprovalDecision(
+  args: { token: string; note?: string | null },
+  status: "granted" | "denied",
+) {
+  const tokenHash = await approvalTokenHash(args.token);
+  const resolution = {
+    status,
+    note: args.note ?? null,
+    created_at: Math.floor(Date.now() / 1_000),
+  };
+  mockApprovalResolutions.set(tokenHash, resolution);
+  localStorage.setItem(
+    MOCK_APPROVAL_RESOLUTIONS_STORAGE_KEY,
+    JSON.stringify({
+      ...persistedMockApprovalResolutions(),
+      [tokenHash]: resolution,
+    }),
+  );
+  return {
+    token: args.token,
+    status,
+    run_id: "mock-approval-run",
+    workflow_id: "mock-approval-workflow",
+  };
+}
+
 const mockProfiles = new Map<string, RawProfile>([
   [
     MOCK_IDENTITY_PUBKEY,
@@ -10164,6 +10220,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockPersonaCatalogEvents(config);
   resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
+  mockApprovalResolutions.clear();
   initializeMockHuddle(config.mock?.huddle, config);
   mockWebsocketSendMutexWedged = false;
   if (config.mock?.windowLabel) {
@@ -13041,6 +13098,26 @@ export function maybeInstallE2eTauriMocks() {
       case "get_run_approvals":
         return handleGetRunApprovals(
           payload as Parameters<typeof handleGetRunApprovals>[0],
+        );
+      case "get_approval_resolution":
+        return (
+          mockApprovalResolutions.get(
+            (payload as { tokenHash: string }).tokenHash,
+          ) ??
+          persistedMockApprovalResolutions()[
+            (payload as { tokenHash: string }).tokenHash
+          ] ??
+          null
+        );
+      case "grant_approval":
+        return handleApprovalDecision(
+          payload as Parameters<typeof handleApprovalDecision>[0],
+          "granted",
+        );
+      case "deny_approval":
+        return handleApprovalDecision(
+          payload as Parameters<typeof handleApprovalDecision>[0],
+          "denied",
         );
       case "plugin:webview|set_webview_zoom":
         window.__BUZZ_E2E_WEBVIEW_ZOOM__ = (payload as { value: number }).value;

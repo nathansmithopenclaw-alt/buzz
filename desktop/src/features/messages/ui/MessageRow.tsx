@@ -25,6 +25,7 @@ import {
   THREAD_REPLY_LINE_WIDTH_REM,
 } from "@/features/messages/lib/threadTreeLayout";
 import {
+  KIND_APPROVAL_REQUEST,
   KIND_HUDDLE_STARTED,
   KIND_STREAM_MESSAGE_DIFF,
 } from "@/shared/constants/kinds";
@@ -52,6 +53,7 @@ import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { WorkflowApprovalRequestCard } from "@/features/workflows/ui/WorkflowApprovalRequestCard";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
@@ -342,6 +344,13 @@ export const MessageRow = React.memo(
 
     const renderBody = () => {
       switch (message.kind) {
+        case KIND_APPROVAL_REQUEST:
+          return (
+            <WorkflowApprovalRequestCard
+              content={message.body}
+              tags={message.tags}
+            />
+          );
         case KIND_STREAM_MESSAGE_DIFF:
           return (
             <React.Suspense

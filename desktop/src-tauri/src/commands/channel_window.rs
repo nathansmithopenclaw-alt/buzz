@@ -2,7 +2,7 @@ use tauri::State;
 
 use crate::{app_state::AppState, models::ChannelPageCursor, relay::query_relay};
 
-const TIMELINE_KINDS: [u32; 11] = [
+const TIMELINE_KINDS: [u32; 12] = [
     9,
     40002,
     40008,
@@ -13,6 +13,7 @@ const TIMELINE_KINDS: [u32; 11] = [
     43004,
     43005,
     43006,
+    buzz_core_pkg::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
     buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
 ];
 

@@ -87,7 +87,6 @@ use tray_menu::show_main_window;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     runtime_identity::log_desktop_identity();
-
     // mesh-llm's async chains (model download, node start/join) overflow
     // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
     // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
@@ -840,6 +839,7 @@ pub fn run() {
             delete_workflow,
             get_workflow_runs,
             get_run_approvals,
+            get_approval_resolution,
             trigger_workflow,
             grant_approval,
             deny_approval,

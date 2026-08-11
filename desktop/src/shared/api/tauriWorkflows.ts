@@ -4,6 +4,7 @@ import type {
   TriggerWorkflowResponse,
   Workflow,
   WorkflowApproval,
+  WorkflowApprovalResolution,
   WorkflowRun,
   WorkflowSaveResult,
   TraceEntry,
@@ -58,6 +59,12 @@ type RawWorkflowApproval = {
   approver_pubkey: string | null;
   note: string | null;
   expires_at: string;
+  created_at: number;
+};
+
+type RawWorkflowApprovalResolution = {
+  status: WorkflowApprovalResolution["status"];
+  note: string | null;
   created_at: number;
 };
 
@@ -236,6 +243,19 @@ export async function getRunApprovals(
     runId,
   });
   return raw.map(fromRawApproval);
+}
+
+export async function getApprovalResolution(
+  tokenHash: string,
+  approverPubkey: string,
+): Promise<WorkflowApprovalResolution | null> {
+  const raw = await invokeTauri<RawWorkflowApprovalResolution | null>(
+    "get_approval_resolution",
+    { tokenHash, approverPubkey },
+  );
+  return raw
+    ? { status: raw.status, note: raw.note, createdAt: raw.created_at }
+    : null;
 }
 
 export async function triggerWorkflow(

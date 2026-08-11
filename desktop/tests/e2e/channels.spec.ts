@@ -31,7 +31,9 @@ type MockFeedWindow = Window & {
     channelName: string;
     content: string;
     createdAt?: number;
+    extraTags?: string[][];
     id?: string;
+    kind?: number;
     parentEventId?: string;
     pubkey?: string;
   }) => {
@@ -1836,6 +1838,66 @@ test("channel with messages shows content", async ({ page }) => {
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Welcome to #general",
   );
+});
+
+test("workflow approval card completes and preserves a decision round trip", async ({
+  page,
+}) => {
+  const approvalToken = "123e4567-e89b-12d3-a456-426614174000";
+  const tokenHash =
+    "986c0dc956dc822b5d8f698661b9eb1ef880786ff9043c16744d2a420e99e9bb";
+
+  const emitApproval = async () => {
+    await page.evaluate(
+      ({ approverPubkey, expiresAt, senderPubkey, token, tokenHash }) => {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "general",
+          content: "Approve the channel workflow proof?",
+          id: "a".repeat(64),
+          kind: 46010,
+          pubkey: senderPubkey,
+          extraTags: [
+            ["p", approverPubkey],
+            ["d", tokenHash],
+            ["token", token],
+            ["expiration", expiresAt],
+          ],
+        });
+      },
+      {
+        approverPubkey: MOCK_IDENTITY_PUBKEY,
+        expiresAt: String(Math.floor(Date.now() / 1_000) + 3_600),
+        senderPubkey: TEST_IDENTITIES.alice.pubkey,
+        token: approvalToken,
+        tokenHash,
+      },
+    );
+  };
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await waitForMockLiveSubscription(page, "general", 39005);
+  await emitApproval();
+
+  const card = page.getByTestId("workflow-approval-request-card");
+  await expect(card).toContainText("Approve the channel workflow proof?");
+  await expect(card.getByRole("button", { name: "Approve" })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Reject" })).toBeVisible();
+
+  await card.getByRole("button", { name: "Reject" }).click();
+  await expect(page.getByTestId("workflow-approval-outcome")).toHaveText(
+    "Rejected",
+  );
+
+  await page.reload();
+  await page.getByTestId("channel-general").click();
+  await waitForMockLiveSubscription(page, "general", 39005);
+  await emitApproval();
+  await expect(page.getByTestId("workflow-approval-outcome")).toHaveText(
+    "Rejected",
+  );
+  await expect(card.getByRole("button", { name: "Approve" })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Reject" })).toHaveCount(0);
 });
 
 test("channel date divider keeps the date sticky while the separator rule scrolls", async ({

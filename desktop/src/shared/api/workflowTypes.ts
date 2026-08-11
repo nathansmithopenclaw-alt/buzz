@@ -65,6 +65,12 @@ export type WorkflowApproval = {
   createdAt: number;
 };
 
+export type WorkflowApprovalResolution = {
+  status: "granted" | "denied";
+  note: string | null;
+  createdAt: number;
+};
+
 export type TriggerWorkflowResponse = {
   runId: string;
   workflowId: string;

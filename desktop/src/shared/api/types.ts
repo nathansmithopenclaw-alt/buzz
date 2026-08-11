@@ -878,6 +878,7 @@ export type {
   ApprovalActionResponse,
   Workflow,
   WorkflowApproval,
+  WorkflowApprovalResolution,
   WorkflowApprovalStatus,
   WorkflowRun,
   WorkflowRunStatus,
