@@ -372,7 +372,14 @@ pub async fn cmd_set_profile(
     // Read-merge-write: fetch current profile, merge in the new fields, then sign.
     let current = fetch_current_profile(client).await?;
 
-    let builder = build_profile_update(&current, display_name, avatar_url, about, nip05_handle)?;
+    let builder = build_profile_update(
+        &current,
+        display_name,
+        avatar_url,
+        about,
+        nip05_handle,
+        !client.has_injected_auth_tag(),
+    )?;
 
     let event = client.sign_event(builder)?;
 
@@ -387,6 +394,7 @@ fn build_profile_update(
     avatar_url: Option<&str>,
     about: Option<&str>,
     nip05_handle: Option<&str>,
+    preserve_existing_auth: bool,
 ) -> Result<nostr::EventBuilder, CliError> {
     // Merge: caller-supplied fields win; fall back to current profile values.
     let merged_name = display_name
@@ -427,6 +435,11 @@ fn build_profile_update(
             .map(|s| s.to_string())
     });
 
+    let mut tags = current.tags.clone();
+    if !preserve_existing_auth {
+        tags.retain(|tag| tag.as_slice().first().map(String::as_str) != Some("auth"));
+    }
+
     let builder = buzz_sdk::build_profile(
         merged_name.as_deref(),
         None, // `name` field (username) — not exposed by CLI
@@ -435,7 +448,7 @@ fn build_profile_update(
         merged_nip05.as_deref(),
     )
     .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?
-    .tags(current.tags.clone());
+    .tags(tags);
 
     Ok(builder)
 }
@@ -602,15 +615,15 @@ pub async fn dispatch(
 mod tests {
     use super::{
         build_profile_update, owned_agent_pubkeys_from_events, owner_scoped_profiles,
-        owner_verification, presence_subject, CurrentProfile,
+        owner_verification, presence_subject, BuzzClient, CurrentProfile,
     };
     use nostr::{Keys, Tag};
     use serde_json::json;
 
     #[test]
-    fn set_profile_republish_preserves_valid_nip_oa_and_other_tags() {
-        let owner_keys = Keys::generate();
+    fn set_profile_without_injected_auth_preserves_one_valid_nip_oa_tag() {
         let keys = Keys::generate();
+        let owner_keys = Keys::generate();
         let auth_tag: Tag = serde_json::from_str(
             &buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &keys.public_key(), "kind=0").unwrap(),
         )
@@ -628,16 +641,19 @@ mod tests {
             tags: vec![auth_tag.clone(), client_tag.clone()],
         };
 
-        let event = build_profile_update(
+        let client = BuzzClient::new("https://test.relay".into(), keys, None, None).unwrap();
+        let builder = build_profile_update(
             &current,
             None,
             Some("https://example.com/new.png"),
             None,
             None,
+            true,
         )
-        .expect("build merged profile")
-        .sign_with_keys(&keys)
-        .expect("sign merged profile");
+        .expect("build merged profile");
+        let event = client
+            .sign_event(builder)
+            .expect("sign merged profile through client seam");
 
         assert_eq!(
             event.tags.iter().cloned().collect::<Vec<_>>(),
@@ -649,6 +665,52 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&event.content).unwrap()["picture"],
             "https://example.com/new.png"
+        );
+    }
+
+    #[test]
+    fn set_profile_with_injected_auth_replaces_prior_auth_and_keeps_other_tags() {
+        let keys = Keys::generate();
+        let prior_auth: Tag = serde_json::from_str(
+            &buzz_sdk::nip_oa::compute_auth_tag(&Keys::generate(), &keys.public_key(), "kind=0")
+                .unwrap(),
+        )
+        .unwrap();
+        let injected_auth: Tag = serde_json::from_str(
+            &buzz_sdk::nip_oa::compute_auth_tag(&Keys::generate(), &keys.public_key(), "kind=0")
+                .unwrap(),
+        )
+        .unwrap();
+        let client_tag = Tag::parse(["client", "buzz"]).unwrap();
+        let current = CurrentProfile {
+            metadata: json!({"display_name": "Bolt"}).as_object().unwrap().clone(),
+            tags: vec![prior_auth, client_tag.clone()],
+        };
+        let injected_json = serde_json::to_string(&injected_auth).unwrap();
+        let client = BuzzClient::new(
+            "https://test.relay".into(),
+            keys,
+            Some(injected_auth.clone()),
+            Some(injected_json),
+        )
+        .unwrap();
+
+        let builder = build_profile_update(
+            &current,
+            None,
+            Some("https://example.com/new.png"),
+            None,
+            None,
+            !client.has_injected_auth_tag(),
+        )
+        .expect("build merged profile");
+        let event = client
+            .sign_event(builder)
+            .expect("sign merged profile through client seam");
+
+        assert_eq!(
+            event.tags.iter().cloned().collect::<Vec<_>>(),
+            vec![client_tag, injected_auth]
         );
     }
 

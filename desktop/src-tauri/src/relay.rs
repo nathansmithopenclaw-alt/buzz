@@ -432,9 +432,11 @@ fn sign_managed_agent_profile_event(
             .map_err(|e| format!("failed to parse verified auth tag: {e}"))?;
         let tag = nostr::Tag::parse(compat_tag.as_slice())
             .map_err(|e| format!("failed to convert auth tag to nostr 0.37: {e}"))?;
-        if !tags.contains(&tag) {
-            tags.push(tag);
-        }
+        // A freshly supplied and verified auth tag is canonical. Remove every
+        // prior auth tag, including stale-but-different attestations, while
+        // retaining all unrelated profile tags.
+        tags.retain(|prior| prior.as_slice().first().map(String::as_str) != Some("auth"));
+        tags.push(tag);
     }
 
     builder
@@ -1159,6 +1161,33 @@ mod tests {
             .expect("build reconciled profile");
 
         assert_eq!(event.tags.iter().cloned().collect::<Vec<_>>(), prior_tags);
+    }
+
+    #[test]
+    fn supplied_auth_replaces_every_prior_auth_and_preserves_other_tags() {
+        let agent_keys = nostr::Keys::generate();
+        let canonical_json = make_valid_auth_tag(&agent_keys);
+        let canonical: nostr::Tag = serde_json::from_str(&canonical_json).unwrap();
+        let client_tag = nostr::Tag::parse(["client", "buzz"]).unwrap();
+        let prior_tags = vec![
+            serde_json::from_str(&make_valid_auth_tag(&agent_keys)).unwrap(),
+            client_tag.clone(),
+            serde_json::from_str(&make_valid_auth_tag(&agent_keys)).unwrap(),
+        ];
+
+        let event = build_profile_event(
+            &agent_keys,
+            "TestBot",
+            None,
+            &prior_tags,
+            Some(&canonical_json),
+        )
+        .expect("build profile with canonical auth");
+
+        assert_eq!(
+            event.tags.iter().cloned().collect::<Vec<_>>(),
+            vec![client_tag, canonical]
+        );
     }
 
     #[test]
