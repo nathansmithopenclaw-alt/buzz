@@ -77,7 +77,12 @@ pub async fn update_profile(
         .as_deref()
         .or_else(|| current.get("nip05").and_then(Value::as_str));
 
-    let builder = events::build_profile(dn, name, picture, ab, nip05)?;
+    let builder = events::build_profile(dn, name, picture, ab, nip05)?.tags(
+        prior_events
+            .first()
+            .map(|event| event.tags.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
     submit_event(builder, &state).await?;
 
     // Re-fetch to return canonical profile.
@@ -159,6 +164,11 @@ fn build_deferred_profile_event(
 
     Ok(
         events::build_profile(display_name, name, Some(avatar_url), about, nip05)?
+            .tags(
+                prior_event
+                    .map(|event| event.tags.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            )
             .custom_created_at(monotonic_created_at(
                 prior_event.map(|event| event.created_at.as_secs() as i64),
             )),
@@ -443,10 +453,12 @@ mod tests {
     fn deferred_profile_event_is_strictly_newer_than_prior_head() {
         let keys = nostr::Keys::generate();
         let prior_created_at = nostr::Timestamp::now().as_secs() + 60;
+        let auth_tag = nostr::Tag::parse(["auth", "owner", "", "signature"]).unwrap();
         let prior_event = nostr::EventBuilder::new(
             nostr::Kind::Metadata,
             serde_json::json!({"display_name": "Larry"}).to_string(),
         )
+        .tags([auth_tag.clone()])
         .custom_created_at(nostr::Timestamp::from(prior_created_at))
         .sign_with_keys(&keys)
         .expect("sign prior profile");
@@ -462,6 +474,10 @@ mod tests {
             .expect("sign deferred profile");
 
         assert_eq!(event.created_at.as_secs(), prior_created_at + 1);
+        assert_eq!(
+            event.tags.iter().cloned().collect::<Vec<_>>(),
+            vec![auth_tag]
+        );
         assert_eq!(
             serde_json::from_str::<Value>(&event.content).unwrap()["picture"],
             "https://example.com/avatar.png"

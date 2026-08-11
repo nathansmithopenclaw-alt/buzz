@@ -83,7 +83,7 @@ pub(crate) async fn reconcile_agent_profile(
     agent_pubkey: &str,
     data: &ProfileReconcileData,
 ) -> Result<ProfileReconcileOutcome, String> {
-    use crate::relay::{query_agent_profile, sync_managed_agent_profile};
+    use crate::relay::{query_agent_profile, sync_managed_agent_profile_from_snapshot};
 
     // An explicit per-agent relay wins; an empty one falls back to the active
     // workspace relay. Resolved once and used for both the read and write-back.
@@ -155,13 +155,14 @@ pub(crate) async fn reconcile_agent_profile(
         return Ok(ProfileReconcileOutcome::SkippedAgentManagedProfiles);
     }
 
-    sync_managed_agent_profile(
+    sync_managed_agent_profile_from_snapshot(
         state,
         &relay_url,
         &agent_keys,
         &data.name,
         expected_avatar.as_deref(),
         data.auth_tag.as_deref(),
+        existing.as_ref(),
     )
     .await?;
     Ok(ProfileReconcileOutcome::Published)
