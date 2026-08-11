@@ -142,34 +142,34 @@ pub struct ImportProvenance {
     /// Import timestamp.
     pub imported_at: u64,
     /// Original source creation timestamp.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_created_at: Option<String>,
     /// Original source update timestamp.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_updated_at: Option<String>,
     /// Original source completion timestamp.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_completed_at: Option<String>,
     /// Original source cancellation timestamp.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_cancelled_at: Option<String>,
     /// Whether the source record was archived.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
     /// Source-system estimate points (never converted to minutes).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_points: Option<u32>,
     /// Complete export SHA-256 used for this import.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_sha256: Option<String>,
     /// Importer implementation version.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub importer_version: Option<String>,
     /// Original human author identity as source data.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_author: Option<String>,
     /// Legacy labels retained during pilot reconciliation.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub legacy_labels: Vec<String>,
 }
 
@@ -2646,6 +2646,36 @@ mod tests {
                 .expect("fixture issue"),
             folded.diagnostics,
         )
+    }
+
+    #[test]
+    fn import_provenance_omits_additive_fields_when_empty() {
+        let provenance = ImportProvenance {
+            system: "linear".into(),
+            external_id: "LIN-1".into(),
+            source_url: None,
+            imported_at: 1,
+            source_created_at: None,
+            source_updated_at: None,
+            source_completed_at: None,
+            source_cancelled_at: None,
+            archived: None,
+            estimate_points: None,
+            export_sha256: None,
+            importer_version: None,
+            original_author: None,
+            legacy_labels: vec![],
+        };
+
+        assert_eq!(
+            serde_json::to_value(provenance).unwrap(),
+            serde_json::json!({
+                "system": "linear",
+                "external_id": "LIN-1",
+                "source_url": null,
+                "imported_at": 1,
+            })
+        );
     }
 
     #[test]

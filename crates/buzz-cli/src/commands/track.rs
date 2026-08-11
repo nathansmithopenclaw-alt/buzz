@@ -428,14 +428,18 @@ fn parse_estimate(value: &str) -> Result<u32, CliError> {
                 .into(),
         ));
     }
-    let (number, unit) = value.split_at(value.len() - 1);
+    let (unit_offset, unit) = value
+        .char_indices()
+        .next_back()
+        .ok_or_else(|| CliError::Usage(format!("invalid estimate duration: {value}")))?;
+    let number = &value[..unit_offset];
     let number: u32 = number
         .parse()
         .map_err(|_| CliError::Usage(format!("invalid estimate duration: {value}")))?;
     let multiplier = match unit {
-        "m" => 1,
-        "h" => 60,
-        "d" => 8 * 60,
+        'm' => 1,
+        'h' => 60,
+        'd' => 8 * 60,
         _ => {
             return Err(CliError::Usage(format!(
                 "invalid estimate unit in {value:?}; use m, h, or d"
@@ -1957,6 +1961,8 @@ async fn cmd_dispatch(
     mutation: TrackMutationArgs,
 ) -> Result<(), CliError> {
     let workspace_id = parse_workspace(workspace)?;
+    let import = parse_import_json(mutation.import_json.as_deref())?;
+    let reason = read_optional_stdin(mutation.reason.clone())?;
     let (mut context, authorization) = load_context(client, workspace_id).await?;
     let issue = context.issue(&issue_key)?.clone();
     if issue.status.is_terminal() {
@@ -2121,15 +2127,12 @@ async fn cmd_dispatch(
                 remove: vec![],
             },
             reason: if set_status != issue.status {
-                Some(
-                    read_optional_stdin(mutation.reason)?
-                        .unwrap_or_else(|| "dispatched for execution".into()),
-                )
+                Some(reason.unwrap_or_else(|| "dispatched for execution".into()))
             } else {
-                read_optional_stdin(mutation.reason)?
+                reason
             },
             request_id: Some(request_id),
-            import: parse_import_json(mutation.import_json.as_deref())?,
+            import,
         };
         match publish_revision(client, &mut context, &authorization, &revision).await {
             Ok(result) => result,
@@ -3567,6 +3570,7 @@ mod tests {
         assert_eq!(parse_estimate("1d").unwrap(), 480);
         assert!(parse_estimate("2").is_err());
         assert!(parse_estimate("0m").is_err());
+        assert!(parse_estimate("9é").is_err());
     }
 
     #[test]

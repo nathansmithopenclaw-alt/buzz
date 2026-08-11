@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 const IMPORTER_VERSION = "buzz-linear-tracker-v1";
@@ -118,6 +118,21 @@ function userKey(user) {
 
 function projectKey(project) {
   return project?.id ?? project?.name ?? null;
+}
+
+function normalizePriority(value) {
+  if (["P0", "P1", "P2", "P3"].includes(value)) return value;
+  const key = typeof value === "string" ? value.toLowerCase() : value;
+  return {
+    1: "P0",
+    2: "P1",
+    3: "P2",
+    4: "P3",
+    urgent: "P0",
+    high: "P1",
+    medium: "P2",
+    low: "P3",
+  }[key] ?? null;
 }
 
 function lookup(map, candidates) {
@@ -296,6 +311,15 @@ function buildPlan(flags) {
     else lifecycle.non_terminal += 1;
     if (issue.archivedAt != null || issue.archived === true) lifecycle.archived += 1;
   }
+  for (const comment of source.comments) {
+    const authorKey = userKey(comment.user ?? comment.creator);
+    if (
+      authorKey &&
+      lookup(userMap, [authorKey, comment.user?.email, comment.user?.name, comment.creator?.email, comment.creator?.name]) === undefined
+    ) {
+      unmappedUsers.push({ comment_id: comment.id, user: authorKey });
+    }
+  }
   const relations = relationRecords(source.issues);
   const links = linkRecords(source.issues);
   const conflicts = [
@@ -305,13 +329,28 @@ function buildPlan(flags) {
   for (const [linearId, pilot] of Object.entries(pilotMap)) {
     const fields = pilotFields(pilot, projectMap);
     if (!fields.project) conflicts.push(`pilot ${linearId} project slug ${fields.projectSlug} is absent from project map`);
+    const issue = source.issues.find((candidate) => candidate.id === linearId);
+    if (!issue) continue;
+    const livePriority = normalizePriority(issue.priority?.label ?? issue.priority);
+    const liveDue = issue.dueDate ?? issue.due_date ?? null;
+    const liveProject = lookup(projectMap, [projectKey(issue.project), issue.project?.name]);
+    const liveProjectSlug = liveProject?.slug ?? null;
+    for (const [field, pilotValue, liveValue] of [
+      ["priority", fields.priority ?? null, livePriority],
+      ["due", fields.due ?? null, liveDue],
+      ["project", fields.projectSlug ?? null, liveProjectSlug],
+    ]) {
+      if (pilotValue !== liveValue) {
+        conflicts.push(`pilot ${linearId} ${field} diverges from export (pilot=${JSON.stringify(pilotValue)}, export=${JSON.stringify(liveValue)})`);
+      }
+    }
   }
   for (const relation of relations) {
     if (!relation.target || !issueIds.has(relation.target)) conflicts.push(`relation from ${relation.source} has missing target ${relation.target}`);
   }
   const actions = {
     create_projects: Object.keys(projectMap).length,
-    create_issues: source.issues.length - Object.keys(pilotMap).length,
+    create_issues: source.issues.length,
     reconcile_pilots: Object.keys(pilotMap).length,
     create_comments: source.comments.length,
     create_relations: relations.length,
@@ -338,6 +377,7 @@ function buildPlan(flags) {
     projects,
     lifecycle,
     actions,
+    pilot_handling: "create Tracker issues for every pilot, then link each legacy NIP-34 event as git_issue",
     unmapped_states: unmappedStates,
     unmapped_users: unmappedUsers,
     unmapped_projects: unmappedProjects,
@@ -390,6 +430,7 @@ function buzz(args, input = undefined, allowFailure = false) {
 }
 
 function importProvenance(issue, plan, originalAuthor = null, legacyLabels = []) {
+  const archived = issue.archivedAt != null || issue.archived === true;
   return {
     system: "linear",
     external_id: issue.id,
@@ -399,44 +440,98 @@ function importProvenance(issue, plan, originalAuthor = null, legacyLabels = [])
     source_updated_at: issue.updatedAt ?? issue.updated_at ?? null,
     source_completed_at: issue.completedAt ?? issue.completed_at ?? null,
     source_cancelled_at: issue.canceledAt ?? issue.cancelled_at ?? null,
-    archived: issue.archivedAt != null || issue.archived === true,
+    archived: archived ? true : undefined,
     estimate_points: Number.isInteger(issue.estimate) && issue.estimate >= 0 ? issue.estimate : null,
     export_sha256: plan.input_sha256,
     importer_version: IMPORTER_VERSION,
-    original_author: originalAuthor,
-    legacy_labels: legacyLabels,
+    original_author: originalAuthor ?? undefined,
+    legacy_labels: legacyLabels.length ? legacyLabels : undefined,
   };
+}
+
+function commentProvenance(comment, issue, plan) {
+  const provenance = importProvenance(comment, plan, userKey(comment.user ?? comment.creator));
+  provenance.external_id = comment.id;
+  provenance.source_url = comment.url ?? sourceUrl(issue);
+  provenance.source_created_at = comment.createdAt ?? comment.created_at ?? null;
+  provenance.source_updated_at = comment.updatedAt ?? comment.updated_at ?? null;
+  return provenance;
+}
+
+const PROVENANCE_FIELDS = [
+  "system",
+  "external_id",
+  "source_url",
+  "imported_at",
+  "source_created_at",
+  "source_updated_at",
+  "source_completed_at",
+  "source_cancelled_at",
+  "archived",
+  "estimate_points",
+  "export_sha256",
+  "importer_version",
+  "original_author",
+  "legacy_labels",
+];
+
+function provenanceValue(provenance, field) {
+  if (field === "legacy_labels") return provenance?.[field] ?? [];
+  return provenance?.[field] ?? null;
+}
+
+function compareProvenance(expected, actual) {
+  return PROVENANCE_FIELDS.flatMap((field) => {
+    const expectedValue = provenanceValue(expected, field);
+    const actualValue = provenanceValue(actual, field);
+    return canonicalJson(expectedValue) === canonicalJson(actualValue)
+      ? []
+      : [{ field, expected: expectedValue, actual: actualValue }];
+  });
 }
 
 function mappedIssue(issue, context) {
   const state = lookup(context.stateMap, [stateKey(issue), issue.state?.name, issue.state?.type]);
   const assignee = lookup(context.userMap, [userKey(issue.assignee), issue.assignee?.email, issue.assignee?.name]);
   const pilot = context.pilotMap[issue.id] ?? null;
-  const pilotValues = pilotFields(pilot, context.projectMap);
-  const project = pilotValues.project ?? lookup(context.projectMap, [projectKey(issue.project), issue.project?.name]);
+  const project = lookup(context.projectMap, [projectKey(issue.project), issue.project?.name]);
   const issueId = uuidV5(LINEAR_NAMESPACE, `${context.source.workspaceId}:${issue.id}`);
   const requestId = uuidV5(LINEAR_NAMESPACE, `${issue.id}:root:${issue.updatedAt ?? issue.updated_at ?? context.plan.input_sha256}`);
   const labels = [...new Set(nodes(issue.labels).map((label) => (label.name ?? label).toString().toLowerCase()))];
   const legacyLabels = pilot?.labels ?? [];
   return {
     state, assignee, project, pilot, issueId, requestId, labels, legacyLabels,
-    priority: pilotValues.priority,
-    due: pilotValues.due,
+    priority: normalizePriority(issue.priority?.label ?? issue.priority),
+    due: issue.dueDate ?? issue.due_date ?? null,
   };
 }
 
 function checkpoint(path, planHash) {
+  let value;
   try {
-    const value = loadJson(path);
-    if (value.plan_sha256 !== planHash) fail("checkpoint belongs to a different migration plan");
-    return value;
-  } catch {
-    return { plan_sha256: planHash, completed: {} };
+    value = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return { plan_sha256: planHash, completed: {} };
+    fail(`cannot parse checkpoint ${path}`, { detail: String(error) });
   }
+  if (value?.plan_sha256 !== planHash) fail("checkpoint belongs to a different migration plan");
+  if (!value.completed || typeof value.completed !== "object" || Array.isArray(value.completed)) {
+    fail("checkpoint completed field must be an object");
+  }
+  return value;
 }
 
 function saveCheckpoint(path, value) {
-  writeReport(path, value);
+  const temporary = `${path}.tmp-${process.pid}`;
+  try {
+    writeReport(temporary, value);
+    renameSync(temporary, path);
+  } catch (error) {
+    try {
+      unlinkSync(temporary);
+    } catch {}
+    fail(`cannot write checkpoint ${path}`, { detail: String(error) });
+  }
 }
 
 function recordApply(report, checkpointValue, checkpointPath, key, receipt) {
@@ -508,11 +603,7 @@ function applyPlan(flags, context) {
       "--import-json", JSON.stringify(provenance),
       "--external-id", `linear:${issue.id}`,
     ];
-    const priority = mapped.priority ?? issue.priority?.label ?? issue.priority;
-    const mappedPriority = ["P0", "P1", "P2", "P3"].includes(priority)
-      ? priority
-      : { 1: "P0", 2: "P1", 3: "P2", 4: "P3", urgent: "P0", high: "P1", medium: "P2", low: "P3" }[priority];
-    if (mappedPriority) args.push("--priority", mappedPriority);
+    if (mapped.priority) args.push("--priority", mapped.priority);
     if (mapped.assignee) args.push("--assignee", mapped.assignee.pubkey ?? mapped.assignee);
     if (project?.project_id) args.push("--project", project.project_id);
     if (mapped.due ?? issue.dueDate ?? issue.due_date) args.push("--due", mapped.due ?? issue.dueDate ?? issue.due_date, "--tz", flags.timezone ?? "America/New_York");
@@ -571,9 +662,7 @@ function applyPlan(flags, context) {
     if (checkpointValue.completed[key]) continue;
     const sourceIssue = context.source.issues.find((issue) => issue.id === sourceIssueId);
     const requestId = uuidV5(LINEAR_NAMESPACE, `${key}:${comment.updatedAt ?? comment.createdAt ?? "unknown"}`);
-    const provenance = importProvenance(sourceIssue, context.plan, userKey(comment.user ?? comment.creator));
-    provenance.external_id = comment.id;
-    provenance.source_created_at = comment.createdAt ?? comment.created_at ?? null;
+    const provenance = commentProvenance(comment, sourceIssue, context.plan);
     const receipt = buzz([
       "track", "comment", "--workspace", workspace,
       "--issue", issueMap.get(sourceIssueId), "--content", comment.body ?? comment.content,
@@ -606,7 +695,7 @@ function verifyPlan(context) {
   const duplicateSourceIds = [];
   const details = [];
   for (const summary of summaries) {
-    const detail = buzz(["track", "get", "--workspace", workspace, "--issue", summary.issue_id, "--include-comments"]).parsed;
+    const detail = buzz(["track", "get", "--workspace", workspace, "--issue", summary.issue_id]).parsed;
     details.push(detail.issue);
     for (const ref of detail.issue.external_refs ?? []) {
       if (ref.type !== "linear" && ref.kind !== "linear") continue;
@@ -634,10 +723,7 @@ function verifyPlan(context) {
     if (mapped.project?.project_id && target.project?.project_id !== mapped.project.project_id) fieldMismatches.push({ source_id: issue.id, field: "project_id", expected: mapped.project.project_id, actual: target.project?.project_id });
     const expectedAssignee = mapped.assignee ? (mapped.assignee.pubkey ?? mapped.assignee) : null;
     if ((target.assignee_pubkey ?? null) !== expectedAssignee) fieldMismatches.push({ source_id: issue.id, field: "assignee_pubkey", expected: expectedAssignee, actual: target.assignee_pubkey ?? null });
-    const sourcePriority = mapped.priority ?? issue.priority?.label ?? issue.priority;
-    const expectedPriority = ["P0", "P1", "P2", "P3"].includes(sourcePriority)
-      ? sourcePriority
-      : ({ 1: "P0", 2: "P1", 3: "P2", 4: "P3", urgent: "P0", high: "P1", medium: "P2", low: "P3" }[sourcePriority] ?? null);
+    const expectedPriority = mapped.priority;
     if ((target.priority ?? null) !== expectedPriority) fieldMismatches.push({ source_id: issue.id, field: "priority", expected: expectedPriority, actual: target.priority ?? null });
     const expectedLabels = [...mapped.labels].sort();
     const actualLabels = [...(target.labels ?? [])].sort();
@@ -648,8 +734,14 @@ function verifyPlan(context) {
     if (expectedChannel && target.home_channel_id !== expectedChannel) fieldMismatches.push({ source_id: issue.id, field: "home_channel_id", expected: expectedChannel, actual: target.home_channel_id });
     const rootActivity = (target.activity ?? []).find((activity) => activity.type === "created");
     const provenance = rootActivity?.import_provenance;
-    if (!provenance || provenance.system !== "linear" || provenance.external_id !== issue.id || provenance.export_sha256 !== context.plan.input_sha256) {
-      provenanceMismatches.push({ source_id: issue.id, field: "root_import_provenance" });
+    const expectedProvenance = importProvenance(
+      issue,
+      context.plan,
+      userKey(issue.creator),
+      mapped.legacyLabels,
+    );
+    for (const mismatch of compareProvenance(expectedProvenance, provenance)) {
+      provenanceMismatches.push({ source_id: issue.id, ...mismatch });
     }
   }
   const importedComments = new Map();
@@ -671,6 +763,11 @@ function verifyPlan(context) {
     const sourceIssueId = sourceComment.issue_id ?? sourceComment.issue?.id;
     if (target.issue_id !== issueMap.get(sourceIssueId) || target.body !== (sourceComment.body ?? sourceComment.content)) {
       commentMismatches.push({ source_comment_id: id, field: "issue_or_body" });
+    }
+    const sourceIssue = context.source.issues.find((issue) => issue.id === sourceIssueId);
+    const expectedProvenance = commentProvenance(sourceComment, sourceIssue, context.plan);
+    for (const mismatch of compareProvenance(expectedProvenance, target.import)) {
+      commentMismatches.push({ source_comment_id: id, field: `import.${mismatch.field}`, expected: mismatch.expected, actual: mismatch.actual });
     }
   }
   const expectedRelations = new Set(relationRecords(context.source.issues).map((relation) =>

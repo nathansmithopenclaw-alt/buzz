@@ -28,6 +28,12 @@ link, and comment carries deterministic UUIDv5 request identity and typed
 Linear provenance. Tracker watchers mark those events
 `dispatcher_suppressed: true`.
 
+The plan counts every Linear issue under `actions.create_issues`, including
+pilots. A pilot is migrated by creating its Tracker issue from the current
+Linear export and then linking the legacy NIP-34 event as `git_issue`; the
+legacy event is never reused as the Tracker root. Pilot priority, due date, and
+project labels must exactly match the current export or planning fails closed.
+
 The export must set `complete_export: true` only after all source pages are
 present. Plan fails closed on incomplete extraction, duplicate issue IDs,
 unmapped states/users/projects, missing relation targets, or invalid pilot
@@ -66,6 +72,15 @@ Verify reads every imported issue with comments and proves exact equality for
 source IDs, field values, import provenance, comments, canonical relations,
 typed links, projects, pilot links, and total counts. Any unexpected Tracker
 record is a mismatch rather than silently ignored.
+
+## Rollout gate
+
+Deploy the Tracker-capable CLI and relay before the first real importer run.
+Before that run, audit the relay once and prove that no import-bearing kinds
+40020 through 40022 predate the upgrade; the expected count is zero. Do not
+run `apply` if either deployment is incomplete or the audit is nonzero. New
+v5 `d` identifiers are invisible to the deployed P0-A CLI, and events that use
+the additive provenance fields require the upgraded reader.
 
 ## Project limitations
 
