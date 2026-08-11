@@ -1,8 +1,8 @@
 //! Tauri commands for global agent configuration defaults.
 //!
-//! `get_global_agent_config` / `set_global_agent_config` — simple load/save
-//! around the `global_config` module with the standard save-time validation,
-//! including the owner-controlled create-draft approval policy.
+//! `get_global_agent_config` / `set_global_agent_config` provide the owner
+//! load/save surface. `apply_delegated_global_agent_config` atomically overlays
+//! the narrower standing-delegation patch vocabulary.
 //!
 //! `set_global_agent_config` additionally auto-restarts any running local agent
 //! whose effective env changes under the new global config — including agents
@@ -41,6 +41,42 @@ pub struct GlobalAgentConfigSaveResult {
     pub failed_restart_count: u32,
 }
 
+/// Narrow patch accepted from the standing-delegation apply path.
+///
+/// Grant and owner-only settings are intentionally absent. The patch is
+/// overlaid onto the latest durable config while holding the store lock, so a
+/// concurrent revocation cannot be overwritten by a stale frontend snapshot.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegatedGlobalAgentConfigPatch {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub preferred_runtime: Option<String>,
+    #[serde(default)]
+    pub env_vars: std::collections::BTreeMap<String, String>,
+}
+
+impl DelegatedGlobalAgentConfigPatch {
+    fn apply_to(self, mut config: GlobalAgentConfig) -> GlobalAgentConfig {
+        if let Some(provider) = self.provider {
+            config.provider = Some(provider);
+        }
+        if let Some(model) = self.model {
+            config.model = Some(model);
+        }
+        if let Some(runtime) = self.preferred_runtime {
+            config.preferred_runtime = Some(runtime);
+        }
+        config.env_vars.extend(self.env_vars);
+        config
+    }
+}
+
+enum GlobalConfigWrite {
+    Replace(GlobalAgentConfig),
+    DelegatedPatch(DelegatedGlobalAgentConfigPatch),
+}
+
 /// Read the current global agent configuration.
 ///
 /// Returns the default (empty) config if `global-agent-config.json` has not
@@ -67,12 +103,26 @@ pub fn get_global_agent_config(app: AppHandle) -> Result<GlobalAgentConfig, Stri
 /// the count of agents successfully restarted.
 #[tauri::command]
 pub async fn set_global_agent_config(
-    mut config: GlobalAgentConfig,
+    config: GlobalAgentConfig,
+    app: AppHandle,
+) -> Result<GlobalAgentConfigSaveResult, String> {
+    write_global_agent_config(GlobalConfigWrite::Replace(config), app).await
+}
+
+/// Apply only delegated global-default fields to the latest durable config.
+#[tauri::command]
+pub async fn apply_delegated_global_agent_config(
+    patch: DelegatedGlobalAgentConfigPatch,
+    app: AppHandle,
+) -> Result<GlobalAgentConfigSaveResult, String> {
+    write_global_agent_config(GlobalConfigWrite::DelegatedPatch(patch), app).await
+}
+
+async fn write_global_agent_config(
+    write: GlobalConfigWrite,
     app: AppHandle,
 ) -> Result<GlobalAgentConfigSaveResult, String> {
     let owner_keys = app.state::<AppState>().signing_keys()?;
-    let old_config = load_global_agent_config(&app).unwrap_or_default();
-    prepare_delegation_signature(&mut config, &old_config, &owner_keys)?;
     // ── Phase 1: disk write (sync, spawn_blocking) ────────────────────────
     //
     // Validate, snapshot old config, write new config, collect pre-filter
@@ -81,7 +131,6 @@ pub async fn set_global_agent_config(
     // lock in Phase 2 after sync_managed_agent_processes.
     let app_for_write = app.clone();
     let phase1 = tokio::task::spawn_blocking(move || {
-        validate_global_config(&config)?;
         let (old_global, new_global) = {
             // Serialize the grant write with request classification so a
             // concurrent revoke cannot authorize one last stale apply.
@@ -91,6 +140,14 @@ pub async fn set_global_agent_config(
                 .lock()
                 .map_err(|error| error.to_string())?;
             let old_global = load_global_agent_config(&app_for_write).unwrap_or_default();
+            let config = match write {
+                GlobalConfigWrite::Replace(mut config) => {
+                    prepare_delegation_signature(&mut config, &old_global, &owner_keys)?;
+                    config
+                }
+                GlobalConfigWrite::DelegatedPatch(patch) => patch.apply_to(old_global.clone()),
+            };
+            validate_global_config(&config)?;
             save_global_agent_config(&app_for_write, &config)?;
             // Re-read from disk so the returned value reflects strip-on-write.
             let new_global = load_global_agent_config(&app_for_write)?;
@@ -464,7 +521,54 @@ fn should_restart_on_config_change(old_ready: bool, new_ready: bool, env_changed
 
 #[cfg(test)]
 mod tests {
-    use super::should_restart_on_config_change;
+    use super::{should_restart_on_config_change, DelegatedGlobalAgentConfigPatch};
+    use crate::managed_agents::global_config::{
+        AgentManagementDelegationCapabilities, AgentManagementDelegationGrant,
+        AgentManagementDelegationPayload,
+    };
+    use crate::managed_agents::GlobalAgentConfig;
+
+    #[test]
+    fn delegated_patch_preserves_authority_and_unrequested_defaults() {
+        let grant = AgentManagementDelegationGrant {
+            payload: AgentManagementDelegationPayload {
+                grantee_pubkey: "11".repeat(32),
+                audit_channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
+                capabilities: AgentManagementDelegationCapabilities {
+                    global_config: true,
+                    ..Default::default()
+                },
+            },
+            signed_event: Some("retained-owner-signature".into()),
+        };
+        let current = GlobalAgentConfig {
+            provider: Some("preserved-provider".into()),
+            model: Some("preserved-model".into()),
+            claude_account_id: Some("preserved-account".into()),
+            auto_approve_agent_drafts: true,
+            agent_management_delegation: Some(grant.clone()),
+            ..Default::default()
+        };
+        let patched = DelegatedGlobalAgentConfigPatch {
+            preferred_runtime: Some("codex".into()),
+            env_vars: [("BUZZ_ACP_THINKING_EFFORT".into(), "high".into())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+        .apply_to(current);
+
+        assert_eq!(patched.provider.as_deref(), Some("preserved-provider"));
+        assert_eq!(patched.model.as_deref(), Some("preserved-model"));
+        assert_eq!(
+            patched.claude_account_id.as_deref(),
+            Some("preserved-account")
+        );
+        assert!(patched.auto_approve_agent_drafts);
+        assert_eq!(patched.agent_management_delegation, Some(grant));
+        assert_eq!(patched.preferred_runtime.as_deref(), Some("codex"));
+        assert_eq!(patched.env_vars["BUZZ_ACP_THINKING_EFFORT"], "high");
+    }
 
     /// Running agent (Ready) whose effective env changed → restart candidate.
     #[test]

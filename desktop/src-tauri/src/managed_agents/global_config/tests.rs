@@ -26,6 +26,10 @@ fn auto_approve_agent_drafts_defaults_false_for_legacy_config() {
     )
     .unwrap();
     assert!(!config.auto_approve_agent_drafts);
+    let capabilities: AgentManagementDelegationCapabilities =
+        serde_json::from_str(r#"{"teams":true,"agent_creation":true,"env_vars":true}"#).unwrap();
+    assert!(!capabilities.agent_config);
+    assert!(!capabilities.global_config);
 }
 
 fn signed_delegation_grant(owner: &Keys, grantee_pubkey: String) -> AgentManagementDelegationGrant {
@@ -33,6 +37,8 @@ fn signed_delegation_grant(owner: &Keys, grantee_pubkey: String) -> AgentManagem
         grantee_pubkey,
         audit_channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
         capabilities: AgentManagementDelegationCapabilities {
+            agent_config: true,
+            global_config: true,
             teams: true,
             agent_creation: true,
             env_vars: true,

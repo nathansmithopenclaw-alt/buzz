@@ -1,5 +1,20 @@
 use super::*;
+use crate::managed_agents::global_config::AgentManagementDelegationCapabilities;
 use nostr::ToBech32;
+
+fn unsigned_grant(
+    grantee_pubkey: String,
+    capabilities: AgentManagementDelegationCapabilities,
+) -> AgentManagementDelegationGrant {
+    AgentManagementDelegationGrant {
+        payload: crate::managed_agents::global_config::AgentManagementDelegationPayload {
+            grantee_pubkey,
+            audit_channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
+            capabilities,
+        },
+        signed_event: None,
+    }
+}
 
 fn request(authorized: bool) -> NewLedgerRequest {
     NewLedgerRequest {
@@ -86,6 +101,55 @@ fn grant_flip_routes_apply_or_durable_draft() {
         draft.requests["request-b"].status,
         RequestStatus::PendingDraft
     );
+}
+
+#[test]
+fn agent_and_global_config_grants_are_independent_and_env_is_conjunctive() {
+    let source = "11".repeat(32);
+    let grant = unsigned_grant(
+        source.clone(),
+        AgentManagementDelegationCapabilities {
+            agent_config: true,
+            global_config: false,
+            teams: false,
+            agent_creation: false,
+            env_vars: false,
+        },
+    );
+
+    assert!(grant_authorizes_request(
+        &grant,
+        &source,
+        DelegatedCapability::AgentConfig,
+        false,
+    ));
+    assert!(!grant_authorizes_request(
+        &grant,
+        &source,
+        DelegatedCapability::GlobalConfig,
+        false,
+    ));
+    assert!(!grant_authorizes_request(
+        &grant,
+        &source,
+        DelegatedCapability::AgentConfig,
+        true,
+    ));
+
+    let globally_scoped = unsigned_grant(
+        source.clone(),
+        AgentManagementDelegationCapabilities {
+            global_config: true,
+            env_vars: true,
+            ..Default::default()
+        },
+    );
+    assert!(grant_authorizes_request(
+        &globally_scoped,
+        &source,
+        DelegatedCapability::GlobalConfig,
+        true,
+    ));
 }
 
 #[test]

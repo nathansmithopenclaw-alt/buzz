@@ -103,3 +103,39 @@ test("env-only update registers against the narrow env_vars capability", async (
   assert.deepEqual(route, { kind: "delegated_apply" });
   assert.equal(calls[0].capability, "env_vars");
 });
+
+test("agent and global config requests use independent grant scopes", async () => {
+  for (const [candidate, expected] of [
+    [
+      {
+        ...request,
+        action: "update",
+        request: {
+          channelId: request.request.channelId,
+          agentName: "Bolt",
+          systemPrompt: "New instructions.",
+        },
+      },
+      "agent_config",
+    ],
+    [
+      {
+        ...request,
+        action: "global_config",
+        request: { channelId: request.request.channelId, effort: "high" },
+      },
+      "global_config",
+    ],
+  ]) {
+    const calls = [];
+    await registerAndRouteAgentManagementRequest("11".repeat(32), candidate, {
+      register: async (input) => {
+        calls.push(input);
+        return { disposition: "apply" };
+      },
+      publishApplying: async () => {},
+      publishDraft: async () => {},
+    });
+    assert.equal(calls[0].capability, expected);
+  }
+});

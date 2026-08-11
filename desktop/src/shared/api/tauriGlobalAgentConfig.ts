@@ -29,3 +29,20 @@ export async function setGlobalAgentConfig(
     config,
   });
 }
+
+export type DelegatedGlobalAgentConfigPatch = {
+  provider?: string;
+  model?: string;
+  preferredRuntime?: string;
+  envVars: Record<string, string>;
+};
+
+/** Atomically overlay delegated fields onto the latest durable config. */
+export async function applyDelegatedGlobalAgentConfig(
+  patch: DelegatedGlobalAgentConfigPatch,
+): Promise<GlobalAgentConfigSaveResult> {
+  return invokeTauri<GlobalAgentConfigSaveResult>(
+    "apply_delegated_global_agent_config",
+    { patch },
+  );
+}

@@ -3,6 +3,7 @@ import { useAgentTeamManagement } from "@/features/agents/useAgentTeamManagement
 import { AgentCardDialogs } from "./AgentCardViewerDialog";
 import { AgentDialog } from "./AgentDialog";
 import { AgentTeamManagementReviewDialog } from "./AgentTeamManagementReviewDialog";
+import { AgentGlobalConfigReviewDialog } from "./AgentGlobalConfigReviewDialog";
 
 /** Global review surfaces opened by owned agents through the Buzz harness. */
 export function AgentManagementDialogs() {
@@ -45,6 +46,19 @@ export function AgentManagementDialogs() {
           title="Edit agent"
         />
       ) : null}
+      <AgentGlobalConfigReviewDialog
+        error={management.error}
+        isPending={management.globalConfigPending}
+        onApprove={() => {
+          void management.approveGlobalConfig();
+        }}
+        onDismiss={management.dismiss}
+        request={
+          management.request?.action === "global_config"
+            ? management.request
+            : null
+        }
+      />
       <AgentCardDialogs />
       <AgentTeamManagementReviewDialog
         error={teamManagement.reviewError}

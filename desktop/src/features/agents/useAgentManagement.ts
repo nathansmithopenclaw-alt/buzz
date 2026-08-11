@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import {
   createInputFromRequest,
+  globalConfigAuditTarget,
   parseAgentManagementRequest,
   requestTargetsEditablePersona,
   updateInputFromRequest,
@@ -33,6 +34,7 @@ import {
   type QueuedAgentManagementRequest,
 } from "./agentManagementBuffer";
 import { useGlobalAgentConfig } from "./useGlobalAgentConfig";
+import { globalAgentConfigQueryKey } from "./useGlobalAgentConfig";
 import {
   beginOwnerReviewedAgentManagementRequest,
   completeAgentManagementRequest,
@@ -51,7 +53,15 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-import { registerAndRouteAgentManagementRequest } from "./agentManagementRegistration";
+import {
+  capabilityForAgentManagementRequest,
+  registerAndRouteAgentManagementRequest,
+} from "./agentManagementRegistration";
+import {
+  applyDelegatedGlobalConfig,
+  completeDelegatedGlobalConfigFailure,
+  completeDelegatedGlobalConfigSuccess,
+} from "./delegatedGlobalConfig";
 
 export function useAgentManagement() {
   const queryClient = useQueryClient();
@@ -62,11 +72,13 @@ export function useAgentManagement() {
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const createAgentMutation = useCreateManagedAgentMutation();
-  const { globalConfig } = useGlobalAgentConfig();
+  const { globalConfig, isLoading: globalConfigLoading } =
+    useGlobalAgentConfig();
   const [request, setRequest] = React.useState<AgentManagementRequest | null>(
     null,
   );
   const [error, setError] = React.useState<string | null>(null);
+  const [globalConfigPending, setGlobalConfigPending] = React.useState(false);
   const createdAgentAttachment = useCreatedAgentChannelAttachment();
   const seenRequestIds = React.useRef(new Set<string>());
   const pendingRequestId = React.useRef<string | null>(null);
@@ -131,8 +143,7 @@ export function useAgentManagement() {
               requestId: next.requestId,
               sourcePubkey: agentPubkey,
               requesterName,
-              capability:
-                next.action === "create" ? "agent_creation" : "env_vars",
+              capability: capabilityForAgentManagementRequest(next),
               target: `agent ${next.action}: ${String(result.error ?? "failed")}`,
               succeeded: false,
             }).catch(() => undefined);
@@ -145,7 +156,7 @@ export function useAgentManagement() {
           } else if (
             route.kind === "terminal_duplicate" &&
             route.registered.disposition === "duplicate_applied" &&
-            next.action === "update" &&
+            next.action !== "create" &&
             route.registered.result
           ) {
             const requesterName =
@@ -157,8 +168,11 @@ export function useAgentManagement() {
               requestId: next.requestId,
               sourcePubkey: agentPubkey,
               requesterName,
-              capability: "env_vars",
-              target: `updated agent ${next.request.agentName}`,
+              capability: capabilityForAgentManagementRequest(next),
+              target:
+                next.action === "update"
+                  ? `saved config for agent ${next.request.agentName}; instruction and runtime changes take effect on next spawn`
+                  : globalConfigAuditTarget(route.registered.result),
               succeeded: true,
             });
             await publishAgentManagementResult({
@@ -335,7 +349,8 @@ export function useAgentManagement() {
   const isPending =
     createPersonaMutation.isPending ||
     updatePersonaMutation.isPending ||
-    createAgentMutation.isPending;
+    createAgentMutation.isPending ||
+    globalConfigPending;
 
   function assertAgentCanActFromOrigin(channelId: string) {
     const targetChannel = (channelsQuery.data ?? []).find(
@@ -480,16 +495,71 @@ export function useAgentManagement() {
 
   const editInitialValues = React.useMemo(() => {
     if (request?.action !== "update" || !currentPersona) return null;
+    const configuredRuntime = request.request.runtime ?? currentPersona.runtime;
+    if (request.request.effort && !configuredRuntime && globalConfigLoading) {
+      return null;
+    }
+    const requestedRuntime =
+      configuredRuntime ??
+      getDefaultPersonaRuntime(
+        runtimesQuery.data ?? [],
+        globalConfig.preferred_runtime,
+      )?.id;
+    const effortEnvVar = runtimesQuery.data?.find(
+      (runtime) => runtime.id === requestedRuntime,
+    )?.thinkingEnvVar;
+    if (request.request.effort && !effortEnvVar) return null;
     return updateInputFromRequest(
       request,
       editPersonaDialogState(currentPersona)
         .initialValues as UpdatePersonaInput,
+      effortEnvVar,
     );
-  }, [currentPersona, request]);
+  }, [
+    currentPersona,
+    globalConfig.preferred_runtime,
+    globalConfigLoading,
+    request,
+    runtimesQuery.data,
+  ]);
+
+  const editEffortError = React.useMemo(() => {
+    if (request?.action !== "update" || !request.request.effort) return null;
+    if (runtimesQuery.isLoading) return null;
+    const configuredRuntime =
+      request.request.runtime ?? currentPersona?.runtime;
+    if (!configuredRuntime && globalConfigLoading) return null;
+    if (runtimesQuery.isError) {
+      return "Could not load runtime metadata required to apply effort.";
+    }
+    const requestedRuntime =
+      configuredRuntime ??
+      getDefaultPersonaRuntime(
+        runtimesQuery.data ?? [],
+        globalConfig.preferred_runtime,
+      )?.id;
+    const runtime = runtimesQuery.data?.find(
+      (candidate) => candidate.id === requestedRuntime,
+    );
+    if (!runtime) return "The selected runtime is not in the runtime catalog.";
+    if (!runtime.thinkingEnvVar) {
+      return "The selected runtime does not support effort configuration.";
+    }
+    return null;
+  }, [
+    currentPersona?.runtime,
+    globalConfig.preferred_runtime,
+    globalConfigLoading,
+    request,
+    runtimesQuery.data,
+    runtimesQuery.isError,
+    runtimesQuery.isLoading,
+  ]);
 
   const editError = React.useMemo(() => {
     if (request?.action !== "update") return error;
     if (error) return error;
+    if (editEffortError) return editEffortError;
     if (matchingPersonas.length > 1) {
       return "More than one personal agent has that name. Rename it in Agents, then ask the agent again.";
     }
@@ -497,7 +567,13 @@ export function useAgentManagement() {
       return "Agents can only update a personal agent profile by its current name.";
     }
     return null;
-  }, [currentPersona, error, matchingPersonas.length, request]);
+  }, [
+    currentPersona,
+    editEffortError,
+    error,
+    matchingPersonas.length,
+    request,
+  ]);
 
   async function completeCreateSuccess(
     requestId: string,
@@ -558,9 +634,17 @@ export function useAgentManagement() {
   async function completeUpdateSuccess(
     requestId: string,
     sourcePubkey: string,
-    agentName: string,
+    updateRequest: Extract<AgentManagementRequest, { action: "update" }>,
   ) {
-    const result = { agentName, envUpdated: true };
+    const changedFields = Object.keys(updateRequest.request).filter(
+      (field) => field !== "channelId" && field !== "agentName",
+    );
+    const result = {
+      agentName: updateRequest.request.agentName,
+      saved: true,
+      changedFields,
+      instructionAndRuntimeChangesTakeEffect: "next_spawn",
+    };
     await completeAgentManagementRequest(requestId, true, result);
     const requesterName =
       managedAgentsRef.current?.find(
@@ -570,8 +654,8 @@ export function useAgentManagement() {
       requestId,
       sourcePubkey,
       requesterName,
-      capability: "env_vars",
-      target: `updated agent ${agentName}`,
+      capability: capabilityForAgentManagementRequest(updateRequest),
+      target: `saved config for agent ${updateRequest.request.agentName}; instruction and runtime changes take effect on next spawn`,
       succeeded: true,
     });
     await publishAgentManagementResult({ requestId, sourcePubkey, result });
@@ -580,22 +664,24 @@ export function useAgentManagement() {
   async function completeUpdateFailure(
     requestId: string,
     sourcePubkey: string,
+    updateRequest: Extract<AgentManagementRequest, { action: "update" }>,
     cause: unknown,
   ) {
     const message =
-      cause instanceof Error ? cause.message : "Agent env update failed.";
+      cause instanceof Error ? cause.message : "Agent config update failed.";
     const result = { error: message };
     await completeAgentManagementRequest(requestId, false, result);
     const requesterName =
       managedAgentsRef.current?.find(
         (agent) => agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
       )?.name ?? "delegated agent";
+    const capability = capabilityForAgentManagementRequest(updateRequest);
     await publishAgentManagementAuditReceipt({
       requestId,
       sourcePubkey,
       requesterName,
-      capability: "env_vars",
-      target: `agent env update: ${message}`,
+      capability,
+      target: `${capability === "env_vars" ? "agent env" : "agent config"} update: ${message}`,
       succeeded: false,
     });
     await publishAgentManagementResult({ requestId, sourcePubkey, result });
@@ -671,16 +757,92 @@ export function useAgentManagement() {
       if (!sourcePubkey) return;
       const submitted = await performUpdate(
         input,
-        () =>
-          completeUpdateSuccess(
-            requestId,
-            sourcePubkey,
-            request.request.agentName,
-          ),
-        (cause) => completeUpdateFailure(requestId, sourcePubkey, cause),
+        () => completeUpdateSuccess(requestId, sourcePubkey, request),
+        (cause) =>
+          completeUpdateFailure(requestId, sourcePubkey, request, cause),
       );
       if (!submitted && pendingRequestId.current === requestId) {
         setFailedAutoApprovalRequestId(requestId);
+      }
+    },
+  );
+
+  const failDelegatedUpdate = React.useEffectEvent(
+    async (
+      requestId: string,
+      sourcePubkey: string,
+      updateRequest: Extract<AgentManagementRequest, { action: "update" }>,
+      message: string,
+    ) => {
+      await completeUpdateFailure(
+        requestId,
+        sourcePubkey,
+        updateRequest,
+        new Error(message),
+      );
+    },
+  );
+
+  const applyGlobalConfigRequest = React.useEffectEvent(
+    async (
+      requestId: string,
+      globalRequest: Extract<
+        AgentManagementRequest,
+        { action: "global_config" }
+      >,
+      ownerReviewed: boolean,
+    ): Promise<void> => {
+      if (
+        request?.requestId !== requestId ||
+        request.action !== "global_config"
+      ) {
+        return;
+      }
+      const sourcePubkey = sourceAgentPubkey.current;
+      if (!sourcePubkey) return;
+      setGlobalConfigPending(true);
+      setError(null);
+      try {
+        assertAgentCanActFromOrigin(globalRequest.request.channelId);
+        if (ownerReviewed) {
+          await beginOwnerReviewedAgentManagementRequest(requestId);
+          delegatedApplyIdsRef.current.add(requestId);
+        }
+        const result = await applyDelegatedGlobalConfig(globalRequest);
+        queryClient.setQueryData(globalAgentConfigQueryKey, result.config);
+        const requesterName =
+          managedAgentsRef.current?.find(
+            (agent) =>
+              agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
+          )?.name ?? "delegated agent";
+        await completeDelegatedGlobalConfigSuccess({
+          requestId,
+          sourcePubkey,
+          requesterName,
+          request: globalRequest,
+          saveResult: result,
+        });
+        dismiss();
+      } catch (cause) {
+        const requesterName =
+          managedAgentsRef.current?.find(
+            (agent) =>
+              agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
+          )?.name ?? "delegated agent";
+        await completeDelegatedGlobalConfigFailure({
+          requestId,
+          sourcePubkey,
+          requesterName,
+          cause,
+        }).catch(() => undefined);
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Could not save global agent defaults.",
+        );
+        setFailedAutoApprovalRequestId(requestId);
+      } finally {
+        setGlobalConfigPending(false);
       }
     },
   );
@@ -731,6 +893,51 @@ export function useAgentManagement() {
     });
   }, [editInitialValues, failedAutoApprovalRequestId, request]);
 
+  React.useEffect(() => {
+    if (
+      request?.action !== "update" ||
+      !editEffortError ||
+      !delegatedApplyIdsRef.current.has(request.requestId) ||
+      failedAutoApprovalRequestId === request.requestId ||
+      autoApprovingRequestId.current === request.requestId
+    ) {
+      return;
+    }
+    const requestId = request.requestId;
+    const sourcePubkey = sourceAgentPubkey.current;
+    if (!sourcePubkey) return;
+    autoApprovingRequestId.current = requestId;
+    void failDelegatedUpdate(
+      requestId,
+      sourcePubkey,
+      request,
+      editEffortError,
+    ).finally(() => {
+      setFailedAutoApprovalRequestId(requestId);
+      if (autoApprovingRequestId.current === requestId) {
+        autoApprovingRequestId.current = null;
+      }
+    });
+  }, [editEffortError, failedAutoApprovalRequestId, request]);
+
+  React.useEffect(() => {
+    if (
+      request?.action !== "global_config" ||
+      !delegatedApplyIdsRef.current.has(request.requestId) ||
+      failedAutoApprovalRequestId === request.requestId ||
+      autoApprovingRequestId.current === request.requestId
+    ) {
+      return;
+    }
+    const requestId = request.requestId;
+    autoApprovingRequestId.current = requestId;
+    void applyGlobalConfigRequest(requestId, request, false).finally(() => {
+      if (autoApprovingRequestId.current === requestId) {
+        autoApprovingRequestId.current = null;
+      }
+    });
+  }, [failedAutoApprovalRequestId, request]);
+
   const hideAutoApprovedCreate =
     request?.action === "create" &&
     (delegatedApplyIdsRef.current.has(request.requestId) ||
@@ -739,10 +946,20 @@ export function useAgentManagement() {
   const hideAutoApprovedUpdate =
     request?.action === "update" &&
     delegatedApplyIdsRef.current.has(request.requestId) &&
+    !editEffortError &&
+    failedAutoApprovalRequestId !== request.requestId;
+  const hideAutoApprovedGlobalConfig =
+    request?.action === "global_config" &&
+    delegatedApplyIdsRef.current.has(request.requestId) &&
     failedAutoApprovalRequestId !== request.requestId;
 
   return {
-    request: hideAutoApprovedCreate || hideAutoApprovedUpdate ? null : request,
+    request:
+      hideAutoApprovedCreate ||
+      hideAutoApprovedUpdate ||
+      hideAutoApprovedGlobalConfig
+        ? null
+        : request,
     createInitialValues,
     editInitialValues,
     editError,
@@ -757,6 +974,15 @@ export function useAgentManagement() {
         : ("ready" as const),
     submitCreate: submitReviewedCreate,
     submitUpdate,
+    approveGlobalConfig: () => {
+      if (request?.action !== "global_config") return Promise.resolve();
+      return applyGlobalConfigRequest(
+        request.requestId,
+        request,
+        !delegatedApplyIdsRef.current.has(request.requestId),
+      );
+    },
+    globalConfigPending,
     dismiss,
   };
 }

@@ -12,6 +12,24 @@ type RegistrationBridge = {
   publishDraft: typeof publishAgentManagementDraftResult;
 };
 
+export type AgentManagementCapability = Parameters<
+  typeof registerAgentManagementRequest
+>[0]["capability"];
+
+export function capabilityForAgentManagementRequest(
+  request: AgentManagementRequest,
+): AgentManagementCapability {
+  if (request.action === "create") return "agent_creation";
+  if (request.action === "global_config") return "global_config";
+  const changes = request.request;
+  return changes.envVars &&
+    Object.keys(changes).every((key) =>
+      ["channelId", "agentName", "envVars"].includes(key),
+    )
+    ? "env_vars"
+    : "agent_config";
+}
+
 const registrationBridge: RegistrationBridge = {
   register: registerAgentManagementRequest,
   publishApplying: publishAgentManagementApplyingResult,
@@ -39,16 +57,7 @@ export async function registerAndRouteAgentManagementRequest(
   request: AgentManagementRequest,
   bridge: RegistrationBridge = registrationBridge,
 ): Promise<AgentManagementRegistrationRoute> {
-  const updateChanges = request.action === "update" ? request.request : null;
-  const capability =
-    request.action === "create"
-      ? "agent_creation"
-      : updateChanges?.envVars &&
-          Object.keys(updateChanges).every((key) =>
-            ["channelId", "agentName", "envVars"].includes(key),
-          )
-        ? "env_vars"
-        : "agent_config";
+  const capability = capabilityForAgentManagementRequest(request);
   const registered = await bridge.register({
     sourcePubkey: agentPubkey,
     requestId: request.requestId,

@@ -101,8 +101,7 @@ pub fn run() {
     {
         Ok(runtime) => {
             tauri::async_runtime::set(runtime.handle().clone());
-            // Keep the runtime alive for the process lifetime; dropping it
-            // would shut down the workers Tauri now depends on.
+            // Keep the runtime alive for the process lifetime; dropping it shuts down Tauri's workers.
             std::mem::forget(runtime);
             eprintln!(
                 "buzz-mesh: installed tokio runtime with {} MiB worker stacks",
@@ -787,6 +786,7 @@ pub fn run() {
             put_agent_session_config,
             get_global_agent_config,
             set_global_agent_config,
+            apply_delegated_global_agent_config,
             managed_agents::list_claude_accounts,
             managed_agents::add_claude_account,
             managed_agents::delete_claude_account,
