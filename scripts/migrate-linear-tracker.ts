@@ -83,8 +83,13 @@ function uuidV5(namespace, name) {
 function nodes(value) {
   if (Array.isArray(value)) return value;
   if (Array.isArray(value?.nodes)) return value.nodes;
+  if (Array.isArray(value?.edges)) return value.edges.map((edge) => edge?.node).filter(Boolean);
   if (Array.isArray(value?.data)) return value.data;
   return [];
+}
+
+function issueLabels(issue) {
+  return [...new Set(nodes(issue.labels).map((label) => (label?.name ?? label).toString().trim().toLowerCase()))];
 }
 
 function normalizeExport(raw) {
@@ -291,7 +296,18 @@ function buildPlan(flags) {
   const teams = {};
   const projects = {};
   const lifecycle = { terminal: 0, non_terminal: 0, archived: 0 };
+  const conflicts = [
+    ...validateMaps(stateMap, userMap, projectMap),
+    ...validatePilotMap(pilotMap, issueIds),
+  ];
   for (const issue of source.issues) {
+    if (typeof issue.title !== "string" || !issue.title.trim()) {
+      conflicts.push(`issue ${issue.id} title must be non-empty text`);
+    } else if (Buffer.byteLength(issue.title.trim(), "utf8") > 256) {
+      conflicts.push(`issue ${issue.id} title exceeds the Tracker CLI 256-byte limit`);
+    }
+    const labels = issueLabels(issue);
+    if (labels.length > 16) conflicts.push(`issue ${issue.id} has ${labels.length} labels; Tracker CLI limit is 16`);
     const sourceState = stateKey(issue);
     const mappedState = lookup(stateMap, [sourceState, issue.state?.name, issue.state?.type]);
     if (!mappedState) unmappedStates.push({ issue_id: issue.id, state: sourceState });
@@ -312,6 +328,10 @@ function buildPlan(flags) {
     if (issue.archivedAt != null || issue.archived === true) lifecycle.archived += 1;
   }
   for (const comment of source.comments) {
+    const sourceIssueId = comment.issue_id ?? comment.issue?.id;
+    if (!sourceIssueId || !issueIds.has(sourceIssueId)) {
+      conflicts.push(`comment ${comment.id} references absent issue ${sourceIssueId ?? "<missing>"}`);
+    }
     const authorKey = userKey(comment.user ?? comment.creator);
     if (
       authorKey &&
@@ -322,10 +342,6 @@ function buildPlan(flags) {
   }
   const relations = relationRecords(source.issues);
   const links = linkRecords(source.issues);
-  const conflicts = [
-    ...validateMaps(stateMap, userMap, projectMap),
-    ...validatePilotMap(pilotMap, issueIds),
-  ];
   for (const [linearId, pilot] of Object.entries(pilotMap)) {
     const fields = pilotFields(pilot, projectMap);
     if (!fields.project) conflicts.push(`pilot ${linearId} project slug ${fields.projectSlug} is absent from project map`);
@@ -497,7 +513,7 @@ function mappedIssue(issue, context) {
   const project = lookup(context.projectMap, [projectKey(issue.project), issue.project?.name]);
   const issueId = uuidV5(LINEAR_NAMESPACE, `${context.source.workspaceId}:${issue.id}`);
   const requestId = uuidV5(LINEAR_NAMESPACE, `${issue.id}:root:${issue.updatedAt ?? issue.updated_at ?? context.plan.input_sha256}`);
-  const labels = [...new Set(nodes(issue.labels).map((label) => (label.name ?? label).toString().toLowerCase()))];
+  const labels = issueLabels(issue);
   const legacyLabels = pilot?.labels ?? [];
   return {
     state, assignee, project, pilot, issueId, requestId, labels, legacyLabels,
@@ -693,15 +709,25 @@ function verifyPlan(context) {
   const summaries = collectTrackerIssues(workspace);
   const trackerByLinear = new Map();
   const duplicateSourceIds = [];
+  const unexpectedTrackerIssues = [];
   const details = [];
   for (const summary of summaries) {
     const detail = buzz(["track", "get", "--workspace", workspace, "--issue", summary.issue_id]).parsed;
     details.push(detail.issue);
+    const linearRefs = [];
     for (const ref of detail.issue.external_refs ?? []) {
       if (ref.type !== "linear" && ref.kind !== "linear") continue;
       const sourceId = ref.ref ?? ref.reference;
+      linearRefs.push(sourceId);
       if (trackerByLinear.has(sourceId)) duplicateSourceIds.push(sourceId);
       trackerByLinear.set(sourceId, detail.issue);
+    }
+    if (linearRefs.length === 0) {
+      unexpectedTrackerIssues.push({
+        issue_id: detail.issue.issue_id,
+        identifier: detail.issue.identifier ?? null,
+        reason: "missing linear external reference",
+      });
     }
   }
   const sourceIds = new Set(context.source.issues.map((issue) => issue.id));
@@ -816,9 +842,10 @@ function verifyPlan(context) {
     mode: "verify",
     plan_sha256: context.plan.plan_sha256,
     source_issue_count: sourceIds.size,
-    tracker_issue_count: trackerByLinear.size,
+    tracker_issue_count: details.length,
     missing_source_ids: missingSourceIds,
     unexpected_source_ids: unexpectedSourceIds,
+    unexpected_tracker_issues: unexpectedTrackerIssues,
     duplicate_source_ids: [...new Set(duplicateSourceIds)],
     field_mismatches: fieldMismatches,
     provenance_mismatches: provenanceMismatches,
@@ -836,6 +863,7 @@ function verifyPlan(context) {
   result.passed = [
     missingSourceIds,
     unexpectedSourceIds,
+    unexpectedTrackerIssues,
     duplicateSourceIds,
     fieldMismatches,
     provenanceMismatches,

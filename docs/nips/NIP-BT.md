@@ -167,12 +167,23 @@ tags and optional channel/verification defaults. The shared SDK projection
 maps the immutable UUID to the signer's current coordinate at read time;
 issues store only that UUID.
 
-Slug uniqueness is enforced by CLI/projection scope among the workspace
-signer's managed projects. A rename publishes the same project UUID at the
-new `d` address and a NIP-09 deletion for the old kind-30621 address. A relay
-cannot enforce uniqueness across signers. Cross-signer upstream NIP-MP heads
-without Tracker UUID/workspace tags may be referenced by coordinate with a
-warning, but are not Tracker-manageable.
+Slug uniqueness is enforced under ASCII case folding by CLI/projection scope
+among the workspace signer's managed projects, matching CLI slug resolution.
+A rename publishes the same project UUID at the new `d` address and a NIP-09
+deletion for the old kind-30621 address. A relay cannot enforce uniqueness
+across signers. Cross-signer upstream NIP-MP heads without Tracker
+UUID/workspace tags may be referenced by coordinate with a warning, but are
+not Tracker-manageable.
+
+A rename interrupted after the new head is accepted but before the old-address
+deletion is accepted leaves duplicate heads for one immutable project UUID.
+Recovery first retries the rename with the same request ID. If that request ID
+is irretrievably unavailable, an operator must identify the newest valid head
+from the `DuplicateProjectId` diagnostic, publish a same-signer NIP-09 deletion
+whose `a` tag targets only the stale 30621 address, and verify that the
+diagnostic clears. The newest address must never be deleted merely to silence
+the diagnostic; immutable kind-40025 activity remains history, not deletion
+authority.
 
 Every project create, update, or rename also publishes immutable kind 40025.
 Its strict content contains `v`, `op`, `project_id`, `request_id`, and complete

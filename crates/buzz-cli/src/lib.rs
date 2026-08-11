@@ -1054,8 +1054,9 @@ pub enum TrackCmd {
         verification: Option<String>,
         #[arg(long)]
         content: Option<String>,
+        /// Allow another task while existing linked tasks remain active
         #[arg(long)]
-        replace_active: bool,
+        allow_active: bool,
         #[arg(long, default_value = "todo")]
         set_status: String,
         #[command(flatten)]
@@ -3005,6 +3006,36 @@ mod tests {
                 "untimeout"
             ]
         );
+    }
+
+    #[test]
+    fn dispatch_active_task_override_is_named_for_its_actual_semantics() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "track",
+            "dispatch",
+            "--issue",
+            "SC-1",
+            "--assignee",
+            &"a".repeat(64),
+            "--verify",
+            "exact head",
+            "--allow-active",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "track",
+            "dispatch",
+            "--issue",
+            "SC-1",
+            "--assignee",
+            &"a".repeat(64),
+            "--verify",
+            "exact head",
+            "--replace-active",
+        ])
+        .is_err());
     }
 
     #[test]
