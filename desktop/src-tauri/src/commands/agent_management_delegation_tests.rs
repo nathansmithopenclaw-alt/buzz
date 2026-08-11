@@ -226,6 +226,7 @@ fn startup_restore_fails_applying_and_keeps_drafts_in_creation_order() {
         interrupted.result.as_ref().unwrap()["code"],
         "interrupted_during_apply"
     );
+    assert!(interrupted.recovery_batch_id.is_some());
 
     let (_, changed_again) = restore_requests(&mut ledger, startup_cutoff);
     assert!(!changed_again);
@@ -234,6 +235,13 @@ fn startup_restore_fails_applying_and_keeps_drafts_in_creation_order() {
         .get_mut("request-a")
         .unwrap()
         .result_published = true;
+    let (restored_with_audit_pending, _) = restore_requests(&mut ledger, startup_cutoff);
+    assert_eq!(restored_with_audit_pending.len(), 2);
+    ledger
+        .requests
+        .get_mut("request-a")
+        .unwrap()
+        .audit_published = true;
     let (restored_after_publish, _) = restore_requests(&mut ledger, startup_cutoff);
     assert_eq!(restored_after_publish.len(), 1);
     assert_eq!(restored_after_publish[0].request_id, "request-b");
@@ -251,6 +259,241 @@ fn startup_restore_does_not_fail_an_apply_registered_after_the_cutoff() {
     assert!(!changed);
     assert!(restored.is_empty());
     assert_eq!(ledger.requests["request-a"].status, RequestStatus::Applying);
+}
+
+#[test]
+fn startup_restore_groups_fanned_out_failures_into_one_owner_signed_receipt() {
+    let owner = Keys::generate();
+    let source = Keys::generate();
+    let mut ledger = AgentManagementState::default();
+    for index in 0..5 {
+        let mut candidate = request(true);
+        candidate.source_pubkey = source.public_key().to_hex();
+        register_in_ledger(&mut ledger, format!("request-{index}"), candidate).unwrap();
+        ledger
+            .requests
+            .get_mut(&format!("request-{index}"))
+            .unwrap()
+            .updated_at = "2026-08-04T00:00:01Z".into();
+    }
+    let cutoff = chrono::DateTime::parse_from_rfc3339("2026-08-04T00:00:02Z").unwrap();
+    let (restored, changed) = restore_requests(&mut ledger, cutoff);
+    assert!(changed);
+    assert_eq!(restored.len(), 5);
+
+    let (event, group_ids) = result_publication::retained_recovery_audit_event(
+        &mut ledger,
+        "request-0",
+        &source.public_key(),
+        "Requester",
+        &owner,
+    )
+    .unwrap()
+    .expect("recovery receipt");
+    assert_eq!(group_ids.len(), 5);
+    assert_eq!(event.pubkey, owner.public_key());
+    assert_eq!(
+        event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(|value| value.as_str()) == Some("p"))
+            .count(),
+        1
+    );
+    assert!(event
+        .content
+        .contains("5 interrupted delegated management requests"));
+    assert!(!event.content.contains("retry with a new request id"));
+    let raw_event = event.as_json();
+    assert!(ledger
+        .requests
+        .values()
+        .all(|entry| entry.audit_event.as_deref() == Some(raw_event.as_str())));
+
+    let replay = result_publication::retained_recovery_audit_event(
+        &mut ledger,
+        "request-4",
+        &source.public_key(),
+        "Requester",
+        &owner,
+    )
+    .unwrap()
+    .expect("stored receipt remains retryable until publish is recorded");
+    assert_eq!(replay.0.id, event.id);
+}
+
+#[test]
+fn recovery_audit_groups_do_not_cross_requester_or_channel_boundaries() {
+    let owner = Keys::generate();
+    let first_source = Keys::generate();
+    let second_source = Keys::generate();
+    let mut ledger = AgentManagementState::default();
+    for (request_id, source, channel) in [
+        ("request-a", &first_source, "channel-a"),
+        ("request-b", &first_source, "channel-b"),
+        ("request-c", &second_source, "channel-a"),
+    ] {
+        let mut candidate = request(true);
+        candidate.source_pubkey = source.public_key().to_hex();
+        candidate.audit_channel_id = Some(channel.into());
+        register_in_ledger(&mut ledger, request_id.into(), candidate).unwrap();
+        ledger.requests.get_mut(request_id).unwrap().updated_at = "2026-08-04T00:00:01Z".into();
+    }
+    let cutoff = chrono::DateTime::parse_from_rfc3339("2026-08-04T00:00:02Z").unwrap();
+    restore_requests(&mut ledger, cutoff);
+
+    let (_, group_ids) = result_publication::retained_recovery_audit_event(
+        &mut ledger,
+        "request-a",
+        &first_source.public_key(),
+        "Requester",
+        &owner,
+    )
+    .unwrap()
+    .expect("first recovery receipt");
+    assert_eq!(group_ids, ["request-a".to_string()]);
+}
+
+#[test]
+fn recovery_publish_response_must_match_the_signed_receipt_id() {
+    let owner = Keys::generate();
+    let event = EventBuilder::new(Kind::TextNote, "recovery")
+        .sign_with_keys(&owner)
+        .unwrap();
+    let mismatched = crate::relay::SubmitEventResponse {
+        event_id: "00".repeat(32),
+        accepted: true,
+        message: String::new(),
+    };
+    assert!(result_publication::verify_recovery_publish_response(&event, &mismatched).is_err());
+    let matched = crate::relay::SubmitEventResponse {
+        event_id: event.id.to_hex(),
+        accepted: true,
+        message: String::new(),
+    };
+    result_publication::verify_recovery_publish_response(&event, &matched).unwrap();
+}
+
+const RECOVERY_CRASH_LEDGER_ENV: &str = "BUZZ_TEST_RECOVERY_CRASH_LEDGER";
+const RECOVERY_CRASH_MARKER_ENV: &str = "BUZZ_TEST_RECOVERY_CRASH_MARKER";
+
+#[test]
+fn recovery_claim_crash_child() {
+    let Ok(ledger_path) = std::env::var(RECOVERY_CRASH_LEDGER_ENV) else {
+        return;
+    };
+    let marker_path = std::env::var(RECOVERY_CRASH_MARKER_ENV).unwrap();
+    let mut ledger: AgentManagementState =
+        serde_json::from_slice(&std::fs::read(ledger_path).unwrap()).unwrap();
+    let source = PublicKey::parse(&ledger.requests["request-0"].source_pubkey).unwrap();
+    let owner = Keys::generate();
+    result_publication::retained_recovery_audit_event(
+        &mut ledger,
+        "request-0",
+        &source,
+        "Requester",
+        &owner,
+    )
+    .unwrap()
+    .expect("volatile claim");
+    // Signal only after signed bytes exist in memory. The parent kills this
+    // process before any ledger write, directly exercising the pre-store gap.
+    std::fs::write(marker_path, b"claimed").unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+#[test]
+fn recovery_claim_survives_process_kill_before_store_and_publishes_once() {
+    let owner = Keys::generate();
+    let source = Keys::generate();
+    let mut ledger = AgentManagementState::default();
+    for index in 0..5 {
+        let mut candidate = request(true);
+        candidate.source_pubkey = source.public_key().to_hex();
+        register_in_ledger(&mut ledger, format!("request-{index}"), candidate).unwrap();
+        ledger
+            .requests
+            .get_mut(&format!("request-{index}"))
+            .unwrap()
+            .updated_at = "2026-08-04T00:00:01Z".into();
+    }
+    let cutoff = chrono::DateTime::parse_from_rfc3339("2026-08-04T00:00:02Z").unwrap();
+    restore_requests(&mut ledger, cutoff);
+
+    let directory = tempfile::tempdir().unwrap();
+    let ledger_path = directory.path().join("ledger.json");
+    let marker_path = directory.path().join("claimed");
+    std::fs::write(&ledger_path, serde_json::to_vec(&ledger).unwrap()).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("recovery_claim_crash_child")
+        .arg("--nocapture")
+        .env(RECOVERY_CRASH_LEDGER_ENV, &ledger_path)
+        .env(RECOVERY_CRASH_MARKER_ENV, &marker_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    for _ in 0..250 {
+        if marker_path.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        marker_path.exists(),
+        "child never reached the pre-store crash point"
+    );
+    child.kill().unwrap();
+    let status = child.wait().unwrap();
+    assert!(!status.success());
+
+    let mut restarted: AgentManagementState =
+        serde_json::from_slice(&std::fs::read(&ledger_path).unwrap()).unwrap();
+    assert!(restarted
+        .requests
+        .values()
+        .all(|entry| entry.audit_event.is_none() && !entry.audit_published));
+    let (event, group_ids) = result_publication::retained_recovery_audit_event(
+        &mut restarted,
+        "request-0",
+        &source.public_key(),
+        "Requester",
+        &owner,
+    )
+    .unwrap()
+    .expect("restart prepares the receipt");
+    std::fs::write(&ledger_path, serde_json::to_vec(&restarted).unwrap()).unwrap();
+
+    let mut after_store: AgentManagementState =
+        serde_json::from_slice(&std::fs::read(&ledger_path).unwrap()).unwrap();
+    let replay = result_publication::retained_recovery_audit_event(
+        &mut after_store,
+        "request-4",
+        &source.public_key(),
+        "Requester",
+        &owner,
+    )
+    .unwrap()
+    .expect("stored bytes remain publishable");
+    assert_eq!(replay.0.id, event.id);
+    for request_id in group_ids {
+        after_store
+            .requests
+            .get_mut(&request_id)
+            .unwrap()
+            .audit_published = true;
+    }
+    assert!(result_publication::retained_recovery_audit_event(
+        &mut after_store,
+        "request-0",
+        &source.public_key(),
+        "Requester",
+        &owner,
+    )
+    .unwrap()
+    .is_none());
 }
 
 #[test]
