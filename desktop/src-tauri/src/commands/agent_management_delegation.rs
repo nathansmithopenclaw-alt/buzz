@@ -21,7 +21,8 @@ mod create_secret_response;
 mod result_publication;
 use create_secret_response::retained_agent_create_secret_event;
 use result_publication::{
-    publish_agent_management_applying_result, publish_agent_management_result,
+    publish_agent_management_applying_result, publish_agent_management_recovery_audit_receipt,
+    publish_agent_management_result,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -64,6 +65,8 @@ struct RequestLedgerEntry {
     result_event: Option<String>,
     #[serde(default = "legacy_result_was_published")]
     result_published: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_batch_id: Option<String>,
     status: RequestStatus,
     created_at: String,
     updated_at: String,
@@ -235,6 +238,7 @@ fn register_in_ledger(
             secret_response_event: None,
             result_event: None,
             result_published: false,
+            recovery_batch_id: None,
             status,
             created_at: now.clone(),
             updated_at: now,
@@ -497,6 +501,17 @@ pub async fn publish_agent_management_audit_receipt(
         .map_err(|error| format!("invalid management requester pubkey: {error}"))?;
     let owner_keys = app.state::<AppState>().signing_keys()?;
     let source_hex = source.to_hex();
+    if publish_agent_management_recovery_audit_receipt(
+        &request_id,
+        &source,
+        &requester_name,
+        &owner_keys,
+        &app,
+    )
+    .await?
+    {
+        return Ok(());
+    }
     let (channel, stored_audit_event, owner_reviewed, env_summary) = {
         let state_handle = app.state::<AppState>();
         let _guard = state_handle
@@ -683,7 +698,7 @@ fn restore_requests(
 ) -> (Vec<RestoredManagementRequest>, bool) {
     let interrupted_result = serde_json::json!({
         "code": "interrupted_during_apply",
-        "error": "Desktop restarted while this management request was applying; retry with a new request id"
+        "error": "Desktop restarted while this management request was applying; completion is unknown and no automatic retry was attempted"
     });
     let mut changed = false;
     for entry in ledger.requests.values_mut() {
@@ -696,6 +711,15 @@ fn restore_requests(
             entry.result = Some(interrupted_result.clone());
             entry.result_event = None;
             entry.result_published = false;
+            if let Some(channel) = entry.audit_channel_id.as_deref() {
+                let batch_material = format!(
+                    "{}\n{}\n{}",
+                    startup_cutoff.to_rfc3339(),
+                    entry.source_pubkey,
+                    channel
+                );
+                entry.recovery_batch_id = Some(hex::encode(Sha256::digest(batch_material)));
+            }
             changed = true;
         }
     }
@@ -705,7 +729,9 @@ fn restore_requests(
         .iter()
         .filter(|(_, entry)| {
             entry.status == RequestStatus::PendingDraft
-                || (entry.status == RequestStatus::Failed && !entry.result_published)
+                || (entry.status == RequestStatus::Failed
+                    && (!entry.result_published
+                        || (entry.recovery_batch_id.is_some() && !entry.audit_published)))
         })
         .map(|(request_id, entry)| {
             (
