@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -77,11 +77,33 @@ async fn spawn_capturing_fake_llm(responses: Vec<Value>) -> (String, Arc<Mutex<V
 async fn spawn_capturing_fake_llm_with_statuses(
     responses: Vec<CannedResponse>,
 ) -> (String, Arc<Mutex<Vec<Value>>>) {
+    spawn_capturing_fake_llm_with_statuses_and_first_response_gate(responses, None).await
+}
+
+async fn spawn_capturing_fake_llm_with_first_response_gate(
+    responses: Vec<Value>,
+    first_response_gate: Option<Arc<Notify>>,
+) -> (String, Arc<Mutex<Vec<Value>>>) {
+    spawn_capturing_fake_llm_with_statuses_and_first_response_gate(
+        responses
+            .into_iter()
+            .map(|body| CannedResponse { status: 200, body })
+            .collect(),
+        first_response_gate,
+    )
+    .await
+}
+
+async fn spawn_capturing_fake_llm_with_statuses_and_first_response_gate(
+    responses: Vec<CannedResponse>,
+    first_response_gate: Option<Arc<Notify>>,
+) -> (String, Arc<Mutex<Vec<Value>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
     let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let captures_clone = captures.clone();
+    let first_response_gate = Arc::new(Mutex::new(first_response_gate));
     tokio::spawn(async move {
         loop {
             let (mut sock, _) = match listener.accept().await {
@@ -90,6 +112,7 @@ async fn spawn_capturing_fake_llm_with_statuses(
             };
             let queue = queue.clone();
             let captures = captures_clone.clone();
+            let first_response_gate = first_response_gate.clone();
             tokio::spawn(async move {
                 // Read headers.
                 let mut buf = Vec::new();
@@ -143,6 +166,10 @@ async fn spawn_capturing_fake_llm_with_statuses(
                     status: 500,
                     body: json!({ "error": "no canned response" }),
                 });
+                let response_gate = first_response_gate.lock().await.take();
+                if let Some(gate) = response_gate {
+                    gate.notified().await;
+                }
                 let body_s = serde_json::to_string(&response.body).unwrap();
                 let reason = if response.status == 200 {
                     "OK"
@@ -779,10 +806,14 @@ async fn steer_folds_into_active_turn_without_cancelling() {
     // A two-round turn (tool call → text). A steer sent once the run is live
     // must (a) be accepted with the matching runId, (b) NOT cancel the turn —
     // it still ends with end_turn — and (c) reach the provider as a user turn.
-    let (url, captures) = spawn_capturing_fake_llm(vec![
-        openai_tool_call("call_steer", "fake__noop", json!({})),
-        openai_text("acknowledged the steer"),
-    ])
+    let first_response_gate = Arc::new(Notify::new());
+    let (url, captures) = spawn_capturing_fake_llm_with_first_response_gate(
+        vec![
+            openai_tool_call("call_steer", "fake__noop", json!({})),
+            openai_text("acknowledged the steer"),
+        ],
+        Some(first_response_gate.clone()),
+    )
     .await;
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
@@ -811,35 +842,27 @@ async fn steer_folds_into_active_turn_without_cancelling() {
         )
         .await;
 
-    // Steer is accepted and echoes the run id it landed in.
-    let mut steer_ok = false;
-    let mut end_turn = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(s_id) {
-            assert_eq!(
-                v["result"]["runId"],
-                json!(run_id),
-                "steer ran into the live turn"
-            );
-            assert!(
-                v["result"]["messageId"]
-                    .as_str()
-                    .is_some_and(|m| m.starts_with("steer_")),
-                "steer reply carries a messageId"
-            );
-            steer_ok = true;
-        } else if v["id"] == json!(p_id) {
-            // The turn was NOT cancelled — it completed normally.
-            assert_eq!(v["result"]["stopReason"], "end_turn");
-            end_turn = true;
-        }
-        if steer_ok && end_turn {
-            break;
-        }
-    }
-    assert!(steer_ok, "steer request was not accepted");
-    assert!(end_turn, "turn did not complete with end_turn after steer");
+    // Hold the first provider response until the steer has definitely been
+    // accepted. Without this gate, a loaded test host can finish both canned
+    // provider rounds before the ACP request loop processes the steer, making
+    // the test assert on scheduler timing rather than steering behavior.
+    let v = h.recv_until(|v| v["id"] == json!(s_id)).await;
+    assert_eq!(
+        v["result"]["runId"],
+        json!(run_id),
+        "steer ran into the live turn"
+    );
+    assert!(
+        v["result"]["messageId"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("steer_")),
+        "steer reply carries a messageId"
+    );
+    first_response_gate.notify_one();
+
+    // The turn was NOT cancelled — it completed normally.
+    let v = h.recv_until(|v| v["id"] == json!(p_id)).await;
+    assert_eq!(v["result"]["stopReason"], "end_turn");
 
     // The steered text reached the provider as a user message in some round.
     let reqs = captures.lock().await;
@@ -1346,37 +1369,52 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     })
     .await;
 
-    // Now send cancel and release the round-2 gate. Cancel is enqueued before
-    // round 2 can respond, so the turn exits with stopReason: cancelled.
+    // Send cancel, then wait for its acknowledgement before releasing the
+    // round-2 gate. Merely writing both messages in order is insufficient:
+    // under workspace load the provider task can resume before the ACP loop
+    // processes the cancel request.
     let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
+    let (frames_before_cancel_ack, _) =
+        recv_until_with_drain(&mut h, |v| v["id"] == json!(c_id)).await;
     let _ = gate_tx.send(()); // unblock round 2
 
     let mut saw_usage_before_prompt_response = false;
     let mut saw_usage = false;
-    let mut saw_cancel_ok = false;
     let mut saw_prompt_response = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(c_id) {
-            saw_cancel_ok = true;
-        } else if is_usage_update(&v) {
-            saw_usage = true;
-            if !saw_prompt_response {
-                saw_usage_before_prompt_response = true;
+    {
+        let mut inspect_frame = |v: &Value| {
+            if is_usage_update(v) {
+                saw_usage = true;
+                if !saw_prompt_response {
+                    saw_usage_before_prompt_response = true;
+                }
+            } else if v["id"] == json!(p_id) {
+                saw_prompt_response = true;
+                // The gate guarantees stopReason: cancelled — not a race-driven error.
+                assert_eq!(
+                    v["result"]["stopReason"], "cancelled",
+                    "turn must end with stopReason: cancelled"
+                );
             }
-        } else if v["id"] == json!(p_id) {
-            saw_prompt_response = true;
-            // The gate guarantees stopReason: cancelled — not a race-driven error.
-            assert_eq!(
-                v["result"]["stopReason"], "cancelled",
-                "turn must end with stopReason: cancelled"
-            );
+            saw_usage && saw_prompt_response
+        };
+
+        let mut done = false;
+        for v in &frames_before_cancel_ack {
+            if inspect_frame(v) {
+                done = true;
+                break;
+            }
         }
-        if saw_usage && saw_prompt_response && saw_cancel_ok {
-            break;
+        if !done {
+            for _ in 0..40 {
+                let v = h.recv().await;
+                if inspect_frame(&v) {
+                    break;
+                }
+            }
         }
     }
-    assert!(saw_cancel_ok, "session/cancel was not acknowledged");
     assert!(
         saw_usage,
         "expected usage_update notification for cancelled turn with observed tokens"
