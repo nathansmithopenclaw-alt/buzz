@@ -98,6 +98,7 @@ export const CHANNEL_EVENT_KINDS = [
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
   KIND_STREAM_MESSAGE_DIFF, // 40008 — message diffs
   KIND_SYSTEM_MESSAGE, // 40099 — system messages (join, leave, etc.)
+  KIND_APPROVAL_REQUEST, // 46010 — targeted workflow approval card
   KIND_HUDDLE_STARTED, // 48100 — visible huddle session card
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101 — huddle lifecycle overlay
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102 — huddle lifecycle overlay
@@ -127,6 +128,7 @@ export const CHANNEL_AUX_EVENT_KINDS = [
 // separately by `#e` reference. Forum kinds (45001/45003) are excluded: forum
 // channels use a different query path, not this timeline.
 export const CHANNEL_TIMELINE_CONTENT_KINDS = [
+  KIND_APPROVAL_REQUEST, // 46010 — workflow approval decision card
   KIND_STREAM_MESSAGE, // 9
   KIND_STREAM_MESSAGE_V2, // 40002
   KIND_STREAM_MESSAGE_DIFF, // 40008 — diff messages (own row)
@@ -146,6 +148,7 @@ export const CHANNEL_TIMELINE_CONTENT_KINDS = [
 // created channel carries one channel_created + N member_joined system rows
 // that would otherwise show as phantom unreads ("4 unread, 1 message").
 const NON_CONVERSATIONAL_UNREAD_KINDS: ReadonlySet<number> = new Set([
+  KIND_APPROVAL_REQUEST, // 46010 — surfaced via Needs Action, not unread chat
   KIND_SYSTEM_MESSAGE, // 40099
   KIND_JOB_REQUEST, // 43001
   KIND_JOB_ACCEPTED, // 43002

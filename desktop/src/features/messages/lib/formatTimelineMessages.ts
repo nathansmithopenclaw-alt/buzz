@@ -20,6 +20,7 @@ import {
 } from "@/features/profile/lib/identity";
 import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
 import {
+  KIND_APPROVAL_REQUEST,
   KIND_JOB_ACCEPTED,
   KIND_JOB_CANCEL,
   KIND_JOB_ERROR,
@@ -46,8 +47,27 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 
 const HEX_RE = /^[0-9a-f]+$/i;
 
+function resolveTimelineAuthorPubkey(
+  event: RelayEvent,
+  relaySelfPubkey: string | null | undefined,
+) {
+  // Approval requests are relay-authored notifications whose p tag names the
+  // recipient, not a delegated author.
+  if (event.kind === KIND_APPROVAL_REQUEST) {
+    return normalizePubkey(event.pubkey);
+  }
+
+  return resolveEventAuthorPubkey({
+    event,
+    preferActorTag: true,
+    relaySelfPubkey,
+    requireChannelTagForPTags: true,
+  });
+}
+
 export function isTimelineContentEvent(event: RelayEvent) {
   return (
+    event.kind === KIND_APPROVAL_REQUEST ||
     event.kind === KIND_STREAM_MESSAGE ||
     event.kind === KIND_STREAM_MESSAGE_V2 ||
     event.kind === KIND_STREAM_MESSAGE_DIFF ||
@@ -138,12 +158,7 @@ function formatMessageAuthor(
   profiles: UserProfileLookup | undefined,
   relaySelfPubkey: string | null | undefined,
 ) {
-  const authorPubkey = resolveEventAuthorPubkey({
-    event,
-    preferActorTag: true,
-    relaySelfPubkey,
-    requireChannelTagForPTags: true,
-  });
+  const authorPubkey = resolveTimelineAuthorPubkey(event, relaySelfPubkey);
   const fallbackName =
     channel?.channelType === "dm"
       ? (() => {
@@ -409,12 +424,7 @@ export function formatTimelineMessages(
       return cached;
     }
 
-    const authorPubkey = resolveEventAuthorPubkey({
-      event,
-      preferActorTag: true,
-      relaySelfPubkey,
-      requireChannelTagForPTags: true,
-    });
+    const authorPubkey = resolveTimelineAuthorPubkey(event, relaySelfPubkey);
     const author = formatMessageAuthor(
       event,
       channel,
@@ -463,12 +473,7 @@ export function formatTimelineMessages(
     const author = getAuthorLabel(event);
     const authorPubkey =
       authorPubkeyByEventId.get(event.id) ??
-      resolveEventAuthorPubkey({
-        event,
-        preferActorTag: true,
-        relaySelfPubkey,
-        requireChannelTagForPTags: true,
-      });
+      resolveTimelineAuthorPubkey(event, relaySelfPubkey);
     const thread = getThreadReference(event.tags);
     const edit = editsByTargetId.get(event.id);
     const role = roleByPubkey.get(authorPubkey.toLowerCase());
@@ -619,12 +624,7 @@ export function collectMessageAuthorPubkeys(
     } else {
       pubkeys.add(event.pubkey.toLowerCase());
       pubkeys.add(
-        resolveEventAuthorPubkey({
-          event,
-          preferActorTag: true,
-          relaySelfPubkey,
-          requireChannelTagForPTags: true,
-        }).toLowerCase(),
+        resolveTimelineAuthorPubkey(event, relaySelfPubkey).toLowerCase(),
       );
     }
   }

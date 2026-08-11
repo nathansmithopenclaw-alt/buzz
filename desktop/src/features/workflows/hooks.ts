@@ -5,6 +5,7 @@ import {
   createWorkflow,
   deleteWorkflow,
   denyApproval,
+  getApprovalResolution,
   getChannelWorkflows,
   getRunApprovals,
   getWorkflow,
@@ -24,6 +25,10 @@ export const workflowRunsQueryKey = (workflowId: string) =>
   ["workflow-runs", workflowId] as const;
 export const runApprovalsQueryKey = (workflowId: string, runId: string) =>
   ["run-approvals", workflowId, runId] as const;
+export const approvalResolutionQueryKey = (
+  tokenHash: string,
+  approverPubkey: string,
+) => ["approval-resolution", tokenHash, approverPubkey] as const;
 
 function invalidateWorkflowListQueries(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -94,6 +99,20 @@ export function useRunApprovalsQuery(
   });
 }
 
+export function useApprovalResolutionQuery(
+  tokenHash: string | null,
+  approverPubkey: string | null,
+) {
+  return useQuery({
+    queryKey: approvalResolutionQueryKey(tokenHash ?? "", approverPubkey ?? ""),
+    queryFn: ({ queryKey: [, resolvedTokenHash, resolvedApproverPubkey] }) =>
+      getApprovalResolution(resolvedTokenHash, resolvedApproverPubkey),
+    enabled: tokenHash !== null && approverPubkey !== null,
+    staleTime: 1_000,
+    refetchInterval: (query) => (query.state.data ? false : 2_000),
+  });
+}
+
 export function useCreateWorkflowMutation(channelId: string) {
   const queryClient = useQueryClient();
 
@@ -160,6 +179,8 @@ export function useApprovalMutation() {
     onSuccess: (_data, _variables) => {
       void queryClient.invalidateQueries({
         predicate: (query) =>
+          query.queryKey[0] === "home-feed" ||
+          query.queryKey[0] === "approval-resolution" ||
           query.queryKey[0] === "workflow-runs" ||
           query.queryKey[0] === "workflow" ||
           query.queryKey[0] === "run-approvals",

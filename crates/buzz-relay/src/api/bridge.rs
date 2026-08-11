@@ -1978,6 +1978,110 @@ pub async fn workflow_webhook(
     ))
 }
 
+/// Optional row limit for `GET /api/workflows/{workflow_id}/runs`.
+#[derive(serde::Deserialize, Default)]
+pub struct WorkflowRunsQuery {
+    limit: Option<u32>,
+}
+
+fn workflow_runs_path(workflow_id: uuid::Uuid, raw_query: Option<&str>) -> String {
+    let path = format!("/api/workflows/{workflow_id}/runs");
+    match raw_query {
+        Some(query) if !query.is_empty() => format!("{path}?{query}"),
+        _ => path,
+    }
+}
+
+fn workflow_run_json(run: &buzz_db::workflow::WorkflowRunRecord) -> Value {
+    serde_json::json!({
+        "id": run.id,
+        "workflow_id": run.workflow_id,
+        "status": run.status.to_string(),
+        "trigger_event_id": run.trigger_event_id.as_ref().map(hex::encode),
+        "current_step": run.current_step,
+        "execution_trace": run.execution_trace,
+        "trigger_context": run.trigger_context,
+        "started_at": run.started_at,
+        "completed_at": run.completed_at,
+        "error_message": run.error_message,
+        "created_at": run.created_at,
+    })
+}
+
+/// Return authoritative workflow-run rows to callers who can read the
+/// workflow's channel. Runs are structured relational state, not stored Nostr
+/// events, so this narrow endpoint avoids inventing a second event source of
+/// truth while preserving tenant, membership, and channel authorization.
+pub async fn workflow_runs(
+    State(state): State<Arc<AppState>>,
+    Extension(public_scheme): Extension<crate::proxy::PublicScheme>,
+    headers: HeaderMap,
+    Path(workflow_id): Path<uuid::Uuid>,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<WorkflowRunsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+        })?;
+
+    let path = workflow_runs_path(workflow_id, raw_query.as_deref());
+    let url = nip98_expected_url(public_scheme, &tenant, &path);
+    let (pubkey, event_id_bytes) =
+        verify_bridge_auth(&headers, "GET", &url, None, state.config.require_auth_token)?;
+    enforce_http_admission(&state, &tenant, &pubkey).await?;
+    check_nip98_replay(&state, &tenant, event_id_bytes).await?;
+
+    let pubkey_bytes = pubkey.to_bytes().to_vec();
+    let auth_tag = headers
+        .get("x-auth-tag")
+        .and_then(|value| value.to_str().ok());
+    super::relay_members::enforce_relay_membership(
+        &state,
+        tenant.community(),
+        &pubkey_bytes,
+        auth_tag,
+    )
+    .await?;
+
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), workflow_id)
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::NotFound(_) => not_found("workflow not found"),
+            other => internal_error(&format!("get workflow: {other}")),
+        })?;
+    let Some(channel_id) = workflow.channel_id else {
+        return Err(not_found("workflow not found"));
+    };
+    let accessible_channels = state
+        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
+        .await
+        .map_err(|error| internal_error(&format!("channel access lookup: {error}")))?;
+    if !accessible_channels.contains(&channel_id) {
+        return Err(not_found("workflow not found"));
+    }
+
+    let limit = query.limit.unwrap_or(20).min(100) as i64;
+    let runs = state
+        .db
+        .list_workflow_runs(tenant.community(), workflow_id, limit)
+        .await
+        .map_err(|error| internal_error(&format!("list workflow runs: {error}")))?;
+    Ok(Json(Value::Array(
+        runs.iter().map(workflow_run_json).collect(),
+    )))
+}
+
 /// If all filters target kind:20001 or kind:40902 with authors, synthesize
 /// presence from Redis instead of querying the DB (ephemeral events are never
 /// stored, and kind:40902 snapshots are relay-generated on demand).
@@ -2282,6 +2386,51 @@ mod tests {
             buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4()),
             host,
         )
+    }
+
+    #[test]
+    fn workflow_runs_path_preserves_raw_query_for_nip98() {
+        let workflow_id = uuid::Uuid::parse_str("a4e018de-c5c6-40a2-a47c-98d7d3279d99")
+            .expect("valid workflow id");
+
+        assert_eq!(
+            workflow_runs_path(workflow_id, Some("limit=7")),
+            "/api/workflows/a4e018de-c5c6-40a2-a47c-98d7d3279d99/runs?limit=7"
+        );
+        assert_eq!(
+            workflow_runs_path(workflow_id, None),
+            "/api/workflows/a4e018de-c5c6-40a2-a47c-98d7d3279d99/runs"
+        );
+    }
+
+    #[test]
+    fn workflow_run_json_exposes_desktop_shape_without_community_id() {
+        let workflow_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        let created_at =
+            chrono::DateTime::from_timestamp(1_725_000_000, 0).expect("valid test timestamp");
+        let run = buzz_db::workflow::WorkflowRunRecord {
+            id: run_id,
+            community_id: buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4()),
+            workflow_id,
+            status: buzz_db::workflow::RunStatus::WaitingApproval,
+            trigger_event_id: Some(vec![0xab; 32]),
+            current_step: 2,
+            execution_trace: serde_json::json!([{"step": "gate"}]),
+            trigger_context: Some(serde_json::json!({"channel_id": "channel"})),
+            started_at: Some(created_at),
+            completed_at: None,
+            error_message: None,
+            created_at,
+        };
+
+        let json = workflow_run_json(&run);
+        assert_eq!(json["id"], run_id.to_string());
+        assert_eq!(json["workflow_id"], workflow_id.to_string());
+        assert_eq!(json["status"], "waiting_approval");
+        assert_eq!(json["trigger_event_id"], "ab".repeat(32));
+        assert_eq!(json["current_step"], 2);
+        assert!(json.get("community_id").is_none());
     }
 
     fn fresh_nip98_event_id_bytes() -> [u8; 32] {

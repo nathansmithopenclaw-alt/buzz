@@ -12,6 +12,7 @@ import {
 import {
   CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
+  KIND_APPROVAL_REQUEST,
   KIND_HUDDLE_ENDED,
   KIND_HUDDLE_STARTED,
 } from "@/shared/constants/kinds";
@@ -274,6 +275,43 @@ test("relay-signed actor tag resolves the delegated timeline author", () => {
   assert.equal(message.pubkey, PUBKEY_B);
   assert.equal(message.signerPubkey, RELAY_PUBKEY);
   assert.equal(message.author, "Delegated user");
+});
+
+test("workflow approval recipient is not presented as the request author", () => {
+  const event = finalizeEvent(
+    {
+      kind: KIND_APPROVAL_REQUEST,
+      created_at: 1_700_000_000,
+      content: "Approve the workflow?",
+      tags: [
+        ["h", CHANNEL_ID],
+        ["p", PUBKEY_A],
+        ["d", "c".repeat(64)],
+        ["token", "123e4567-e89b-12d3-a456-426614174000"],
+      ],
+    },
+    RELAY_SECRET,
+  );
+
+  assert.deepEqual(collectMessageAuthorPubkeys([event], RELAY_PUBKEY), [
+    RELAY_PUBKEY,
+  ]);
+
+  const [message] = formatTimelineMessages(
+    [event],
+    null,
+    PUBKEY_A,
+    null,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    RELAY_PUBKEY,
+  );
+
+  assert.equal(message.pubkey, RELAY_PUBKEY);
+  assert.equal(message.signerPubkey, RELAY_PUBKEY);
+  assert.notEqual(message.pubkey, PUBKEY_A);
 });
 
 test("collectReactionActorPubkeys returns active kind:7 actors only", () => {
@@ -650,6 +688,15 @@ test("countTopLevelTimelineRows ignores non-content kinds (reactions)", () => {
 
 test("countTopLevelTimelineRows counts huddle start rows", () => {
   assert.equal(countTopLevelTimelineRows([huddleStarted()]), 1);
+});
+
+test("countTopLevelTimelineRows counts workflow approval cards", () => {
+  assert.equal(
+    countTopLevelTimelineRows([
+      message(hex64("a"), { kind: KIND_APPROVAL_REQUEST }),
+    ]),
+    1,
+  );
 });
 
 test("huddle ended stays lifecycle-only, not a timeline row", () => {

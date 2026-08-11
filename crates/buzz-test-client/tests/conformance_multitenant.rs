@@ -1818,7 +1818,8 @@ mod channels_membership {
 mod workflows {
     use super::*;
 
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
 
     /// Workflow definition command (NIP-custom kind 30620). `content` is the
     /// YAML body; `h` tags the channel. The server *generates* the workflow id
@@ -1987,6 +1988,132 @@ mod workflows {
             });
         }
         panic!("POST workflow trigger to {http_base} returned HTTP {status}: {body}");
+    }
+
+    fn nip98_get_header(keys: &Keys, url: &str) -> String {
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                Tag::parse(["u", url]).expect("u tag"),
+                Tag::parse(["method", "GET"]).expect("method tag"),
+                Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).expect("nonce tag"),
+            ])
+            .sign_with_keys(keys)
+            .expect("sign NIP-98 GET event");
+        format!("Nostr {}", BASE64.encode(event.as_json().as_bytes()))
+    }
+
+    async fn get_workflow_runs(
+        http_base: &str,
+        keys: &Keys,
+        workflow_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let url = format!("{http_base}/api/workflows/{workflow_id}/runs?limit=20");
+        let response = reqwest::Client::new()
+            .get(&url)
+            .header("Authorization", nip98_get_header(keys, &url))
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("GET workflow runs from {url} failed: {error}"));
+        let status = response.status();
+        let body = response.text().await.expect("read workflow runs body");
+        assert!(
+            status.is_success(),
+            "GET workflow runs from {url} returned {status}: {body}"
+        );
+        serde_json::from_str(&body)
+            .unwrap_or_else(|error| panic!("parse workflow runs JSON: {error} ({body})"))
+    }
+
+    async fn query_workflow_definition(
+        http_base: &str,
+        keys: &Keys,
+        workflow_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let filter = serde_json::json!({
+            "kinds": [KIND_WORKFLOW_DEF],
+            "authors": [keys.public_key().to_hex()],
+            "#d": [workflow_id],
+            "limit": 1,
+        });
+        let response = reqwest::Client::new()
+            .post(format!("{http_base}/query"))
+            .header("X-Pubkey", keys.public_key().to_hex())
+            .json(&[filter])
+            .send()
+            .await
+            .expect("POST workflow definition query");
+        let status = response.status();
+        let body = response.text().await.expect("read workflow query body");
+        assert!(
+            status.is_success(),
+            "workflow definition query returned {status}: {body}"
+        );
+        serde_json::from_str(&body)
+            .unwrap_or_else(|error| panic!("parse workflow query JSON: {error} ({body})"))
+    }
+
+    /// N=1 live regression for the two relational/event read-model repairs:
+    /// a triggered workflow must be visible through the authenticated run
+    /// endpoint, and deleting its definition must remove the kind:30620 head
+    /// from REQ reads immediately, without a relay restart.
+    #[tokio::test]
+    #[ignore]
+    async fn workflow_runs_and_delete_are_live_without_restart() {
+        let http = to_http(&url_a());
+        let keys = Keys::generate();
+        let channel_id = create_open_channel(&http, &keys, uuid::Uuid::new_v4()).await;
+        let name = format!("wf_live_{}", uuid::Uuid::new_v4().simple());
+        let workflow_id = define_workflow(&http, &keys, &channel_id, &name).await;
+
+        assert_eq!(
+            query_workflow_definition(&http, &keys, &workflow_id)
+                .await
+                .len(),
+            1,
+            "fresh workflow definition must be REQ-readable"
+        );
+
+        let trigger = trigger_workflow(&http, &keys, &workflow_id).await;
+        assert_eq!(
+            trigger["accepted"], true,
+            "workflow trigger failed: {trigger}"
+        );
+
+        let mut runs = Vec::new();
+        for _ in 0..20 {
+            runs = get_workflow_runs(&http, &keys, &workflow_id).await;
+            if !runs.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!runs.is_empty(), "workflow run never became readable");
+        assert_eq!(runs[0]["workflow_id"], workflow_id);
+        assert!(runs[0]["id"].as_str().is_some(), "run id missing: {runs:?}");
+
+        let coordinate = format!(
+            "{KIND_WORKFLOW_DEF}:{}:{workflow_id}",
+            keys.public_key().to_hex()
+        );
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tags([
+                Tag::parse(["a", coordinate.as_str()]).expect("a tag"),
+                Tag::parse(["h", channel_id.as_str()]).expect("h tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign workflow deletion");
+        let deleted = submit_event(&http, &keys, deletion).await;
+        assert_eq!(
+            deleted["accepted"], true,
+            "workflow deletion failed: {deleted}"
+        );
+
+        assert!(
+            query_workflow_definition(&http, &keys, &workflow_id)
+                .await
+                .is_empty(),
+            "deleted workflow definition remained REQ-readable without restart"
+        );
     }
 
     /// Obligation (trigger-confinement half): a workflow id defined under

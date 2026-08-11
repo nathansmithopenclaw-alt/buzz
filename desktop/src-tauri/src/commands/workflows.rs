@@ -121,26 +121,28 @@ pub async fn get_workflow(
 pub async fn get_workflow_runs(
     workflow_id: String,
     limit: Option<u32>,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<Value>, String> {
-    // TODO(workflow-runs): Run reconstruction is a clearly-scoped follow-up.
-    // The authoritative run record the frontend's `WorkflowRun` shape needs
-    // (status / current_step / execution_trace / error_message) lives in the
-    // relay DB and is not exposed to the desktop client as a single queryable
-    // record. If the relay starts emitting lifecycle events (46001–46007, …),
-    // folding that stream into `WorkflowRun` would be another viable design.
-    // The important bit for this command is that raw lifecycle events are not
-    // the `RawWorkflowRun` contract.
-    //
-    // Until then we return a bare empty array — NOT a raw-event wrapper. The
-    // frontend wrapper (`getWorkflowRuns`) does `raw.map(fromRawWorkflowRun)`,
-    // so it must receive an array; the wrapped `{ runs: [...] }` shape would
-    // make `.map()` throw and crash the detail panel (the same TypeError class
-    // as the original page bug). Raw lifecycle events also don't carry the
-    // `id`/`workflow_id`/`status`/… fields `RawWorkflowRun` expects, so an
-    // empty list is the honest, safe placeholder.
-    let _ = (workflow_id, limit);
-    Ok(Vec::new())
+    let workflow_id = uuid::Uuid::parse_str(&workflow_id)
+        .map_err(|error| format!("invalid workflow id: {error}"))?;
+    let limit = limit.unwrap_or(20).min(100);
+    crate::relay_admission::wait_for_rate_limit().await;
+    let url = format!(
+        "{}/api/workflows/{workflow_id}/runs?limit={limit}",
+        crate::relay::relay_api_base_url_with_override(&state)
+    );
+    let auth = crate::relay::build_nip98_auth_header(&reqwest::Method::GET, &url, &[], &state)?;
+    let response = state
+        .http_client
+        .get(url)
+        .header("Authorization", auth)
+        .send()
+        .await
+        .map_err(|error| crate::relay::classify_request_error(&error))?;
+    if !response.status().is_success() {
+        return Err(crate::relay::relay_error_message(response).await);
+    }
+    crate::relay::parse_json_response(response).await
 }
 
 // ── Writes ───────────────────────────────────────────────────────────────────
@@ -263,6 +265,49 @@ pub async fn get_run_approvals(
     // `getRunApprovals` (`raw.map(fromRawApproval)`) is safe.
     let _ = (workflow_id, run_id);
     Ok(Vec::new())
+}
+
+#[tauri::command]
+pub async fn get_approval_resolution(
+    token_hash: String,
+    approver_pubkey: String,
+    state: State<'_, AppState>,
+) -> Result<Option<Value>, String> {
+    let token_hash = token_hash.trim().to_ascii_lowercase();
+    if token_hash.len() != 64 || !token_hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("invalid approval token hash".to_string());
+    }
+    let approver_pubkey = approver_pubkey.trim().to_ascii_lowercase();
+    if approver_pubkey.len() != 64 || !approver_pubkey.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("invalid approver pubkey".to_string());
+    }
+
+    let events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [
+                buzz_core_pkg::kind::KIND_APPROVAL_GRANT,
+                buzz_core_pkg::kind::KIND_APPROVAL_DENY,
+            ],
+            "#d": [token_hash],
+            "authors": [approver_pubkey],
+            "limit": 10,
+        })],
+    )
+    .await?;
+
+    let resolution = events.into_iter().max_by_key(|event| event.created_at);
+    Ok(resolution.map(|event| {
+        serde_json::json!({
+            "status": if event.kind.as_u16() as u32 == buzz_core_pkg::kind::KIND_APPROVAL_GRANT {
+                "granted"
+            } else {
+                "denied"
+            },
+            "note": if event.content.is_empty() { Value::Null } else { Value::String(event.content) },
+            "created_at": event.created_at.as_secs(),
+        })
+    }))
 }
 
 #[tauri::command]
