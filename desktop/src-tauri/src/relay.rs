@@ -435,9 +435,7 @@ fn sign_managed_agent_profile_event(
         // A freshly supplied and verified auth tag is canonical. Remove every
         // prior auth tag, including stale-but-different attestations, while
         // retaining all unrelated profile tags.
-        tags.retain(|prior| {
-            prior.as_slice().first().map(String::as_str) != Some("auth")
-        });
+        tags.retain(|prior| prior.as_slice().first().map(String::as_str) != Some("auth"));
         tags.push(tag);
     }
 
