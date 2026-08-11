@@ -189,6 +189,10 @@ fn print_write_with_task(resp: &str, task_id: Uuid, status: TaskStatus) {
     println!("{value}");
 }
 
+fn upgrade_task_envelope_for_write(envelope: &mut TaskEnvelope) {
+    envelope.v = TASK_ENVELOPE_VERSION;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn assign(
     client: &BuzzClient,
@@ -283,6 +287,7 @@ async fn update(client: &BuzzClient, input: TaskUpdateInput) -> Result<(), CliEr
         .remove(&task_id)
         .ok_or_else(|| CliError::Usage(format!("task {task_id} not found in channel {channel}")))?
         .envelope;
+    upgrade_task_envelope_for_write(&mut envelope);
     let author = client.keys().public_key().to_hex();
     if status == TaskStatus::Verified && author == envelope.assignee {
         return Err(CliError::Usage(
@@ -443,7 +448,32 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
 
 #[cfg(test)]
 mod tests {
+    use nostr::Keys;
+
     use super::*;
+
+    fn task_envelope(version: u8) -> TaskEnvelope {
+        TaskEnvelope {
+            v: version,
+            task_id: Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap(),
+            status: TaskStatus::Assigned,
+            assignee: "aa".repeat(32),
+            assigner: "bb".repeat(32),
+            title: "Upgrade legacy task".into(),
+            deliverables: vec![TaskDeliverable {
+                kind: TaskDeliverableType::Pr,
+                reference: "existing-pr".into(),
+            }],
+            verification: TaskVerification {
+                method: "full suite".into(),
+                evidence_ref: Some("existing-evidence".into()),
+            },
+            blocked_on: None,
+            notes: Some("legacy note".into()),
+            tracker_issue_id: None,
+            dispatch_request_id: None,
+        }
+    }
 
     #[test]
     fn deliverable_parser_accepts_contract_types() {
@@ -462,5 +492,38 @@ mod tests {
         assert!(parse_status("assigned", false).is_err());
         assert!(parse_status("complete", false).is_err());
         assert_eq!(parse_status("done", false).unwrap(), TaskStatus::Done);
+    }
+
+    #[test]
+    fn update_upgrades_folded_v1_history_before_writing() {
+        let legacy = task_envelope(1);
+        let task_id = legacy.task_id;
+        let mut expected = legacy.clone();
+        expected.v = TASK_ENVELOPE_VERSION;
+        let history = [TaskEnvelopeEvent {
+            event_id: "legacy-event".into(),
+            author_pubkey: "cc".repeat(32),
+            channel_id: Uuid::nil(),
+            created_at: 1,
+            envelope: legacy,
+        }];
+
+        let mut envelope = fold_task_events(history).remove(&task_id).unwrap().envelope;
+        upgrade_task_envelope_for_write(&mut envelope);
+
+        assert_eq!(envelope, expected);
+        let event = buzz_sdk::task_envelope::build_task_message(
+            Uuid::nil(),
+            "upgraded",
+            &envelope,
+            None,
+            &[],
+        )
+        .unwrap()
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+        let parsed = TaskEnvelopeEvent::from_event(&event).unwrap();
+        assert_eq!(parsed.envelope.v, TASK_ENVELOPE_VERSION);
+        assert_eq!(parsed.envelope.task_id, task_id);
     }
 }
