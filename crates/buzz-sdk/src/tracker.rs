@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use buzz_core::kind::{
     KIND_PROJECT, KIND_TRACKER_COMMENT, KIND_TRACKER_ISSUE, KIND_TRACKER_PROJECT_ACTIVITY,
@@ -591,6 +592,22 @@ pub enum ProjectDiagnostic {
         /// NIP-MP coordinate that may still be referenced.
         coordinate: String,
     },
+    /// A Tracker-tagged head advertises managed identity but fails strict parsing.
+    InvalidManagedHead {
+        /// NIP-MP coordinate of the invalid head.
+        coordinate: String,
+        /// Strict parser rejection reason.
+        reason: String,
+    },
+    /// A project head is too far in the future to participate in the projection.
+    FutureSkew {
+        /// NIP-MP coordinate of the future-dated head.
+        coordinate: String,
+        /// Signed event timestamp.
+        created_at: u64,
+        /// Greatest timestamp accepted by this fold.
+        max_accepted_at: u64,
+    },
 }
 
 /// Shared SDK projection of current Tracker-managed projects.
@@ -1017,18 +1034,57 @@ pub fn fold_tracker_projects(
     workspace_id: Uuid,
     managed_signer: &str,
 ) -> TrackerProjectProjection {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    fold_tracker_projects_at(events, workspace_id, managed_signer, now)
+}
+
+/// Fold current project heads at a caller-supplied clock for deterministic verification.
+pub fn fold_tracker_projects_at(
+    events: impl IntoIterator<Item = Event>,
+    workspace_id: Uuid,
+    managed_signer: &str,
+    now: u64,
+) -> TrackerProjectProjection {
     let mut projection = TrackerProjectProjection::default();
     let mut parsed = Vec::new();
     for event in events {
+        let coordinate = tag_values(&event, "d")
+            .first()
+            .and_then(|tag| tag.get(1))
+            .map(|slug| format!("30621:{}:{slug}", event.pubkey.to_hex()));
+        if event.kind.as_u16() as u32 == KIND_PROJECT
+            && event.created_at.as_secs() > now.saturating_add(MAX_FUTURE_SKEW_SECONDS)
+        {
+            if let Some(coordinate) = coordinate {
+                projection.diagnostics.push(ProjectDiagnostic::FutureSkew {
+                    coordinate,
+                    created_at: event.created_at.as_secs(),
+                    max_accepted_at: now.saturating_add(MAX_FUTURE_SKEW_SECONDS),
+                });
+            }
+            continue;
+        }
         match parse_tracker_project(&event) {
             Ok(project) if project.workspace_id == workspace_id => parsed.push(project),
-            Err(_) if event.kind.as_u16() as u32 == KIND_PROJECT => {
-                if let Some(slug) = tag_values(&event, "d").first().and_then(|tag| tag.get(1)) {
-                    projection
-                        .diagnostics
-                        .push(ProjectDiagnostic::UnmanagedCoordinate {
-                            coordinate: format!("30621:{}:{slug}", event.pubkey.to_hex()),
-                        });
+            Err(error) if event.kind.as_u16() as u32 == KIND_PROJECT => {
+                if let Some(coordinate) = coordinate {
+                    if !tag_values(&event, "buzz-project-id").is_empty()
+                        || !tag_values(&event, "buzz-workspace").is_empty()
+                    {
+                        projection
+                            .diagnostics
+                            .push(ProjectDiagnostic::InvalidManagedHead {
+                                coordinate,
+                                reason: error.to_string(),
+                            });
+                    } else {
+                        projection
+                            .diagnostics
+                            .push(ProjectDiagnostic::UnmanagedCoordinate { coordinate });
+                    }
                 }
             }
             _ => {}
@@ -1055,17 +1111,30 @@ pub fn fold_tracker_projects(
                 });
         }
     }
-    let mut slugs = BTreeMap::<String, Uuid>::new();
+    let mut slug_groups = BTreeMap::<String, Vec<&TrackerProject>>::new();
     for project in projection.projects.values() {
-        if let Some(canonical) = slugs.insert(project.slug.clone(), project.project_id) {
-            projection
-                .diagnostics
-                .push(ProjectDiagnostic::DuplicateSlug {
-                    slug: project.slug.clone(),
-                    canonical,
-                    conflicting: project.project_id,
-                });
-        }
+        slug_groups
+            .entry(project.slug.to_ascii_lowercase())
+            .or_default()
+            .push(project);
+    }
+    for mut projects in slug_groups.into_values().filter(|group| group.len() > 1) {
+        projects.sort_by(|left, right| {
+            (left.updated_at, left.revision_event_id.as_str())
+                .cmp(&(right.updated_at, right.revision_event_id.as_str()))
+        });
+        let canonical = projects.pop().expect("duplicate slug group is non-empty");
+        projection
+            .diagnostics
+            .extend(
+                projects
+                    .into_iter()
+                    .map(|project| ProjectDiagnostic::DuplicateSlug {
+                        slug: canonical.slug.clone(),
+                        canonical: canonical.project_id,
+                        conflicting: project.project_id,
+                    }),
+            );
     }
     projection
 }
@@ -1777,7 +1846,12 @@ fn tracker_json_builder<T: Serialize>(
             got: content.len(),
         });
     }
-    Ok(EventBuilder::new(Kind::Custom(kind as u16), content).tags(tags))
+    // Tracker `p` tags are semantic projections (for example, the issue
+    // assignee), so a self-assignment must survive nostr-sdk's default
+    // self-tag filtering and remain consistent with the signed JSON payload.
+    Ok(EventBuilder::new(Kind::Custom(kind as u16), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 fn common_tracker_tags(
@@ -3337,6 +3411,46 @@ mod tests {
     }
 
     #[test]
+    fn public_revision_builder_round_trips_with_assignee() {
+        let keys = Keys::generate();
+        let assignee = keys.public_key().to_hex();
+        let stream = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let revision = IssueRevision {
+            v: TRACKER_VERSION,
+            op: "revise".into(),
+            issue_id: issue,
+            root_event: "1".repeat(64),
+            parent_event: "2".repeat(64),
+            revision: 1,
+            set: RevisionSet {
+                assignee: Some(assignee),
+                status: Some(IssueStatus::Todo),
+                ..RevisionSet::default()
+            },
+            clear: Vec::new(),
+            relations: SetOperations::default(),
+            external_refs: SetOperations {
+                add: vec![ExternalRef {
+                    kind: "task".into(),
+                    reference: Uuid::new_v4().to_string(),
+                }],
+                remove: Vec::new(),
+            },
+            reason: Some("dispatched for execution".into()),
+            request_id: Some(Uuid::new_v4()),
+            import: None,
+        };
+        let event = build_tracker_revision(stream, &revision)
+            .expect("builder")
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .expect("signed event");
+        let parsed = parse_tracker_event(&event, 100).expect("strict parse");
+        assert!(matches!(parsed.payload, TrackerPayload::Revision(value) if value == revision));
+    }
+
+    #[test]
     fn deterministic_import_uuid_v5_round_trips() {
         let keys = Keys::generate();
         let stream = Uuid::new_v4();
@@ -3397,5 +3511,143 @@ mod tests {
                 .unwrap();
         let parsed = parse_tracker_project_activity(&event, 101).expect("activity parse");
         assert_eq!(parsed.activity, activity);
+    }
+
+    fn tracker_project_head(
+        keys: &Keys,
+        workspace: Uuid,
+        project_id: Uuid,
+        slug: &str,
+        created_at: u64,
+    ) -> Event {
+        crate::build_project_with_tags(
+            "",
+            vec![
+                Tag::parse(["d", slug]).unwrap(),
+                Tag::parse(["name", slug]).unwrap(),
+                Tag::parse(["buzz-project-id", &project_id.to_string()]).unwrap(),
+                Tag::parse(["buzz-workspace", &workspace.to_string()]).unwrap(),
+            ],
+        )
+        .unwrap()
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .unwrap()
+    }
+
+    #[test]
+    fn project_fold_preserves_unambiguous_heads() {
+        let keys = Keys::generate();
+        let workspace = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let head = tracker_project_head(&keys, workspace, project_id, "dispatch", 100);
+        let projection =
+            fold_tracker_projects_at([head], workspace, &keys.public_key().to_hex(), 100);
+        assert_eq!(projection.projects[&project_id].slug, "dispatch");
+        assert!(projection.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn project_fold_case_folds_slugs_and_picks_newest_canonical() {
+        let keys = Keys::generate();
+        let workspace = Uuid::new_v4();
+        let older_id = Uuid::parse_str("ffffffff-ffff-4fff-8fff-ffffffffffff").unwrap();
+        let middle_id = Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee").unwrap();
+        let newer_id = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+        let older = tracker_project_head(&keys, workspace, older_id, "Foo", 100);
+        let middle = tracker_project_head(&keys, workspace, middle_id, "FOO", 101);
+        let newer = tracker_project_head(&keys, workspace, newer_id, "foo", 101);
+        let canonical_id = if newer.id.to_hex() > middle.id.to_hex() {
+            newer_id
+        } else {
+            middle_id
+        };
+        let projection = fold_tracker_projects_at(
+            [newer, older, middle],
+            workspace,
+            &keys.public_key().to_hex(),
+            101,
+        );
+        assert_eq!(projection.projects.len(), 3);
+        let duplicate_slugs: Vec<_> = projection
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| match diagnostic {
+                ProjectDiagnostic::DuplicateSlug {
+                    canonical,
+                    conflicting,
+                    ..
+                } => Some((*canonical, *conflicting)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(duplicate_slugs.len(), 2);
+        assert!(duplicate_slugs
+            .iter()
+            .all(|(canonical, _)| *canonical == canonical_id));
+        assert!(duplicate_slugs
+            .iter()
+            .any(|(_, conflicting)| *conflicting == older_id));
+    }
+
+    #[test]
+    fn project_fold_distinguishes_invalid_managed_and_unmanaged_heads() {
+        let keys = Keys::generate();
+        let workspace = Uuid::new_v4();
+        let invalid = EventBuilder::new(Kind::Custom(KIND_PROJECT as u16), "")
+            .tags([
+                Tag::parse(["d", "invalid"]).unwrap(),
+                Tag::parse(["buzz-project-id", "not-a-uuid"]).unwrap(),
+                Tag::parse(["buzz-workspace", &workspace.to_string()]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let unmanaged = EventBuilder::new(Kind::Custom(KIND_PROJECT as u16), "")
+            .tag(Tag::parse(["d", "upstream"]).unwrap())
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let projection = fold_tracker_projects_at(
+            [invalid, unmanaged],
+            workspace,
+            &keys.public_key().to_hex(),
+            100,
+        );
+        assert!(projection.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            ProjectDiagnostic::InvalidManagedHead { coordinate, .. }
+                if coordinate.ends_with(":invalid")
+        )));
+        assert!(projection.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            ProjectDiagnostic::UnmanagedCoordinate { coordinate }
+                if coordinate.ends_with(":upstream")
+        )));
+    }
+
+    #[test]
+    fn project_fold_rejects_future_skewed_heads() {
+        let keys = Keys::generate();
+        let workspace = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let future = tracker_project_head(
+            &keys,
+            workspace,
+            project_id,
+            "future",
+            100 + MAX_FUTURE_SKEW_SECONDS + 1,
+        );
+        let projection =
+            fold_tracker_projects_at([future], workspace, &keys.public_key().to_hex(), 100);
+        assert!(projection.projects.is_empty());
+        assert!(matches!(
+            projection.diagnostics.as_slice(),
+            [ProjectDiagnostic::FutureSkew {
+                created_at,
+                max_accepted_at,
+                ..
+            }] if *created_at == 401 && *max_accepted_at == 400
+        ));
     }
 }

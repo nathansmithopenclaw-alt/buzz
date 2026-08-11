@@ -86,6 +86,10 @@ struct TrackerContext {
     warnings: Vec<String>,
 }
 
+fn project_slug_matches(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
 impl TrackerContext {
     fn issue(&self, value: &str) -> Result<&IssueProjection, CliError> {
         let parsed_uuid = Uuid::parse_str(value).ok();
@@ -106,7 +110,7 @@ impl TrackerContext {
     fn project(&self, value: &str) -> Result<&TrackerProject, CliError> {
         let parsed_uuid = Uuid::parse_str(value).ok();
         let mut matches = self.projects.projects.values().filter(|project| {
-            parsed_uuid == Some(project.project_id) || project.slug.eq_ignore_ascii_case(value)
+            parsed_uuid == Some(project.project_id) || project_slug_matches(&project.slug, value)
         });
         let found = matches
             .next()
@@ -631,26 +635,31 @@ fn same_semantic_request(existing: &Event, candidate: &Event) -> bool {
         && semantic_event_tags(existing) == semantic_event_tags(candidate)
 }
 
+fn has_request_tag(event: &Event, request_id: Uuid) -> bool {
+    let expected = request_id.to_string();
+    event.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        values.first().map(String::as_str) == Some("request")
+            && values.get(1).map(String::as_str) == Some(expected.as_str())
+    })
+}
+
 async fn existing_request_event(
     client: &BuzzClient,
     workspace_id: Uuid,
     request_id: Uuid,
 ) -> Result<Option<Event>, CliError> {
     let events = client
-        .query_paginated(
-            json!({
-                "kinds": [
-                    KIND_TRACKER_ISSUE,
-                    KIND_TRACKER_REVISION,
-                    KIND_TRACKER_COMMENT,
-                    KIND_TRACKER_PROJECT_ACTIVITY,
-                    KIND_PROJECT,
-                ],
-                "#h": [workspace_id.to_string()],
-                "#request": [request_id.to_string()],
-            }),
-            2,
-        )
+        .query_all(json!({
+            "kinds": [
+                KIND_TRACKER_ISSUE,
+                KIND_TRACKER_REVISION,
+                KIND_TRACKER_COMMENT,
+                KIND_TRACKER_PROJECT_ACTIVITY,
+                KIND_PROJECT,
+            ],
+            "#h": [workspace_id.to_string()],
+        }))
         .await?;
     let parsed: Vec<Event> = events
         .into_iter()
@@ -658,7 +667,10 @@ async fn existing_request_event(
             serde_json::from_value(value)
                 .map_err(|error| CliError::Other(format!("invalid request event JSON: {error}")))
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|event| has_request_tag(event, request_id))
+        .collect();
     if parsed.len() > 1 {
         return Err(CliError::Conflict(format!(
             "request {request_id} already names multiple events"
@@ -1956,7 +1968,7 @@ async fn cmd_dispatch(
     deliverables: Vec<String>,
     verification: Option<String>,
     content: Option<String>,
-    replace_active: bool,
+    allow_active: bool,
     set_status: String,
     mutation: TrackMutationArgs,
 ) -> Result<(), CliError> {
@@ -2020,11 +2032,17 @@ async fn cmd_dispatch(
             )
         })
         .collect();
-    if !active.is_empty() && !replace_active {
+    if !active.is_empty() && !allow_active {
         return Err(CliError::Conflict(format!(
-            "issue has {} active linked task(s); pass --replace-active",
+            "issue has {} active linked task(s); pass --allow-active to create another without superseding them",
             active.len()
         )));
+    }
+    if !active.is_empty() {
+        context.warnings.push(format!(
+            "{} existing active linked task(s) remain active; --allow-active does not supersede them",
+            active.len()
+        ));
     }
 
     let (task_event_id, task_id, task_replayed) = if let Some(existing) = existing_task {
@@ -2212,6 +2230,28 @@ fn project_json(project: &TrackerProject) -> Value {
     })
 }
 
+fn matching_project_create_activity(events: &[Event], project: &TrackerProject) -> Option<String> {
+    let expected = TrackerProjectSnapshot::from(project);
+    events
+        .iter()
+        .filter(|event| event.kind.as_u16() as u32 == KIND_TRACKER_PROJECT_ACTIVITY)
+        .filter_map(|event| {
+            let activity = buzz_sdk::tracker::parse_tracker_project_activity(
+                event,
+                Utc::now().timestamp().max(0) as u64,
+            )
+            .ok()?;
+            (event.pubkey.to_hex() == project.author_pubkey
+                && activity.workspace_id == project.workspace_id
+                && activity.activity.op == ProjectActivityOperation::Create
+                && activity.activity.project_id == project.project_id
+                && activity.activity.before.is_none()
+                && activity.activity.after == expected)
+                .then(|| event.id.to_hex())
+        })
+        .max()
+}
+
 async fn submit_raw_event(client: &BuzzClient, event: Event) -> Result<String, CliError> {
     let raw = client.submit_event(event.clone()).await?;
     let response: Value = serde_json::from_str(&normalize_write_response(&raw))
@@ -2352,10 +2392,11 @@ async fn cmd_project_create(
         .projects
         .projects
         .values()
-        .find(|project| project.slug == slug)
+        .find(|project| project_slug_matches(&project.slug, &slug))
         .cloned();
     if let Some(existing) = &existing_head {
         if existing.project_id != project_id
+            || existing.slug != slug
             || existing.name != name
             || existing.statuses != statuses
             || existing.default_channel_id != default_channel_id
@@ -2364,6 +2405,22 @@ async fn cmd_project_create(
             return Err(CliError::Conflict(format!(
                 "project slug {slug:?} already exists with different semantic input"
             )));
+        }
+        if let Some(activity_id) = matching_project_create_activity(&context.cache.events, existing)
+        {
+            println!(
+                "{}",
+                json!({
+                    "accepted": true,
+                    "operation": "track.project.create",
+                    "request_id": request_id,
+                    "event_ids": [existing.revision_event_id, activity_id],
+                    "replayed": true,
+                    "project": project_json(existing),
+                    "warnings": context.warnings,
+                })
+            );
+            return Ok(());
         }
     }
     let tags = tracker_project_tags(
@@ -2437,7 +2494,7 @@ async fn cmd_project_create(
             "operation": "track.project.create",
             "request_id": request_id,
             "event_ids": [head_id, activity_id],
-            "replayed": false,
+            "replayed": replayed,
             "project": project_json(&project),
             "warnings": context.warnings,
         })
@@ -2482,31 +2539,32 @@ fn derived_request_id(request_id: Uuid, scope: &str) -> Uuid {
 
 async fn project_update_head_by_request(
     client: &BuzzClient,
+    workspace_id: Uuid,
     request_id: Uuid,
 ) -> Result<Option<Event>, CliError> {
     let events = client
-        .query_paginated(
-            json!({
-                "kinds": [KIND_PROJECT],
-                "authors": [client.keys().public_key().to_hex()],
-                "#request": [request_id.to_string()],
-            }),
-            2,
-        )
+        .query_all(json!({
+            "kinds": [KIND_PROJECT],
+            "authors": [client.keys().public_key().to_hex()],
+            "#h": [workspace_id.to_string()],
+        }))
         .await?;
+    let events: Vec<Event> = events
+        .into_iter()
+        .map(|value| {
+            serde_json::from_value(value)
+                .map_err(|error| CliError::Other(format!("invalid project head JSON: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|event| has_request_tag(event, request_id))
+        .collect();
     if events.len() > 1 {
         return Err(CliError::Conflict(format!(
             "project update request {request_id} names multiple heads"
         )));
     }
-    events
-        .into_iter()
-        .next()
-        .map(|value| {
-            serde_json::from_value(value)
-                .map_err(|error| CliError::Other(format!("invalid project head JSON: {error}")))
-        })
-        .transpose()
+    Ok(events.into_iter().next())
 }
 
 fn project_update_intent(event: &Event) -> Result<ProjectUpdateIntent, CliError> {
@@ -2534,23 +2592,27 @@ async fn submit_project_delete(
     candidate: Event,
 ) -> Result<(String, bool), CliError> {
     let events = client
-        .query_paginated(
-            json!({
-                "kinds": [5],
-                "authors": [client.keys().public_key().to_hex()],
-                "#request": [request_id.to_string()],
-            }),
-            2,
-        )
+        .query_all(json!({
+            "kinds": [5],
+            "authors": [client.keys().public_key().to_hex()],
+        }))
         .await?;
+    let events: Vec<Event> = events
+        .into_iter()
+        .map(|value| {
+            serde_json::from_value(value)
+                .map_err(|error| CliError::Other(format!("invalid deletion event JSON: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|event| has_request_tag(event, request_id))
+        .collect();
     if events.len() > 1 {
         return Err(CliError::Conflict(format!(
             "project delete request {request_id} names multiple events"
         )));
     }
     if let Some(existing) = events.into_iter().next() {
-        let existing: Event = serde_json::from_value(existing)
-            .map_err(|error| CliError::Other(format!("invalid deletion event JSON: {error}")))?;
         if same_semantic_request(&existing, &candidate) {
             return Ok((existing.id.to_hex(), true));
         }
@@ -2608,7 +2670,7 @@ async fn cmd_project_update(
             "request {request_id} was already used by another Tracker mutation"
         )));
     }
-    let existing_head = project_update_head_by_request(client, request_id).await?;
+    let existing_head = project_update_head_by_request(client, workspace_id, request_id).await?;
     if existing_activity.is_some() && existing_head.is_none() {
         return Err(CliError::Conflict(format!(
             "request {request_id} already names project activity without its matching update head"
@@ -2655,11 +2717,10 @@ async fn cmd_project_update(
     let next_name = name.unwrap_or_else(|| before.name.clone());
     let next_slug = slug.unwrap_or_else(|| before.slug.clone());
     if next_slug != before.slug
-        && context
-            .projects
-            .projects
-            .values()
-            .any(|project| project.project_id != before.project_id && project.slug == next_slug)
+        && context.projects.projects.values().any(|project| {
+            project.project_id != before.project_id
+                && project_slug_matches(&project.slug, &next_slug)
+        })
     {
         return Err(CliError::Conflict(format!(
             "project slug {next_slug:?} already exists"
@@ -3467,7 +3528,7 @@ pub async fn dispatch(
             deliverables,
             verification,
             content,
-            replace_active,
+            allow_active,
             set_status,
             mutation,
         } => {
@@ -3481,7 +3542,7 @@ pub async fn dispatch(
                 deliverables,
                 verification,
                 content,
-                replace_active,
+                allow_active,
                 set_status,
                 mutation,
             )
@@ -3615,6 +3676,69 @@ mod tests {
         let maps = parse_status_maps(&["backlog=todo".into()]).unwrap();
         assert_eq!(maps[&IssueStatus::Backlog], IssueStatus::Todo);
         assert!(parse_status_maps(&["backlog".into()]).is_err());
+    }
+
+    #[test]
+    fn project_slug_uniqueness_matches_case_insensitive_resolution() {
+        assert!(project_slug_matches("Foo", "foo"));
+        assert!(project_slug_matches("DISPATCH", "dispatch"));
+        assert!(!project_slug_matches("dispatch", "tracker"));
+    }
+
+    #[test]
+    fn semantic_project_recreate_finds_original_create_activity() {
+        let keys = Keys::generate();
+        let workspace = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let head = build_project_with_tags(
+            "",
+            vec![
+                Tag::parse(["d", "dispatch"]).unwrap(),
+                Tag::parse(["name", "Dispatch"]).unwrap(),
+                Tag::parse(["buzz-project-id", &project_id.to_string()]).unwrap(),
+                Tag::parse(["buzz-workspace", &workspace.to_string()]).unwrap(),
+            ],
+        )
+        .unwrap()
+        .custom_created_at(Timestamp::from(100))
+        .sign_with_keys(&keys)
+        .unwrap();
+        let project = parse_tracker_project(&head).unwrap();
+        let activity = ProjectActivity {
+            v: TRACKER_VERSION,
+            op: ProjectActivityOperation::Create,
+            project_id,
+            request_id: Uuid::new_v4(),
+            before: None,
+            after: TrackerProjectSnapshot::from(&project),
+        };
+        let event =
+            build_tracker_project_activity(workspace, &activity, &keys.public_key().to_hex())
+                .unwrap()
+                .custom_created_at(Timestamp::from(101))
+                .sign_with_keys(&keys)
+                .unwrap();
+        assert_eq!(
+            matching_project_create_activity(std::slice::from_ref(&event), &project),
+            Some(event.id.to_hex())
+        );
+
+        let mut changed = project;
+        changed.name = "Changed".into();
+        assert_eq!(matching_project_create_activity(&[event], &changed), None);
+    }
+
+    #[test]
+    fn request_tag_filter_distinguishes_fresh_request_ids() {
+        let keys = Keys::generate();
+        let request_id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let other_request = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let event = EventBuilder::new(Kind::Custom(KIND_TRACKER_PROJECT_ACTIVITY as u16), "")
+            .tag(Tag::parse(["request", &request_id.to_string()]).unwrap())
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert!(has_request_tag(&event, request_id));
+        assert!(!has_request_tag(&event, other_request));
     }
 
     #[test]

@@ -68,10 +68,15 @@ The repository fixtures under `scripts/tracker-fixtures/` exercise these
 shapes; they are test data, not production mappings. Production map files and
 the complete export are operator-reviewed inputs and must not be inferred.
 
+Plan accepts array, `nodes`, `data`, and GraphQL `edges[].node` collection
+shapes. It fails closed before relay writes when a comment references an absent
+issue or an issue exceeds the CLI's 256-byte UTF-8 title or 16-label limits.
+
 Verify reads every imported issue with comments and proves exact equality for
 source IDs, field values, import provenance, comments, canonical relations,
 typed links, projects, pilot links, and total counts. Any unexpected Tracker
-record is a mismatch rather than silently ignored.
+record is a mismatch rather than silently ignored, including an issue that has
+no `linear` external reference.
 
 ## Rollout gate
 
