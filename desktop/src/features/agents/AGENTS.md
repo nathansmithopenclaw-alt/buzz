@@ -194,9 +194,23 @@ that frontend inventory.
    `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
+13. **Delegated config patches obey the same catalog and preservation rules.**
+   `agent_config` and `global_config` requests resolve an `effort` value through
+   the selected runtime catalog entry's `thinkingEnvVar`; they never carry a
+   frontend-owned runtime-to-key table or silently fall back to a raw key.
+   Global patches are overlaid onto the current durable config under the Rust
+   store lock, so an in-flight query placeholder or concurrent revocation cannot
+   erase unrelated defaults or reintroduce the standing grant. Existing-agent updates save
+   without respawning and report that instruction and runtime changes take
+   effect on next spawn.
+   Global receipts report restart effects from the setter's returned counts,
+   never from the requested field names.
 
 ## The tests that enforce this
 
+- `agentManagement.test.mjs` — delegated patch validation, runtime-declared
+  effort persistence, config preservation, truthful restart claims, and
+  secret-free global review rows.
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
   policy. Update when the capability model changes.
 - `ui/agentConfigFieldsContract.test.mjs` — canonical behaviors + disclosure

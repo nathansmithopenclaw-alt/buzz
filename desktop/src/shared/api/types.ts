@@ -982,12 +982,7 @@ export type ChannelMessagesPageResponse = {
 
 // ── Global agent configuration ────────────────────────────────────────────────
 
-/** Global agent configuration defaults applied to ALL agents.
- * Lowest user-settable layer — per-agent and persona values win on any key
- * collision. Mirrors the Rust `GlobalAgentConfig` struct.
- *
- * Precedence: baked floor < global < persona < per-agent.
- */
+/** Global defaults. Precedence: baked floor < global < persona < per-agent. */
 export type GlobalAgentConfig = {
   /** Global env vars injected into all agents unconditionally. */
   env_vars: Record<string, string>;
@@ -1004,6 +999,8 @@ export type GlobalAgentConfig = {
 };
 
 export type AgentManagementDelegationCapabilities = {
+  agent_config: boolean;
+  global_config: boolean;
   teams: boolean;
   agent_creation: boolean;
   env_vars: boolean;

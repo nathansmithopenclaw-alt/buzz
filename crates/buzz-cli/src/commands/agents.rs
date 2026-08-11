@@ -6,8 +6,9 @@ use serde_json::json;
 use std::collections::HashMap;
 
 use crate::agent_management::{
-    build_apply_create, build_apply_update, build_create, build_set_avatar, build_update,
-    parse_env_vars, CreateAgentDraft, UpdateAgentDraft,
+    build_apply_create, build_apply_global_config, build_apply_update, build_create,
+    build_set_avatar, build_update, parse_env_vars, CreateAgentDraft, GlobalAgentConfigDraft,
+    UpdateAgentDraft,
 };
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -182,6 +183,16 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             request_id,
             channel,
             agent_name,
+            display_name,
+            system_prompt,
+            runtime,
+            provider,
+            model,
+            effort,
+            respond_to,
+            respond_to_allowlist,
+            parallelism,
+            instance_name_pool,
             env,
         } => {
             let owner = require_owner(client)?;
@@ -191,14 +202,58 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                 UpdateAgentDraft {
                     channel_id: channel,
                     agent_name,
-                    display_name: None,
-                    system_prompt: None,
-                    runtime: None,
-                    provider: None,
-                    model: None,
-                    respond_to: None,
-                    parallelism: None,
-                    name_pool: None,
+                    display_name,
+                    system_prompt: system_prompt
+                        .map(|value| read_or_stdin(&value))
+                        .transpose()?,
+                    runtime,
+                    provider,
+                    model,
+                    effort: effort.map(crate::ThinkingEffortArg::to_wire),
+                    respond_to: respond_to.map(RespondToArg::to_wire),
+                    respond_to_allowlist: Some(respond_to_allowlist),
+                    parallelism,
+                    name_pool: instance_name_pool,
+                    env_vars: parse_env_vars(env)?,
+                },
+                request_id,
+            )?;
+            let response = client.publish_ephemeral_event(built.event).await?;
+            let outcome = wait_for_management_result(client, &owner, &built.request_id).await?;
+            let mut output: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            if let Some(obj) = output.as_object_mut() {
+                obj.insert("request_id".into(), built.request_id.into());
+                obj.insert("action".into(), built.action.into());
+                obj.insert("applied".into(), outcome.succeeded.into());
+                if outcome.result["queuedForReview"] == true {
+                    obj.insert("queued_for_review".into(), true.into());
+                }
+                obj.insert("result".into(), outcome.result);
+            }
+            println!("{output}");
+            Ok(())
+        }
+
+        AgentsCmd::ApplyGlobalConfig {
+            request_id,
+            channel,
+            provider,
+            model,
+            preferred_runtime,
+            effort,
+            env,
+        } => {
+            let owner = require_owner(client)?;
+            let built = build_apply_global_config(
+                client.keys(),
+                &owner,
+                GlobalAgentConfigDraft {
+                    channel_id: channel,
+                    provider,
+                    model,
+                    preferred_runtime,
+                    effort: effort.map(crate::ThinkingEffortArg::to_wire),
                     env_vars: parse_env_vars(env)?,
                 },
                 request_id,
@@ -244,7 +299,9 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     runtime,
                     provider,
                     model,
+                    effort: None,
                     respond_to: respond_to.map(RespondToArg::to_wire),
+                    respond_to_allowlist: None,
                     parallelism,
                     name_pool: instance_name_pool,
                     env_vars: Default::default(),

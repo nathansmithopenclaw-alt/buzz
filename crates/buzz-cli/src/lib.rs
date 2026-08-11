@@ -255,6 +255,8 @@ enum Cmd {
 pub enum RespondToArg {
     #[value(name = "owner-only")]
     OwnerOnly,
+    #[value(name = "allowlist")]
+    Allowlist,
     #[value(name = "anyone")]
     Anyone,
 }
@@ -263,7 +265,34 @@ impl RespondToArg {
     fn to_wire(self) -> String {
         match self {
             Self::OwnerOnly => "owner-only",
+            Self::Allowlist => "allowlist",
             Self::Anyone => "anyone",
+        }
+        .to_string()
+    }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ThinkingEffortArg {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl ThinkingEffortArg {
+    fn to_wire(self) -> String {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
         .to_string()
     }
@@ -307,7 +336,7 @@ pub enum AgentsCmd {
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=32))]
         parallelism: Option<u32>,
     },
-    /// Set environment variables on an agent under a standing delegation
+    /// Update an existing agent under a standing delegation
     ApplyUpdate {
         /// Stable UUID for idempotent retries after an unknown delivery outcome
         #[arg(long)]
@@ -318,8 +347,53 @@ pub enum AgentsCmd {
         /// Current name of the personal agent to update
         #[arg(long)]
         agent_name: String,
+        #[arg(long)]
+        display_name: Option<String>,
+        /// Replacement instructions; use '-' to read from stdin
+        #[arg(long)]
+        system_prompt: Option<String>,
+        #[arg(long)]
+        runtime: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, value_enum)]
+        effort: Option<ThinkingEffortArg>,
+        #[arg(long, value_enum)]
+        respond_to: Option<RespondToArg>,
+        /// Allowed pubkey for --respond-to allowlist; repeat for each identity
+        #[arg(long = "respond-to-allowlist")]
+        respond_to_allowlist: Vec<String>,
+        /// Maximum concurrent agent turns (1-32)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=32))]
+        parallelism: Option<u32>,
+        /// Comma-separated instance names; pass an empty value to clear the pool
+        #[arg(long)]
+        instance_name_pool: Option<String>,
         /// Per-agent environment variable; repeat for each KEY=VALUE
-        #[arg(long = "env", required = true)]
+        #[arg(long = "env")]
+        env: Vec<String>,
+    },
+    /// Update global agent defaults under a standing delegation
+    ApplyGlobalConfig {
+        /// Stable UUID for idempotent retries after an unknown delivery outcome
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Current channel UUID
+        #[arg(long)]
+        channel: String,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        preferred_runtime: Option<String>,
+        /// Global ACP reasoning-effort default
+        #[arg(long, value_enum)]
+        effort: Option<ThinkingEffortArg>,
+        /// Global environment variable; requires both global_config and env_vars grants
+        #[arg(long = "env")]
         env: Vec<String>,
     },
     /// Create an agent under an owner-granted standing delegation
@@ -2638,6 +2712,34 @@ mod tests {
         .is_ok());
         assert!(Cli::try_parse_from([
             "buzz",
+            "agents",
+            "apply-update",
+            "--request-id",
+            request_id,
+            "--channel",
+            "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+            "--agent-name",
+            "Bolt",
+            "--system-prompt",
+            "Updated instructions",
+            "--effort",
+            "high",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "agents",
+            "apply-global-config",
+            "--request-id",
+            request_id,
+            "--channel",
+            "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+            "--effort",
+            "high",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
             "teams",
             "create",
             "--request-id",
@@ -2747,6 +2849,7 @@ mod tests {
             names(&cmd, "agents"),
             vec![
                 "apply-create",
+                "apply-global-config",
                 "apply-update",
                 "archive",
                 "archived",
@@ -2907,7 +3010,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 9),
+            ("agents", 10),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

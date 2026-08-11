@@ -358,8 +358,10 @@ export function AgentDefaultsEditor({
                         "",
                       capabilities: config.agent_management_delegation
                         ?.capabilities ?? {
+                        agent_config: false,
                         agent_creation: false,
                         env_vars: false,
+                        global_config: false,
                         teams: false,
                       },
                     },
@@ -396,8 +398,10 @@ export function AgentDefaultsEditor({
           <div className="grid gap-3 sm:grid-cols-2">
             {(
               [
+                ["agent_config", "Update existing agents"],
                 ["agent_creation", "Create agents"],
                 ["env_vars", "Set agent environment variables"],
+                ["global_config", "Update global agent defaults"],
                 ["teams", "Create and update teams"],
               ] as const
             ).map(([capability, label]) => (

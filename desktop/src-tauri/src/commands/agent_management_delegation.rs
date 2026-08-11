@@ -31,6 +31,7 @@ pub enum DelegatedCapability {
     AgentConfig,
     AgentCreation,
     EnvVars,
+    GlobalConfig,
     Teams,
 }
 
@@ -168,11 +169,23 @@ fn capability_enabled(
     capability: DelegatedCapability,
 ) -> bool {
     match capability {
-        DelegatedCapability::AgentConfig => false,
+        DelegatedCapability::AgentConfig => grant.payload.capabilities.agent_config,
         DelegatedCapability::AgentCreation => grant.payload.capabilities.agent_creation,
         DelegatedCapability::EnvVars => grant.payload.capabilities.env_vars,
+        DelegatedCapability::GlobalConfig => grant.payload.capabilities.global_config,
         DelegatedCapability::Teams => grant.payload.capabilities.teams,
     }
+}
+
+fn grant_authorizes_request(
+    grant: &AgentManagementDelegationGrant,
+    source_pubkey: &str,
+    capability: DelegatedCapability,
+    request_has_env_vars: bool,
+) -> bool {
+    grant.payload.grantee_pubkey == source_pubkey
+        && capability_enabled(grant, capability)
+        && (!request_has_env_vars || grant.payload.capabilities.env_vars)
 }
 
 struct NewLedgerRequest {
@@ -322,9 +335,7 @@ pub fn register_agent_management_request(
     let env_vars = request_env_vars(&payload)?;
     let authorized = intent == "apply"
         && grant.as_ref().is_some_and(|grant| {
-            grant.payload.grantee_pubkey == source
-                && capability_enabled(grant, capability)
-                && (env_vars.is_none() || grant.payload.capabilities.env_vars)
+            grant_authorizes_request(grant, &source, capability, env_vars.is_some())
         });
     let rejection = if authorized {
         env_vars
@@ -561,6 +572,7 @@ pub async fn publish_agent_management_audit_receipt(
         DelegatedCapability::AgentConfig => "agent config",
         DelegatedCapability::AgentCreation => "agent creation",
         DelegatedCapability::EnvVars => "agent env vars",
+        DelegatedCapability::GlobalConfig => "global agent config",
         DelegatedCapability::Teams => "teams",
     };
     let outcome = if succeeded { "applied" } else { "failed" };

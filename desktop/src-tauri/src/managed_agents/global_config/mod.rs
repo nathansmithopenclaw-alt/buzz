@@ -38,6 +38,10 @@ use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentManagementDelegationCapabilities {
     #[serde(default)]
+    pub agent_config: bool,
+    #[serde(default)]
+    pub global_config: bool,
+    #[serde(default)]
     pub teams: bool,
     #[serde(default)]
     pub agent_creation: bool,

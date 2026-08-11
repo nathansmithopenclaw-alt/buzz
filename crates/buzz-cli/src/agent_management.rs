@@ -52,7 +52,11 @@ pub struct UpdateAgentDraft {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub respond_to_allowlist: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,13 +81,33 @@ struct ValidatedUpdateAgentDraft {
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     respond_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    respond_to_allowlist: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parallelism: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name_pool: Option<Vec<String>>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     env_vars: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalAgentConfigDraft {
+    pub channel_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_runtime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_vars: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -279,6 +303,21 @@ fn optional_name_pool(value: Option<String>) -> Result<Option<Vec<String>>, CliE
     Ok(Some(names))
 }
 
+fn optional_pubkeys(values: Vec<String>) -> Result<Option<Vec<String>>, CliError> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+    values
+        .into_iter()
+        .map(|value| {
+            PublicKey::parse(value.trim())
+                .map(|pubkey| pubkey.to_hex())
+                .map_err(|error| CliError::Usage(format!("invalid allowlist pubkey: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 pub fn parse_env_vars(values: Vec<String>) -> Result<BTreeMap<String, String>, CliError> {
     let mut env_vars = BTreeMap::new();
     for entry in values {
@@ -440,10 +479,10 @@ fn build_update_with_intent(
     let respond_to = optional(draft.respond_to, "respond-to")?;
     if respond_to
         .as_deref()
-        .is_some_and(|value| value != "owner-only" && value != "anyone")
+        .is_some_and(|value| value != "owner-only" && value != "allowlist" && value != "anyone")
     {
         return Err(CliError::Usage(
-            "respond-to must be owner-only or anyone".into(),
+            "respond-to must be owner-only, allowlist, or anyone".into(),
         ));
     }
     if draft
@@ -465,17 +504,27 @@ fn build_update_with_intent(
         runtime: optional(draft.runtime, "runtime")?,
         provider: optional(draft.provider, "provider")?,
         model: optional(draft.model, "model")?,
+        effort: optional(draft.effort, "effort")?,
         respond_to,
+        respond_to_allowlist: optional_pubkeys(draft.respond_to_allowlist.unwrap_or_default())?,
         parallelism: draft.parallelism,
         name_pool: optional_name_pool(draft.name_pool)?,
         env_vars: draft.env_vars,
     };
+    if request.respond_to.as_deref() == Some("allowlist") && request.respond_to_allowlist.is_none()
+    {
+        return Err(CliError::Usage(
+            "respond-to allowlist requires at least one --respond-to-allowlist pubkey".into(),
+        ));
+    }
     if request.display_name.is_none()
         && request.system_prompt.is_none()
         && request.runtime.is_none()
         && request.provider.is_none()
         && request.model.is_none()
+        && request.effort.is_none()
         && request.respond_to.is_none()
+        && request.respond_to_allowlist.is_none()
         && request.parallelism.is_none()
         && request.name_pool.is_none()
         && request.env_vars.is_empty()
@@ -486,6 +535,44 @@ fn build_update_with_intent(
     }
     build(
         keys, owner, channel_id, "update", intent, request_id, request,
+    )
+}
+
+pub fn build_apply_global_config(
+    keys: &Keys,
+    owner: &PublicKey,
+    draft: GlobalAgentConfigDraft,
+    request_id: Option<String>,
+) -> Result<BuiltDraftRequest, CliError> {
+    let channel_id = required(draft.channel_id, "channel", 128)?;
+    uuid::Uuid::parse_str(&channel_id)
+        .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel_id}")))?;
+    let request = GlobalAgentConfigDraft {
+        channel_id: channel_id.clone(),
+        provider: optional(draft.provider, "provider")?,
+        model: optional(draft.model, "model")?,
+        preferred_runtime: optional(draft.preferred_runtime, "preferred runtime")?,
+        effort: optional(draft.effort, "effort")?,
+        env_vars: draft.env_vars,
+    };
+    if request.provider.is_none()
+        && request.model.is_none()
+        && request.preferred_runtime.is_none()
+        && request.effort.is_none()
+        && request.env_vars.is_empty()
+    {
+        return Err(CliError::Usage(
+            "include at least one global config field to update".into(),
+        ));
+    }
+    build(
+        keys,
+        owner,
+        channel_id,
+        "global_config",
+        ManagementIntent::Apply,
+        request_id,
+        request,
     )
 }
 
@@ -673,7 +760,9 @@ mod tests {
                 runtime: None,
                 provider: None,
                 model: None,
+                effort: None,
                 respond_to: None,
+                respond_to_allowlist: None,
                 parallelism: None,
                 name_pool: None,
                 env_vars,
@@ -688,6 +777,97 @@ mod tests {
             update_payload["payload"]["request"]["envVars"]["OPENAI_HOST"],
             "http://100.80.202.75:4000"
         );
+    }
+
+    #[test]
+    fn apply_update_serializes_full_existing_agent_configuration() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let allowed = Keys::generate().public_key().to_hex();
+        let built = build_apply_update(
+            &agent,
+            &owner.public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Bolt".into(),
+                display_name: Some("Bolt Prime".into()),
+                system_prompt: Some("Apply the approval clause.".into()),
+                runtime: Some("codex".into()),
+                provider: Some("openai".into()),
+                model: Some("gpt-5".into()),
+                effort: Some("high".into()),
+                respond_to: Some("allowlist".into()),
+                respond_to_allowlist: Some(vec![allowed.clone()]),
+                parallelism: Some(4),
+                name_pool: Some("Alpha, Beta".into()),
+                env_vars: Default::default(),
+            },
+            None,
+        )
+        .unwrap();
+
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["payload"]["action"], "update");
+        assert_eq!(payload["payload"]["intent"], "apply");
+        let request = &payload["payload"]["request"];
+        assert_eq!(request["agentName"], "Bolt");
+        assert_eq!(request["displayName"], "Bolt Prime");
+        assert_eq!(request["systemPrompt"], "Apply the approval clause.");
+        assert_eq!(request["runtime"], "codex");
+        assert_eq!(request["provider"], "openai");
+        assert_eq!(request["model"], "gpt-5");
+        assert_eq!(request["effort"], "high");
+        assert_eq!(request["respondTo"], "allowlist");
+        assert_eq!(request["respondToAllowlist"], serde_json::json!([allowed]));
+        assert_eq!(request["parallelism"], 4);
+        assert_eq!(request["namePool"], serde_json::json!(["Alpha", "Beta"]));
+    }
+
+    #[test]
+    fn apply_global_config_serializes_narrow_patch_and_requires_a_change() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let built = build_apply_global_config(
+            &agent,
+            &owner.public_key(),
+            GlobalAgentConfigDraft {
+                channel_id: CHANNEL.into(),
+                provider: Some("openai".into()),
+                model: Some("gpt-5".into()),
+                preferred_runtime: Some("codex".into()),
+                effort: Some("high".into()),
+                env_vars: BTreeMap::from([("OPENAI_HOST".into(), "http://lane".into())]),
+            },
+            None,
+        )
+        .unwrap();
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["payload"]["action"], "global_config");
+        assert_eq!(payload["payload"]["intent"], "apply");
+        let request = &payload["payload"]["request"];
+        assert_eq!(request["provider"], "openai");
+        assert_eq!(request["model"], "gpt-5");
+        assert_eq!(request["preferredRuntime"], "codex");
+        assert_eq!(request["effort"], "high");
+        assert_eq!(request["envVars"]["OPENAI_HOST"], "http://lane");
+
+        let empty = build_apply_global_config(
+            &agent,
+            &owner.public_key(),
+            GlobalAgentConfigDraft {
+                channel_id: CHANNEL.into(),
+                provider: None,
+                model: None,
+                preferred_runtime: None,
+                effort: None,
+                env_vars: Default::default(),
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(empty
+            .to_string()
+            .contains("at least one global config field"));
     }
 
     #[test]
@@ -734,7 +914,9 @@ mod tests {
                 runtime: None,
                 provider: None,
                 model: None,
+                effort: None,
                 respond_to: None,
+                respond_to_allowlist: None,
                 parallelism: None,
                 name_pool: None,
                 env_vars: Default::default(),
@@ -742,6 +924,32 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("at least one field"));
+    }
+
+    #[test]
+    fn update_allowlist_mode_requires_a_pubkey() {
+        let error = build_apply_update(
+            &Keys::generate(),
+            &Keys::generate().public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Scout".into(),
+                display_name: None,
+                system_prompt: None,
+                runtime: None,
+                provider: None,
+                model: None,
+                effort: None,
+                respond_to: Some("allowlist".into()),
+                respond_to_allowlist: None,
+                parallelism: None,
+                name_pool: None,
+                env_vars: Default::default(),
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires at least one"));
     }
 
     #[test]
@@ -759,7 +967,9 @@ mod tests {
                 runtime: None,
                 provider: None,
                 model: None,
+                effort: None,
                 respond_to: None,
+                respond_to_allowlist: None,
                 parallelism: Some(6),
                 name_pool: Some("Alpha, Beta".into()),
                 env_vars: Default::default(),
@@ -789,7 +999,9 @@ mod tests {
                 runtime: None,
                 provider: None,
                 model: None,
+                effort: None,
                 respond_to: None,
+                respond_to_allowlist: None,
                 parallelism: None,
                 name_pool: Some(String::new()),
                 env_vars: Default::default(),

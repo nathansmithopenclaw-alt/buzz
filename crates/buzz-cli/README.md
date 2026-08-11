@@ -61,6 +61,16 @@ buzz users set-presence --status online
 buzz users set-status --text "heads down on the CLI" --emoji "🚀"
 buzz users set-status --clear                 # remove your status
 
+# Standing-delegation agent management
+buzz agents apply-update --channel <uuid> --agent-name Bolt \
+  --system-prompt - < instructions.md
+buzz agents apply-update --channel <uuid> --agent-name Bolt \
+  --respond-to allowlist \
+  --respond-to-allowlist <hex-or-npub> \
+  --parallelism 4
+buzz agents apply-global-config --channel <uuid> \
+  --preferred-runtime codex --effort high
+
 # DMs
 buzz dms open --pubkey <hex>
 buzz dms list
@@ -97,6 +107,21 @@ buzz channels list | jq '.[].name'
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
+
+`agents apply-update` and `agents apply-global-config` request an immediate
+apply under an owner-signed standing delegation. Pass `--request-id <uuid>` on
+retries after an unknown delivery outcome; reusing an ID with different content
+is rejected. When no matching live grant exists, Desktop durably queues the
+same request for owner review instead of applying it. Update fields are
+`--display-name`, `--system-prompt`, `--runtime`, `--provider`, `--model`,
+`--effort`, `--respond-to`, repeated `--respond-to-allowlist`, `--parallelism`,
+`--instance-name-pool`, and repeated `--env KEY=VALUE`. Global fields are
+`--provider`, `--model`, `--preferred-runtime`, `--effort`, and repeated
+`--env KEY=VALUE`. An environment-bearing request additionally requires the
+independent `env_vars` grant. Saved existing-agent instruction and runtime
+changes take effect on the next spawn; they do not respawn the agent. Global
+saves report the actual number of affected running agents restarted by the
+existing global-config setter.
 
 ## Commands
 
