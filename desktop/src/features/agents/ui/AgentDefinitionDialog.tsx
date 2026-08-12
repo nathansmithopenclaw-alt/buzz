@@ -76,6 +76,7 @@ import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 import { AgentDefinitionDialogFooter } from "./AgentDefinitionDialogFooter";
 import { AgentDialogEffortSection } from "./AgentDialogEffortField";
+import { parseModelEffortQualifier } from "./agentModelCatalog";
 import {
   definitionProviderDropdownOptions,
   definitionModelDropdownOptions,
@@ -482,12 +483,8 @@ export function AgentDefinitionDialog({
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired = aiConfigurationMode === "custom";
-  // Gate the provider requirement on the field's actual visibility, not the raw
-  // runtime capability. Codex/Claude hide the provider picker (they drive their
-  // own provider), so Customize must not require a provider there. But a
-  // runtime-less legacy/builtin definition still exposes the picker via
-  // blankRuntimeModelProviderEditable, so it must keep requiring a provider —
-  // otherwise Save could persist `provider: undefined` despite the visible field.
+  // Codex/Claude own their provider, while runtime-less legacy definitions expose
+  // the picker and must not persist `provider: undefined`.
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
@@ -548,15 +545,19 @@ export function AgentDefinitionDialog({
     showCustomInput: showCustomModelInput,
   } = useAgentDialogModelPicker({
     discoveredOptions: discoveredModelOptions,
-    effort: selectedRuntime?.thinkingEnvVar
-      ? (envVars[selectedRuntime.thinkingEnvVar] ?? "")
-      : "",
+    effort: selectedRuntime?.effortModelQualifier
+      ? (parseModelEffortQualifier(model).effort ?? "")
+      : selectedRuntime?.thinkingEnvVar
+        ? (envVars[selectedRuntime.thinkingEnvVar] ?? "")
+        : "",
+    effortModelQualifier: selectedRuntime?.effortModelQualifier ?? false,
     fallbackOptions: staticModelOptions,
     knownOptions: runtimeModelOptions,
     isCustomEditing: isCustomModelEditing,
     model,
     modelFieldVisible,
     nativeEffortOptions: nativeTuning.effortOptions,
+    persistedModel: isCreateMode ? undefined : initialValues?.model,
     provider: effectiveProvider,
     runtimeId: runtime,
   });

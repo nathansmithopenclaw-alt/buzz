@@ -805,6 +805,31 @@ test.describe("global agent config screenshots", () => {
     });
   });
 
+  test("create-codex-unqualified-model-remains-valid", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: CATALOG_WITH_CODEX,
+      discoverAgentModels: {
+        models: [{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol" }],
+        supportsSwitching: true,
+        effortConfigId: "effort",
+        effortOptions: ["low", "medium", "high", "xhigh", "max", "ultra"].map(
+          (id) => ({ id, name: id }),
+        ),
+      },
+    });
+
+    await openCreateDialog(page);
+    await customizeAgentAi(page);
+    await selectDropdownOption(page, page.locator("#persona-runtime"), "Codex");
+    await page.locator("#persona-model").click();
+    await page.getByRole("button", { name: "GPT-5.6 Sol" }).click();
+
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
+      timeout: 10_000,
+    });
+    await expect(page.getByText(/Model qualifier \[/)).toHaveCount(0);
+  });
+
   // Shot 10: the ORIGINAL defect — Ian's "Save button stays disabled after
   // editing an agent." This drives the real EDIT/Save path (not create): a
   // persona-linked Codex agent with an explicit custom model and no provider is
@@ -815,12 +840,23 @@ test.describe("global agent config screenshots", () => {
   // provider picker hidden, Save enabled, and no submit-block reason. Create
   // and Save share this rendering path, but the defect was Save-specific, so
   // this exercises Save directly.
-  test("10-edit-codex-custom-model-save-enabled-no-reason", async ({
+  test("10-edit-codex-effort-qualified-model-does-not-wedge-save", async ({
     page,
   }) => {
     const PERSONA_ID = "persona-codex-edit-e2e";
     await installMockBridge(page, {
       acpRuntimesCatalog: CATALOG_WITH_CODEX,
+      discoverAgentModels: {
+        models: [{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol" }],
+        supportsSwitching: true,
+        effortConfigId: "effort",
+        effortOptions: ["low", "medium", "high", "xhigh", "max", "ultra"].map(
+          (id) => ({ id, name: id }),
+        ),
+        fastModeConfigId: "fast",
+        fastModeEnabled: false,
+        fastModeDescription: "1.5x speed, increased usage",
+      },
       managedAgents: [
         {
           pubkey: TEST_IDENTITIES.tyler.pubkey,
@@ -835,10 +871,10 @@ test.describe("global agent config screenshots", () => {
           id: PERSONA_ID,
           displayName: "Codex Editor",
           systemPrompt: "You are the Codex edit-mode e2e persona.",
-          // CLI-login runtime with an explicit custom model and NO provider —
-          // the exact shape that used to pin Save disabled.
+          // The stored effort qualifier is native Codex configuration and must
+          // not wedge an unrelated definition edit.
           runtime: "codex",
-          model: "gpt-5-codex",
+          model: "gpt-5.6-sol[medium]",
           provider: null,
         },
       ],
@@ -869,12 +905,20 @@ test.describe("global agent config screenshots", () => {
       /Save changes/,
     );
 
-    // The core assertions: Codex hides the provider picker, so the hidden
-    // provider must NOT block Save and must NOT surface a reason.
+    // Codex hides the provider picker and advertises Fast mode natively even
+    // though its persisted model carries an effort qualifier.
     await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
+    await expect(page.locator("#persona-model")).toContainText(
+      "gpt-5.6-sol[medium]",
+    );
+    await expect(page.getByTestId("agent-fast-mode-field")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId("definition-agent-fast-mode-toggle").click();
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 10_000,
     });
+    await expect(page.getByText(/Model qualifier \[medium\]/)).toHaveCount(0);
     await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
       0,
     );
@@ -885,6 +929,50 @@ test.describe("global agent config screenshots", () => {
     await dialog.screenshot({
       path: `${SHOTS}/10-edit-codex-custom-model-save-enabled-no-reason.png`,
     });
+
+    await page.getByTestId("persona-dialog-submit").click();
+    await expect(dialog).not.toBeVisible();
+    const savedUpdate = await page.evaluate(() => {
+      const log = (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__;
+      return log?.findLast((entry) => entry.command === "update_persona")
+        ?.payload;
+    });
+    expect(savedUpdate).toMatchObject({
+      input: {
+        envVars: { BUZZ_ACP_FAST_MODE: "true" },
+        model: "gpt-5.6-sol[medium]",
+      },
+    });
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(page.locator("#persona-model")).toContainText(
+      "gpt-5.6-sol[medium]",
+      { timeout: 10_000 },
+    );
+    await expect(
+      page.getByTestId("definition-agent-fast-mode-toggle"),
+    ).toBeChecked();
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled();
+
+    // The persisted-value exception is exact. An explicitly changed bad
+    // qualifier must still fail against the adapter's advertised effort list.
+    await page.locator("#persona-model").click();
+    await page
+      .getByRole("button", { name: "Custom model...", exact: true })
+      .click();
+    await page.locator("#persona-custom-model").fill("gpt-5.6-sol[impossible]");
+    await expect(
+      page.getByText(
+        "Reasoning effort impossible is not advertised for gpt-5.6-sol.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
   });
 
   // Shot 11: the inverse of Ian's fix, and wesbillman's blocking review point.
