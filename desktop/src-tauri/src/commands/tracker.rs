@@ -8,10 +8,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 fn authorization_from_membership(event: &Event, managed_signer: &str) -> TrackerAuthorization {
-    let mut roles = vec![
-        (event.pubkey.to_hex(), TrackerRole::Maintainer),
-        (managed_signer.to_string(), TrackerRole::Maintainer),
-    ];
+    let mut roles = vec![(event.pubkey.to_hex(), TrackerRole::Maintainer)];
     for tag in event.tags.iter().map(|tag| tag.as_slice()) {
         if tag.first().map(String::as_str) != Some("p") {
             continue;
@@ -25,6 +22,10 @@ fn authorization_from_membership(event: &Event, managed_signer: &str) -> Tracker
         };
         roles.push((pubkey.clone(), role));
     }
+    // TrackerAuthorization is last-write-wins for duplicate pubkeys. Match the
+    // CLI's auth-tag-owner semantics by applying the Desktop identity override
+    // after membership rows so a `member` tag cannot downgrade the owner.
+    roles.push((managed_signer.to_string(), TrackerRole::Maintainer));
     TrackerAuthorization::new(roles)
 }
 
@@ -205,7 +206,10 @@ mod tests {
             identifier: "DSP-123".to_string(),
             title: "Canonical fold fixture".to_string(),
             body: "Fixture body".to_string(),
-            status: IssueStatus::Todo,
+            // A terminal root requires Maintainer authorization. The fixture's
+            // managed signer is also tagged as a member, proving the final
+            // identity override wins over the membership row.
+            status: IssueStatus::Done,
             priority: Some(Priority::P1),
             assignee: Some(member.public_key().to_hex()),
             project_id: None,
@@ -271,6 +275,7 @@ mod tests {
         assert_eq!(actual_issue["tipEvent"], expected_issue.tip_event);
         assert_eq!(actual_issue["identifier"], expected_issue.identifier);
         assert_eq!(actual_issue["title"], expected_issue.title);
+        assert_eq!(actual_issue["status"], IssueStatus::Done.to_string());
         assert_eq!(actual_issue["status"], expected_issue.status.to_string());
         assert_eq!(actual_issue["priority"], "P1");
         assert_eq!(actual_issue["labels"], json!(["desktop"]));
