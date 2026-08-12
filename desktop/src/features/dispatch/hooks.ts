@@ -117,7 +117,11 @@ async function loadContext(
       kinds: [PROJECT_KIND],
       "#buzz-workspace": [workspaceId],
     }),
-    fetchExhaustively({ kinds: [TASK_KIND], "#t": [TASK_DISCOVERY_TAG] }),
+    fetchExhaustively({
+      kinds: [TASK_KIND],
+      "#t": [TASK_DISCOVERY_TAG],
+      "#h": [workspaceId],
+    }),
   ]);
   const membershipEvent = memberships[0];
   if (!membershipEvent)
@@ -215,7 +219,12 @@ export function useDispatchContext(workspaceId: string | null) {
     );
     capture(
       relayClient.subscribeLive(
-        { kinds: [TASK_KIND], "#t": [TASK_DISCOVERY_TAG], limit: 0 },
+        {
+          kinds: [TASK_KIND],
+          "#t": [TASK_DISCOVERY_TAG],
+          "#h": [workspaceId],
+          limit: 0,
+        },
         refresh.trigger,
       ),
     );

@@ -145,6 +145,41 @@ test("a conflicting canonical tip rolls back and refetches", async () => {
   assert.deepEqual(rolledBack, [current]);
 });
 
+test("an applied revision superseded before refresh remains successful", async () => {
+  const current = issue();
+  const event = relayEvent();
+  const superseding = { ...current, tipEvent: "8".repeat(64), revision: 3 };
+  const deps = dependencies(event);
+  const rolledBack = [];
+  let refreshes = 0;
+  const result = await publishDispatchIssueMutation(
+    {
+      issue: current,
+      mutation: { type: "priority", priority: "P0" },
+      viewerRole: "member",
+      onOptimistic: () => {},
+      onRollback: (value) => rolledBack.push(value),
+      refresh: async () => {
+        refreshes += 1;
+        return {
+          ...context([superseding]),
+          activity: [
+            {
+              issueId: current.issueId,
+              eventId: event.id,
+            },
+          ],
+        };
+      },
+    },
+    deps.value,
+  );
+
+  assert.equal(result, superseding);
+  assert.equal(refreshes, 1);
+  assert.deepEqual(rolledBack, []);
+});
+
 test("terminal and reopen transitions remain maintainer-only", () => {
   assert.equal(
     canApplyDispatchMutation(

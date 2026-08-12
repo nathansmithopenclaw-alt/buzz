@@ -271,3 +271,24 @@ test("detail keeps canonical activity visible when comments and profiles degrade
   await expect(page.getByText("Needs owner review")).toBeVisible();
   await expect(page.getByTestId("dispatch-comment")).toHaveCount(0);
 });
+
+test("detail never turns a non-http provenance source into a link", async ({
+  page,
+}) => {
+  const unsafe = context({
+    activity: context().activity.map((entry, index) =>
+      index === 0 && entry.import
+        ? {
+            ...entry,
+            import: { ...entry.import, source_url: "javascript:alert(1)" },
+          }
+        : entry,
+    ),
+  });
+  await openDispatch(page, unsafe);
+  await openPrimaryIssue(page);
+  await expect(page.getByText("Imported from Linear")).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /Imported from Linear/ }),
+  ).toHaveCount(0);
+});

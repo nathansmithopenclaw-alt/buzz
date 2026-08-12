@@ -6,6 +6,8 @@ import {
   selectMyIssues,
   splitTriageIssues,
   taskMessageLink,
+  retainUnfoldedComments,
+  selectVisibleComments,
 } from "./selectors.mjs";
 
 function issue(overrides = {}) {
@@ -96,5 +98,27 @@ test("linked tasks use the canonical message deep-link shape", () => {
   assert.equal(
     taskMessageLink({ channelId: "workspace", eventId: "event" }),
     "buzz://message?channel=workspace&id=event",
+  );
+});
+
+test("optimistic comments stay issue-scoped until the fold contains them", () => {
+  const canonical = [{ issueId: "issue-a", eventId: "folded" }];
+  const optimistic = [
+    { issueId: "issue-a", eventId: "pending-a" },
+    { issueId: "issue-b", eventId: "pending-b" },
+    { issueId: "issue-a", eventId: "folded" },
+  ];
+
+  assert.deepEqual(
+    selectVisibleComments(canonical, optimistic, "issue-b").map(
+      (comment) => comment.eventId,
+    ),
+    ["pending-b"],
+  );
+  assert.deepEqual(
+    retainUnfoldedComments(optimistic, canonical).map(
+      (comment) => comment.eventId,
+    ),
+    ["pending-a", "pending-b"],
   );
 });

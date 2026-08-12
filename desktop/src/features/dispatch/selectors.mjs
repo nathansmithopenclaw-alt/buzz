@@ -72,3 +72,15 @@ export function taskMessageLink(task) {
     messageId: task.eventId,
   });
 }
+
+export function selectVisibleComments(canonical, optimistic, issueId) {
+  return [
+    ...canonical.filter((comment) => comment.issueId === issueId),
+    ...optimistic.filter((comment) => comment.issueId === issueId),
+  ];
+}
+
+export function retainUnfoldedComments(optimistic, canonical) {
+  const foldedEventIds = new Set(canonical.map((comment) => comment.eventId));
+  return optimistic.filter((comment) => !foldedEventIds.has(comment.eventId));
+}

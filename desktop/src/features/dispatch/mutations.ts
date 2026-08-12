@@ -221,7 +221,10 @@ export async function publishDispatchIssueMutation(
     const canonical = context.issues.find(
       (candidate) => candidate.issueId === issue.issueId,
     );
-    if (!canonical || canonical.tipEvent !== event.id) {
+    const applied = context.activity.some(
+      (entry) => entry.issueId === issue.issueId && entry.eventId === event.id,
+    );
+    if (!canonical || (canonical.tipEvent !== event.id && !applied)) {
       onRollback(issue);
       await refresh();
       throw new TrackerMutationConflictError();

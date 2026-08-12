@@ -57,6 +57,18 @@ function dateLabel(timestamp: number, withYear = false) {
   }).format(new Date(timestamp * 1_000));
 }
 
+function safeExternalHref(value: string | null | undefined) {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.toString()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function canTransition(
   role: "none" | "member" | "maintainer",
   current: DispatchStatus,
@@ -204,6 +216,7 @@ export function IssueDetail({
     (candidate) => candidate.projectId === issue.projectId,
   );
   const imported = activity.find((entry) => entry.import)?.import ?? null;
+  const importedSourceUrl = safeExternalHref(imported?.source_url);
   const timeline = chronologicalActivity(
     activity,
     sectionErrors.comments ? [] : comments,
@@ -536,19 +549,33 @@ export function IssueDetail({
             Provenance
           </h2>
           {imported ? (
-            <a
-              className="mt-3 block rounded-lg border border-border p-3 text-xs hover:bg-muted/30"
-              href={imported.source_url ?? undefined}
-            >
-              <strong className="flex items-center gap-1">
-                <ExternalLink className="h-3.5 w-3.5" />
-                Imported from {titleCase(imported.system)}
-              </strong>
-              <span className="mt-1 block text-muted-foreground">
-                {imported.importer_version ?? imported.external_id} ·{" "}
-                {dateLabel(imported.imported_at, true)}
-              </span>
-            </a>
+            importedSourceUrl ? (
+              <a
+                className="mt-3 block rounded-lg border border-border p-3 text-xs hover:bg-muted/30"
+                href={importedSourceUrl}
+                rel="noreferrer"
+              >
+                <strong className="flex items-center gap-1">
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Imported from {titleCase(imported.system)}
+                </strong>
+                <span className="mt-1 block text-muted-foreground">
+                  {imported.importer_version ?? imported.external_id} ·{" "}
+                  {dateLabel(imported.imported_at, true)}
+                </span>
+              </a>
+            ) : (
+              <div className="mt-3 rounded-lg border border-border p-3 text-xs">
+                <strong className="flex items-center gap-1">
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Imported from {titleCase(imported.system)}
+                </strong>
+                <span className="mt-1 block text-muted-foreground">
+                  {imported.importer_version ?? imported.external_id} ·{" "}
+                  {dateLabel(imported.imported_at, true)}
+                </span>
+              </div>
+            )
           ) : (
             <p className="mt-3 text-sm italic text-muted-foreground">
               No import provenance

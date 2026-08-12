@@ -238,6 +238,18 @@ fn fold_tracker_context_values(
             continue;
         }
         match TaskEnvelopeEvent::from_event(&event) {
+            Ok(event) if event.channel_id != workspace_id => {
+                task_diagnostics.push(format!(
+                    "{}: task channel is outside the Tracker workspace",
+                    event.event_id
+                ));
+            }
+            Ok(event) if authorization.role(&event.author_pubkey).is_none() => {
+                task_diagnostics.push(format!(
+                    "{}: task author is not a workspace member",
+                    event.event_id
+                ));
+            }
             Ok(event) => task_events.push(event),
             Err(error) => task_diagnostics.push(format!("{}: {error}", event.id.to_hex())),
         }
@@ -440,7 +452,7 @@ mod tests {
         .expect("signed project");
         let task_id = Uuid::new_v4();
         let task = build_task_message(
-            Uuid::new_v4(),
+            workspace_id,
             "Dispatch fixture",
             &TaskEnvelope {
                 v: TASK_ENVELOPE_VERSION,
@@ -466,6 +478,61 @@ mod tests {
         .custom_created_at(nostr::Timestamp::from(103))
         .sign_with_keys(&member)
         .expect("signed task");
+        let outsider = Keys::generate();
+        let outsider_task = build_task_message(
+            workspace_id,
+            "Untrusted replacement",
+            &TaskEnvelope {
+                v: TASK_ENVELOPE_VERSION,
+                task_id,
+                status: TaskStatus::Done,
+                assignee: outsider.public_key().to_hex(),
+                assigner: outsider.public_key().to_hex(),
+                title: "Untrusted linked task".to_string(),
+                deliverables: Vec::<TaskDeliverable>::new(),
+                verification: TaskVerification {
+                    method: "Untrusted verification".to_string(),
+                    evidence_ref: None,
+                },
+                blocked_on: None,
+                notes: None,
+                tracker_issue_id: Some(issue_id),
+                dispatch_request_id: None,
+            },
+            None,
+            &[],
+        )
+        .expect("outsider task builder")
+        .custom_created_at(nostr::Timestamp::from(104))
+        .sign_with_keys(&outsider)
+        .expect("signed outsider task");
+        let foreign_task = build_task_message(
+            Uuid::new_v4(),
+            "Foreign workspace task",
+            &TaskEnvelope {
+                v: TASK_ENVELOPE_VERSION,
+                task_id: Uuid::new_v4(),
+                status: TaskStatus::PickedUp,
+                assignee: member.public_key().to_hex(),
+                assigner: member.public_key().to_hex(),
+                title: "Foreign linked task".to_string(),
+                deliverables: Vec::<TaskDeliverable>::new(),
+                verification: TaskVerification {
+                    method: "Foreign verification".to_string(),
+                    evidence_ref: None,
+                },
+                blocked_on: None,
+                notes: None,
+                tracker_issue_id: Some(issue_id),
+                dispatch_request_id: None,
+            },
+            None,
+            &[],
+        )
+        .expect("foreign task builder")
+        .custom_created_at(nostr::Timestamp::from(104))
+        .sign_with_keys(&member)
+        .expect("signed foreign task");
         let snapshot_at = 104;
         let managed_signer = member.public_key().to_hex();
 
@@ -476,7 +543,11 @@ mod tests {
                 serde_json::to_value(&comment).expect("comment JSON"),
                 serde_json::to_value(&project).expect("project JSON"),
             ],
-            vec![serde_json::to_value(&task).expect("task JSON")],
+            vec![
+                serde_json::to_value(&task).expect("task JSON"),
+                serde_json::to_value(&outsider_task).expect("outsider task JSON"),
+                serde_json::to_value(&foreign_task).expect("foreign task JSON"),
+            ],
             serde_json::to_value(&membership).expect("membership JSON"),
             &workspace_id.to_string(),
             &managed_signer,
@@ -527,7 +598,16 @@ mod tests {
         assert_eq!(actual["linkedTasks"][0]["title"], "Canonical linked task");
         assert_eq!(actual["linkedTasks"][0]["status"], "picked_up");
         assert_eq!(actual["viewerRole"], "maintainer");
-        assert_eq!(actual["taskDiagnostics"], json!([]));
+        let task_diagnostics = actual["taskDiagnostics"]
+            .as_array()
+            .expect("task diagnostics");
+        assert_eq!(task_diagnostics.len(), 2);
+        assert!(task_diagnostics.iter().any(|message| message
+            .as_str()
+            .is_some_and(|message| message.contains("not a workspace member"))));
+        assert!(task_diagnostics.iter().any(|message| message
+            .as_str()
+            .is_some_and(|message| message.contains("outside the Tracker workspace"))));
         assert_eq!(actual["diagnostics"], json!([]));
     }
 

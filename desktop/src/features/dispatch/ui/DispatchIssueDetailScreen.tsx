@@ -8,6 +8,10 @@ import {
   publishDispatchComment,
   publishDispatchIssueMutation,
 } from "../mutations";
+import {
+  retainUnfoldedComments,
+  selectVisibleComments,
+} from "../selectors.mjs";
 import type { DispatchComment, DispatchIssue } from "../types";
 import { useDispatchContext, useDispatchWorkspaces } from "../hooks";
 import {
@@ -50,6 +54,11 @@ export function DispatchIssueDetailScreen({
     )
       setOptimisticIssue(null);
   }, [canonical, optimisticIssue]);
+  React.useEffect(() => {
+    setOptimisticComments((current) =>
+      retainUnfoldedComments(current, context.comments),
+    );
+  }, [context.comments]);
   const authors = [
     ...new Set([
       ...(issue?.assignee ? [issue.assignee] : []),
@@ -92,6 +101,7 @@ export function DispatchIssueDetailScreen({
         onRollback: () => setOptimisticIssue(null),
         refresh: context.refresh,
       });
+      setOptimisticIssue(null);
       toast.success("Issue updated");
     } catch (error) {
       toast.error(
@@ -116,7 +126,6 @@ export function DispatchIssueDetailScreen({
           ),
         refresh: context.refresh,
       });
-      setOptimisticComments([]);
       toast.success("Comment added");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Comment failed");
@@ -129,10 +138,11 @@ export function DispatchIssueDetailScreen({
   return (
     <IssueDetail
       activity={context.activity.filter((entry) => entry.issueId === issueId)}
-      comments={[
-        ...context.comments.filter((entry) => entry.issueId === issueId),
-        ...optimisticComments,
-      ]}
+      comments={selectVisibleComments(
+        context.comments,
+        optimisticComments,
+        issueId,
+      )}
       currentPubkey={identity.data?.pubkey}
       issue={issue}
       issues={context.issues}

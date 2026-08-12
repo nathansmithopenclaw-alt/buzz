@@ -30,3 +30,12 @@ export function chronologicalActivity(
   | (DispatchComment & { timelineKind: "comment" })
 >;
 export function taskMessageLink(task: DispatchLinkedTask): string;
+export function selectVisibleComments(
+  canonical: readonly DispatchComment[],
+  optimistic: readonly DispatchComment[],
+  issueId: string,
+): DispatchComment[];
+export function retainUnfoldedComments(
+  optimistic: readonly DispatchComment[],
+  canonical: readonly DispatchComment[],
+): DispatchComment[];
