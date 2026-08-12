@@ -1158,6 +1158,7 @@ export function foldTrackerContext<T>(input: {
   events: RelayEvent[];
   membershipEvent: RelayEvent;
   workspaceId: string;
+  managedSigner: string;
   snapshotAt: number;
 }): Promise<T> {
   return invokeTauri<T>("fold_tracker_context", input);

@@ -7,8 +7,11 @@ use nostr::{Event, PublicKey};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-fn authorization_from_membership(event: &Event) -> TrackerAuthorization {
-    let mut roles = vec![(event.pubkey.to_hex(), TrackerRole::Maintainer)];
+fn authorization_from_membership(event: &Event, managed_signer: &str) -> TrackerAuthorization {
+    let mut roles = vec![
+        (event.pubkey.to_hex(), TrackerRole::Maintainer),
+        (managed_signer.to_string(), TrackerRole::Maintainer),
+    ];
     for tag in event.tags.iter().map(|tag| tag.as_slice()) {
         if tag.first().map(String::as_str) != Some("p") {
             continue;
@@ -29,6 +32,7 @@ fn fold_tracker_context_values(
     raw_events: Vec<Value>,
     membership_event: Value,
     workspace_id: &str,
+    managed_signer: &str,
     snapshot_at: u64,
 ) -> Result<Value, String> {
     let workspace_id = workspace_id
@@ -49,8 +53,10 @@ fn fold_tracker_context_values(
     {
         return Err("membership snapshot does not identify the Tracker workspace".to_string());
     }
-    let managed_signer = membership_event.pubkey.to_hex();
-    let authorization = authorization_from_membership(&membership_event);
+    let managed_signer = PublicKey::parse(managed_signer)
+        .map_err(|error| format!("invalid Tracker managed signer: {error}"))?
+        .to_hex();
+    let authorization = authorization_from_membership(&membership_event, &managed_signer);
     let mut signed_events = Vec::new();
     let mut parsed_tracker_events = Vec::new();
     let mut diagnostics = Vec::new();
@@ -155,14 +161,22 @@ pub fn fold_tracker_context(
     events: Vec<Value>,
     membership_event: Value,
     workspace_id: String,
+    managed_signer: String,
     snapshot_at: u64,
 ) -> Result<Value, String> {
-    fold_tracker_context_values(events, membership_event, &workspace_id, snapshot_at)
+    fold_tracker_context_values(
+        events,
+        membership_event,
+        &workspace_id,
+        &managed_signer,
+        snapshot_at,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_sdk_pkg::build_project_with_tags;
     use buzz_sdk_pkg::tracker::{build_tracker_issue, IssueRoot, IssueStatus, Priority};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -178,9 +192,10 @@ mod tests {
     }
 
     #[test]
-    fn fold_tracker_context_matches_the_sdk_issue_projection() {
+    fn fold_tracker_context_matches_the_sdk_issue_and_project_projections() {
         let workspace_id = Uuid::new_v4();
         let issue_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
         let member = Keys::generate();
         let membership = membership(workspace_id, &member, &Keys::generate());
         let root = IssueRoot {
@@ -208,17 +223,41 @@ mod tests {
             .expect("root builder")
             .sign_with_keys(&member)
             .expect("signed root");
-        let snapshot_at = event.created_at.as_secs() + 1;
+        let project = build_project_with_tags(
+            "",
+            vec![
+                Tag::parse(["d", "dispatch"]).expect("project slug"),
+                Tag::parse(["name", "Dispatch"]).expect("project name"),
+                Tag::parse(["buzz-project-id", project_id.to_string().as_str()])
+                    .expect("project id"),
+                Tag::parse(["buzz-workspace", workspace_id.to_string().as_str()])
+                    .expect("project workspace"),
+            ],
+        )
+        .expect("project builder")
+        .sign_with_keys(&member)
+        .expect("signed project");
+        let snapshot_at = event.created_at.as_secs().max(project.created_at.as_secs()) + 1;
+        let managed_signer = member.public_key().to_hex();
 
         let actual = fold_tracker_context_values(
-            vec![serde_json::to_value(&event).expect("root JSON")],
+            vec![
+                serde_json::to_value(&event).expect("root JSON"),
+                serde_json::to_value(&project).expect("project JSON"),
+            ],
             serde_json::to_value(&membership).expect("membership JSON"),
             &workspace_id.to_string(),
+            &managed_signer,
             snapshot_at,
         )
         .expect("fold context");
         let parsed = parse_tracker_event(&event, snapshot_at).expect("SDK parse");
-        let expected = fold_tracker_events([parsed], &authorization_from_membership(&membership));
+        let expected = fold_tracker_events(
+            [parsed],
+            &authorization_from_membership(&membership, &managed_signer),
+        );
+        let expected_projects =
+            fold_tracker_projects_at([project], workspace_id, &managed_signer, snapshot_at);
         let expected_issue = expected
             .issues
             .get(&(workspace_id, issue_id))
@@ -235,6 +274,12 @@ mod tests {
         assert_eq!(actual_issue["status"], expected_issue.status.to_string());
         assert_eq!(actual_issue["priority"], "P1");
         assert_eq!(actual_issue["labels"], json!(["desktop"]));
+        assert_eq!(actual["projects"][0]["projectId"], project_id.to_string());
+        assert_eq!(actual["projects"][0]["slug"], "dispatch");
+        assert_eq!(
+            actual["projects"][0]["name"],
+            expected_projects.projects[&project_id].name
+        );
         assert_eq!(actual["diagnostics"], json!([]));
     }
 
@@ -246,6 +291,7 @@ mod tests {
             Vec::new(),
             serde_json::to_value(membership).expect("membership JSON"),
             &requested.to_string(),
+            &Keys::generate().public_key().to_hex(),
             1,
         )
         .expect_err("workspace mismatch must fail");

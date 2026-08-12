@@ -90,7 +90,10 @@ async function loadWorkspaces(pubkey: string): Promise<DispatchWorkspace[]> {
   );
 }
 
-async function loadContext(workspaceId: string): Promise<DispatchContext> {
+async function loadContext(
+  workspaceId: string,
+  managedSigner: string,
+): Promise<DispatchContext> {
   const snapshotAt = Math.floor(Date.now() / 1000);
   const [memberships, trackerEvents, projectEvents] = await Promise.all([
     relayClient.fetchEvents({ kinds: [39002], "#d": [workspaceId], limit: 1 }),
@@ -107,6 +110,7 @@ async function loadContext(workspaceId: string): Promise<DispatchContext> {
     events: [...trackerEvents, ...projectEvents],
     membershipEvent,
     workspaceId,
+    managedSigner,
     snapshotAt,
   });
 }
@@ -127,11 +131,18 @@ export function useDispatchWorkspaces() {
 }
 
 export function useDispatchContext(workspaceId: string | null) {
+  const identity = useIdentityQuery();
   const [revision, setRevision] = React.useState(0);
   const query = useQuery({
-    queryKey: ["dispatch", "context", workspaceId, revision],
-    queryFn: () => loadContext(workspaceId ?? ""),
-    enabled: Boolean(workspaceId),
+    queryKey: [
+      "dispatch",
+      "context",
+      workspaceId,
+      identity.data?.pubkey,
+      revision,
+    ],
+    queryFn: () => loadContext(workspaceId ?? "", identity.data?.pubkey ?? ""),
+    enabled: Boolean(workspaceId && identity.data?.pubkey),
   });
   React.useEffect(() => {
     if (!workspaceId) return;
@@ -163,8 +174,8 @@ export function useDispatchContext(workspaceId: string | null) {
   };
   return {
     ...data,
-    isLoading: query.isLoading,
-    error: query.error as Error | null,
+    isLoading: identity.isLoading || query.isLoading,
+    error: (identity.error ?? query.error) as Error | null,
     refresh: () => void query.refetch(),
   };
 }
