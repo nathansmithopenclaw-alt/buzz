@@ -15,6 +15,7 @@ import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
 import { resolveAgentParallelism } from "@/features/agents/lib/agentParallelism";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
+import type { DispatchContext } from "@/features/dispatch/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -182,6 +183,11 @@ type E2eConfig = {
   mock?: {
     /** Tauri window label exposed to the app. Defaults to the main window. */
     windowLabel?: string;
+    /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */
+    dispatch?: {
+      workspace: { id: string; name: string };
+      context: DispatchContext;
+    };
     ttsSettings?: {
       version: number;
       agentTextToSpeech: boolean;
@@ -997,6 +1003,7 @@ type MockFilter = {
   "#e"?: string[];
   "#h"?: string[];
   "#p"?: string[];
+  "#buzz-workspace"?: string[];
   authors?: string[];
   ids?: string[];
   kinds?: number[];
@@ -9762,6 +9769,66 @@ async function sendToRealSocket(args: {
   }
 }
 
+function dispatchFixtureEvent(
+  idDigit: string,
+  kind: number,
+  tags: string[][],
+  content = "",
+): RelayEvent {
+  return {
+    id: idDigit.repeat(64),
+    pubkey: MOCK_IDENTITY_PUBKEY,
+    created_at: Math.floor(Date.now() / 1000) - 1,
+    kind,
+    tags,
+    content,
+    sig: "d".repeat(128),
+  };
+}
+
+/** Serve the raw relay discovery/history shape while the mock Tauri command
+ * returns the already-canonical projection seeded by the spec. Rust command
+ * parity is tested in commands::tracker; this seam proves renderer wiring. */
+function emitMockDispatchFixture(
+  socket: MockSocket,
+  subId: string,
+  filter: MockFilter,
+): boolean {
+  const fixture = getConfig()?.mock?.dispatch;
+  if (!fixture) return false;
+  const { id, name } = fixture.workspace;
+  const kinds = new Set(filter.kinds ?? []);
+  const matching: RelayEvent[] = [];
+  if (kinds.has(39002) && (filter["#p"] || filter["#d"]?.includes(id))) {
+    matching.push(
+      dispatchFixtureEvent("a", 39002, [
+        ["d", id],
+        ["p", MOCK_IDENTITY_PUBKEY, "", "owner"],
+      ]),
+    );
+  } else if (kinds.has(39000) && filter["#d"]?.includes(id)) {
+    matching.push(
+      dispatchFixtureEvent("b", 39000, [["d", id]], JSON.stringify({ name })),
+    );
+  } else if (
+    [40020, 40021, 40022, 40025].some((kind) => kinds.has(kind)) &&
+    filter["#h"]?.includes(id)
+  ) {
+    matching.push(dispatchFixtureEvent("c", 40020, [["h", id]], "{}"));
+  } else if (kinds.has(30621) && filter["#buzz-workspace"]?.includes(id)) {
+    matching.push(
+      dispatchFixtureEvent("e", 30621, [["buzz-workspace", id]], ""),
+    );
+  } else {
+    return false;
+  }
+  for (const event of matching.slice(0, filter.limit ?? matching.length)) {
+    sendWsText(socket.handler, ["EVENT", subId, event]);
+  }
+  sendWsText(socket.handler, ["EOSE", subId]);
+  return true;
+}
+
 function sendToMockSocket(args: {
   id: number;
   message?: {
@@ -9863,6 +9930,7 @@ function sendToMockSocket(args: {
     }
 
     const filter = rest[1] as MockFilter;
+    if (emitMockDispatchFixture(socket, subId, filter)) return;
     if (filter.kinds?.includes(13534)) {
       sendWsText(socket.handler, [
         "EVENT",
@@ -11240,6 +11308,12 @@ export function maybeInstallE2eTauriMocks() {
         }
 
         return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
+      }
+      case "fold_tracker_context": {
+        const fixture = activeConfig?.mock?.dispatch;
+        if (!fixture)
+          throw new Error("Dispatch fold fixture is not configured.");
+        return structuredClone(fixture.context);
       }
       case "sign_nostr_identity_binding": {
         const request = payload as {

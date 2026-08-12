@@ -645,6 +645,7 @@ pub fn run() {
             get_user_notes,
             get_git_identity,
             get_project_repo_snapshot,
+            fold_tracker_context,
             get_project_repo_diff,
             get_project_local_repo_diff,
             get_project_local_repo_snapshot,

@@ -1,6 +1,7 @@
 import type { Page } from "@playwright/test";
 import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
 import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
+import type { DispatchContext } from "../../src/features/dispatch/types";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
@@ -147,6 +148,11 @@ type MockInstallRuntimeResult = {
 type MockBridgeOptions = {
   /** Tauri window label exposed to the app. Defaults to the main window. */
   windowLabel?: string;
+  /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */
+  dispatch?: {
+    workspace: { id: string; name: string };
+    context: DispatchContext;
+  };
   ttsSettings?: {
     version: number;
     agentTextToSpeech: boolean;

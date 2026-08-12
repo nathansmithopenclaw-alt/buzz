@@ -167,13 +167,19 @@ tags and optional channel/verification defaults. The shared SDK projection
 maps the immutable UUID to the signer's current coordinate at read time;
 issues store only that UUID.
 
+The workspace signer is the pubkey in the `owner` row of the workspace
+channel's verified kind-39002 membership snapshot. Tracker-manageable project
+heads MUST be authored by that workspace signer. Heads authored by any other
+pubkey remain referenceable by their NIP-MP coordinate with a warning, but
+MUST NOT enter the manageable project projection.
+
 Slug uniqueness is enforced under ASCII case folding by CLI/projection scope
 among the workspace signer's managed projects, matching CLI slug resolution.
 A rename publishes the same project UUID at the new `d` address and a NIP-09
 deletion for the old kind-30621 address. A relay cannot enforce uniqueness
-across signers. Cross-signer upstream NIP-MP heads without Tracker
-UUID/workspace tags may be referenced by coordinate with a warning, but are
-not Tracker-manageable.
+across signers. Cross-signer upstream NIP-MP heads may be referenced by
+coordinate with a warning, but are not Tracker-manageable even when they carry
+Tracker UUID/workspace tags.
 
 A rename interrupted after the new head is accepted but before the old-address
 deletion is accepted leaves duplicate heads for one immutable project UUID.

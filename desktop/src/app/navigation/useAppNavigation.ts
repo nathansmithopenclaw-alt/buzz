@@ -102,6 +102,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goDispatch = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/dispatch",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goProject = React.useCallback(
     (
       projectId: string,
@@ -321,6 +332,7 @@ export function useAppNavigation() {
     goNewMessage,
     goProject,
     goProjects,
+    goDispatch,
     goPulse,
     goProfile,
     goSettings,
