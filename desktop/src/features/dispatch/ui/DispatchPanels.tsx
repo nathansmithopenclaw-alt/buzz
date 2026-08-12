@@ -156,7 +156,7 @@ function IssueIdentifier({ issue }: { issue: DispatchIssue }) {
     <Tooltip>
       <TooltipTrigger asChild>
         <span
-          className="min-w-0 truncate text-2xs text-muted-foreground"
+          className="block w-full min-w-0 truncate text-2xs text-muted-foreground"
           data-testid="dispatch-issue-identifier"
           title={issue.identifier}
         >
@@ -538,7 +538,7 @@ export function DispatchListPanel({
       />
       <div className="min-h-0 flex-1 overflow-auto">
         <table
-          className="w-full min-w-[940px] border-collapse text-xs"
+          className="w-full min-w-[940px] table-fixed border-collapse text-xs"
           data-testid="dispatch-list"
         >
           <thead className="sticky top-0 z-10 bg-background">
@@ -574,7 +574,7 @@ export function DispatchListPanel({
                 key={issue.issueId}
                 onClick={() => onOpenIssue(issue.issueId)}
               >
-                <td className="max-w-36 px-3 py-2">
+                <td className="w-40 max-w-40 px-3 py-2">
                   <IssueIdentifier issue={issue} />
                 </td>
                 <td

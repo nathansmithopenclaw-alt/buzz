@@ -149,6 +149,30 @@ for (const theme of ["catppuccin-latte", "catppuccin-mocha"] as const) {
 
     await page.getByTestId("dispatch-tab-list").click();
     await expect(page.getByTestId("dispatch-list-row")).toHaveCount(5);
+    const longIdentifierRow = page
+      .getByTestId("dispatch-list-row")
+      .filter({ hasText: longIdentifier });
+    const listIdentifier = longIdentifierRow.getByTestId(
+      "dispatch-issue-identifier",
+    );
+    await expect(listIdentifier).toHaveAttribute("title", longIdentifier);
+    const identifierGeometry = await longIdentifierRow.evaluate((row) => {
+      const cells = row.querySelectorAll("td");
+      const identifier = cells[0]?.querySelector<HTMLElement>(
+        '[data-testid="dispatch-issue-identifier"]',
+      );
+      if (!identifier || !cells[1])
+        throw new Error("List cells are unavailable");
+      return {
+        isTruncated: identifier.scrollWidth > identifier.clientWidth,
+        identifierRight: identifier.getBoundingClientRect().right,
+        titleLeft: cells[1].getBoundingClientRect().left,
+      };
+    });
+    expect(identifierGeometry.isTruncated).toBe(true);
+    expect(identifierGeometry.identifierRight).toBeLessThanOrEqual(
+      identifierGeometry.titleLeft + 1,
+    );
     await page.getByTestId("dispatch-filter-query").fill("relay");
     await expect(page.getByTestId("dispatch-list-row")).toHaveCount(1);
     await expect(page.getByText("Relay coverage review")).toBeVisible();
