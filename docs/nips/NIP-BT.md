@@ -64,10 +64,10 @@ versions are invalid. Version 1 contains:
 ```
 
 The seven stable status IDs are `triage`, `backlog`, `todo`, `in_progress`,
-`in_review`, `done`, and `cancelled`. All transitions are legal, but every
-status-changing revision carries a non-empty reason. `done` and `cancelled`
-are terminal. Terminal transitions and reopen transitions require the
-workspace-configured maintainer role.
+`in_review`, `done`, and `cancelled`. All transitions are legal. A
+status-changing revision SHOULD carry a reason; when present, the reason MUST
+be non-empty. `done` and `cancelled` are terminal. Terminal transitions and
+reopen transitions require the workspace-configured maintainer role.
 
 `labels` contains at most 16 unique values. Each is already trimmed,
 lowercase, and at most 64 UTF-8 bytes, and each has a matching repeatable
