@@ -208,7 +208,7 @@ export function useAgentManagement() {
                           failedStartCount: number;
                         },
                       )
-                    : `saved config for agent ${next.request.agentName}; instruction and runtime changes take effect on next spawn`
+                    : `saved config for agent ${next.request.agentName}; configuration changes take effect on next spawn`
                   : globalConfigAuditTarget(route.registered.result),
               succeeded: true,
             });

@@ -42,13 +42,15 @@ export async function completeDelegatedAgentUpdateSuccess(
     agentName: request.request.agentName,
     saved: true,
     changedFields,
+    configurationChangesTakeEffect: takeEffect,
+    // Backward-compatible result key for older CLI/Desktop consumers.
     instructionAndRuntimeChangesTakeEffect: takeEffect,
     ...(activationCounts ?? {}),
   };
   await completeAgentManagementRequest(requestId, true, result);
   const target = activationCounts
     ? delegatedEnvAuditTarget(request.request.agentName, activationCounts)
-    : `saved config for agent ${request.request.agentName}; instruction and runtime changes take effect on next spawn`;
+    : `saved config for agent ${request.request.agentName}; configuration changes take effect on next spawn`;
   await publishAgentManagementAuditReceipt({
     requestId,
     sourcePubkey,

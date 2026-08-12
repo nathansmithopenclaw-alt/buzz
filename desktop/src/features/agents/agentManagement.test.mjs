@@ -6,6 +6,7 @@ import {
   createInputFromRequest,
   globalConfigAuditTarget,
   globalConfigPatchFromRequest,
+  linkedInstanceBehaviorPatchFromRequest,
   globalConfigReviewRows,
   parseAgentManagementRequest,
   requestTargetsEditablePersona,
@@ -195,6 +196,7 @@ test("parses and maps parallelism plus instance name pool updates", () => {
         respondToAllowlist: ["owner"],
         parallelism: 6,
       },
+      linkedInstanceBehaviorPatch: { parallelism: 6 },
     },
   );
 });
@@ -276,6 +278,47 @@ test("agent config update maps effort and a respond-to allowlist", () => {
     respondToAllowlist: ["11".repeat(32)],
     parallelism: undefined,
   });
+  assert.deepEqual(updated.linkedInstanceBehaviorPatch, {
+    respondTo: "allowlist",
+    respondToAllowlist: ["11".repeat(32)],
+  });
+});
+
+test("existing-agent behavior patch keeps only explicitly requested fields", () => {
+  const parsed = parseAgentManagementRequest({
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-linked-access",
+    intent: "apply",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      respondTo: "allowlist",
+      respondToAllowlist: ["AA".repeat(32)],
+    },
+  });
+  assert.ok(parsed && parsed.action === "update");
+  assert.deepEqual(linkedInstanceBehaviorPatchFromRequest(parsed), {
+    respondTo: "allowlist",
+    respondToAllowlist: ["AA".repeat(32)],
+  });
+
+  const instructionsOnly = parseAgentManagementRequest({
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-instructions-only",
+    intent: "apply",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      systemPrompt: "New instructions.",
+    },
+  });
+  assert.ok(instructionsOnly && instructionsOnly.action === "update");
+  assert.equal(
+    linkedInstanceBehaviorPatchFromRequest(instructionsOnly),
+    undefined,
+  );
 });
 
 test("allowlist mode requires a non-empty allowlist", () => {

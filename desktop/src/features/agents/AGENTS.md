@@ -200,9 +200,15 @@ that frontend inventory.
    frontend-owned runtime-to-key table or silently fall back to a raw key.
    Global patches are overlaid onto the current durable config under the Rust
    store lock, so an in-flight query placeholder or concurrent revocation cannot
-   erase unrelated defaults or reintroduce the standing grant. Existing-agent updates save
-   without respawning and report that instruction and runtime changes take
-   effect on next spawn.
+   erase unrelated defaults or reintroduce the standing grant. Existing-agent
+   updates save without respawning and report that configuration changes take
+   effect on next spawn. Definition behavior remains a mint-time default, so
+   an existing-agent management request carries its original behavior patch to
+   Rust separately: apply only the fields the request named to every linked
+   instance record, preserving unrelated per-instance overrides. Each running
+   `(agent, community relay)` pair keeps its old config until that pair next
+   spawns. The env-only readiness exception restarts all tracked pairs only
+   when every one is in setup mode; it never bounces a live non-setup pair.
    Global receipts report restart effects from the setter's returned counts,
    never from the requested field names.
 

@@ -28,6 +28,24 @@ pub struct PersonaBehaviorRequest {
     pub parallelism: Option<u32>,
 }
 
+/// Requested instance-side behavior changes from an existing-agent management
+/// request.
+///
+/// Definition behavior remains a mint-time default. This separate patch lets
+/// the management route apply only the fields the requester actually named to
+/// already-linked instances, without overwriting unrelated per-instance
+/// choices reconstructed from the definition edit form.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedInstanceBehaviorPatch {
+    #[serde(default)]
+    pub respond_to: Option<RespondTo>,
+    #[serde(default)]
+    pub respond_to_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    pub parallelism: Option<u32>,
+}
+
 /// Validate a behavior group and apply it onto a persona record.
 ///
 /// This is the single write path for definition behavioral fields — both
@@ -125,6 +143,12 @@ pub struct UpdatePersonaRequest {
     /// present = validate and replace the fields as a unit.
     #[serde(default)]
     pub behavior: Option<PersonaBehaviorRequest>,
+    /// Existing-agent management only: apply the named behavior fields to
+    /// currently linked instances so their record-backed spawn config changes
+    /// on the next spawn. Ordinary definition edits omit this field and retain
+    /// mint-time-default semantics.
+    #[serde(default)]
+    pub linked_instance_behavior_patch: Option<LinkedInstanceBehaviorPatch>,
 }
 
 #[derive(Debug, Deserialize)]

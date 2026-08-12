@@ -16,7 +16,8 @@ use crate::{
         load_personas, managed_agent_avatar_url, managed_agent_runtime_keys, record_agent_command,
         resolve_effective_agent_env, save_managed_agents, save_personas,
         stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
-        AgentDefinition, AgentReadiness, BackendKind, ManagedAgentRecord, UpdatePersonaRequest,
+        AgentDefinition, AgentReadiness, BackendKind, LinkedInstanceBehaviorPatch,
+        ManagedAgentRecord, RespondTo, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -119,6 +120,85 @@ fn propagate_persona_name_rename(
         renamed.push(record.pubkey.clone());
     }
     renamed
+}
+
+/// Apply the behavior fields explicitly named by an existing-agent management
+/// request to every instance currently linked to the target persona.
+///
+/// The definition's behavior group remains a mint-time default. Applying the
+/// original narrow patch here avoids reconstructing instance intent from the
+/// definition edit form, which would overwrite unrelated instance overrides.
+fn apply_linked_instance_behavior_patch(
+    records: &mut [ManagedAgentRecord],
+    persona_id: &str,
+    patch: &LinkedInstanceBehaviorPatch,
+) -> Result<Vec<String>, String> {
+    if patch.respond_to.is_none()
+        && patch.respond_to_allowlist.is_none()
+        && patch.parallelism.is_none()
+    {
+        return Ok(Vec::new());
+    }
+    if let Some(parallelism) = patch.parallelism {
+        if !(1..=32).contains(&parallelism) {
+            return Err(format!(
+                "parallelism {parallelism} is out of range (must be between 1 and 32)"
+            ));
+        }
+    }
+    let normalized_allowlist = patch
+        .respond_to_allowlist
+        .as_ref()
+        .map(|allowlist| crate::managed_agents::validate_respond_to_allowlist(allowlist))
+        .transpose()?;
+
+    // Validate every linked record before mutating any of them. This matters
+    // when the patch changes only the allowlist: instance modes can differ.
+    for record in records
+        .iter()
+        .filter(|record| record.persona_id.as_deref() == Some(persona_id))
+    {
+        let mode = patch.respond_to.unwrap_or(record.respond_to);
+        let allowlist = if mode != RespondTo::Allowlist {
+            Vec::new()
+        } else {
+            normalized_allowlist
+                .clone()
+                .unwrap_or_else(|| record.respond_to_allowlist.clone())
+        };
+        if mode == RespondTo::Allowlist && allowlist.is_empty() {
+            return Err(
+                "respond-to mode 'allowlist' requires at least one pubkey in the allowlist"
+                    .to_string(),
+            );
+        }
+    }
+
+    let mut changed = Vec::new();
+    for record in records
+        .iter_mut()
+        .filter(|record| record.persona_id.as_deref() == Some(persona_id))
+    {
+        if let Some(mode) = patch.respond_to {
+            record.respond_to = mode;
+            if mode != RespondTo::Allowlist {
+                record.respond_to_allowlist.clear();
+            }
+        }
+        if let Some(allowlist) = &normalized_allowlist {
+            record.respond_to_allowlist = if record.respond_to == RespondTo::Allowlist {
+                allowlist.clone()
+            } else {
+                Vec::new()
+            };
+        }
+        if let Some(parallelism) = patch.parallelism {
+            record.parallelism = parallelism;
+        }
+        record.updated_at = now_iso();
+        changed.push(record.pubkey.clone());
+    }
+    Ok(changed)
 }
 
 /// Profile sync params collected under the store lock for async relay publish.
@@ -429,6 +509,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let runtime = trim_optional(input.runtime);
             let model = trim_optional(input.model);
             let provider = trim_optional(input.provider);
+            let linked_instance_behavior_patch = input.linked_instance_behavior_patch;
 
             let _store_guard = state
                 .managed_agents_store_lock
@@ -466,14 +547,26 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             persona.updated_at = now_iso();
 
             let result = persona.clone();
+            // Validate the linked-record half before the first durable write.
+            // The store lock makes the later application deterministic, so an
+            // invalid instance patch cannot save the definition and then
+            // report the whole request as failed.
+            if let Some(patch) = &linked_instance_behavior_patch {
+                let mut preview_records = load_managed_agents(&app)?;
+                apply_linked_instance_behavior_patch(&mut preview_records, &result.id, patch)?;
+            }
             save_personas(&app, &personas)?;
 
             let retained = retain(&app, &state, &result)?;
             try_regenerate_nest(&app);
 
-            // If the avatar or display_name changed, propagate to linked agent
-            // records and collect relay profile sync params for the async phase.
-            let sync_params: ProfileSyncParams = if avatar_changed || name_changed {
+            // Propagate identity fields and any explicit existing-agent
+            // behavior patch to linked records, then collect relay profile sync
+            // params for the async identity phase.
+            let sync_params: ProfileSyncParams = if avatar_changed
+                || name_changed
+                || linked_instance_behavior_patch.is_some()
+            {
                 let mut records = load_managed_agents(&app)?;
                 let mut params: ProfileSyncParams = Vec::new();
                 let mut agents_modified = false;
@@ -493,12 +586,20 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 } else {
                     Vec::new()
                 };
+                let behavior_changed = linked_instance_behavior_patch
+                    .as_ref()
+                    .map(|patch| {
+                        apply_linked_instance_behavior_patch(&mut records, &result.id, patch)
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
 
                 for record in records.iter_mut() {
                     if record.persona_id.as_deref() != Some(&result.id) {
                         continue;
                     }
-                    let mut record_changed = renamed.contains(&record.pubkey);
+                    let mut identity_changed = renamed.contains(&record.pubkey);
+                    let record_changed = behavior_changed.contains(&record.pubkey);
 
                     if avatar_changed {
                         // Update the persisted avatar so reconciliation on next
@@ -515,11 +616,13 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                             .avatar_url
                             .clone()
                             .or_else(|| managed_agent_avatar_url(&effective_cmd));
-                        record_changed = true;
+                        identity_changed = true;
                     }
 
-                    if record_changed {
+                    if record_changed || identity_changed {
                         agents_modified = true;
+                    }
+                    if identity_changed {
                         if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
                             let relay_url = crate::relay::effective_agent_relay_url(
                                 &record.relay_url,
@@ -545,6 +648,15 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                     // Avatar-only edits are excluded — the avatar is not in the
                     // projection, so retaining would be a guaranteed no-op.
                     for record in records.iter().filter(|r| renamed.contains(&r.pubkey)) {
+                        crate::commands::agents::retain_managed_agent_pending(&app, &state, record);
+                    }
+                    // Access policy is part of the kind:30177 instance
+                    // projection. Retain the changed instances immediately so
+                    // relay observers and the next spawn read the same policy.
+                    for record in records
+                        .iter()
+                        .filter(|r| behavior_changed.contains(&r.pubkey))
+                    {
                         crate::commands::agents::retain_managed_agent_pending(&app, &state, record);
                     }
                 }
