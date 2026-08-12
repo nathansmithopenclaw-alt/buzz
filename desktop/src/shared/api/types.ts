@@ -776,8 +776,8 @@ export type UpdatePersonaInput = {
   namePool?: string[];
   envVars?: Record<string, string>;
   behavior?: PersonaBehaviorInput;
+  linkedInstanceBehaviorPatch?: PersonaBehaviorInput;
 };
-
 // ── Team types ────────────────────────────────────────────────────────────────
 export type AgentTeam = {
   id: string;

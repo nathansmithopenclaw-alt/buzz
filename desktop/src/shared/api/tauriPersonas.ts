@@ -106,6 +106,10 @@ function updatePersonaPayload(input: UpdatePersonaInput) {
     envVars: input.envVars,
     // Same absent-vs-present contract as envVars for the behavioral quad.
     behavior: input.behavior,
+    // Existing-agent management only. The backend applies this narrow patch
+    // to linked instance records so record-backed spawn behavior cannot lag
+    // behind a successful definition save.
+    linkedInstanceBehaviorPatch: input.linkedInstanceBehaviorPatch,
   };
 }
 

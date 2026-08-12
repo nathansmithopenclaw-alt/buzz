@@ -205,3 +205,76 @@ fn delegated_env_requires_an_actual_not_ready_to_ready_transition() {
         None
     );
 }
+
+#[test]
+fn delegated_allowlist_patch_reaches_the_real_spawn_env_builder() {
+    let allowed = "ab".repeat(32);
+    let mut records = vec![agent("persona-1", "Emberproof", Some("Emberproof"))];
+    records[0].pubkey = "cd".repeat(32);
+    records[0].respond_to = RespondTo::OwnerOnly;
+    records[0].respond_to_allowlist = Vec::new();
+    records[0].parallelism = 7;
+
+    let changed = apply_linked_instance_behavior_patch(
+        &mut records,
+        "persona-1",
+        &LinkedInstanceBehaviorPatch {
+            respond_to: Some(RespondTo::Allowlist),
+            respond_to_allowlist: Some(vec![allowed.to_uppercase()]),
+            parallelism: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(changed, vec!["cd".repeat(32)]);
+    assert_eq!(records[0].parallelism, 7, "unrequested field preserved");
+    let (set, remove) = crate::managed_agents::access_policy::build_respond_to_env_with_policy(
+        &records[0],
+        Some("owner"),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        set,
+        vec![
+            ("BUZZ_ACP_RESPOND_TO", "allowlist".to_string()),
+            ("BUZZ_ACP_RESPOND_TO_ALLOWLIST", allowed),
+            ("BUZZ_ACP_AGENT_OWNER", "owner".to_string()),
+        ]
+    );
+    assert_eq!(remove, vec!["BUZZ_ACP_ALLOWED_RESPOND_TO"]);
+}
+
+#[test]
+fn delegated_access_patch_updates_only_linked_instances() {
+    let mut records = vec![
+        agent("persona-1", "One", Some("One")),
+        agent("persona-1", "Two", Some("Two")),
+        agent("persona-2", "Other", Some("Other")),
+    ];
+    records[0].respond_to_allowlist = vec!["aa".repeat(32)];
+    records[1].respond_to_allowlist = vec!["bb".repeat(32)];
+    records[2].respond_to = RespondTo::Allowlist;
+    records[2].respond_to_allowlist = vec!["cc".repeat(32)];
+
+    let changed = apply_linked_instance_behavior_patch(
+        &mut records,
+        "persona-1",
+        &LinkedInstanceBehaviorPatch {
+            respond_to: Some(RespondTo::Anyone),
+            respond_to_allowlist: None,
+            parallelism: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(changed.len(), 2);
+    assert!(records[..2]
+        .iter()
+        .all(|record| record.respond_to == RespondTo::Anyone));
+    assert!(records[..2]
+        .iter()
+        .all(|record| record.respond_to_allowlist.is_empty()));
+    assert_eq!(records[2].respond_to, RespondTo::Allowlist);
+    assert_eq!(records[2].respond_to_allowlist, vec!["cc".repeat(32)]);
+}

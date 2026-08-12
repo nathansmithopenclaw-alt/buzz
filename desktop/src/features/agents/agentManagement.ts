@@ -406,8 +406,33 @@ export function updateInputFromRequest(
                   current.behavior?.respondToAllowlist),
             parallelism: changes.parallelism ?? current.behavior?.parallelism,
           },
+          linkedInstanceBehaviorPatch:
+            linkedInstanceBehaviorPatchFromRequest(request),
         }
       : {}),
+  };
+}
+
+/**
+ * Preserve the original existing-agent behavior patch for the Rust boundary.
+ * Reconstructing it from the merged definition form would overwrite unrelated
+ * per-instance behavior the request never named.
+ */
+export function linkedInstanceBehaviorPatchFromRequest(
+  request: Extract<AgentManagementRequest, { action: "update" }>,
+) {
+  const { respondTo, respondToAllowlist, parallelism } = request.request;
+  if (
+    respondTo === undefined &&
+    respondToAllowlist === undefined &&
+    parallelism === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(respondTo !== undefined ? { respondTo } : {}),
+    ...(respondToAllowlist !== undefined ? { respondToAllowlist } : {}),
+    ...(parallelism !== undefined ? { parallelism } : {}),
   };
 }
 

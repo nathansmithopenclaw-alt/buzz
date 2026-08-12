@@ -101,9 +101,19 @@ personal definition. The patch overlays only supplied fields. Allowlist
 pubkeys are canonicalized by the CLI and validated by the existing persona
 save boundary.
 
-An update saves the definition through `update_managed_agent` semantics. It
-does not stop or respawn a running agent. The result and audit receipt therefore
-state that instruction and runtime changes take effect on the next spawn.
+An update saves the definition through `update_managed_agent` semantics. For
+behavior fields, Desktop also applies only the fields named in the request to
+every currently linked instance record; unrelated instance overrides are
+preserved. This is required because the spawn-time inbound-author gate reads
+the instance record, while definition behavior remains a mint-time default.
+
+An agent-config update does not stop or respawn a running agent. Each running
+`(agent, community relay)` pair therefore keeps its prior config until that pair
+next spawns, and the result and audit receipt state that configuration changes
+take effect on the next spawn. The narrow `envVars` readiness transition is the
+only exception: when every tracked pair for a linked local agent is in setup
+mode and the patch makes it ready, Desktop restarts all of those tracked pairs
+on their original relays. It never cycles an already-ready, non-setup pair.
 
 ## Global defaults update
 
