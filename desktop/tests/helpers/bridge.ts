@@ -146,6 +146,7 @@ type MockInstallRuntimeResult = {
 };
 
 type MockBridgeOptions = {
+  dispatchFoldError?: string;
   /** Tauri window label exposed to the app. Defaults to the main window. */
   windowLabel?: string;
   /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */
@@ -293,6 +294,8 @@ type MockBridgeOptions = {
    * deliver live reply/aux events while an older response is in flight. */
   threadRepliesDelayMs?: number;
   usersBatchDelayMs?: number;
+  /** Reject profile hydration independently of canonical Dispatch data. */
+  usersBatchError?: string;
   /** Delay (ms) for older-history fetches; see e2eBridge mock config. */
   channelWindowDelayMs?: number;
   profileReadDelayMs?: number;

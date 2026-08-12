@@ -1158,6 +1158,7 @@ export const setAgentManagedProfiles = (enabled: boolean) =>
 
 export function foldTrackerContext<T>(input: {
   events: RelayEvent[];
+  taskEvents: RelayEvent[];
   membershipEvent: RelayEvent;
   workspaceId: string;
   managedSigner: string;

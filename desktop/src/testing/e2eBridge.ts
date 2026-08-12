@@ -181,6 +181,8 @@ type MockHuddleSeed = {
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
+    /** Critical root/history failure raised by the Dispatch fold command. */
+    dispatchFoldError?: string;
     /** Tauri window label exposed to the app. Defaults to the main window. */
     windowLabel?: string;
     /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */
@@ -343,6 +345,8 @@ type E2eConfig = {
      *  deliver live reply/aux events while an older response is in flight. */
     threadRepliesDelayMs?: number;
     usersBatchDelayMs?: number;
+    /** Reject profile hydration independently of canonical view data. */
+    usersBatchError?: string;
     /** Delay (ms) applied to continuation channel-window requests so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     channelWindowDelayMs?: number;
@@ -999,11 +1003,12 @@ type MockSubscription = {
 
 type MockFilter = {
   "#a"?: string[];
+  "#buzz-workspace"?: string[];
   "#d"?: string[];
   "#e"?: string[];
   "#h"?: string[];
   "#p"?: string[];
-  "#buzz-workspace"?: string[];
+  "#t"?: string[];
   authors?: string[];
   ids?: string[];
   kinds?: number[];
@@ -6129,6 +6134,9 @@ async function handleGetUsersBatch(
   },
   config: E2eConfig | undefined,
 ) {
+  if (config?.mock?.usersBatchError) {
+    throw new Error(config.mock.usersBatchError);
+  }
   const usersBatchDelayMs = config?.mock?.usersBatchDelayMs ?? 0;
   if (usersBatchDelayMs > 0) {
     await new Promise<void>((resolve) => {
@@ -7617,6 +7625,7 @@ function withMockRuntimeConfigMetadata(
 }
 
 let runtimeCatalogDiscoveryCount = 0;
+let mockDispatchContext: DispatchContext | null = null;
 let mockInstallCompleted = false;
 let mockConnectCompleted = false;
 
@@ -9798,6 +9807,19 @@ function emitMockDispatchFixture(
   if (!fixture) return false;
   const { id, name } = fixture.workspace;
   const kinds = new Set(filter.kinds ?? []);
+  const sectionErrors = mockDispatchContext?.sectionErrors;
+  const failure =
+    kinds.size === 1 && kinds.has(40022)
+      ? sectionErrors?.comments
+      : kinds.size === 1 && kinds.has(30621)
+        ? sectionErrors?.projects
+        : kinds.has(9) && filter["#t"]?.includes("buzz-task")
+          ? sectionErrors?.tasks
+          : null;
+  if (failure) {
+    sendWsText(socket.handler, ["CLOSED", subId, failure]);
+    return true;
+  }
   const matching: RelayEvent[] = [];
   if (kinds.has(39002) && (filter["#p"] || filter["#d"]?.includes(id))) {
     matching.push(
@@ -10291,6 +10313,9 @@ export function maybeInstallE2eTauriMocks() {
   mockChannelHistoryCloses.length = 0;
   relayWebsocketConnectAttemptStarts.length = 0;
   deferredSendMessageLiveEchoes.length = 0;
+  mockDispatchContext = config.mock?.dispatch
+    ? structuredClone(config.mock.dispatch.context)
+    : null;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -11310,10 +11335,13 @@ export function maybeInstallE2eTauriMocks() {
         return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
       }
       case "fold_tracker_context": {
-        const fixture = activeConfig?.mock?.dispatch;
-        if (!fixture)
-          throw new Error("Dispatch fold fixture is not configured.");
-        return structuredClone(fixture.context);
+        if (activeConfig?.mock?.dispatchFoldError) {
+          throw new Error(activeConfig.mock.dispatchFoldError);
+        }
+        if (!mockDispatchContext) {
+          throw new Error("No mocked Dispatch fold is configured.");
+        }
+        return structuredClone(mockDispatchContext);
       }
       case "sign_nostr_identity_binding": {
         const request = payload as {
@@ -13057,7 +13085,9 @@ export function maybeInstallE2eTauriMocks() {
           args.revision.reason !== null &&
           !args.revision.reason.trim()
         ) {
-          throw new Error("status change reason must be non-empty when present");
+          throw new Error(
+            "status change reason must be non-empty when present",
+          );
         }
         const tags = [
           ["h", args.streamId],
@@ -13102,7 +13132,8 @@ export function maybeInstallE2eTauriMocks() {
           ["e", args.rootEvent, "", "root"],
         ];
         if (args.parentEvent) tags.push(["e", args.parentEvent, "", "reply"]);
-        if (args.comment.request_id) tags.push(["request", args.comment.request_id]);
+        if (args.comment.request_id)
+          tags.push(["request", args.comment.request_id]);
         for (const mention of args.mentions) tags.push(["p", mention]);
         return {
           kind: 40022,
@@ -13111,33 +13142,91 @@ export function maybeInstallE2eTauriMocks() {
           tags,
         };
       }
-      case "sign_event":
-        window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
+      case "sign_event": {
+        const shape = {
+          kind: (payload as { kind: number }).kind,
           content: (payload as { content: string }).content,
           createdAt: (payload as { createdAt?: number }).createdAt,
-          kind: (payload as { kind: number }).kind,
           tags: (payload as { tags: string[][] }).tags,
-        });
-        if (identity) {
-          return JSON.stringify(
-            await signWithIdentity(identity, {
-              kind: (payload as { kind: number }).kind,
-              content: (payload as { content: string }).content,
-              createdAt: (payload as { createdAt?: number }).createdAt,
-              tags: (payload as { tags: string[][] }).tags,
-            }),
+        };
+        const signed = identity
+          ? await signWithIdentity(identity, shape)
+          : createMockEvent(
+              shape.kind,
+              shape.content,
+              shape.tags,
+              DEFAULT_MOCK_IDENTITY.pubkey,
+              shape.createdAt,
+            );
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.push(shape);
+        if (
+          mockDispatchContext &&
+          (signed.kind === 40021 || signed.kind === 40022)
+        ) {
+          const content = JSON.parse(signed.content) as Record<string, unknown>;
+          const issueId = String(content.issue_id ?? "");
+          const issue = mockDispatchContext.issues.find(
+            (candidate) => candidate.issueId === issueId,
           );
+          if (signed.kind === 40021 && issue) {
+            const set = (content.set ?? {}) as Record<string, unknown>;
+            const clear = Array.isArray(content.clear)
+              ? content.clear.map(String)
+              : [];
+            const changes = Object.entries(set).map(([field, after]) => ({
+              field,
+              before: issue[field as keyof typeof issue] ?? null,
+              after,
+            }));
+            for (const [field, value] of Object.entries(set))
+              (issue as unknown as Record<string, unknown>)[field] = value;
+            for (const field of clear) {
+              changes.push({
+                field,
+                before: issue[field as keyof typeof issue] ?? null,
+                after: null,
+              });
+              (issue as unknown as Record<string, unknown>)[field] = null;
+            }
+            if (Object.hasOwn(set, "status"))
+              issue.enteredStatusAt = signed.created_at;
+            issue.tipEvent = signed.id;
+            issue.tipCreatedAt = signed.created_at;
+            issue.revision = Number(content.revision);
+            mockDispatchContext.activity.push({
+              issueId,
+              eventId: signed.id,
+              authorPubkey: signed.pubkey,
+              createdAt: signed.created_at,
+              revision: issue.revision,
+              reason:
+                typeof content.reason === "string" ? content.reason : null,
+              requestId:
+                typeof content.request_id === "string"
+                  ? content.request_id
+                  : null,
+              import: null,
+              changes,
+            });
+          } else if (signed.kind === 40022 && issue) {
+            mockDispatchContext.comments.push({
+              issueId,
+              eventId: signed.id,
+              authorPubkey: signed.pubkey,
+              createdAt: signed.created_at,
+              rootEvent: issue.rootEvent,
+              parentEvent: null,
+              body: String(content.body ?? ""),
+              requestId:
+                typeof content.request_id === "string"
+                  ? content.request_id
+                  : null,
+              import: null,
+            });
+          }
         }
-
-        return JSON.stringify(
-          createMockEvent(
-            (payload as { kind: number }).kind,
-            (payload as { content: string }).content,
-            (payload as { tags: string[][] }).tags,
-            DEFAULT_MOCK_IDENTITY.pubkey,
-            (payload as { createdAt?: number }).createdAt,
-          ),
-        );
+        return JSON.stringify(signed);
+      }
       case "nip44_encrypt_to_self":
         return (payload as { plaintext: string }).plaintext;
       case "nip44_decrypt_from_self":

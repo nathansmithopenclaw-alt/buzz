@@ -23,12 +23,32 @@ export type DispatchRelation = {
 
 export type DispatchExternalRef = { type: string; ref: string };
 
+export type DispatchImportProvenance = {
+  system: string;
+  external_id: string;
+  source_url: string | null;
+  imported_at: number;
+  source_created_at?: string;
+  source_updated_at?: string;
+  source_completed_at?: string;
+  source_cancelled_at?: string;
+  archived?: boolean;
+  estimate_points?: number;
+  export_sha256?: string;
+  importer_version?: string;
+  original_author?: string;
+  legacy_labels?: string[];
+};
+
 export type DispatchIssue = {
   streamId: string;
   issueId: string;
   rootEvent: string;
   rootCreatedAt: number;
   tipEvent: string;
+  tipCreatedAt: number;
+  revision: number;
+  enteredStatusAt: number;
   identifier: string;
   title: string;
   body: string;
@@ -43,6 +63,48 @@ export type DispatchIssue = {
   labels: string[];
   externalRefs: DispatchExternalRef[];
   relations: DispatchRelation[];
+};
+
+export type DispatchFieldChange = {
+  field: string;
+  before: unknown;
+  after: unknown;
+};
+
+export type DispatchActivity = {
+  issueId: string;
+  eventId: string;
+  authorPubkey: string;
+  createdAt: number;
+  revision: number;
+  reason: string | null;
+  requestId: string | null;
+  import: DispatchImportProvenance | null;
+  changes: DispatchFieldChange[];
+};
+
+export type DispatchComment = {
+  issueId: string;
+  eventId: string;
+  authorPubkey: string;
+  createdAt: number;
+  rootEvent: string;
+  parentEvent: string | null;
+  body: string;
+  requestId: string | null;
+  import: DispatchImportProvenance | null;
+};
+
+export type DispatchLinkedTask = {
+  issueId: string;
+  taskId: string;
+  title: string;
+  status: "assigned" | "picked_up" | "blocked" | "done" | "failed" | "verified";
+  assignee: string;
+  eventId: string;
+  channelId: string;
+  createdAt: number;
+  dispatchRequestId: string | null;
 };
 
 export type DispatchProject = {
@@ -64,7 +126,17 @@ export type DispatchWorkspace = {
 
 export type DispatchContext = {
   issues: DispatchIssue[];
+  activity: DispatchActivity[];
+  comments: DispatchComment[];
+  linkedTasks: DispatchLinkedTask[];
   projects: DispatchProject[];
   diagnostics: DispatchDiagnostic[];
+  taskDiagnostics: string[];
+  viewerRole: "none" | "member" | "maintainer";
+  sectionErrors: {
+    comments: string | null;
+    projects: string | null;
+    tasks: string | null;
+  };
   snapshotAt: string;
 };

@@ -11,60 +11,31 @@ import {
 } from "lucide-react";
 
 import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
+import { cn } from "@/shared/lib/cn";
 import { getStorageItem, setStorageItem } from "@/shared/lib/safeStorage";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { Button } from "@/shared/ui/button";
-import { cn } from "@/shared/lib/cn";
 import { useDispatchContext, useDispatchWorkspaces } from "../hooks";
 import type { DispatchWorkspace } from "../types";
-import type { DispatchProfileMap } from "../viewModel";
 import {
   DispatchBoardPanel,
   DispatchListPanel,
   DispatchPanelsTooltipProvider,
 } from "./DispatchPanels";
+import { MyIssues } from "./MyIssues";
+import { TriageInbox } from "./TriageInbox";
 
 const LAST_WORKSPACE_KEY = "buzz-dispatch-last-workspace-v1";
-
-export type DispatchStubPanelProps = {
-  workspaceId: string | null;
-};
-
-// Stable P1-B mount contracts. Patch replaces only these exports.
-export function DispatchTriagePanelStub({
-  workspaceId,
-}: DispatchStubPanelProps) {
-  return (
-    <div
-      className="p-5 text-sm text-muted-foreground"
-      data-testid="dispatch-triage-mount"
-      data-workspace-id={workspaceId ?? ""}
-    >
-      Triage is loading in the detail lane.
-    </div>
-  );
-}
-
-export function DispatchMyIssuesPanelStub({
-  workspaceId,
-}: DispatchStubPanelProps) {
-  return (
-    <div
-      className="p-5 text-sm text-muted-foreground"
-      data-testid="dispatch-my-issues-mount"
-      data-workspace-id={workspaceId ?? ""}
-    >
-      My Issues is loading in the detail lane.
-    </div>
-  );
-}
 
 type DispatchView = "board" | "list" | "triage" | "my-issues";
 
 function initialWorkspaceId(workspaces: DispatchWorkspace[]): string | null {
   const persisted = getStorageItem(LAST_WORKSPACE_KEY);
-  if (persisted && workspaces.some((workspace) => workspace.id === persisted))
+  if (persisted && workspaces.some((workspace) => workspace.id === persisted)) {
     return persisted;
+  }
   const withData = workspaces.filter(
     (workspace) => workspace.trackerEventCount > 0,
   );
@@ -93,7 +64,9 @@ const tabClassName =
 
 export function DispatchScreen() {
   const navigate = useNavigate();
+  const identity = useIdentityQuery();
   const workspaceQuery = useDispatchWorkspaces();
+  const { channels } = useChannelNavigation();
   const [view, setView] = React.useState<DispatchView>("board");
   const [workspaceId, setWorkspaceId] = React.useState<string | null>(null);
   const initializedFor = React.useRef<string | null>(null);
@@ -108,8 +81,9 @@ export function DispatchScreen() {
       if (
         current &&
         workspaceQuery.workspaces.some((workspace) => workspace.id === current)
-      )
+      ) {
         return current;
+      }
       return initialWorkspaceId(workspaceQuery.workspaces);
     });
   }, [workspaceQuery.isLoading, workspaceQuery.workspaces]);
@@ -129,15 +103,21 @@ export function DispatchScreen() {
     [context.issues],
   );
   const profilesQuery = useUsersBatchQuery(assigneePubkeys);
-  const profiles = (profilesQuery.data?.profiles ?? {}) as DispatchProfileMap;
+  const profiles = profilesQuery.data?.profiles ?? {};
   const prefix = workspacePrefix(
     context.issues.map((issue) => issue.identifier),
   );
   const triageCount = context.issues.filter(
     (issue) => issue.status === "triage",
   ).length;
-  const openIssue = (issueId: string) =>
-    void navigate({ to: "/dispatch/issue/$issueId", params: { issueId } });
+  const openIssue = (issueId: string) => {
+    if (!workspaceId) return;
+    void navigate({
+      to: "/dispatch/issue/$issueId",
+      params: { issueId },
+      search: { workspace: workspaceId },
+    });
+  };
 
   return (
     <DispatchPanelsTooltipProvider>
@@ -180,7 +160,7 @@ export function DispatchScreen() {
                 aria-label="Refresh Dispatch"
                 data-testid="dispatch-refresh"
                 disabled={!workspaceId || context.isLoading}
-                onClick={context.refresh}
+                onClick={() => void context.refresh()}
                 size="icon-xs"
                 variant="ghost"
               >
@@ -285,7 +265,7 @@ export function DispatchScreen() {
             Folding Tracker history…
           </div>
         ) : (
-          <section className="flex min-h-0 flex-1 flex-col">
+          <section className="flex min-h-0 flex-1 flex-col overflow-auto">
             {view === "board" ? (
               <DispatchBoardPanel
                 issues={context.issues}
@@ -303,10 +283,27 @@ export function DispatchScreen() {
               />
             ) : null}
             {view === "triage" ? (
-              <DispatchTriagePanelStub workspaceId={workspaceId} />
+              <TriageInbox
+                channels={channels}
+                error={context.error}
+                isLoading={context.isLoading || workspaceQuery.isLoading}
+                issues={context.issues}
+                onOpenIssue={openIssue}
+                onRetry={() => void context.refresh()}
+                profiles={profiles}
+                projects={context.projects}
+              />
             ) : null}
             {view === "my-issues" ? (
-              <DispatchMyIssuesPanelStub workspaceId={workspaceId} />
+              <MyIssues
+                channels={channels}
+                currentPubkey={identity.data?.pubkey}
+                isLoading={context.isLoading || workspaceQuery.isLoading}
+                issues={context.issues}
+                onOpenIssue={openIssue}
+                profiles={profiles}
+                projects={context.projects}
+              />
             ) : null}
           </section>
         )}
