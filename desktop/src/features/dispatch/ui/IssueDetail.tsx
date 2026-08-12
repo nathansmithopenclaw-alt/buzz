@@ -561,25 +561,29 @@ export function IssueDetail({
           </h2>
           {relations.length ? (
             <div className="mt-2 space-y-1">
-              {relations.map((relation) => (
-                <button
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted/40"
-                  key={`${relation.label}:${relation.target}`}
-                  onClick={() => onOpenIssue(relation.target)}
-                  type="button"
-                >
-                  <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
-                  <span>{relation.label}</span>
-                  <span
-                    className="ml-auto max-w-24 truncate font-mono text-xs text-muted-foreground"
-                    title={relation.target}
+              {relations.map((relation) => {
+                const targetIdentifier =
+                  issues.find(
+                    (candidate) => candidate.issueId === relation.target,
+                  )?.identifier ?? relation.target;
+                return (
+                  <button
+                    className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted/40"
+                    key={`${relation.label}:${relation.target}`}
+                    onClick={() => onOpenIssue(relation.target)}
+                    type="button"
                   >
-                    {issues.find(
-                      (candidate) => candidate.issueId === relation.target,
-                    )?.identifier ?? relation.target}
-                  </span>
-                </button>
-              ))}
+                    <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="shrink-0">{relation.label}</span>
+                    <span
+                      className="ml-auto min-w-0 max-w-24 truncate font-mono text-xs text-muted-foreground"
+                      title={targetIdentifier}
+                    >
+                      {targetIdentifier}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           ) : (
             <p className="mt-3 text-sm italic text-muted-foreground">

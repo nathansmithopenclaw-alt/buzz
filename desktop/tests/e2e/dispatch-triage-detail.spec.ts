@@ -9,6 +9,8 @@ import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 const WORKSPACE = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const SELF = TEST_IDENTITIES.tyler.pubkey;
 const OTHER = TEST_IDENTITIES.alice.pubkey;
+const LONG_IDENTIFIER = `D-${"a".repeat(32)}`;
+const RELATED_LONG_IDENTIFIER = `D-${"b".repeat(32)}`;
 
 function issue(
   overrides: Partial<DispatchIssue> &
@@ -41,7 +43,7 @@ function issue(
 function context(overrides: Partial<DispatchContext> = {}): DispatchContext {
   const primary = issue({
     issueId: "11111111-1111-4111-8111-111111111111",
-    identifier: `D-${"a".repeat(32)}`,
+    identifier: LONG_IDENTIFIER,
     title: "P0 oldest canonical triage issue",
     priority: "P0",
     enteredStatusAt: 1_710_000_000,
@@ -73,7 +75,7 @@ function context(overrides: Partial<DispatchContext> = {}): DispatchContext {
     primary,
     issue({
       issueId: "44444444-4444-4444-8444-444444444444",
-      identifier: "SMI-284",
+      identifier: RELATED_LONG_IDENTIFIER,
       title: "Assigned active issue",
       status: "triage",
       priority: "P2",
@@ -206,7 +208,18 @@ test("detail renders markdown, chronological comments, relations, and linked tas
   );
   await expect(page.getByText("Needs owner review")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Relations" })).toBeVisible();
-  await expect(page.getByText("SMI-284")).toBeVisible();
+  const breadcrumbIdentifier = page.getByTitle(LONG_IDENTIFIER);
+  const relationIdentifier = page.getByTitle(RELATED_LONG_IDENTIFIER);
+  await expect(breadcrumbIdentifier).toBeVisible();
+  await expect(relationIdentifier).toBeVisible();
+  for (const identifier of [breadcrumbIdentifier, relationIdentifier]) {
+    await expect(identifier).toHaveCSS("text-overflow", "ellipsis");
+    expect(
+      await identifier.evaluate(
+        (element) => element.scrollWidth > element.clientWidth,
+      ),
+    ).toBe(true);
+  }
   await expect(page.getByText("Investigate canonical issue")).toBeVisible();
 });
 
