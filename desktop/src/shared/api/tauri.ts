@@ -1154,6 +1154,15 @@ export const setPreventSleepActive = (active: boolean) =>
 export const setAgentManagedProfiles = (enabled: boolean) =>
   invokeTauri("set_agent_managed_profiles", { enabled });
 
+export function foldTrackerContext<T>(input: {
+  events: RelayEvent[];
+  membershipEvent: RelayEvent;
+  workspaceId: string;
+  snapshotAt: number;
+}): Promise<T> {
+  return invokeTauri<T>("fold_tracker_context", input);
+}
+
 /** Returns true on macOS, Windows, and Linux AppImage installs.
  *  Returns false on Linux non-AppImage packages (e.g. .deb) where
  *  Tauri's updater cannot swap the binary. */

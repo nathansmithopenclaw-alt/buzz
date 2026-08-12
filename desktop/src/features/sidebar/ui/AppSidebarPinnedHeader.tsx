@@ -1,4 +1,4 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import { Activity, Bot, FolderGit2, Inbox, Waypoints, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -19,7 +19,8 @@ type SidebarSelectedView =
   | "agents"
   | "workflows"
   | "pulse"
-  | "projects";
+  | "projects"
+  | "dispatch";
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
@@ -40,6 +41,7 @@ type AppSidebarPrimaryMenuProps = {
   onSelectAgents: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
+  onSelectDispatch: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
   selectedView: SidebarSelectedView;
@@ -83,6 +85,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectDispatch,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
@@ -149,6 +152,20 @@ export function AppSidebarPrimaryMenu({
             >
               <FolderGit2 className="h-4 w-4" />
               <SidebarMenuLabel>Projects</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </FeatureGate>
+        <FeatureGate feature="dispatch">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-dispatch-view"
+              isActive={selectedView === "dispatch"}
+              onClick={onSelectDispatch}
+              tooltip="Dispatch"
+              type="button"
+            >
+              <Waypoints className="h-4 w-4" />
+              <SidebarMenuLabel>Dispatch</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </FeatureGate>

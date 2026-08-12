@@ -14,6 +14,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "dispatch",
+      "name": "Dispatch",
+      "description": "Workspace issue boards, triage, and assignment",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "pulse",
       "name": "Pulse",
       "description": "Activity feed with notes, social posts, and agent activity",
