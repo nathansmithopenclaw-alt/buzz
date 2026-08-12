@@ -60,7 +60,8 @@ pub fn build_tracker_revision_event(
     revision: IssueRevision,
     author_pubkey: String,
 ) -> Result<TrackerUnsignedEvent, String> {
-    let builder = build_tracker_revision(stream_id, &revision).map_err(|error| error.to_string())?;
+    let builder =
+        build_tracker_revision(stream_id, &revision).map_err(|error| error.to_string())?;
     unsigned_shape(builder, &author_pubkey)
 }
 
@@ -130,25 +131,24 @@ mod tests {
         .expect("build revision");
 
         assert_eq!(shape.kind, 40021);
-        assert!(shape.tags.iter().any(|tag| {
-            tag.as_slice() == ["p", author.as_str(), "", "assignee"]
-        }));
-        let signed = nostr::EventBuilder::new(
-            nostr::Kind::Custom(shape.kind),
-            shape.content.clone(),
-        )
-        .tags(
-            shape
-                .tags
-                .iter()
-                .map(nostr::Tag::parse)
-                .collect::<Result<Vec<_>, _>>()
-                .expect("parse tags"),
-        )
-        .custom_created_at(nostr::Timestamp::from(shape.created_at))
-        .allow_self_tagging()
-        .sign_with_keys(&keys)
-        .expect("sign");
+        assert!(shape
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["p", author.as_str(), "", "assignee"] }));
+        let signed =
+            nostr::EventBuilder::new(nostr::Kind::Custom(shape.kind), shape.content.clone())
+                .tags(
+                    shape
+                        .tags
+                        .iter()
+                        .map(nostr::Tag::parse)
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("parse tags"),
+                )
+                .custom_created_at(nostr::Timestamp::from(shape.created_at))
+                .allow_self_tagging()
+                .sign_with_keys(&keys)
+                .expect("sign");
         assert!(Event::from_json(signed.as_json()).is_ok());
     }
 
@@ -173,4 +173,3 @@ mod tests {
         assert!(error.contains("root_event"));
     }
 }
-
