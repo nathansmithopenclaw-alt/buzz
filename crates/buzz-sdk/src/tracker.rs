@@ -670,7 +670,8 @@ impl TrackerAuthorization {
         }
     }
 
-    fn role(&self, pubkey: &str) -> Option<TrackerRole> {
+    /// Resolve the configured Tracker role for a pubkey.
+    pub fn role(&self, pubkey: &str) -> Option<TrackerRole> {
         self.roles.get(pubkey).copied()
     }
 }
@@ -688,6 +689,12 @@ pub struct IssueProjection {
     pub root_created_at: u64,
     /// Canonical revision tip, or the root when unmodified.
     pub tip_event: String,
+    /// Creation time of the canonical revision tip.
+    pub tip_created_at: u64,
+    /// Canonical revision number, with the root defined as zero.
+    pub revision: u64,
+    /// Time the canonical issue entered its current status.
+    pub entered_status_at: u64,
     /// Human-facing identifier.
     pub identifier: String,
     /// Title.
@@ -737,6 +744,29 @@ pub struct CommentProjection {
     pub request_id: Option<Uuid>,
     /// Optional import provenance.
     pub import: Option<ImportProvenance>,
+}
+
+/// One canonical issue-history entry retained by the deterministic fold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityProjection {
+    /// Root or revision event ID.
+    pub event_id: String,
+    /// Signing workspace member.
+    pub author_pubkey: String,
+    /// Event creation time.
+    pub created_at: u64,
+    /// Canonical revision number, with the root defined as zero.
+    pub revision: u64,
+    /// Optional status-change reason carried by a revision.
+    pub reason: Option<String>,
+    /// Optional idempotency request ID carried by the source event.
+    pub request_id: Option<Uuid>,
+    /// Optional import provenance carried by the source event.
+    pub import: Option<ImportProvenance>,
+    /// Canonical state immediately before this entry, or `None` for the root.
+    pub before: Option<IssueProjection>,
+    /// Canonical state immediately after this entry.
+    pub after: IssueProjection,
 }
 
 /// Diagnostic surfaced without mutating canonical state.
@@ -803,6 +833,8 @@ pub struct TrackerFold {
     pub issues: BTreeMap<(Uuid, Uuid), IssueProjection>,
     /// Valid comments ordered by `(created_at, event_id)` per issue.
     pub comments: BTreeMap<(Uuid, Uuid), Vec<CommentProjection>>,
+    /// Canonical root-to-tip activity per issue.
+    pub activity: BTreeMap<(Uuid, Uuid), Vec<ActivityProjection>>,
     /// Excluded events and surfaced conflicts.
     pub diagnostics: Vec<FoldDiagnostic>,
 }
@@ -1447,6 +1479,7 @@ fn fold_one_issue(
     } else {
         initial.clone()
     };
+    let activity = canonical_activity(root_event, &initial, winner, &revisions, &memo);
     // External refs are operation-based, not a whole-list scalar. Apply every
     // structurally and semantically valid branch operation in deterministic
     // event order so concurrent adds cannot clobber one another.
@@ -1463,7 +1496,81 @@ fn fold_one_issue(
             projection.external_refs.insert(value.clone());
         }
     }
+    result.activity.insert(key, activity);
     result.issues.insert(key, projection);
+}
+
+fn canonical_activity(
+    root_event: &TrackerEvent,
+    initial: &IssueProjection,
+    winner: Option<&(&TrackerEvent, IssueProjection)>,
+    revisions: &BTreeMap<String, &TrackerEvent>,
+    memo: &HashMap<String, Result<IssueProjection, String>>,
+) -> Vec<ActivityProjection> {
+    let mut activity = vec![ActivityProjection {
+        event_id: root_event.event_id.clone(),
+        author_pubkey: root_event.author_pubkey.clone(),
+        created_at: root_event.created_at,
+        revision: 0,
+        reason: None,
+        request_id: match &root_event.payload {
+            TrackerPayload::Root(root) => root.request_id,
+            _ => None,
+        },
+        import: match &root_event.payload {
+            TrackerPayload::Root(root) => root.import.clone(),
+            _ => None,
+        },
+        before: None,
+        after: initial.clone(),
+    }];
+    let Some((winner_event, _)) = winner else {
+        return activity;
+    };
+    let mut chain = Vec::new();
+    let mut current = *winner_event;
+    loop {
+        chain.push(current);
+        let TrackerPayload::Revision(revision) = &current.payload else {
+            break;
+        };
+        if revision.parent_event == root_event.event_id {
+            break;
+        }
+        let Some(parent) = revisions.get(&revision.parent_event) else {
+            break;
+        };
+        current = parent;
+    }
+    chain.reverse();
+    for event in chain {
+        let TrackerPayload::Revision(revision) = &event.payload else {
+            continue;
+        };
+        let Some(Ok(after)) = memo.get(&event.event_id) else {
+            continue;
+        };
+        let before = if revision.parent_event == root_event.event_id {
+            initial.clone()
+        } else {
+            let Some(Ok(parent)) = memo.get(&revision.parent_event) else {
+                continue;
+            };
+            parent.clone()
+        };
+        activity.push(ActivityProjection {
+            event_id: event.event_id.clone(),
+            author_pubkey: event.author_pubkey.clone(),
+            created_at: event.created_at,
+            revision: revision.revision,
+            reason: revision.reason.clone(),
+            request_id: revision.request_id,
+            import: revision.import.clone(),
+            before: Some(before),
+            after: after.clone(),
+        });
+    }
+    activity
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1528,8 +1635,14 @@ fn evaluate_revision(
     if (renumber || restricted_status) && role != TrackerRole::Maintainer {
         return Err("renumber and terminal/reopen transitions require maintainer role".into());
     }
+    let prior_status = parent.status;
     apply_revision(&mut parent, revision)?;
     parent.tip_event = event.event_id.clone();
+    parent.tip_created_at = event.created_at;
+    parent.revision = revision.revision;
+    if parent.status != prior_status {
+        parent.entered_status_at = event.created_at;
+    }
     visiting.remove(&event.event_id);
     memo.insert(event.event_id.clone(), Ok(parent.clone()));
     Ok(parent)
@@ -1612,9 +1725,9 @@ fn apply_revision(state: &mut IssueProjection, revision: &IssueRevision) -> Resu
         if revision
             .reason
             .as_deref()
-            .is_none_or(|reason| reason.trim().is_empty())
+            .is_some_and(|reason| reason.trim().is_empty())
         {
-            return Err("status change requires a non-empty reason".into());
+            return Err("status change reason must be non-empty when present".into());
         }
         state.status = value;
     }
@@ -1682,6 +1795,9 @@ fn projection_from_root(
         stream_id,
         issue_id: root.issue_id,
         tip_event: root_event.clone(),
+        tip_created_at: root_created_at,
+        revision: 0,
+        entered_status_at: root_created_at,
         root_event,
         root_created_at,
         identifier: root.identifier.clone(),
@@ -2016,6 +2132,14 @@ fn validate_revision(revision: &IssueRevision) -> Result<(), SdkError> {
     }
     if let Some(labels) = &revision.set.labels {
         validate_labels(labels)?;
+    }
+    if revision.set.status.is_some()
+        && revision
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.trim().is_empty())
+    {
+        return invalid("status change reason must be non-empty when present");
     }
     validate_external_refs(&revision.external_refs.add)?;
     validate_external_refs(&revision.external_refs.remove)?;
@@ -2763,6 +2887,9 @@ mod tests {
         let issue = Uuid::new_v4();
         let (state, diagnostics) = current(vec![root(stream, issue, "root", 1, MEMBER)]);
         assert_eq!(state.tip_event, "root");
+        assert_eq!(state.tip_created_at, 1);
+        assert_eq!(state.revision, 0);
+        assert_eq!(state.entered_status_at, 1);
         assert_eq!(state.status, IssueStatus::Triage);
         assert!(diagnostics.is_empty());
     }
@@ -2797,10 +2924,34 @@ mod tests {
                 ..RevisionSet::default()
             },
         );
-        let (state, _) = current(vec![root(stream, issue, "root", 1, MEMBER), one, two]);
+        let folded = fold_tracker_events(
+            vec![root(stream, issue, "root", 1, MEMBER), one, two],
+            &auth(),
+        );
+        let state = &folded.issues[&(stream, issue)];
         assert_eq!(state.tip_event, "two");
+        assert_eq!(state.tip_created_at, 3);
+        assert_eq!(state.revision, 2);
+        assert_eq!(state.entered_status_at, 3);
         assert_eq!(state.title, "changed");
         assert_eq!(state.status, IssueStatus::InProgress);
+        let activity = &folded.activity[&(stream, issue)];
+        assert_eq!(
+            activity
+                .iter()
+                .map(|entry| entry.event_id.as_str())
+                .collect::<Vec<_>>(),
+            ["root", "one", "two"]
+        );
+        assert!(activity[0].before.is_none());
+        assert_eq!(activity[0].revision, 0);
+        assert_eq!(activity[1].after.entered_status_at, 1);
+        assert_eq!(activity[2].revision, 2);
+        assert_eq!(
+            activity[2].before.as_ref().map(|before| before.status),
+            Some(IssueStatus::Triage)
+        );
+        assert_eq!(activity[2].after.status, IssueStatus::InProgress);
     }
 
     #[test]
@@ -2919,13 +3070,13 @@ mod tests {
     }
 
     #[test]
-    fn gate_06_status_change_requires_reason() {
+    fn gate_06_status_change_reason_is_optional_but_not_blank() {
         let stream = Uuid::new_v4();
         let issue = Uuid::new_v4();
-        let mut event = revision(
+        let mut absent = revision(
             stream,
             issue,
-            "status",
+            "absent",
             "root",
             1,
             2,
@@ -2935,13 +3086,50 @@ mod tests {
                 ..RevisionSet::default()
             },
         );
-        let TrackerPayload::Revision(payload) = &mut event.payload else {
+        let TrackerPayload::Revision(payload) = &mut absent.payload else {
             panic!("fixture revision")
         };
         payload.reason = None;
-        let (state, diagnostics) = current(vec![root(stream, issue, "root", 1, MEMBER), event]);
+        let (state, diagnostics) =
+            current(vec![root(stream, issue, "root", 1, MEMBER), absent.clone()]);
+        assert_eq!(state.status, IssueStatus::Todo);
+        assert!(diagnostics.is_empty());
+
+        let TrackerPayload::Revision(payload) = &mut absent.payload else {
+            panic!("fixture revision")
+        };
+        payload.reason = Some("   ".into());
+        let (state, diagnostics) = current(vec![root(stream, issue, "root", 1, MEMBER), absent]);
         assert_eq!(state.status, IssueStatus::Triage);
         assert_eq!(diagnostics.len(), 1);
+
+        let builder_payload = IssueRevision {
+            v: TRACKER_VERSION,
+            op: "revise".into(),
+            issue_id: issue,
+            root_event: MEMBER.into(),
+            parent_event: MEMBER.into(),
+            revision: 1,
+            set: RevisionSet {
+                status: Some(IssueStatus::Todo),
+                ..RevisionSet::default()
+            },
+            clear: Vec::new(),
+            relations: SetOperations::default(),
+            external_refs: SetOperations::default(),
+            reason: None,
+            request_id: None,
+            import: None,
+        };
+        assert!(build_tracker_revision(stream, &builder_payload).is_ok());
+        assert!(build_tracker_revision(
+            stream,
+            &IssueRevision {
+                reason: Some("\t".into()),
+                ..builder_payload
+            }
+        )
+        .is_err());
     }
 
     #[test]

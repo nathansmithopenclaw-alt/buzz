@@ -110,6 +110,7 @@ export default defineConfig({
         "**/project-issue-comments.spec.ts",
         "**/project-pr-review.spec.ts",
         "**/dispatch-shell.spec.ts",
+        "**/dispatch-triage-detail.spec.ts",
         "**/persona-model-combobox-screenshots.spec.ts",
         "**/drafts-screenshots.spec.ts",
         "**/drafts-all-fix-screenshots.spec.ts",

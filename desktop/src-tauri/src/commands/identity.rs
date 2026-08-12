@@ -110,6 +110,7 @@ pub async fn sign_event(
     content: String,
     created_at: Option<u64>,
     tags: Vec<Vec<String>>,
+    allow_self_tagging: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let keys = state.signing_keys()?;
@@ -121,6 +122,9 @@ pub async fn sign_event(
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
+        if allow_self_tagging.unwrap_or(false) {
+            builder = builder.allow_self_tagging();
+        }
         if let Some(created_at) = created_at {
             builder = builder.custom_created_at(Timestamp::from(created_at));
         }

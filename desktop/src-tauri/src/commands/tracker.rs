@@ -1,6 +1,7 @@
+use buzz_sdk_pkg::task_envelope::{fold_task_events, TaskEnvelopeEvent};
 use buzz_sdk_pkg::tracker::{
-    fold_tracker_events, fold_tracker_projects_at, parse_tracker_event, RelationType,
-    TrackerAuthorization, TrackerRole,
+    fold_tracker_events, fold_tracker_projects_at, parse_tracker_event, IssueProjection,
+    RelationType, TrackerAuthorization, TrackerRole,
 };
 use chrono::{DateTime, Utc};
 use nostr::{Event, PublicKey};
@@ -47,8 +48,79 @@ fn project_signer_from_membership(event: &Event) -> Result<String, String> {
         .ok_or_else(|| "membership snapshot has no valid workspace owner row".to_string())
 }
 
+fn issue_json(issue: &IssueProjection) -> Value {
+    let relations = issue
+        .relations
+        .iter()
+        .map(|relation| {
+            json!({
+                "kind": match relation.kind {
+                    RelationType::Blocks => "blocks",
+                    RelationType::DuplicateOf => "duplicate_of",
+                    RelationType::Parent => "parent",
+                },
+                "targetIssueId": relation.target_issue_id,
+                "targetRootEvent": relation.target_root_event,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "streamId": issue.stream_id,
+        "issueId": issue.issue_id,
+        "rootEvent": issue.root_event,
+        "rootCreatedAt": issue.root_created_at,
+        "tipEvent": issue.tip_event,
+        "tipCreatedAt": issue.tip_created_at,
+        "revision": issue.revision,
+        "enteredStatusAt": issue.entered_status_at,
+        "identifier": issue.identifier,
+        "title": issue.title,
+        "body": issue.body,
+        "status": issue.status.to_string(),
+        "priority": issue.priority.map(|value| value.to_string()),
+        "assignee": issue.assignee,
+        "projectId": issue.project_id,
+        "due": issue.due,
+        "estimateMinutes": issue.estimate_minutes,
+        "homeChannelId": issue.home_channel_id,
+        "workflow": issue.workflow,
+        "labels": issue.labels,
+        "externalRefs": issue.external_refs,
+        "relations": relations,
+    })
+}
+
+fn issue_changes(before: &IssueProjection, after: &IssueProjection) -> Vec<Value> {
+    let before = issue_json(before);
+    let after = issue_json(after);
+    [
+        "identifier",
+        "title",
+        "body",
+        "status",
+        "priority",
+        "assignee",
+        "projectId",
+        "due",
+        "estimateMinutes",
+        "homeChannelId",
+        "workflow",
+        "labels",
+        "externalRefs",
+        "relations",
+    ]
+    .into_iter()
+    .filter_map(|field| {
+        let old = before.get(field)?;
+        let new = after.get(field)?;
+        (old != new).then(|| json!({"field": field, "before": old, "after": new}))
+    })
+    .collect()
+}
+
 fn fold_tracker_context_values(
     raw_events: Vec<Value>,
+    raw_task_events: Vec<Value>,
     membership_event: Value,
     workspace_id: &str,
     managed_signer: &str,
@@ -112,46 +184,97 @@ fn fold_tracker_context_values(
         |diagnostic| json!({"kind": "ProjectDiagnostic", "message": format!("{diagnostic:?}")}),
     ));
 
-    let issues = folded
-        .issues
-        .values()
-        .map(|issue| {
-            let relations = issue
-                .relations
-                .iter()
-                .map(|relation| {
+    let issues = folded.issues.values().map(issue_json).collect::<Vec<_>>();
+    let activity = folded
+        .activity
+        .iter()
+        .flat_map(|((_, issue_id), entries)| {
+            entries.iter().map(move |entry| {
+                json!({
+                    "issueId": issue_id,
+                    "eventId": entry.event_id,
+                    "authorPubkey": entry.author_pubkey,
+                    "createdAt": entry.created_at,
+                    "revision": entry.revision,
+                    "reason": entry.reason,
+                    "requestId": entry.request_id,
+                    "import": entry.import,
+                    "changes": entry.before.as_ref().map(|before| issue_changes(before, &entry.after)).unwrap_or_default(),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let comments = folded
+        .comments
+        .iter()
+        .flat_map(|((_, issue_id), entries)| {
+            entries.iter().map(move |comment| {
+                json!({
+                    "issueId": issue_id,
+                    "eventId": comment.event_id,
+                    "authorPubkey": comment.author_pubkey,
+                    "createdAt": comment.created_at,
+                    "rootEvent": comment.root_event,
+                    "parentEvent": comment.parent_event,
+                    "body": comment.body,
+                    "requestId": comment.request_id,
+                    "import": comment.import,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut task_diagnostics = Vec::new();
+    let mut task_events = Vec::new();
+    for raw in raw_task_events {
+        let event: Event = match serde_json::from_value(raw) {
+            Ok(event) => event,
+            Err(error) => {
+                task_diagnostics.push(error.to_string());
+                continue;
+            }
+        };
+        if let Err(error) = event.verify() {
+            task_diagnostics.push(format!("{}: {error}", event.id.to_hex()));
+            continue;
+        }
+        match TaskEnvelopeEvent::from_event(&event) {
+            Ok(event) if event.channel_id != workspace_id => {
+                task_diagnostics.push(format!(
+                    "{}: task channel is outside the Tracker workspace",
+                    event.event_id
+                ));
+            }
+            Ok(event) if authorization.role(&event.author_pubkey).is_none() => {
+                task_diagnostics.push(format!(
+                    "{}: task author is not a workspace member",
+                    event.event_id
+                ));
+            }
+            Ok(event) => task_events.push(event),
+            Err(error) => task_diagnostics.push(format!("{}: {error}", event.id.to_hex())),
+        }
+    }
+    let linked_tasks = fold_task_events(task_events)
+        .into_values()
+        .filter_map(|event| {
+            let issue_id = event.envelope.tracker_issue_id?;
+            folded
+                .issues
+                .keys()
+                .any(|(_, candidate)| *candidate == issue_id)
+                .then(|| {
                     json!({
-                        "kind": match relation.kind {
-                            RelationType::Blocks => "blocks",
-                            RelationType::DuplicateOf => "duplicate_of",
-                            RelationType::Parent => "parent",
-                        },
-                        "targetIssueId": relation.target_issue_id,
-                        "targetRootEvent": relation.target_root_event,
+                        "issueId": issue_id,
+                        "taskId": event.envelope.task_id,
+                        "title": event.envelope.title,
+                        "status": event.envelope.status,
+                        "assignee": event.envelope.assignee,
+                        "eventId": event.event_id,
+                        "channelId": event.channel_id,
+                        "createdAt": event.created_at,
+                        "dispatchRequestId": event.envelope.dispatch_request_id,
                     })
                 })
-                .collect::<Vec<_>>();
-            json!({
-                "streamId": issue.stream_id,
-                "issueId": issue.issue_id,
-                "rootEvent": issue.root_event,
-                "rootCreatedAt": issue.root_created_at,
-                "tipEvent": issue.tip_event,
-                "identifier": issue.identifier,
-                "title": issue.title,
-                "body": issue.body,
-                "status": issue.status.to_string(),
-                "priority": issue.priority.map(|value| value.to_string()),
-                "assignee": issue.assignee,
-                "projectId": issue.project_id,
-                "due": issue.due,
-                "estimateMinutes": issue.estimate_minutes,
-                "homeChannelId": issue.home_channel_id,
-                "workflow": issue.workflow,
-                "labels": issue.labels,
-                "externalRefs": issue.external_refs,
-                "relations": relations,
-            })
         })
         .collect::<Vec<_>>();
     let projects = projects
@@ -168,8 +291,17 @@ fn fold_tracker_context_values(
 
     Ok(json!({
         "issues": issues,
+        "activity": activity,
+        "comments": comments,
+        "linkedTasks": linked_tasks,
         "projects": projects,
         "diagnostics": diagnostics,
+        "taskDiagnostics": task_diagnostics,
+        "viewerRole": match authorization.role(&managed_signer) {
+            Some(TrackerRole::Maintainer) => "maintainer",
+            Some(TrackerRole::Member) => "member",
+            None => "none",
+        },
         "snapshotAt": DateTime::<Utc>::from_timestamp(snapshot_at as i64, 0)
             .ok_or_else(|| "Tracker snapshot timestamp is out of range".to_string())?
             .to_rfc3339(),
@@ -179,6 +311,7 @@ fn fold_tracker_context_values(
 #[tauri::command]
 pub fn fold_tracker_context(
     events: Vec<Value>,
+    task_events: Vec<Value>,
     membership_event: Value,
     workspace_id: String,
     managed_signer: String,
@@ -186,6 +319,7 @@ pub fn fold_tracker_context(
 ) -> Result<Value, String> {
     fold_tracker_context_values(
         events,
+        task_events,
         membership_event,
         &workspace_id,
         &managed_signer,
@@ -197,7 +331,15 @@ pub fn fold_tracker_context(
 mod tests {
     use super::*;
     use buzz_sdk_pkg::build_project_with_tags;
-    use buzz_sdk_pkg::tracker::{build_tracker_issue, IssueRoot, IssueStatus, Priority};
+    use buzz_sdk_pkg::task_envelope::{
+        build_task_message, TaskDeliverable, TaskEnvelope, TaskStatus, TaskVerification,
+        TASK_ENVELOPE_VERSION,
+    };
+    use buzz_sdk_pkg::tracker::{
+        build_tracker_comment, build_tracker_issue, build_tracker_revision, IssueComment,
+        IssueRevision, IssueRoot, IssueStatus, Priority, RevisionSet, SetOperations,
+        TRACKER_VERSION,
+    };
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     fn membership(workspace_id: Uuid, member: &Keys, owner: &Keys) -> Event {
@@ -248,8 +390,51 @@ mod tests {
         };
         let event = build_tracker_issue(workspace_id, &root)
             .expect("root builder")
+            .custom_created_at(nostr::Timestamp::from(100))
             .sign_with_keys(&member)
             .expect("signed root");
+        let revision = build_tracker_revision(
+            workspace_id,
+            &IssueRevision {
+                v: TRACKER_VERSION,
+                op: "revise".to_string(),
+                issue_id,
+                root_event: event.id.to_hex(),
+                parent_event: event.id.to_hex(),
+                revision: 1,
+                set: RevisionSet {
+                    status: Some(IssueStatus::InProgress),
+                    ..RevisionSet::default()
+                },
+                clear: Vec::new(),
+                relations: SetOperations::default(),
+                external_refs: SetOperations::default(),
+                reason: None,
+                request_id: None,
+                import: None,
+            },
+        )
+        .expect("revision builder")
+        .custom_created_at(nostr::Timestamp::from(101))
+        .sign_with_keys(&member)
+        .expect("signed revision");
+        let comment = build_tracker_comment(
+            workspace_id,
+            &event.id.to_hex(),
+            None,
+            &IssueComment {
+                v: TRACKER_VERSION,
+                issue_id,
+                body: "Canonical comment".to_string(),
+                request_id: None,
+                import: None,
+            },
+            &[],
+        )
+        .expect("comment builder")
+        .custom_created_at(nostr::Timestamp::from(102))
+        .sign_with_keys(&member)
+        .expect("signed comment");
         let project = build_project_with_tags(
             "",
             vec![
@@ -262,15 +447,106 @@ mod tests {
             ],
         )
         .expect("project builder")
+        .custom_created_at(nostr::Timestamp::from(100))
         .sign_with_keys(&owner)
         .expect("signed project");
-        let snapshot_at = event.created_at.as_secs().max(project.created_at.as_secs()) + 1;
+        let task_id = Uuid::new_v4();
+        let task = build_task_message(
+            workspace_id,
+            "Dispatch fixture",
+            &TaskEnvelope {
+                v: TASK_ENVELOPE_VERSION,
+                task_id,
+                status: TaskStatus::PickedUp,
+                assignee: member.public_key().to_hex(),
+                assigner: member.public_key().to_hex(),
+                title: "Canonical linked task".to_string(),
+                deliverables: Vec::<TaskDeliverable>::new(),
+                verification: TaskVerification {
+                    method: "Fixture verification".to_string(),
+                    evidence_ref: None,
+                },
+                blocked_on: None,
+                notes: None,
+                tracker_issue_id: Some(issue_id),
+                dispatch_request_id: Some(Uuid::new_v4()),
+            },
+            None,
+            &[],
+        )
+        .expect("task builder")
+        .custom_created_at(nostr::Timestamp::from(103))
+        .sign_with_keys(&member)
+        .expect("signed task");
+        let outsider = Keys::generate();
+        let outsider_task = build_task_message(
+            workspace_id,
+            "Untrusted replacement",
+            &TaskEnvelope {
+                v: TASK_ENVELOPE_VERSION,
+                task_id,
+                status: TaskStatus::Done,
+                assignee: outsider.public_key().to_hex(),
+                assigner: outsider.public_key().to_hex(),
+                title: "Untrusted linked task".to_string(),
+                deliverables: Vec::<TaskDeliverable>::new(),
+                verification: TaskVerification {
+                    method: "Untrusted verification".to_string(),
+                    evidence_ref: None,
+                },
+                blocked_on: None,
+                notes: None,
+                tracker_issue_id: Some(issue_id),
+                dispatch_request_id: None,
+            },
+            None,
+            &[],
+        )
+        .expect("outsider task builder")
+        .custom_created_at(nostr::Timestamp::from(104))
+        .sign_with_keys(&outsider)
+        .expect("signed outsider task");
+        let foreign_task = build_task_message(
+            Uuid::new_v4(),
+            "Foreign workspace task",
+            &TaskEnvelope {
+                v: TASK_ENVELOPE_VERSION,
+                task_id: Uuid::new_v4(),
+                status: TaskStatus::PickedUp,
+                assignee: member.public_key().to_hex(),
+                assigner: member.public_key().to_hex(),
+                title: "Foreign linked task".to_string(),
+                deliverables: Vec::<TaskDeliverable>::new(),
+                verification: TaskVerification {
+                    method: "Foreign verification".to_string(),
+                    evidence_ref: None,
+                },
+                blocked_on: None,
+                notes: None,
+                tracker_issue_id: Some(issue_id),
+                dispatch_request_id: None,
+            },
+            None,
+            &[],
+        )
+        .expect("foreign task builder")
+        .custom_created_at(nostr::Timestamp::from(104))
+        .sign_with_keys(&member)
+        .expect("signed foreign task");
+        let snapshot_at = 104;
         let managed_signer = member.public_key().to_hex();
 
         let actual = fold_tracker_context_values(
             vec![
                 serde_json::to_value(&event).expect("root JSON"),
+                serde_json::to_value(&revision).expect("revision JSON"),
+                serde_json::to_value(&comment).expect("comment JSON"),
                 serde_json::to_value(&project).expect("project JSON"),
+            ],
+            vec![
+                serde_json::to_value(&task).expect("task JSON"),
+                serde_json::to_value(&outsider_task).expect("outsider task JSON"),
+                serde_json::to_value(&foreign_task).expect("foreign task JSON"),
             ],
             serde_json::to_value(&membership).expect("membership JSON"),
             &workspace_id.to_string(),
@@ -278,9 +554,11 @@ mod tests {
             snapshot_at,
         )
         .expect("fold context");
-        let parsed = parse_tracker_event(&event, snapshot_at).expect("SDK parse");
+        let parsed = [event.clone(), revision.clone(), comment.clone()]
+            .into_iter()
+            .map(|event| parse_tracker_event(&event, snapshot_at).expect("SDK parse"));
         let expected = fold_tracker_events(
-            [parsed],
+            parsed,
             &authorization_from_membership(&membership, &managed_signer),
         );
         let expected_projects = fold_tracker_projects_at(
@@ -300,9 +578,10 @@ mod tests {
 
         assert_eq!(actual_issue["issueId"], issue_id.to_string());
         assert_eq!(actual_issue["tipEvent"], expected_issue.tip_event);
+        assert_eq!(actual_issue["revision"], 1);
+        assert_eq!(actual_issue["enteredStatusAt"], 101);
         assert_eq!(actual_issue["identifier"], expected_issue.identifier);
         assert_eq!(actual_issue["title"], expected_issue.title);
-        assert_eq!(actual_issue["status"], IssueStatus::Done.to_string());
         assert_eq!(actual_issue["status"], expected_issue.status.to_string());
         assert_eq!(actual_issue["priority"], "P1");
         assert_eq!(actual_issue["labels"], json!(["desktop"]));
@@ -312,6 +591,23 @@ mod tests {
             actual["projects"][0]["name"],
             expected_projects.projects[&project_id].name
         );
+        assert_eq!(actual["activity"].as_array().map(Vec::len), Some(2));
+        assert_eq!(actual["activity"][1]["changes"][0]["field"], "status");
+        assert_eq!(actual["comments"][0]["body"], "Canonical comment");
+        assert_eq!(actual["linkedTasks"][0]["taskId"], task_id.to_string());
+        assert_eq!(actual["linkedTasks"][0]["title"], "Canonical linked task");
+        assert_eq!(actual["linkedTasks"][0]["status"], "picked_up");
+        assert_eq!(actual["viewerRole"], "maintainer");
+        let task_diagnostics = actual["taskDiagnostics"]
+            .as_array()
+            .expect("task diagnostics");
+        assert_eq!(task_diagnostics.len(), 2);
+        assert!(task_diagnostics.iter().any(|message| message
+            .as_str()
+            .is_some_and(|message| message.contains("not a workspace member"))));
+        assert!(task_diagnostics.iter().any(|message| message
+            .as_str()
+            .is_some_and(|message| message.contains("outside the Tracker workspace"))));
         assert_eq!(actual["diagnostics"], json!([]));
     }
 
@@ -362,6 +658,7 @@ mod tests {
                 serde_json::to_value(&project).expect("project JSON"),
                 serde_json::to_value(&member_project).expect("member project JSON"),
             ],
+            Vec::new(),
             serde_json::to_value(&membership).expect("membership JSON"),
             &workspace_id.to_string(),
             &member.public_key().to_hex(),
@@ -385,6 +682,7 @@ mod tests {
         let requested = Uuid::new_v4();
         let membership = membership(Uuid::new_v4(), &Keys::generate(), &Keys::generate());
         let error = fold_tracker_context_values(
+            Vec::new(),
             Vec::new(),
             serde_json::to_value(membership).expect("membership JSON"),
             &requested.to_string(),

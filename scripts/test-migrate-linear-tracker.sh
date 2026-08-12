@@ -121,6 +121,44 @@ grep -q 'priority diverges from export' "$scratch/stale-pilot-report.json"
 
 node -e '
 const fs = require("fs");
+const source = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+source.issues[0].dueDate = null;
+fs.writeFileSync(process.argv[2], JSON.stringify(source));
+const pilots = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+pilots["linear-issue-1"].labels = pilots["linear-issue-1"].labels.filter((label) => !label.startsWith("due:"));
+fs.writeFileSync(process.argv[4], JSON.stringify(pilots));
+' "$fixture_root/linear-export.json" "$scratch/null-due-export.json" \
+  "$fixture_root/pilot-map.json" "$scratch/null-due-pilot-map.json"
+node "$repo_root/scripts/migrate-linear-tracker.ts" plan \
+  --input "$scratch/null-due-export.json" \
+  --workspace 55555555-5555-4555-8555-555555555555 \
+  --state-map "$fixture_root/state-map.json" \
+  --user-map "$fixture_root/user-map.json" \
+  --project-map "$fixture_root/project-map.json" \
+  --pilot-map "$scratch/null-due-pilot-map.json" \
+  --report "$scratch/null-due-report.json" > "$scratch/null-due-stdout.json"
+node -e '
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (!report.safe_to_apply || report.conflicts.length !== 0) process.exit(1);
+' "$scratch/null-due-report.json"
+null_due_export_sha="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).input_sha256)' "$scratch/null-due-report.json")"
+TRACKER_MOCK_NULL_DUE=1 TRACKER_MOCK_EXPORT_SHA="$null_due_export_sha" \
+  BUZZ_BIN="$fixture_root/mock-buzz.sh" node "$repo_root/scripts/migrate-linear-tracker.ts" verify \
+  --input "$scratch/null-due-export.json" \
+  --workspace 55555555-5555-4555-8555-555555555555 \
+  --state-map "$fixture_root/state-map.json" \
+  --user-map "$fixture_root/user-map.json" \
+  --project-map "$fixture_root/project-map.json" \
+  --pilot-map "$scratch/null-due-pilot-map.json" \
+  --report "$scratch/null-due-verify.json" > "$scratch/null-due-verify-stdout.json"
+node -e '
+const report = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+if (!report.passed || report.field_mismatches.length !== 0) process.exit(1);
+' "$scratch/null-due-verify.json"
+
+node -e '
+const fs = require("fs");
 const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
 value.issues[0].comments[0].user.id = "unmapped-comment-author";
 fs.writeFileSync(process.argv[2], JSON.stringify(value));

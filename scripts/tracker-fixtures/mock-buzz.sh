@@ -4,13 +4,19 @@ set -euo pipefail
 issue_one="7b7f3d7f-2e4e-5dc8-bd56-3282324a3e2b"
 issue_two="8eb4bcb7-fd95-5d89-a003-a43365260e59"
 unexpected_issue="9fc5cdc8-0ea6-5f00-8111-044476371160"
-export_sha="d6130297b2e2c46c6bc68367229fdff99b317918c8448645ff4d6e62bfb11d83"
+export_sha="${TRACKER_MOCK_EXPORT_SHA:-d6130297b2e2c46c6bc68367229fdff99b317918c8448645ff4d6e62bfb11d83}"
 issue_one_title="Imported open issue"
 issue_one_imported_at=1785672000
 issue_one_created_at="2026-08-01T12:00:00Z"
 issue_one_legacy_priority="priority:P1"
+issue_one_due='"2026-08-20"'
+issue_one_legacy_due='"due:2026-08-20",'
 issue_two_archived=true
 comment_author="linear-user-1"
+if [[ "${TRACKER_MOCK_NULL_DUE:-}" == "1" ]]; then
+  issue_one_due=null
+  issue_one_legacy_due=''
+fi
 if [[ "${TRACKER_MOCK_BAD:-}" == "1" ]]; then
   issue_one_title="Corrupted title"
 fi
@@ -21,6 +27,7 @@ if [[ "${TRACKER_MOCK_BAD_PROVENANCE:-}" == "1" ]]; then
   issue_two_archived=false
   comment_author="unmapped-comment-author"
 fi
+issue_one_legacy_labels="\"$issue_one_legacy_priority\",${issue_one_legacy_due}\"project:dispatch\",\"linear:linear-issue-1\""
 
 arg_value() {
   local wanted="$1"
@@ -101,7 +108,7 @@ if [[ "$1 $2" == "track get" ]]; then
     exit 1
   fi
   if [[ "$joined" == *" $issue_one "* ]]; then
-    printf '%s\n' "{\"issue\":{\"issue_id\":\"$issue_one\",\"identifier\":\"SC-1\",\"title\":\"$issue_one_title\",\"body\":\"Source body\",\"status\":\"in_progress\",\"priority\":\"P1\",\"assignee_pubkey\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"project\":{\"project_id\":\"22222222-2222-4222-8222-222222222222\",\"slug\":\"dispatch\"},\"labels\":[\"area:tracker\"],\"due\":\"2026-08-20\",\"home_channel_id\":\"33333333-3333-4333-8333-333333333333\",\"external_refs\":[{\"type\":\"linear\",\"ref\":\"linear-issue-1\"},{\"type\":\"pull_request\",\"ref\":\"https://example.test/pr/1\"},{\"type\":\"git_issue\",\"ref\":\"4444444444444444444444444444444444444444444444444444444444444444\"}],\"relations\":[{\"type\":\"blocks\",\"target_issue_id\":\"$issue_two\",\"target_root_event\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"activity\":[{\"type\":\"created\",\"import_provenance\":{\"system\":\"linear\",\"external_id\":\"linear-issue-1\",\"source_url\":null,\"imported_at\":$issue_one_imported_at,\"source_created_at\":\"$issue_one_created_at\",\"source_updated_at\":\"2026-08-02T12:00:00Z\",\"estimate_points\":3,\"export_sha256\":\"$export_sha\",\"importer_version\":\"buzz-linear-tracker-v1\",\"original_author\":\"linear-user-1\",\"legacy_labels\":[\"$issue_one_legacy_priority\",\"due:2026-08-20\",\"project:dispatch\",\"linear:linear-issue-1\"]}}],\"comments\":[{\"body\":\"Imported comment\",\"import\":{\"system\":\"linear\",\"external_id\":\"linear-comment-1\",\"source_url\":null,\"imported_at\":1785672000,\"source_created_at\":\"2026-08-01T13:00:00Z\",\"export_sha256\":\"$export_sha\",\"importer_version\":\"buzz-linear-tracker-v1\",\"original_author\":\"$comment_author\"}}]}}"
+    printf '%s\n' "{\"issue\":{\"issue_id\":\"$issue_one\",\"identifier\":\"SC-1\",\"title\":\"$issue_one_title\",\"body\":\"Source body\",\"status\":\"in_progress\",\"priority\":\"P1\",\"assignee_pubkey\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"project\":{\"project_id\":\"22222222-2222-4222-8222-222222222222\",\"slug\":\"dispatch\"},\"labels\":[\"area:tracker\"],\"due\":$issue_one_due,\"home_channel_id\":\"33333333-3333-4333-8333-333333333333\",\"external_refs\":[{\"type\":\"linear\",\"ref\":\"linear-issue-1\"},{\"type\":\"pull_request\",\"ref\":\"https://example.test/pr/1\"},{\"type\":\"git_issue\",\"ref\":\"4444444444444444444444444444444444444444444444444444444444444444\"}],\"relations\":[{\"type\":\"blocks\",\"target_issue_id\":\"$issue_two\",\"target_root_event\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"activity\":[{\"type\":\"created\",\"import_provenance\":{\"system\":\"linear\",\"external_id\":\"linear-issue-1\",\"source_url\":null,\"imported_at\":$issue_one_imported_at,\"source_created_at\":\"$issue_one_created_at\",\"source_updated_at\":\"2026-08-02T12:00:00Z\",\"estimate_points\":3,\"export_sha256\":\"$export_sha\",\"importer_version\":\"buzz-linear-tracker-v1\",\"original_author\":\"linear-user-1\",\"legacy_labels\":[$issue_one_legacy_labels]}}],\"comments\":[{\"body\":\"Imported comment\",\"import\":{\"system\":\"linear\",\"external_id\":\"linear-comment-1\",\"source_url\":null,\"imported_at\":1785672000,\"source_created_at\":\"2026-08-01T13:00:00Z\",\"export_sha256\":\"$export_sha\",\"importer_version\":\"buzz-linear-tracker-v1\",\"original_author\":\"$comment_author\"}}]}}"
   elif [[ "$joined" == *" $issue_two "* ]]; then
     printf '%s\n' "{\"issue\":{\"issue_id\":\"$issue_two\",\"identifier\":\"SC-2\",\"title\":\"Imported closed issue\",\"body\":\"Closed source body\",\"status\":\"done\",\"priority\":null,\"assignee_pubkey\":null,\"project\":{\"project_id\":\"22222222-2222-4222-8222-222222222222\",\"slug\":\"dispatch\"},\"labels\":[],\"due\":null,\"home_channel_id\":\"33333333-3333-4333-8333-333333333333\",\"external_refs\":[{\"type\":\"linear\",\"ref\":\"linear-issue-2\"}],\"relations\":[],\"activity\":[{\"type\":\"created\",\"import_provenance\":{\"system\":\"linear\",\"external_id\":\"linear-issue-2\",\"source_url\":null,\"imported_at\":1785672000,\"source_created_at\":\"2026-07-01T12:00:00Z\",\"source_updated_at\":\"2026-07-03T12:00:00Z\",\"source_completed_at\":\"2026-07-03T12:00:00Z\",\"archived\":$issue_two_archived,\"export_sha256\":\"$export_sha\",\"importer_version\":\"buzz-linear-tracker-v1\",\"original_author\":\"linear-user-1\"}}],\"comments\":[]}}"
   else
