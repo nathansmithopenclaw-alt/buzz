@@ -689,6 +689,12 @@ pub struct IssueProjection {
     pub root_created_at: u64,
     /// Canonical revision tip, or the root when unmodified.
     pub tip_event: String,
+    /// Creation time of the canonical revision tip.
+    pub tip_created_at: u64,
+    /// Canonical revision number, with the root defined as zero.
+    pub revision: u64,
+    /// Time the canonical issue entered its current status.
+    pub entered_status_at: u64,
     /// Human-facing identifier.
     pub identifier: String,
     /// Title.
@@ -749,8 +755,14 @@ pub struct ActivityProjection {
     pub author_pubkey: String,
     /// Event creation time.
     pub created_at: u64,
+    /// Canonical revision number, with the root defined as zero.
+    pub revision: u64,
     /// Optional status-change reason carried by a revision.
     pub reason: Option<String>,
+    /// Optional idempotency request ID carried by the source event.
+    pub request_id: Option<Uuid>,
+    /// Optional import provenance carried by the source event.
+    pub import: Option<ImportProvenance>,
     /// Canonical state immediately before this entry, or `None` for the root.
     pub before: Option<IssueProjection>,
     /// Canonical state immediately after this entry.
@@ -1499,7 +1511,16 @@ fn canonical_activity(
         event_id: root_event.event_id.clone(),
         author_pubkey: root_event.author_pubkey.clone(),
         created_at: root_event.created_at,
+        revision: 0,
         reason: None,
+        request_id: match &root_event.payload {
+            TrackerPayload::Root(root) => root.request_id,
+            _ => None,
+        },
+        import: match &root_event.payload {
+            TrackerPayload::Root(root) => root.import.clone(),
+            _ => None,
+        },
         before: None,
         after: initial.clone(),
     }];
@@ -1541,7 +1562,10 @@ fn canonical_activity(
             event_id: event.event_id.clone(),
             author_pubkey: event.author_pubkey.clone(),
             created_at: event.created_at,
+            revision: revision.revision,
             reason: revision.reason.clone(),
+            request_id: revision.request_id,
+            import: revision.import.clone(),
             before: Some(before),
             after: after.clone(),
         });
@@ -1611,8 +1635,14 @@ fn evaluate_revision(
     if (renumber || restricted_status) && role != TrackerRole::Maintainer {
         return Err("renumber and terminal/reopen transitions require maintainer role".into());
     }
+    let prior_status = parent.status;
     apply_revision(&mut parent, revision)?;
     parent.tip_event = event.event_id.clone();
+    parent.tip_created_at = event.created_at;
+    parent.revision = revision.revision;
+    if parent.status != prior_status {
+        parent.entered_status_at = event.created_at;
+    }
     visiting.remove(&event.event_id);
     memo.insert(event.event_id.clone(), Ok(parent.clone()));
     Ok(parent)
@@ -1765,6 +1795,9 @@ fn projection_from_root(
         stream_id,
         issue_id: root.issue_id,
         tip_event: root_event.clone(),
+        tip_created_at: root_created_at,
+        revision: 0,
+        entered_status_at: root_created_at,
         root_event,
         root_created_at,
         identifier: root.identifier.clone(),
@@ -2854,6 +2887,9 @@ mod tests {
         let issue = Uuid::new_v4();
         let (state, diagnostics) = current(vec![root(stream, issue, "root", 1, MEMBER)]);
         assert_eq!(state.tip_event, "root");
+        assert_eq!(state.tip_created_at, 1);
+        assert_eq!(state.revision, 0);
+        assert_eq!(state.entered_status_at, 1);
         assert_eq!(state.status, IssueStatus::Triage);
         assert!(diagnostics.is_empty());
     }
@@ -2894,6 +2930,9 @@ mod tests {
         );
         let state = &folded.issues[&(stream, issue)];
         assert_eq!(state.tip_event, "two");
+        assert_eq!(state.tip_created_at, 3);
+        assert_eq!(state.revision, 2);
+        assert_eq!(state.entered_status_at, 3);
         assert_eq!(state.title, "changed");
         assert_eq!(state.status, IssueStatus::InProgress);
         let activity = &folded.activity[&(stream, issue)];
@@ -2905,6 +2944,9 @@ mod tests {
             ["root", "one", "two"]
         );
         assert!(activity[0].before.is_none());
+        assert_eq!(activity[0].revision, 0);
+        assert_eq!(activity[1].after.entered_status_at, 1);
+        assert_eq!(activity[2].revision, 2);
         assert_eq!(
             activity[2].before.as_ref().map(|before| before.status),
             Some(IssueStatus::Triage)
