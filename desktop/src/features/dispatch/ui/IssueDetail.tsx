@@ -119,8 +119,16 @@ export function IssueDetailSkeleton() {
       </div>
       <div className="space-y-4 border-l border-border p-6">
         <Skeleton className="h-4 w-24" />
-        {Array.from({ length: 7 }, (_, i) => (
-          <Skeleton className="h-8 w-full" key={i} />
+        {[
+          "status",
+          "priority",
+          "assignee",
+          "project",
+          "labels",
+          "due",
+          "updated",
+        ].map((property) => (
+          <Skeleton className="h-8 w-full" key={property} />
         ))}
       </div>
     </main>

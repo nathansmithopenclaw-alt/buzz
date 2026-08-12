@@ -20,6 +20,7 @@ function PriorityMark({ priority }: { priority: DispatchIssue["priority"] }) {
       <span
         aria-label="P0 priority"
         className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] bg-destructive text-[10px] font-bold text-destructive-foreground"
+        role="img"
       >
         !
       </span>
@@ -30,6 +31,7 @@ function PriorityMark({ priority }: { priority: DispatchIssue["priority"] }) {
     <span
       aria-label={priority ? `${priority} priority` : "No priority"}
       className="flex h-4 w-4 shrink-0 items-end gap-px"
+      role="img"
     >
       {[1, 2, 3].map((bar) => (
         <span
@@ -58,6 +60,7 @@ function AssigneeAvatar({
       <span
         aria-label="Unassigned"
         className="flex h-6 w-6 items-center justify-center rounded-full border border-dashed border-muted-foreground/70 text-muted-foreground"
+        role="img"
       >
         <UserRound aria-hidden className="h-3.5 w-3.5" />
       </span>
@@ -84,8 +87,11 @@ export function DispatchIssueListSkeleton({ rows = 4 }: { rows?: number }) {
       className="divide-y divide-border"
       role="status"
     >
-      {Array.from({ length: rows }, (_, index) => (
-        <div className="flex h-11 items-center gap-3 px-5" key={index}>
+      {Array.from(
+        { length: rows },
+        (_, index) => `issue-skeleton-${index}`,
+      ).map((key) => (
+        <div className="flex h-11 items-center gap-3 px-5" key={key}>
           <Skeleton className="h-4 w-4" />
           <Skeleton className="h-4 w-20" />
           <Skeleton className="h-4 max-w-xl flex-1" />
