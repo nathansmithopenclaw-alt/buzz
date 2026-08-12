@@ -803,6 +803,7 @@ pub fn run() {
             list_personas,
             create_persona,
             update_persona,
+            apply_delegated_persona_env_vars,
             update_persona_and_publish,
             delete_persona,
             set_persona_active,
@@ -983,7 +984,6 @@ pub fn run() {
         RunEvent::Exit => {
             shut_down_app(app_handle, &run_shutdown_done);
             app_handle.state::<ClipboardState>().release();
-
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
             if restart_requested.load(Ordering::SeqCst) {
                 relaunch_after_mesh_shutdown(app_handle);

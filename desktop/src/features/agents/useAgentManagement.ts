@@ -62,6 +62,25 @@ import {
   completeDelegatedGlobalConfigFailure,
   completeDelegatedGlobalConfigSuccess,
 } from "./delegatedGlobalConfig";
+import {
+  applyDelegatedPersonaEnvVarsRequest,
+  delegatedEnvAuditTarget,
+} from "./delegatedPersonaEnvVars";
+import {
+  completeDelegatedAgentUpdateFailure,
+  completeDelegatedAgentUpdateSuccess,
+} from "./delegatedAgentUpdateCompletion";
+
+function requesterNameFor(
+  agents: readonly { pubkey: string; name: string }[] | undefined,
+  sourcePubkey: string,
+): string {
+  return (
+    agents?.find(
+      (agent) => agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
+    )?.name ?? "delegated agent"
+  );
+}
 
 export function useAgentManagement() {
   const queryClient = useQueryClient();
@@ -94,6 +113,19 @@ export function useAgentManagement() {
   >([]);
   const registrationQueueRef = React.useRef(Promise.resolve());
   const delegatedApplyIdsRef = React.useRef(new Set<string>());
+
+  function updateCompletionContext(
+    requestId: string,
+    sourcePubkey: string,
+    updateRequest: Extract<AgentManagementRequest, { action: "update" }>,
+  ) {
+    return {
+      requestId,
+      sourcePubkey,
+      requesterName: requesterNameFor(managedAgentsRef.current, sourcePubkey),
+      request: updateRequest,
+    };
+  }
 
   const presentNextRequest = React.useEffectEvent(() => {
     if (pendingRequestId.current !== null) return;
@@ -134,15 +166,13 @@ export function useAgentManagement() {
           ) {
             const registered = route.registered;
             const result = registered.result as Record<string, unknown>;
-            const requesterName =
-              managedAgentsRef.current?.find(
-                (agent) =>
-                  agent.pubkey.toLowerCase() === agentPubkey.toLowerCase(),
-              )?.name ?? "delegated agent";
             await publishAgentManagementAuditReceipt({
               requestId: next.requestId,
               sourcePubkey: agentPubkey,
-              requesterName,
+              requesterName: requesterNameFor(
+                managedAgentsRef.current,
+                agentPubkey,
+              ),
               capability: capabilityForAgentManagementRequest(next),
               target: `agent ${next.action}: ${String(result.error ?? "failed")}`,
               succeeded: false,
@@ -159,19 +189,26 @@ export function useAgentManagement() {
             next.action !== "create" &&
             route.registered.result
           ) {
-            const requesterName =
-              managedAgentsRef.current?.find(
-                (agent) =>
-                  agent.pubkey.toLowerCase() === agentPubkey.toLowerCase(),
-              )?.name ?? "delegated agent";
             await publishAgentManagementAuditReceipt({
               requestId: next.requestId,
               sourcePubkey: agentPubkey,
-              requesterName,
+              requesterName: requesterNameFor(
+                managedAgentsRef.current,
+                agentPubkey,
+              ),
               capability: capabilityForAgentManagementRequest(next),
               target:
                 next.action === "update"
-                  ? `saved config for agent ${next.request.agentName}; instruction and runtime changes take effect on next spawn`
+                  ? capabilityForAgentManagementRequest(next) === "env_vars"
+                    ? delegatedEnvAuditTarget(
+                        next.request.agentName,
+                        route.registered.result as {
+                          restartedCount: number;
+                          startedCount: number;
+                          failedStartCount: number;
+                        },
+                      )
+                    : `saved config for agent ${next.request.agentName}; instruction and runtime changes take effect on next spawn`
                   : globalConfigAuditTarget(route.registered.result),
               succeeded: true,
             });
@@ -198,15 +235,13 @@ export function useAgentManagement() {
               (agent) =>
                 agent.pubkey.toLowerCase() === createdPubkey.toLowerCase(),
             );
-            const requesterName =
-              managedAgentsRef.current?.find(
-                (agent) =>
-                  agent.pubkey.toLowerCase() === agentPubkey.toLowerCase(),
-              )?.name ?? "delegated agent";
             await publishAgentManagementAuditReceipt({
               requestId: next.requestId,
               sourcePubkey: agentPubkey,
-              requesterName,
+              requesterName: requesterNameFor(
+                managedAgentsRef.current,
+                agentPubkey,
+              ),
               capability: "agent_creation",
               target: `created agent ${createdAgent?.name ?? createdPubkey} (${createdPubkey})`,
               succeeded: true,
@@ -251,16 +286,13 @@ export function useAgentManagement() {
           if (!parsed || parsed.requestId !== entry.requestId) continue;
           if (entry.disposition === "failed" && entry.result) {
             const result = entry.result as Record<string, unknown>;
-            const requesterName =
-              managedAgentsRef.current?.find(
-                (agent) =>
-                  agent.pubkey.toLowerCase() ===
-                  entry.sourcePubkey.toLowerCase(),
-              )?.name ?? "delegated agent";
             await publishAgentManagementAuditReceipt({
               requestId: entry.requestId,
               sourcePubkey: entry.sourcePubkey,
-              requesterName,
+              requesterName: requesterNameFor(
+                managedAgentsRef.current,
+                entry.sourcePubkey,
+              ),
               capability: entry.capability,
               target: `agent ${parsed.action}: ${String(result.error ?? "failed")}`,
               succeeded: false,
@@ -583,14 +615,10 @@ export function useAgentManagement() {
     await completeAgentManagementRequest(requestId, true, {
       pubkey: created.agent.pubkey,
     });
-    const requesterName =
-      managedAgentsRef.current?.find(
-        (agent) => agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
-      )?.name ?? "delegated agent";
     await publishAgentManagementAuditReceipt({
       requestId,
       sourcePubkey,
-      requesterName,
+      requesterName: requesterNameFor(managedAgentsRef.current, sourcePubkey),
       capability: "agent_creation",
       target: `created agent ${created.agent.name} (${created.agent.pubkey})`,
       succeeded: true,
@@ -612,14 +640,10 @@ export function useAgentManagement() {
       cause instanceof Error ? cause.message : "Agent creation failed.";
     const result = { error: message };
     await completeAgentManagementRequest(requestId, false, result);
-    const requesterName =
-      managedAgentsRef.current?.find(
-        (agent) => agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
-      )?.name ?? "delegated agent";
     await publishAgentManagementAuditReceipt({
       requestId,
       sourcePubkey,
-      requesterName,
+      requesterName: requesterNameFor(managedAgentsRef.current, sourcePubkey),
       capability: "agent_creation",
       target: `agent create: ${message}`,
       succeeded: false,
@@ -629,62 +653,6 @@ export function useAgentManagement() {
       sourcePubkey,
       result,
     });
-  }
-
-  async function completeUpdateSuccess(
-    requestId: string,
-    sourcePubkey: string,
-    updateRequest: Extract<AgentManagementRequest, { action: "update" }>,
-  ) {
-    const changedFields = Object.keys(updateRequest.request).filter(
-      (field) => field !== "channelId" && field !== "agentName",
-    );
-    const result = {
-      agentName: updateRequest.request.agentName,
-      saved: true,
-      changedFields,
-      instructionAndRuntimeChangesTakeEffect: "next_spawn",
-    };
-    await completeAgentManagementRequest(requestId, true, result);
-    const requesterName =
-      managedAgentsRef.current?.find(
-        (agent) => agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
-      )?.name ?? "delegated agent";
-    await publishAgentManagementAuditReceipt({
-      requestId,
-      sourcePubkey,
-      requesterName,
-      capability: capabilityForAgentManagementRequest(updateRequest),
-      target: `saved config for agent ${updateRequest.request.agentName}; instruction and runtime changes take effect on next spawn`,
-      succeeded: true,
-    });
-    await publishAgentManagementResult({ requestId, sourcePubkey, result });
-  }
-
-  async function completeUpdateFailure(
-    requestId: string,
-    sourcePubkey: string,
-    updateRequest: Extract<AgentManagementRequest, { action: "update" }>,
-    cause: unknown,
-  ) {
-    const message =
-      cause instanceof Error ? cause.message : "Agent config update failed.";
-    const result = { error: message };
-    await completeAgentManagementRequest(requestId, false, result);
-    const requesterName =
-      managedAgentsRef.current?.find(
-        (agent) => agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
-      )?.name ?? "delegated agent";
-    const capability = capabilityForAgentManagementRequest(updateRequest);
-    await publishAgentManagementAuditReceipt({
-      requestId,
-      sourcePubkey,
-      requesterName,
-      capability,
-      target: `${capability === "env_vars" ? "agent env" : "agent config"} update: ${message}`,
-      succeeded: false,
-    });
-    await publishAgentManagementResult({ requestId, sourcePubkey, result });
   }
 
   async function submitReviewedCreate(
@@ -755,11 +723,55 @@ export function useAgentManagement() {
         return;
       const sourcePubkey = sourceAgentPubkey.current;
       if (!sourcePubkey) return;
+      if (
+        capabilityForAgentManagementRequest(request) === "env_vars" &&
+        request.request.envVars
+      ) {
+        setError(null);
+        try {
+          assertAgentCanActFromOrigin(request.request.channelId);
+          const activation = await applyDelegatedPersonaEnvVarsRequest(
+            request as Extract<AgentManagementRequest, { action: "update" }> & {
+              request: { envVars: Record<string, string> };
+            },
+            input.id,
+          );
+          await completeDelegatedAgentUpdateSuccess(
+            updateCompletionContext(requestId, sourcePubkey, request),
+            activation,
+          );
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: personasQueryKey }),
+            queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+          ]);
+          dismiss();
+        } catch (cause) {
+          await completeDelegatedAgentUpdateFailure(
+            updateCompletionContext(requestId, sourcePubkey, request),
+            cause,
+          ).catch(() => undefined);
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Could not save this agent.",
+          );
+          if (pendingRequestId.current === requestId) {
+            setFailedAutoApprovalRequestId(requestId);
+          }
+        }
+        return;
+      }
       const submitted = await performUpdate(
         input,
-        () => completeUpdateSuccess(requestId, sourcePubkey, request),
+        () =>
+          completeDelegatedAgentUpdateSuccess(
+            updateCompletionContext(requestId, sourcePubkey, request),
+          ),
         (cause) =>
-          completeUpdateFailure(requestId, sourcePubkey, request, cause),
+          completeDelegatedAgentUpdateFailure(
+            updateCompletionContext(requestId, sourcePubkey, request),
+            cause,
+          ),
       );
       if (!submitted && pendingRequestId.current === requestId) {
         setFailedAutoApprovalRequestId(requestId);
@@ -774,10 +786,8 @@ export function useAgentManagement() {
       updateRequest: Extract<AgentManagementRequest, { action: "update" }>,
       message: string,
     ) => {
-      await completeUpdateFailure(
-        requestId,
-        sourcePubkey,
-        updateRequest,
+      await completeDelegatedAgentUpdateFailure(
+        updateCompletionContext(requestId, sourcePubkey, updateRequest),
         new Error(message),
       );
     },
@@ -810,29 +820,25 @@ export function useAgentManagement() {
         }
         const result = await applyDelegatedGlobalConfig(globalRequest);
         queryClient.setQueryData(globalAgentConfigQueryKey, result.config);
-        const requesterName =
-          managedAgentsRef.current?.find(
-            (agent) =>
-              agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
-          )?.name ?? "delegated agent";
         await completeDelegatedGlobalConfigSuccess({
           requestId,
           sourcePubkey,
-          requesterName,
+          requesterName: requesterNameFor(
+            managedAgentsRef.current,
+            sourcePubkey,
+          ),
           request: globalRequest,
           saveResult: result,
         });
         dismiss();
       } catch (cause) {
-        const requesterName =
-          managedAgentsRef.current?.find(
-            (agent) =>
-              agent.pubkey.toLowerCase() === sourcePubkey.toLowerCase(),
-          )?.name ?? "delegated agent";
         await completeDelegatedGlobalConfigFailure({
           requestId,
           sourcePubkey,
-          requesterName,
+          requesterName: requesterNameFor(
+            managedAgentsRef.current,
+            sourcePubkey,
+          ),
           cause,
         }).catch(() => undefined);
         setError(

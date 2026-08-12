@@ -35,7 +35,7 @@ mod sharing;
 pub use sharing::set_persona_shared;
 pub use sharing::update_persona_and_publish;
 mod update;
-pub use update::update_persona;
+pub use update::{apply_delegated_persona_env_vars, update_persona};
 mod inbound;
 pub use inbound::reconcile_inbound_persona_event;
 
