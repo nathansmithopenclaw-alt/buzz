@@ -252,7 +252,9 @@ function validatePilotMap(pilotMap, issueIds) {
     const projects = values("project");
     if (linearLabels.length !== 1 || linearLabels[0] !== linearId) conflicts.push(`pilot ${linearId} must carry exactly one matching linear: label`);
     if (priorities.length !== 1 || !["P0", "P1", "P2", "P3"].includes(priorities[0])) conflicts.push(`pilot ${linearId} must carry exactly one valid priority: label`);
-    if (dues.length !== 1 || !/^\d{4}-\d{2}-\d{2}$/.test(dues[0])) conflicts.push(`pilot ${linearId} must carry exactly one date due: label`);
+    if (dues.length > 1 || (dues.length === 1 && !/^\d{4}-\d{2}-\d{2}$/.test(dues[0]))) {
+      conflicts.push(`pilot ${linearId} must carry at most one valid date due: label`);
+    }
     if (projects.length !== 1 || !projects[0]) conflicts.push(`pilot ${linearId} must carry exactly one project: label`);
   }
   return conflicts;
