@@ -123,6 +123,36 @@ export async function updatePersona(
   return fromRawPersona(raw);
 }
 
+export type DelegatedPersonaEnvVarsResult = {
+  persona: AgentPersona;
+  restarted_count: number;
+  started_count: number;
+  failed_start_count: number;
+};
+
+/**
+ * Overlay only the requested env keys onto the latest durable persona and let
+ * the backend activate linked agents whose readiness becomes complete.
+ */
+export async function applyDelegatedPersonaEnvVars(input: {
+  id: string;
+  envVars: Record<string, string>;
+}): Promise<DelegatedPersonaEnvVarsResult> {
+  const raw = await invokeTauri<
+    RawPersona & {
+      restarted_count: number;
+      started_count: number;
+      failed_start_count: number;
+    }
+  >("apply_delegated_persona_env_vars", { patch: input });
+  return {
+    persona: fromRawPersona(raw),
+    restarted_count: raw.restarted_count,
+    started_count: raw.started_count,
+    failed_start_count: raw.failed_start_count,
+  };
+}
+
 /**
  * Save an edit AND publish the persona's catalog head, reporting whether the
  * relay accepted it.

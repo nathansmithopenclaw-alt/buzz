@@ -159,3 +159,49 @@ fn test_rename_renames_all_matching_instances_in_one_pass() {
     assert_eq!(records[1].name, "Duncan Idaho");
     assert_eq!(records[2].name, "Birch", "pool-named instance untouched");
 }
+
+#[test]
+fn delegated_env_unblocks_running_setup_mode_agent_for_restart() {
+    assert_eq!(
+        readiness_transition_action(true, true, false, true, true, true),
+        Some(ReadinessTransitionAction::Restart)
+    );
+}
+
+#[test]
+fn delegated_env_unblocks_stopped_active_agent_for_start() {
+    assert_eq!(
+        readiness_transition_action(true, true, false, true, false, false),
+        Some(ReadinessTransitionAction::Start),
+        "an active linked agent must not stay silently stopped after its missing env arrives"
+    );
+}
+
+#[test]
+fn delegated_env_does_not_resurrect_archived_agent() {
+    assert_eq!(
+        readiness_transition_action(true, false, false, true, false, false),
+        None
+    );
+}
+
+#[test]
+fn delegated_env_does_not_bounce_non_setup_runtime() {
+    assert_eq!(
+        readiness_transition_action(true, true, false, true, true, false),
+        None,
+        "a live non-setup runtime is outside readiness-transition candidacy"
+    );
+}
+
+#[test]
+fn delegated_env_requires_an_actual_not_ready_to_ready_transition() {
+    assert_eq!(
+        readiness_transition_action(true, true, true, true, true, true),
+        None
+    );
+    assert_eq!(
+        readiness_transition_action(true, true, false, false, false, false),
+        None
+    );
+}

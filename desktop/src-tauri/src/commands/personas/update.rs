@@ -1,15 +1,22 @@
-//! The persona edit command surface: `update_persona` (best-effort enqueue)
-//! and the `update_persona_with` seam that `update_persona_and_publish` reuses
-//! to await relay acceptance for the same save.
+//! The persona edit command surface: `update_persona` (best-effort enqueue),
+//! the narrow delegated env apply, and the `update_persona_with` seam that
+//! `update_persona_and_publish` reuses to await relay acceptance for the same
+//! save.
 
-use tauri::AppHandle;
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager};
 
 use crate::{
     app_state::AppState,
     managed_agents::{
-        apply_persona_behavior, effective_agent_command, load_managed_agents, load_personas,
-        managed_agent_avatar_url, save_managed_agents, save_personas, try_regenerate_nest,
-        AgentDefinition, ManagedAgentRecord, UpdatePersonaRequest,
+        agent_readiness, apply_persona_behavior, current_instance_id, effective_agent_command,
+        find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
+        load_personas, managed_agent_avatar_url, managed_agent_runtime_keys, record_agent_command,
+        resolve_effective_agent_env, save_managed_agents, save_personas,
+        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
+        AgentDefinition, AgentReadiness, BackendKind, ManagedAgentRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -26,6 +33,66 @@ mod name_propagation_tests;
 pub struct UpdatePersonaResult {
     #[serde(flatten)]
     persona: AgentDefinition,
+}
+
+/// Narrow payload for the standing-delegation `env_vars` capability.
+///
+/// The backend overlays these keys onto the latest durable persona instead of
+/// accepting the frontend's full edit-form snapshot. That keeps an env-only
+/// grant from overwriting unrelated owner edits made after the request was
+/// received.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegatedPersonaEnvVarsPatch {
+    pub id: String,
+    pub env_vars: BTreeMap<String, String>,
+}
+
+/// Result of a delegated env apply.
+///
+/// `restarted_count` is for live setup-listener processes that were bounced;
+/// `started_count` is for active linked instances that were already stopped.
+/// A failed start is non-transactional: the env write remains durable and the
+/// failure is persisted on the agent record for an honest receipt/UI state.
+#[derive(Debug, Serialize)]
+pub struct DelegatedPersonaEnvVarsResult {
+    #[serde(flatten)]
+    pub persona: AgentDefinition,
+    pub restarted_count: u32,
+    pub started_count: u32,
+    pub failed_start_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessTransitionAction {
+    Restart,
+    Start,
+}
+
+fn readiness_transition_action(
+    is_local: bool,
+    is_active: bool,
+    old_ready: bool,
+    new_ready: bool,
+    has_runtime: bool,
+    every_runtime_is_setup_mode: bool,
+) -> Option<ReadinessTransitionAction> {
+    if !is_local || !is_active || old_ready || !new_ready {
+        return None;
+    }
+    if has_runtime {
+        every_runtime_is_setup_mode.then_some(ReadinessTransitionAction::Restart)
+    } else {
+        Some(ReadinessTransitionAction::Start)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelegatedEnvStartOutcome {
+    Restarted,
+    Started,
+    Failed,
+    Skipped,
 }
 
 /// Propagate a persona definition's display_name rename to linked agent instances.
@@ -68,6 +135,273 @@ pub async fn update_persona(
     })
     .await?;
     Ok(UpdatePersonaResult { persona })
+}
+
+/// Overlay an owner-granted env patch onto a persona and immediately activate
+/// linked local agents whose readiness changes from `NotReady` to `Ready`.
+///
+/// This is intentionally separate from `update_persona`: only the delegated
+/// `env_vars` route calls it, and its typed payload cannot mutate instructions,
+/// model, access policy, or any other persona field. The lifecycle work is a
+/// Desktop-owned consequence of the saved readiness transition, not a lifecycle
+/// operation controlled by the grantee.
+#[tauri::command]
+pub async fn apply_delegated_persona_env_vars(
+    patch: DelegatedPersonaEnvVarsPatch,
+    app: AppHandle,
+) -> Result<DelegatedPersonaEnvVarsResult, String> {
+    let owner_hex = super::super::agents::workspace_owner_hex(&app.state::<AppState>())?;
+    let app_for_write = app.clone();
+    let (persona, old_personas, candidates) = tokio::task::spawn_blocking(move || {
+        let state = app_for_write.state::<AppState>();
+        crate::managed_agents::validate_user_env_keys(&patch.env_vars)?;
+
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut personas = load_personas(&app_for_write)?;
+        pending::project_active_persona_sharing(&app_for_write, &state, &mut personas);
+        let old_personas = personas.clone();
+        let persona = personas
+            .iter_mut()
+            .find(|record| record.id == patch.id)
+            .ok_or_else(|| format!("agent {} not found", patch.id))?;
+        persona.env_vars.extend(patch.env_vars);
+        persona.updated_at = now_iso();
+        let saved_persona = persona.clone();
+
+        // Complete every fallible activation precondition before the persona
+        // write. Once the env patch is durable, this phase cannot return a
+        // failure that would incorrectly record the request as unapplied.
+        let global = load_global_agent_config(&app_for_write)?;
+        let mut records = load_managed_agents(&app_for_write)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
+            &mut records,
+            &mut runtimes,
+            &current_instance_id(&app_for_write),
+        );
+        for pubkey in &exited_pubkeys {
+            state.clear_agent_session_caches(pubkey);
+        }
+        if sync_changed {
+            save_managed_agents(&app_for_write, &records)?;
+        }
+
+        let candidates = records
+            .iter()
+            .filter(|record| record.persona_id.as_deref() == Some(saved_persona.id.as_str()))
+            .filter_map(|record| {
+                let old_ready = agent_is_ready(record, &old_personas, &global);
+                let new_ready = agent_is_ready(record, &personas, &global);
+                let runtime_keys = managed_agent_runtime_keys(&runtimes, &record.pubkey);
+                let has_runtime = !runtime_keys.is_empty();
+                let every_runtime_is_setup_mode = has_runtime
+                    && runtime_keys
+                        .iter()
+                        .all(|key| runtimes.get(key).is_some_and(|runtime| runtime.setup_mode));
+                readiness_transition_action(
+                    record.backend == BackendKind::Local,
+                    record.is_active,
+                    old_ready,
+                    new_ready,
+                    has_runtime,
+                    every_runtime_is_setup_mode,
+                )
+                .map(|_| record.pubkey.clone())
+            })
+            .collect::<Vec<_>>();
+
+        save_personas(&app_for_write, &personas)?;
+        retain_persona_pending(&app_for_write, &state, &saved_persona);
+        drop(runtimes);
+        try_regenerate_nest(&app_for_write);
+        Ok::<_, String>((saved_persona, old_personas, candidates))
+    })
+    .await
+    .map_err(|error| format!("spawn_blocking failed: {error}"))??;
+
+    let mut restarted_count = 0;
+    let mut started_count = 0;
+    let mut failed_start_count = 0;
+    for pubkey in candidates {
+        match activate_after_delegated_env(&app, &pubkey, &old_personas, &owner_hex).await {
+            DelegatedEnvStartOutcome::Restarted => restarted_count += 1,
+            DelegatedEnvStartOutcome::Started => started_count += 1,
+            DelegatedEnvStartOutcome::Failed => failed_start_count += 1,
+            DelegatedEnvStartOutcome::Skipped => {}
+        }
+    }
+
+    Ok(DelegatedPersonaEnvVarsResult {
+        persona,
+        restarted_count,
+        started_count,
+        failed_start_count,
+    })
+}
+
+fn agent_is_ready(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+    global: &crate::managed_agents::GlobalAgentConfig,
+) -> bool {
+    let command = record_agent_command(record, personas);
+    let effective =
+        resolve_effective_agent_env(record, personas, known_acp_runtime(&command), global);
+    matches!(agent_readiness(&effective), AgentReadiness::Ready)
+}
+
+async fn activate_after_delegated_env(
+    app: &AppHandle,
+    pubkey: &str,
+    old_personas: &[AgentDefinition],
+    owner_hex: &str,
+) -> DelegatedEnvStartOutcome {
+    let app_for_transition = app.clone();
+    let pubkey_owned = pubkey.to_string();
+    let old_personas_owned = old_personas.to_vec();
+    let transition = tokio::task::spawn_blocking(move || {
+        let state = app_for_transition.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| format!("failed to acquire store lock: {error}"))?;
+        let mut records = load_managed_agents(&app_for_transition)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|error| format!("failed to acquire runtimes lock: {error}"))?;
+        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
+            &mut records,
+            &mut runtimes,
+            &current_instance_id(&app_for_transition),
+        );
+        for exited_pubkey in &exited_pubkeys {
+            state.clear_agent_session_caches(exited_pubkey);
+        }
+        if sync_changed {
+            save_managed_agents(&app_for_transition, &records)?;
+        }
+
+        let current_personas = load_personas(&app_for_transition).unwrap_or_default();
+        let global = load_global_agent_config(&app_for_transition).unwrap_or_default();
+        let record = records
+            .iter()
+            .find(|record| record.pubkey.eq_ignore_ascii_case(&pubkey_owned))
+            .ok_or_else(|| format!("agent {pubkey_owned} not found"))?;
+        let old_ready = agent_is_ready(record, &old_personas_owned, &global);
+        let new_ready = agent_is_ready(record, &current_personas, &global);
+        let runtime_keys = managed_agent_runtime_keys(&runtimes, &pubkey_owned);
+        let has_runtime = !runtime_keys.is_empty();
+        let every_runtime_is_setup_mode = has_runtime
+            && runtime_keys
+                .iter()
+                .all(|key| runtimes.get(key).is_some_and(|runtime| runtime.setup_mode));
+        let action = readiness_transition_action(
+            record.backend == BackendKind::Local,
+            record.is_active,
+            old_ready,
+            new_ready,
+            has_runtime,
+            every_runtime_is_setup_mode,
+        )
+        .ok_or_else(|| {
+            format!("agent {pubkey_owned} readiness transition is no longer restart-eligible")
+        })?;
+
+        let relay_urls = if action == ReadinessTransitionAction::Restart {
+            let relay_urls = runtime_keys
+                .iter()
+                .map(|key| key.relay_url.clone())
+                .collect::<Vec<_>>();
+            let record = find_managed_agent_mut(&mut records, &pubkey_owned)?;
+            stop_managed_agent_process(&app_for_transition, record, &mut runtimes)?;
+            save_managed_agents(&app_for_transition, &records)?;
+            relay_urls
+        } else {
+            Vec::new()
+        };
+
+        Ok::<_, String>((action, relay_urls))
+    })
+    .await;
+
+    let (action, relay_urls) = match transition {
+        Ok(Ok(transition)) => transition,
+        Ok(Err(error)) => {
+            eprintln!(
+                "buzz-desktop: delegated persona env: skipping activation of {pubkey}: {error}"
+            );
+            return DelegatedEnvStartOutcome::Skipped;
+        }
+        Err(error) => {
+            eprintln!(
+                "buzz-desktop: delegated persona env: activation task failed for {pubkey}: {error}"
+            );
+            return DelegatedEnvStartOutcome::Skipped;
+        }
+    };
+
+    let state = app.state::<AppState>();
+    let start_result = match action {
+        ReadinessTransitionAction::Restart => {
+            super::super::agents::start_local_agent_pairs_with_preflight(
+                app,
+                &state,
+                pubkey,
+                &relay_urls,
+            )
+            .await
+        }
+        ReadinessTransitionAction::Start => {
+            super::super::agents::start_local_agent_with_preflight(
+                app, &state, pubkey, owner_hex, false,
+            )
+            .await
+        }
+    };
+
+    match start_result {
+        Ok(_) if action == ReadinessTransitionAction::Restart => {
+            eprintln!("buzz-desktop: delegated persona env: restarted setup-mode agent {pubkey}");
+            DelegatedEnvStartOutcome::Restarted
+        }
+        Ok(_) => {
+            eprintln!("buzz-desktop: delegated persona env: started active agent {pubkey}");
+            DelegatedEnvStartOutcome::Started
+        }
+        Err(error) => {
+            eprintln!("buzz-desktop: delegated persona env: failed to activate {pubkey}: {error}");
+            if let Err(save_error) = persist_delegated_env_start_error(app, pubkey, &error) {
+                eprintln!(
+                    "buzz-desktop: delegated persona env: failed to persist last_error for {pubkey}: {save_error}"
+                );
+            }
+            DelegatedEnvStartOutcome::Failed
+        }
+    }
+}
+
+fn persist_delegated_env_start_error(
+    app: &AppHandle,
+    pubkey: &str,
+    error: &str,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|lock_error| format!("failed to acquire store lock: {lock_error}"))?;
+    let mut records = load_managed_agents(app)?;
+    let record = find_managed_agent_mut(&mut records, pubkey)?;
+    record.last_error = Some(error.to_string());
+    record.updated_at = now_iso();
+    save_managed_agents(app, &records)
 }
 
 /// Save an edited persona, hand the saved record to `retain` while the store

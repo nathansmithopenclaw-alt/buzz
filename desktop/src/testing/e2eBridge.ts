@@ -8115,6 +8115,24 @@ async function handleUpdatePersona(args: {
   return { ...(await applyMockPersonaUpdate(args.input)) };
 }
 
+async function handleApplyDelegatedPersonaEnvVars(args: {
+  patch: { id: string; envVars: Record<string, string> };
+}) {
+  const persona = mockPersonas.find(
+    (candidate) => candidate.id === args.patch.id,
+  );
+  if (!persona) throw new Error(`agent ${args.patch.id} not found`);
+  persona.env_vars = { ...(persona.env_vars ?? {}), ...args.patch.envVars };
+  persona.updated_at = new Date().toISOString();
+  await emit("agents-data-changed");
+  return {
+    ...persona,
+    restarted_count: 0,
+    started_count: 0,
+    failed_start_count: 0,
+  };
+}
+
 /**
  * Save an edit to the mock persona store, exactly like `update_persona_with`,
  * and return the live record so a caller can publish it.
@@ -12034,6 +12052,10 @@ export function maybeInstallE2eTauriMocks() {
       case "update_persona":
         return handleUpdatePersona(
           payload as Parameters<typeof handleUpdatePersona>[0],
+        );
+      case "apply_delegated_persona_env_vars":
+        return handleApplyDelegatedPersonaEnvVars(
+          payload as Parameters<typeof handleApplyDelegatedPersonaEnvVars>[0],
         );
       case "update_persona_and_publish":
         return handleUpdatePersonaAndPublish(
