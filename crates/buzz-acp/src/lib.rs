@@ -3734,6 +3734,7 @@ fn handle_prompt_result(
                 "fate": delivery_fate,
                 "finalOutputPresent": delivery_evidence.final_answer_present,
                 "finalAnswerSnippet": delivery_evidence.final_answer_snippet,
+                "adapterRuntimeFailurePresent": delivery_evidence.adapter_runtime_failure_present,
                 "publishAttemptCount": delivery_evidence.publish_attempt_count,
                 "publishFailureCount": delivery_evidence.publish_failure_count,
             }),
