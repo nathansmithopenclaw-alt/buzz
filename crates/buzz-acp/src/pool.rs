@@ -1884,6 +1884,13 @@ fn publication_silence_disposition(
     turn_id: &str,
     evidence: &TurnDeliveryEvidence,
 ) -> PublicationSilenceDisposition {
+    if evidence.publish_attempt_count == 0 && evidence.adapter_runtime_failure_present {
+        return PublicationSilenceDisposition::LoudFailure(format!(
+            "⚠️ Mention-triggered turn delivery failed (`failure_shape: agent_runtime_failed`). \
+             The agent adapter returned a provider/runtime error as terminal output, and no report \
+             reached the relay. Inspect the local agent transcript/log for turn `{turn_id}`."
+        ));
+    }
     if evidence.publish_attempt_count == 0 && evidence.final_answer_present {
         return PublicationSilenceDisposition::ChosenSilence;
     }
@@ -2714,7 +2721,38 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        let delivery_evidence = agent.acp.turn_delivery_evidence();
                         let usage = agent.acp.take_turn_usage();
+                        if delivery_evidence.adapter_runtime_failure_present {
+                            tracing::error!(
+                                target: "pool::prompt",
+                                "agent adapter returned a provider/runtime failure as terminal output"
+                            );
+                            publish_agent_turn_metric(
+                                &ctx,
+                                usage,
+                                observer_channel_id,
+                                &session_id,
+                                &turn_id,
+                                Some(buzz_core::agent_turn_metric::StopReason::Error),
+                            )
+                            .await;
+                            spawn_publication_silence_notice(
+                                &ctx,
+                                publication_watch,
+                                &turn_id,
+                                delivery_evidence,
+                            );
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::Error(AcpError::AgentRuntimeFailure),
+                                None,
+                            );
+                            return;
+                        }
                         publish_agent_turn_metric(
                             &ctx,
                             usage,
@@ -2747,6 +2785,38 @@ pub async fn run_prompt_task(
 
     match prompt_result {
         Ok(stop_reason) => {
+            let delivery_evidence = agent.acp.turn_delivery_evidence();
+            if delivery_evidence.adapter_runtime_failure_present {
+                tracing::error!(
+                    target: "pool::prompt",
+                    "agent adapter returned a provider/runtime failure as terminal output"
+                );
+                let usage = agent.acp.take_turn_usage();
+                publish_agent_turn_metric(
+                    &ctx,
+                    usage,
+                    observer_channel_id,
+                    &session_id,
+                    &turn_id,
+                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                )
+                .await;
+                spawn_publication_silence_notice(
+                    &ctx,
+                    publication_watch,
+                    &turn_id,
+                    delivery_evidence,
+                );
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(AcpError::AgentRuntimeFailure),
+                    None,
+                );
+                return;
+            }
             log_stop_reason(&source, &stop_reason);
 
             let should_rotate = matches!(
@@ -7445,6 +7515,23 @@ mod tests {
             publication_silence_disposition("turn-123", &evidence),
             PublicationSilenceDisposition::ChosenSilence
         );
+    }
+
+    #[test]
+    fn adapter_runtime_failure_gets_loud_failure_without_echoing_provider_text() {
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.final_answer_present = true;
+        evidence.final_answer_snippet =
+            Some("Ran into this error: Authentication error: secret provider detail".to_string());
+        evidence.adapter_runtime_failure_present = true;
+
+        let disposition = publication_silence_disposition("turn-runtime", &evidence);
+        let PublicationSilenceDisposition::LoudFailure(content) = disposition else {
+            panic!("adapter runtime failure must be loud");
+        };
+        assert!(content.contains("failure_shape: agent_runtime_failed"));
+        assert!(content.contains("turn `turn-runtime`"));
+        assert!(!content.contains("secret provider detail"));
     }
 
     #[test]

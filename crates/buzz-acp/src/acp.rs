@@ -9,7 +9,7 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use futures_util::StreamExt;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
@@ -27,6 +27,10 @@ const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 /// Tool inputs and outputs are never retained here.
 const FINAL_ANSWER_SNIPPET_CHARS: usize = 160;
 
+/// Prefix goose uses when the adapter, rather than the model, synthesizes a
+/// terminal provider/runtime failure as an `agent_message_chunk`.
+const GOOSE_RUNTIME_FAILURE_PREFIX: &str = "Ran into this error:";
+
 /// Delivery evidence collected from ACP updates for one prompt turn.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TurnDeliveryEvidence {
@@ -34,6 +38,8 @@ pub(crate) struct TurnDeliveryEvidence {
     pub final_answer_present: bool,
     /// Whitespace-normalized, bounded final-answer text. Never tool content.
     pub final_answer_snippet: Option<String>,
+    /// Whether goose synthesized a provider/runtime failure as final output.
+    pub adapter_runtime_failure_present: bool,
     /// Number of distinct `buzz messages send` tool calls observed.
     pub publish_attempt_count: usize,
     /// Number of those calls that emitted a failed/error update.
@@ -43,7 +49,7 @@ pub(crate) struct TurnDeliveryEvidence {
 }
 
 impl TurnDeliveryEvidence {
-    fn record_final_answer_chunk(&mut self, text: &str) {
+    fn record_final_answer_chunk(&mut self, text: &str, from_goose: bool) {
         if text.trim().is_empty() {
             return;
         }
@@ -53,6 +59,14 @@ impl TurnDeliveryEvidence {
             None => text.to_owned(),
         };
         self.final_answer_snippet = normalized_snippet(&combined, FINAL_ANSWER_SNIPPET_CHARS);
+        if from_goose
+            && self
+                .final_answer_snippet
+                .as_deref()
+                .is_some_and(|snippet| snippet.starts_with(GOOSE_RUNTIME_FAILURE_PREFIX))
+        {
+            self.adapter_runtime_failure_present = true;
+        }
     }
 
     fn record_tool_call(&mut self, update: &serde_json::Value) {
@@ -111,6 +125,52 @@ fn value_contains_buzz_message_send(value: Option<&serde_json::Value>) -> bool {
             .any(|value| value_contains_buzz_message_send(Some(value))),
         _ => false,
     }
+}
+
+/// Translate Buzz's runtime-neutral OpenAI-compatible variables into the
+/// provider variables goose consumes. Explicit goose variables retain
+/// precedence; inherited process values retain precedence over persona env.
+fn derived_goose_provider_env(
+    command: &str,
+    extra_env: &[(String, String)],
+    parent_env: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    if std::path::Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some("goose")
+    {
+        return Vec::new();
+    }
+
+    let resolved = |key: &str| {
+        parent_env.get(key).map(String::as_str).or_else(|| {
+            extra_env
+                .iter()
+                .rev()
+                .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
+        })
+    };
+    if resolved("GOOSE_PROVIDER").map(str::trim) != Some("openai") {
+        return Vec::new();
+    }
+
+    [
+        ("OPENAI_COMPAT_BASE_URL", "GOOSE_PROVIDER__HOST"),
+        ("OPENAI_COMPAT_API_KEY", "GOOSE_PROVIDER__API_KEY"),
+    ]
+    .into_iter()
+    .filter_map(|(source, target)| {
+        let target_is_explicit = parent_env.contains_key(target)
+            || extra_env.iter().any(|(candidate, _)| candidate == target);
+        if target_is_explicit {
+            return None;
+        }
+        resolved(source)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (target.to_owned(), value.to_owned()))
+    })
+    .collect()
 }
 
 /// An MCP server configuration passed to `session/new`.
@@ -199,6 +259,9 @@ pub enum AcpError {
 
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
+
+    #[error("Agent adapter returned a provider/runtime failure as terminal output")]
+    AgentRuntimeFailure,
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
@@ -604,6 +667,23 @@ impl AcpClient {
             if std::env::var_os(key).is_none() {
                 cmd.env(key, value);
             }
+        }
+        let goose_bridge_keys = [
+            "GOOSE_PROVIDER",
+            "OPENAI_COMPAT_BASE_URL",
+            "OPENAI_COMPAT_API_KEY",
+            "GOOSE_PROVIDER__HOST",
+            "GOOSE_PROVIDER__API_KEY",
+        ];
+        let parent_env: HashMap<String, String> = goose_bridge_keys
+            .into_iter()
+            .filter_map(|key| {
+                std::env::var_os(key)
+                    .map(|value| (key.to_owned(), value.to_string_lossy().into_owned()))
+            })
+            .collect();
+        for (key, value) in derived_goose_provider_env(command, extra_env, &parent_env) {
+            cmd.env(key, value);
         }
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
@@ -1834,7 +1914,9 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
-                    self.turn_delivery_evidence.record_final_answer_chunk(text);
+                    let from_goose = update.pointer("/_meta/goose").is_some();
+                    self.turn_delivery_evidence
+                        .record_final_answer_chunk(text, from_goose);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -3149,6 +3231,38 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_bridges_compatible_openai_env_into_goose_process() {
+        const RELEVANT_PARENT_KEYS: [&str; 5] = [
+            "GOOSE_PROVIDER",
+            "OPENAI_COMPAT_BASE_URL",
+            "OPENAI_COMPAT_API_KEY",
+            "GOOSE_PROVIDER__HOST",
+            "GOOSE_PROVIDER__API_KEY",
+        ];
+        if RELEVANT_PARENT_KEYS
+            .iter()
+            .any(|key| std::env::var_os(key).is_some())
+        {
+            return;
+        }
+        let extra = env(&[
+            ("GOOSE_PROVIDER", "openai"),
+            ("OPENAI_COMPAT_BASE_URL", "http://spark:4000/v1"),
+            ("OPENAI_COMPAT_API_KEY", "dummy"),
+        ]);
+
+        assert_eq!(
+            spawn_named_and_read_child_env("goose", "GOOSE_PROVIDER__HOST", &extra).await,
+            "http://spark:4000/v1"
+        );
+        assert_eq!(
+            spawn_named_and_read_child_env("goose", "GOOSE_PROVIDER__API_KEY", &extra).await,
+            "dummy"
+        );
+    }
+
     #[tokio::test]
     async fn idle_timeout_fires_on_silent_process() {
         let mut client = spawn_script("sleep 10").await;
@@ -3778,6 +3892,51 @@ mod tests {
             Some("No further action required.")
         );
         assert_eq!(evidence.publish_attempt_count, 0);
+        assert!(!evidence.adapter_runtime_failure_present);
+    }
+
+    #[tokio::test]
+    async fn delivery_evidence_marks_goose_synthetic_runtime_failure() {
+        let mut client = spawn_inert_client().await;
+        for text in ["Ran into this ", "error: Authentication error: missing key"] {
+            let message = serde_json::json!({
+                "params": { "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": text },
+                    "_meta": { "goose": { "messageId": "msg_failure" } }
+                }}
+            });
+            let _ = client.handle_session_update(&message);
+        }
+
+        let evidence = client.turn_delivery_evidence();
+        assert!(evidence.final_answer_present);
+        assert!(evidence.adapter_runtime_failure_present);
+    }
+
+    #[tokio::test]
+    async fn delivery_evidence_does_not_infer_runtime_failure_from_model_prose() {
+        let mut client = spawn_inert_client().await;
+        for (text, goose_meta) in [
+            ("Ran into this error: quoted documentation", false),
+            ("Ordinary goose answer", true),
+        ] {
+            let mut update = serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": text }
+            });
+            if goose_meta {
+                update["_meta"] = serde_json::json!({ "goose": { "messageId": "msg_ok" } });
+            }
+            let message = serde_json::json!({ "params": { "update": update } });
+            let _ = client.handle_session_update(&message);
+            assert!(
+                !client
+                    .turn_delivery_evidence()
+                    .adapter_runtime_failure_present
+            );
+            client.turn_delivery_evidence = TurnDeliveryEvidence::default();
+        }
     }
 
     #[tokio::test]
@@ -4665,6 +4824,59 @@ mod tests {
             result, None,
             "no CODEX_CONFIG in extra_env must return None"
         );
+    }
+
+    #[test]
+    fn goose_openai_spawn_derives_provider_env_from_compatible_contract() {
+        let extra = env(&[
+            ("GOOSE_PROVIDER", "openai"),
+            ("OPENAI_COMPAT_BASE_URL", "http://spark:4000/v1"),
+            ("OPENAI_COMPAT_API_KEY", "dummy"),
+        ]);
+
+        assert_eq!(
+            derived_goose_provider_env("/opt/bin/goose", &extra, &HashMap::new()),
+            env(&[
+                ("GOOSE_PROVIDER__HOST", "http://spark:4000/v1"),
+                ("GOOSE_PROVIDER__API_KEY", "dummy"),
+            ])
+        );
+    }
+
+    #[test]
+    fn goose_provider_specific_env_is_never_overwritten_by_compat_bridge() {
+        let extra = env(&[
+            ("GOOSE_PROVIDER", "openai"),
+            ("OPENAI_COMPAT_BASE_URL", "http://compat"),
+            ("OPENAI_COMPAT_API_KEY", "compat-key"),
+            ("GOOSE_PROVIDER__HOST", "http://explicit"),
+        ]);
+        let parent = HashMap::from([(
+            "GOOSE_PROVIDER__API_KEY".to_string(),
+            "operator-key".to_string(),
+        )]);
+
+        assert!(derived_goose_provider_env("goose", &extra, &parent).is_empty());
+    }
+
+    #[test]
+    fn compatible_env_bridge_is_goose_openai_only_and_parent_source_wins() {
+        let extra = env(&[
+            ("GOOSE_PROVIDER", "openai"),
+            ("OPENAI_COMPAT_BASE_URL", "http://persona"),
+        ]);
+        let parent = HashMap::from([(
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "http://operator".to_string(),
+        )]);
+        assert_eq!(
+            derived_goose_provider_env("goose", &extra, &parent),
+            env(&[("GOOSE_PROVIDER__HOST", "http://operator")])
+        );
+        assert!(derived_goose_provider_env("codex", &extra, &parent).is_empty());
+
+        let anthropic = env(&[("GOOSE_PROVIDER", "anthropic")]);
+        assert!(derived_goose_provider_env("goose", &anthropic, &parent).is_empty());
     }
 
     #[test]
