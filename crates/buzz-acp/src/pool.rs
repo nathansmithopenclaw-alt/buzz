@@ -1127,13 +1127,12 @@ async fn create_session_and_apply_model(
             .or_else(|| resp.raw.get("configOptions"))
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        if should_skip_thinking_effort(&advertised, ctx.thinking_effort_is_default) {
-            tracing::info!(
-                target: "pool::effort",
-                configured_effort = desired_effort,
-                "skipping harness-default effort because the selected model advertises no native effort option"
-            );
-        } else {
+        if !skip_unsupported_default_thinking_effort(
+            &agent.acp,
+            &advertised,
+            desired_effort,
+            ctx.thinking_effort_is_default,
+        ) {
             applied_config_options = Some(
                 apply_thinking_effort(
                     &mut agent.acp,
@@ -1396,11 +1395,64 @@ fn thinking_effort_option(config_options: &serde_json::Value) -> Option<&serde_j
     })
 }
 
+fn advertised_thinking_effort_values(config_options: &serde_json::Value) -> Vec<&str> {
+    thinking_effort_option(config_options)
+        .and_then(|option| option.get("options"))
+        .and_then(|value| value.as_array())
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| option.get("value").and_then(|value| value.as_str()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn should_skip_thinking_effort(
     config_options: &serde_json::Value,
+    desired: &str,
+    thinking_effort_is_default: bool,
+) -> Option<&'static str> {
+    if !thinking_effort_is_default {
+        return None;
+    }
+    if thinking_effort_option(config_options).is_none() {
+        return Some("option_missing");
+    }
+    if !advertised_thinking_effort_values(config_options).contains(&desired) {
+        return Some("value_unadvertised");
+    }
+    None
+}
+
+fn skip_unsupported_default_thinking_effort(
+    acp: &AcpClient,
+    config_options: &serde_json::Value,
+    desired: &str,
     thinking_effort_is_default: bool,
 ) -> bool {
-    thinking_effort_is_default && thinking_effort_option(config_options).is_none()
+    let Some(reason) =
+        should_skip_thinking_effort(config_options, desired, thinking_effort_is_default)
+    else {
+        return false;
+    };
+    let advertised_values = advertised_thinking_effort_values(config_options);
+    tracing::warn!(
+        target: "pool::effort",
+        configured_effort = desired,
+        reason,
+        advertised_values = ?advertised_values,
+        "skipping unsupported harness-default effort for the selected model"
+    );
+    acp.observe(
+        "effort_default_skipped",
+        serde_json::json!({
+            "configuredEffort": desired,
+            "reason": reason,
+            "advertisedValues": advertised_values,
+        }),
+    );
+    true
 }
 
 async fn apply_fast_mode(
@@ -7998,20 +8050,85 @@ mod tests {
     }
 
     #[test]
-    fn harness_default_effort_skips_only_when_the_option_is_missing() {
+    fn harness_default_effort_skips_missing_options_and_unadvertised_values() {
         let advertised = json!([{
             "id": "effort",
             "options": [{"value": "high"}]
         }]);
+        let value_mismatch = json!([{
+            "id": "effort",
+            "options": [{"value": "low"}, {"value": "medium"}]
+        }]);
         let missing = json!([]);
 
-        assert!(should_skip_thinking_effort(&missing, true));
-        assert!(!should_skip_thinking_effort(&missing, false));
-        assert!(!should_skip_thinking_effort(&advertised, true));
+        assert_eq!(
+            should_skip_thinking_effort(&missing, "high", true),
+            Some("option_missing")
+        );
+        assert_eq!(should_skip_thinking_effort(&missing, "high", false), None);
+        assert_eq!(should_skip_thinking_effort(&advertised, "high", true), None);
+        assert_eq!(
+            should_skip_thinking_effort(&value_mismatch, "high", true),
+            Some("value_unadvertised")
+        );
+        assert_eq!(
+            should_skip_thinking_effort(&value_mismatch, "high", false),
+            None
+        );
+        assert_eq!(
+            resolve_thinking_effort_config_id(&value_mismatch, "high")
+                .unwrap_err()
+                .to_string(),
+            "Protocol error: configured effort \"high\" is not advertised for the selected model"
+        );
+    }
 
-        // A harness default skips only the missing-option case. An advertised
-        // option with a bad value still reaches strict resolver validation.
-        assert!(resolve_thinking_effort_config_id(&advertised, "ultra").is_err());
+    #[tokio::test]
+    async fn harness_default_effort_skip_emits_reasoned_observations() {
+        let advertised = json!([{
+            "id": "effort",
+            "options": [{"value": "low"}, {"value": "medium"}]
+        }]);
+        let observer = observer::ObserverHandle::in_process();
+        let mut acp = AcpClient::spawn("cat", &[], &[], false)
+            .await
+            .expect("spawn inert test agent");
+        acp.set_observer(Some(observer.clone()), 0);
+
+        assert!(skip_unsupported_default_thinking_effort(
+            &acp,
+            &json!([]),
+            "high",
+            true
+        ));
+        assert!(skip_unsupported_default_thinking_effort(
+            &acp,
+            &advertised,
+            "high",
+            true
+        ));
+
+        let events = observer.snapshot();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "effort_default_skipped");
+        assert_eq!(
+            events[0].payload,
+            json!({
+                "configuredEffort": "high",
+                "reason": "option_missing",
+                "advertisedValues": [],
+            })
+        );
+        assert_eq!(events[1].kind, "effort_default_skipped");
+        assert_eq!(
+            events[1].payload,
+            json!({
+                "configuredEffort": "high",
+                "reason": "value_unadvertised",
+                "advertisedValues": ["low", "medium"],
+            })
+        );
+        acp.shutdown().await;
     }
 
     #[test]
