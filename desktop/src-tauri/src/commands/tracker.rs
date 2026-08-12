@@ -29,6 +29,24 @@ fn authorization_from_membership(event: &Event, managed_signer: &str) -> Tracker
     TrackerAuthorization::new(roles)
 }
 
+fn project_signer_from_membership(event: &Event) -> Result<String, String> {
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .find_map(|tag| {
+            if tag.first().map(String::as_str) != Some("p")
+                || tag.get(3).map(String::as_str) != Some("owner")
+            {
+                return None;
+            }
+            tag.get(1)
+                .and_then(|pubkey| PublicKey::parse(pubkey).ok())
+                .map(|pubkey| pubkey.to_hex())
+        })
+        .ok_or_else(|| "membership snapshot has no valid workspace owner row".to_string())
+}
+
 fn fold_tracker_context_values(
     raw_events: Vec<Value>,
     membership_event: Value,
@@ -57,6 +75,7 @@ fn fold_tracker_context_values(
     let managed_signer = PublicKey::parse(managed_signer)
         .map_err(|error| format!("invalid Tracker managed signer: {error}"))?
         .to_hex();
+    let project_signer = project_signer_from_membership(&membership_event)?;
     let authorization = authorization_from_membership(&membership_event, &managed_signer);
     let mut signed_events = Vec::new();
     let mut parsed_tracker_events = Vec::new();
@@ -85,7 +104,7 @@ fn fold_tracker_context_values(
 
     let folded = fold_tracker_events(parsed_tracker_events, &authorization);
     let projects =
-        fold_tracker_projects_at(signed_events, workspace_id, &managed_signer, snapshot_at);
+        fold_tracker_projects_at(signed_events, workspace_id, &project_signer, snapshot_at);
     diagnostics.extend(folded.diagnostics.iter().map(|diagnostic| {
         json!({"kind": format!("{diagnostic:?}").split_whitespace().next().unwrap_or("FoldDiagnostic"), "message": format!("{diagnostic:?}")})
     }));
@@ -181,14 +200,17 @@ mod tests {
     use buzz_sdk_pkg::tracker::{build_tracker_issue, IssueRoot, IssueStatus, Priority};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    fn membership(workspace_id: Uuid, member: &Keys, signer: &Keys) -> Event {
+    fn membership(workspace_id: Uuid, member: &Keys, owner: &Keys) -> Event {
+        let relay = Keys::generate();
         EventBuilder::new(Kind::Custom(39002), "")
             .tags([
                 Tag::parse(["d", workspace_id.to_string().as_str()]).expect("workspace tag"),
                 Tag::parse(["p", member.public_key().to_hex().as_str(), "", "member"])
                     .expect("member tag"),
+                Tag::parse(["p", owner.public_key().to_hex().as_str(), "", "owner"])
+                    .expect("owner tag"),
             ])
-            .sign_with_keys(signer)
+            .sign_with_keys(&relay)
             .expect("signed membership")
     }
 
@@ -198,7 +220,8 @@ mod tests {
         let issue_id = Uuid::new_v4();
         let project_id = Uuid::new_v4();
         let member = Keys::generate();
-        let membership = membership(workspace_id, &member, &Keys::generate());
+        let owner = Keys::generate();
+        let membership = membership(workspace_id, &member, &owner);
         let root = IssueRoot {
             v: 1,
             op: "create".to_string(),
@@ -239,7 +262,7 @@ mod tests {
             ],
         )
         .expect("project builder")
-        .sign_with_keys(&member)
+        .sign_with_keys(&owner)
         .expect("signed project");
         let snapshot_at = event.created_at.as_secs().max(project.created_at.as_secs()) + 1;
         let managed_signer = member.public_key().to_hex();
@@ -260,8 +283,12 @@ mod tests {
             [parsed],
             &authorization_from_membership(&membership, &managed_signer),
         );
-        let expected_projects =
-            fold_tracker_projects_at([project], workspace_id, &managed_signer, snapshot_at);
+        let expected_projects = fold_tracker_projects_at(
+            [project],
+            workspace_id,
+            &owner.public_key().to_hex(),
+            snapshot_at,
+        );
         let expected_issue = expected
             .issues
             .get(&(workspace_id, issue_id))
@@ -286,6 +313,71 @@ mod tests {
             expected_projects.projects[&project_id].name
         );
         assert_eq!(actual["diagnostics"], json!([]));
+    }
+
+    #[test]
+    fn fold_tracker_context_uses_the_workspace_owner_for_project_heads() {
+        let workspace_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let member_project_id = Uuid::new_v4();
+        let member = Keys::generate();
+        let owner = Keys::generate();
+        let membership = membership(workspace_id, &member, &owner);
+        let project = build_project_with_tags(
+            "",
+            vec![
+                Tag::parse(["d", "dispatch"]).expect("project slug"),
+                Tag::parse(["name", "Dispatch"]).expect("project name"),
+                Tag::parse(["buzz-project-id", project_id.to_string().as_str()])
+                    .expect("project id"),
+                Tag::parse(["buzz-workspace", workspace_id.to_string().as_str()])
+                    .expect("project workspace"),
+            ],
+        )
+        .expect("project builder")
+        .sign_with_keys(&owner)
+        .expect("signed project");
+        let member_project = build_project_with_tags(
+            "",
+            vec![
+                Tag::parse(["d", "member-project"]).expect("project slug"),
+                Tag::parse(["name", "Member project"]).expect("project name"),
+                Tag::parse(["buzz-project-id", member_project_id.to_string().as_str()])
+                    .expect("project id"),
+                Tag::parse(["buzz-workspace", workspace_id.to_string().as_str()])
+                    .expect("project workspace"),
+            ],
+        )
+        .expect("project builder")
+        .sign_with_keys(&member)
+        .expect("signed member project");
+        let snapshot_at = project
+            .created_at
+            .as_secs()
+            .max(member_project.created_at.as_secs())
+            + 1;
+
+        let actual = fold_tracker_context_values(
+            vec![
+                serde_json::to_value(&project).expect("project JSON"),
+                serde_json::to_value(&member_project).expect("member project JSON"),
+            ],
+            serde_json::to_value(&membership).expect("membership JSON"),
+            &workspace_id.to_string(),
+            &member.public_key().to_hex(),
+            snapshot_at,
+        )
+        .expect("fold context");
+
+        assert_eq!(actual["projects"].as_array().map(Vec::len), Some(1));
+        assert_eq!(actual["projects"][0]["projectId"], project_id.to_string());
+        assert_eq!(actual["projects"][0]["name"], "Dispatch");
+        let diagnostics = actual["diagnostics"].as_array().expect("diagnostics");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["kind"], "ProjectDiagnostic");
+        assert!(diagnostics[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("member-project")));
     }
 
     #[test]

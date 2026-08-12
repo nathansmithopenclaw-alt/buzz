@@ -587,7 +587,7 @@ pub enum ProjectDiagnostic {
         /// Conflicting project UUID.
         conflicting: Uuid,
     },
-    /// An upstream project lacks Tracker identity tags.
+    /// An upstream project is referenceable but not manageable by the workspace signer.
     UnmanagedCoordinate {
         /// NIP-MP coordinate that may still be referenced.
         coordinate: String,
@@ -1096,6 +1096,11 @@ pub fn fold_tracker_projects_at(
     });
     for project in parsed {
         if project.author_pubkey != managed_signer {
+            projection
+                .diagnostics
+                .push(ProjectDiagnostic::UnmanagedCoordinate {
+                    coordinate: format!("30621:{}:{}", project.author_pubkey, project.slug),
+                });
             continue;
         }
         if let Some(previous) = projection
@@ -3624,6 +3629,31 @@ mod tests {
             ProjectDiagnostic::UnmanagedCoordinate { coordinate }
                 if coordinate.ends_with(":upstream")
         )));
+    }
+
+    #[test]
+    fn project_fold_warns_for_a_tracker_head_not_authored_by_the_managed_signer() {
+        let managed_signer = Keys::generate();
+        let member = Keys::generate();
+        let workspace = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let foreign = tracker_project_head(&member, workspace, project_id, "member-project", 100);
+        let expected_coordinate = format!("30621:{}:member-project", member.public_key().to_hex());
+
+        let projection = fold_tracker_projects_at(
+            [foreign],
+            workspace,
+            &managed_signer.public_key().to_hex(),
+            100,
+        );
+
+        assert!(projection.projects.is_empty());
+        assert_eq!(
+            projection.diagnostics,
+            vec![ProjectDiagnostic::UnmanagedCoordinate {
+                coordinate: expected_coordinate,
+            }]
+        );
     }
 
     #[test]
