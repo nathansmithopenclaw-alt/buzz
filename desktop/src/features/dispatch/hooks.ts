@@ -158,12 +158,17 @@ export function useDispatchContext(workspaceId: string | null) {
         () => setRevision((value) => value + 1),
       ),
     ]).then((values) => {
-      if (cancelled) values.forEach((dispose) => dispose());
-      else disposers = values;
+      if (cancelled) {
+        values.forEach((dispose) => {
+          dispose();
+        });
+      } else disposers = values;
     });
     return () => {
       cancelled = true;
-      disposers.forEach((dispose) => dispose());
+      disposers.forEach((dispose) => {
+        dispose();
+      });
     };
   }, [workspaceId]);
   const data = query.data ?? {
