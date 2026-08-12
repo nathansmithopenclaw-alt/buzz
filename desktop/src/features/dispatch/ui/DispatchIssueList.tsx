@@ -19,7 +19,7 @@ function PriorityMark({ priority }: { priority: DispatchIssue["priority"] }) {
     return (
       <span
         aria-label="P0 priority"
-        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] bg-destructive text-[10px] font-bold text-destructive-foreground"
+        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] bg-destructive text-3xs font-bold text-destructive-foreground"
         role="img"
       >
         !
@@ -73,7 +73,7 @@ function AssigneeAvatar({
       {profile?.avatarUrl ? (
         <AvatarImage alt="" src={profile.avatarUrl} />
       ) : null}
-      <AvatarFallback className="text-[10px] font-semibold">
+      <AvatarFallback className="text-2xs font-semibold">
         {label.slice(0, 1).toUpperCase()}
       </AvatarFallback>
     </Avatar>

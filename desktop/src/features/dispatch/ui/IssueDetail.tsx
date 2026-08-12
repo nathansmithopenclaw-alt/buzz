@@ -94,7 +94,7 @@ function ProfileAvatar({
       {profile?.avatarUrl ? (
         <AvatarImage alt="" src={profile.avatarUrl} />
       ) : null}
-      <AvatarFallback className="text-[10px] font-semibold">
+      <AvatarFallback className="text-2xs font-semibold">
         {label.slice(0, 1).toUpperCase()}
       </AvatarFallback>
     </Avatar>
