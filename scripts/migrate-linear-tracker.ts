@@ -155,7 +155,19 @@ function sourceUrl(issue) {
   return issue.url ?? issue.source_url ?? null;
 }
 
-function relationRecords(issues) {
+// Tracker relations are typed and directed (M12 removed undirected
+// "related"), so only source types with a canonical mapping can migrate.
+// Everything else is dropped explicitly and surfaced in the plan report.
+const RELATION_TYPE_MAP = {
+  blocks: "blocks",
+  blockedBy: "blocked_by",
+  duplicate: "duplicate_of",
+  duplicateOf: "duplicate_of",
+  parent: "parent_of",
+  child: "child_of",
+};
+
+function allRelationRecords(issues) {
   return issues.flatMap((issue) =>
     nodes(issue.relations).map((relation) => ({
       source: issue.id,
@@ -163,6 +175,14 @@ function relationRecords(issues) {
       type: relation.type ?? relation.relation_type,
     })),
   );
+}
+
+function relationRecords(issues) {
+  return allRelationRecords(issues).filter((relation) => RELATION_TYPE_MAP[relation.type] !== undefined);
+}
+
+function droppedRelationRecords(issues) {
+  return allRelationRecords(issues).filter((relation) => RELATION_TYPE_MAP[relation.type] === undefined);
 }
 
 function linkRecords(issues) {
@@ -372,6 +392,7 @@ function buildPlan(flags) {
     create_relations: relations.length,
     create_links: links.length + Object.keys(pilotMap).length,
   };
+  const droppedRelations = droppedRelationRecords(source.issues);
   const plan = {
     mode: "plan",
     importer_version: IMPORTER_VERSION,
@@ -643,8 +664,7 @@ function applyPlan(flags, context) {
   for (const relation of relationRecords(context.source.issues)) {
     const key = `relation:${relation.source}:${relation.type}:${relation.target}`;
     if (checkpointValue.completed[key]) continue;
-    const typeMap = { blocks: "blocks", blockedBy: "blocked_by", duplicate: "duplicate_of", duplicateOf: "duplicate_of", parent: "parent_of", child: "child_of" };
-    const type = typeMap[relation.type] ?? relation.type;
+    const type = RELATION_TYPE_MAP[relation.type];
     const requestId = uuidV5(LINEAR_NAMESPACE, key);
     const receipt = buzz([
       "track", "relate", "--workspace", workspace,
