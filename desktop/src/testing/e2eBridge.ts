@@ -13034,6 +13034,83 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleGetEvent>[0],
           activeConfig,
         );
+      case "build_tracker_revision_event": {
+        const args = payload as {
+          streamId: string;
+          revision: {
+            issue_id: string;
+            root_event: string;
+            parent_event: string;
+            revision: number;
+            request_id: string | null;
+            set: {
+              status?: string;
+              priority?: string;
+              assignee?: string;
+            };
+            clear: string[];
+            reason: string | null;
+          };
+        };
+        if (
+          args.revision.set.status &&
+          args.revision.reason !== null &&
+          !args.revision.reason.trim()
+        ) {
+          throw new Error("status change reason must be non-empty when present");
+        }
+        const tags = [
+          ["h", args.streamId],
+          ["d", args.revision.issue_id],
+          ["t", "buzz-tracker"],
+          ["e", args.revision.root_event, "", "root"],
+          ["e", args.revision.parent_event, "", "reply"],
+          ["revision", String(args.revision.revision)],
+        ];
+        if (args.revision.request_id) {
+          tags.push(["request", args.revision.request_id]);
+        }
+        if (args.revision.set.status) {
+          tags.push(["status", args.revision.set.status]);
+        }
+        if (args.revision.set.priority) {
+          tags.push(["priority", args.revision.set.priority]);
+        }
+        if (args.revision.set.assignee) {
+          tags.push(["p", args.revision.set.assignee, "", "assignee"]);
+        }
+        for (const field of args.revision.clear) tags.push(["clear", field]);
+        return {
+          kind: 40021,
+          content: JSON.stringify(args.revision),
+          createdAt: Math.floor(Date.now() / 1_000),
+          tags,
+        };
+      }
+      case "build_tracker_comment_event": {
+        const args = payload as {
+          streamId: string;
+          rootEvent: string;
+          parentEvent: string | null;
+          comment: { issue_id: string; request_id: string | null };
+          mentions: string[];
+        };
+        const tags = [
+          ["h", args.streamId],
+          ["d", args.comment.issue_id],
+          ["t", "buzz-tracker"],
+          ["e", args.rootEvent, "", "root"],
+        ];
+        if (args.parentEvent) tags.push(["e", args.parentEvent, "", "reply"]);
+        if (args.comment.request_id) tags.push(["request", args.comment.request_id]);
+        for (const mention of args.mentions) tags.push(["p", mention]);
+        return {
+          kind: 40022,
+          content: JSON.stringify(args.comment),
+          createdAt: Math.floor(Date.now() / 1_000),
+          tags,
+        };
+      }
       case "sign_event":
         window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
           content: (payload as { content: string }).content,

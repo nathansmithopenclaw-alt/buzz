@@ -647,6 +647,8 @@ export async function signRelayEvent(input: {
   content: string;
   createdAt?: number;
   tags: string[][];
+  /** Preserve semantic p tags that reference the signer itself. */
+  allowSelfTagging?: boolean;
 }): Promise<RelayEvent> {
   const eventJson = await invokeTauri<string>("sign_event", input);
   return JSON.parse(eventJson) as RelayEvent;

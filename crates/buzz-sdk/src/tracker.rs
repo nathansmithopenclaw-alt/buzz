@@ -3048,10 +3048,8 @@ mod tests {
             panic!("fixture revision")
         };
         payload.reason = None;
-        let (state, diagnostics) = current(vec![
-            root(stream, issue, "root", 1, MEMBER),
-            absent.clone(),
-        ]);
+        let (state, diagnostics) =
+            current(vec![root(stream, issue, "root", 1, MEMBER), absent.clone()]);
         assert_eq!(state.status, IssueStatus::Todo);
         assert!(diagnostics.is_empty());
 

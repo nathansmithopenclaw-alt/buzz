@@ -682,6 +682,8 @@ pub fn run() {
             connect_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,
+            build_tracker_revision_event,
+            build_tracker_comment_event,
             sign_nostr_identity_binding,
             sign_out,
             decrypt_observer_event,
