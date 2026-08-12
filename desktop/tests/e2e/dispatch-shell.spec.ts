@@ -102,6 +102,12 @@ for (const theme of ["catppuccin-latte", "catppuccin-mocha"] as const) {
                 priority: "P2",
               }),
               makeIssue({
+                identifier: "SMI-309",
+                title: "Todo remains visible on the board",
+                status: "todo",
+                priority: "P3",
+              }),
+              makeIssue({
                 identifier: "SMI-8",
                 title: "Wake refactor complete",
                 status: "done",
@@ -128,7 +134,19 @@ for (const theme of ["catppuccin-latte", "catppuccin-mocha"] as const) {
       workspaceId,
     );
     await expect(page.getByTestId("dispatch-board")).toBeVisible();
-    await expect(page.getByTestId("dispatch-issue-card")).toHaveCount(5);
+    await expect(page.getByTestId("dispatch-issue-card")).toHaveCount(6);
+    await expect(page.getByTestId("dispatch-group-todo")).toBeVisible();
+    await page.getByTestId("dispatch-filter-status").selectOption("todo");
+    await expect(page.getByTestId("dispatch-issue-card")).toHaveCount(1);
+    await expect(
+      page.getByText("Todo remains visible on the board"),
+    ).toBeVisible();
+    await page.getByTestId("dispatch-filter-query").fill("no such issue");
+    await expect(
+      page.getByText("No issues match these filters."),
+    ).toBeVisible();
+    await page.getByTestId("dispatch-filter-query").fill("");
+    await page.getByTestId("dispatch-filter-status").selectOption("all");
     await expect(
       page.getByTestId("dispatch-diagnostics-warning"),
     ).toBeVisible();
@@ -148,7 +166,7 @@ for (const theme of ["catppuccin-latte", "catppuccin-mocha"] as const) {
     await expect(page.getByTestId("dispatch-group-P1")).toBeVisible();
 
     await page.getByTestId("dispatch-tab-list").click();
-    await expect(page.getByTestId("dispatch-list-row")).toHaveCount(5);
+    await expect(page.getByTestId("dispatch-list-row")).toHaveCount(6);
     const longIdentifierRow = page
       .getByTestId("dispatch-list-row")
       .filter({ hasText: longIdentifier });

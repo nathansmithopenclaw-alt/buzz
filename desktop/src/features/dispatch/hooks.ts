@@ -5,12 +5,20 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 import { foldTrackerContext } from "@/shared/api/tauri";
+import { createTrailingDebounce } from "@/shared/lib/trailingDebounce";
 import type { RelayEvent } from "@/shared/api/types";
 import type { DispatchContext, DispatchWorkspace } from "./types";
 
 const PAGE_SIZE = 500;
 const TRACKER_KINDS = [40020, 40021, 40022, 40025];
 const PROJECT_KIND = 30621;
+const LIVE_REFRESH_DEBOUNCE_MS = 250;
+
+function asError(value: unknown): Error {
+  return value instanceof Error
+    ? value
+    : new Error(`Dispatch live subscription failed: ${String(value)}`);
+}
 
 async function fetchExhaustively(
   filter: Omit<RelaySubscriptionFilter, "limit" | "until">,
@@ -133,6 +141,7 @@ export function useDispatchWorkspaces() {
 export function useDispatchContext(workspaceId: string | null) {
   const identity = useIdentityQuery();
   const [revision, setRevision] = React.useState(0);
+  const [liveError, setLiveError] = React.useState<Error | null>(null);
   const query = useQuery({
     queryKey: [
       "dispatch",
@@ -145,30 +154,43 @@ export function useDispatchContext(workspaceId: string | null) {
     enabled: Boolean(workspaceId && identity.data?.pubkey),
   });
   React.useEffect(() => {
+    setLiveError(null);
     if (!workspaceId) return;
-    let disposers: Array<() => void> = [];
+    const disposers = new Set<() => void>();
     let cancelled = false;
-    void Promise.all([
+    const refresh = createTrailingDebounce(
+      () => setRevision((value) => value + 1),
+      LIVE_REFRESH_DEBOUNCE_MS,
+    );
+    const capture = (subscription: Promise<() => void>) => {
+      void subscription
+        .then((dispose) => {
+          if (cancelled) dispose();
+          else disposers.add(dispose);
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) setLiveError(asError(error));
+        });
+    };
+    capture(
       relayClient.subscribeLive(
         { kinds: TRACKER_KINDS, "#h": [workspaceId], limit: 0 },
-        () => setRevision((value) => value + 1),
+        refresh.trigger,
       ),
+    );
+    capture(
       relayClient.subscribeLive(
         { kinds: [PROJECT_KIND], "#buzz-workspace": [workspaceId], limit: 0 },
-        () => setRevision((value) => value + 1),
+        refresh.trigger,
       ),
-    ]).then((values) => {
-      if (cancelled) {
-        values.forEach((dispose) => {
-          dispose();
-        });
-      } else disposers = values;
-    });
+    );
     return () => {
       cancelled = true;
+      refresh.cancel();
       disposers.forEach((dispose) => {
         dispose();
       });
+      disposers.clear();
     };
   }, [workspaceId]);
   const data = query.data ?? {
@@ -180,7 +202,7 @@ export function useDispatchContext(workspaceId: string | null) {
   return {
     ...data,
     isLoading: identity.isLoading || query.isLoading,
-    error: (identity.error ?? query.error) as Error | null,
+    error: (identity.error ?? query.error ?? liveError) as Error | null,
     refresh: () => void query.refetch(),
   };
 }

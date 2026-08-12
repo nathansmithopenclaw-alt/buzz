@@ -406,14 +406,23 @@ export function DispatchBoardPanel({
   const grouped = groupDispatchIssues(filtered, groupBy, projects, profiles);
   const groups =
     groupBy === "status"
-      ? BOARD_STATUSES.map(
-          (status) =>
-            grouped.find((group) => group.id === status) ?? {
-              id: status,
-              label: statusLabel(status),
-              issues: [],
-            },
-        )
+      ? filtered.length === 0
+        ? []
+        : [
+            ...BOARD_STATUSES.map(
+              (status) =>
+                grouped.find((group) => group.id === status) ?? {
+                  id: status,
+                  label: statusLabel(status),
+                  issues: [],
+                },
+            ),
+            ...grouped.filter(
+              (group) =>
+                !BOARD_STATUSES.includes(group.id as DispatchStatus) &&
+                group.issues.length > 0,
+            ),
+          ]
       : grouped;
   const blocked = blockedIssueIds(issues);
   return (
