@@ -1991,12 +1991,11 @@ mod tests {
                 .await
                 .expect("read community-host table");
         assert_eq!(community_hosts.as_deref(), Some("community_hosts"));
-        let routing_is_operator_global: bool = sqlx::query_scalar(
-            "SELECT community_write_fence_excluded_table('community_hosts')",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("read community-host deletion taxonomy");
+        let routing_is_operator_global: bool =
+            sqlx::query_scalar("SELECT community_write_fence_excluded_table('community_hosts')")
+                .fetch_one(pool)
+                .await
+                .expect("read community-host deletion taxonomy");
         assert!(
             routing_is_operator_global,
             "community_hosts must not be treated as tenant-owned deletion inventory"
