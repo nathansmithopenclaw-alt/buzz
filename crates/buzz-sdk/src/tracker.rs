@@ -797,11 +797,11 @@ pub enum FoldDiagnostic {
         /// Conflicting issue UUID.
         conflicting: Uuid,
     },
-    /// A valid revision did not win canonical-tip selection.
+    /// A valid revision lies outside the canonical tip's ancestor chain.
     LosingBranch {
         /// Issue UUID.
         issue_id: Uuid,
-        /// Losing revision event ID.
+        /// Off-chain revision event ID.
         event_id: String,
         /// Winning canonical tip event ID.
         canonical_tip: String,
@@ -1466,8 +1466,12 @@ fn fold_one_issue(
         .iter()
         .max_by_key(|(event, _)| (event.created_at, event.event_id.as_str()));
     let mut projection = if let Some((winner_event, state)) = winner {
+        let canonical_chain: HashSet<&str> = revision_chain(root_event, winner_event, &revisions)
+            .into_iter()
+            .map(|event| event.event_id.as_str())
+            .collect();
         for (event, _) in &valid {
-            if event.event_id != winner_event.event_id {
+            if !canonical_chain.contains(event.event_id.as_str()) {
                 result.diagnostics.push(FoldDiagnostic::LosingBranch {
                     issue_id: key.1,
                     event_id: event.event_id.clone(),
@@ -1527,23 +1531,7 @@ fn canonical_activity(
     let Some((winner_event, _)) = winner else {
         return activity;
     };
-    let mut chain = Vec::new();
-    let mut current = *winner_event;
-    loop {
-        chain.push(current);
-        let TrackerPayload::Revision(revision) = &current.payload else {
-            break;
-        };
-        if revision.parent_event == root_event.event_id {
-            break;
-        }
-        let Some(parent) = revisions.get(&revision.parent_event) else {
-            break;
-        };
-        current = parent;
-    }
-    chain.reverse();
-    for event in chain {
+    for event in revision_chain(root_event, winner_event, revisions) {
         let TrackerPayload::Revision(revision) = &event.payload else {
             continue;
         };
@@ -1571,6 +1559,30 @@ fn canonical_activity(
         });
     }
     activity
+}
+
+fn revision_chain<'a>(
+    root_event: &TrackerEvent,
+    tip: &'a TrackerEvent,
+    revisions: &BTreeMap<String, &'a TrackerEvent>,
+) -> Vec<&'a TrackerEvent> {
+    let mut chain = Vec::new();
+    let mut current = tip;
+    loop {
+        chain.push(current);
+        let TrackerPayload::Revision(revision) = &current.payload else {
+            break;
+        };
+        if revision.parent_event == root_event.event_id {
+            break;
+        }
+        let Some(parent) = revisions.get(&revision.parent_event) else {
+            break;
+        };
+        current = parent;
+    }
+    chain.reverse();
+    chain
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2952,6 +2964,7 @@ mod tests {
             Some(IssueStatus::Triage)
         );
         assert_eq!(activity[2].after.status, IssueStatus::InProgress);
+        assert!(folded.diagnostics.is_empty());
     }
 
     #[test]
@@ -2975,6 +2988,50 @@ mod tests {
         let first = current(vec![root_event.clone(), one.clone()]).0;
         let second = current(vec![one.clone(), root_event, one]).0;
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn true_fork_flags_loser_with_canonical_tip() {
+        let stream = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let loser = revision(
+            stream,
+            issue,
+            "loser",
+            "root",
+            1,
+            2,
+            MEMBER,
+            RevisionSet {
+                title: Some("losing branch".into()),
+                ..RevisionSet::default()
+            },
+        );
+        let winner = revision(
+            stream,
+            issue,
+            "winner",
+            "root",
+            1,
+            3,
+            MEMBER,
+            RevisionSet {
+                title: Some("winning branch".into()),
+                ..RevisionSet::default()
+            },
+        );
+        let (state, diagnostics) =
+            current(vec![root(stream, issue, "root", 1, MEMBER), loser, winner]);
+
+        assert_eq!(state.tip_event, "winner");
+        assert_eq!(
+            diagnostics,
+            [FoldDiagnostic::LosingBranch {
+                issue_id: issue,
+                event_id: "loser".into(),
+                canonical_tip: "winner".into(),
+            }]
+        );
     }
 
     #[test]
@@ -3020,7 +3077,7 @@ mod tests {
                 ..RevisionSet::default()
             },
         );
-        let (state, _) = current(vec![
+        let (state, diagnostics) = current(vec![
             root(stream, issue, "root", 1, MEMBER),
             deep_one,
             deep_two,
@@ -3028,6 +3085,21 @@ mod tests {
         ]);
         assert_eq!(state.tip_event, "recent");
         assert_eq!(state.assignee.as_deref(), Some(MAINTAINER));
+        assert_eq!(
+            diagnostics,
+            [
+                FoldDiagnostic::LosingBranch {
+                    issue_id: issue,
+                    event_id: "deep-one".into(),
+                    canonical_tip: "recent".into(),
+                },
+                FoldDiagnostic::LosingBranch {
+                    issue_id: issue,
+                    event_id: "deep-two".into(),
+                    canonical_tip: "recent".into(),
+                },
+            ]
+        );
     }
 
     #[test]
