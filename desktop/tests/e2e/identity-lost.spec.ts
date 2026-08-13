@@ -179,12 +179,17 @@ test("phone recovery uses the desktop pairing card semantics", async ({
     "animation-name",
     "buzz-qr-cell-reveal",
   );
-  const qrBox = await qrContainer.boundingBox();
-  const copyBox = await copyButton.boundingBox();
-  expect(qrBox).not.toBeNull();
-  expect(copyBox).not.toBeNull();
-  expect(Math.abs((copyBox?.x ?? 0) - (qrBox?.x ?? 0))).toBeLessThan(1);
-  expect(Math.abs((copyBox?.width ?? 0) - (qrBox?.width ?? 0))).toBeLessThan(1);
+  await expect
+    .poll(async () => {
+      const qrBox = await qrContainer.boundingBox();
+      const copyBox = await copyButton.boundingBox();
+      if (!qrBox || !copyBox) return Number.POSITIVE_INFINITY;
+      return Math.max(
+        Math.abs(copyBox.x - qrBox.x),
+        Math.abs(copyBox.width - qrBox.width),
+      );
+    })
+    .toBeLessThan(1);
 
   await page.evaluate(async () => {
     await window.__TAURI_INTERNALS__?.invoke?.("plugin:event|emit", {

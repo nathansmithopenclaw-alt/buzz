@@ -154,6 +154,18 @@ async function startAnchorDriftSampler(
 }
 
 async function stopAnchorDriftSampler(timeline: Locator) {
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __TIMELINE_NO_SHIFT_PROBE__?: { samples: number };
+            }
+          ).__TIMELINE_NO_SHIFT_PROBE__?.samples ?? 0,
+      ),
+    )
+    .toBeGreaterThan(0);
   return timeline.evaluate((element) => {
     const win = window as typeof window & {
       __TIMELINE_NO_SHIFT_PROBE__?: {
@@ -488,12 +500,21 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
 
   await expect
     .poll(
-      async () =>
-        page.evaluate(
+      async () => {
+        const inflight = await page.evaluate(
           () =>
             (window as unknown as { __CHANNEL_WINDOW_INFLIGHT__?: number })
               .__CHANNEL_WINDOW_INFLIGHT__ ?? 0,
-        ),
+        );
+        if (inflight === 0) {
+          await timeline.evaluate((element) => {
+            const scroller = element as HTMLDivElement;
+            scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
+            scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+          });
+        }
+        return inflight;
+      },
       { timeout: 5_000 },
     )
     .toBeGreaterThan(0);

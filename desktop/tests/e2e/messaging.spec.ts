@@ -2105,7 +2105,13 @@ test("shows your avatar on your own message when profile avatar is set", async (
   await page.goto("/");
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
+  await expect(
+    page.getByTestId("profile-avatar-editor-shell"),
+  ).not.toHaveAttribute("inert");
   await page.getByTestId("profile-avatar-url").fill(avatarUrl);
+  await expect(
+    page.getByTestId("profile-avatar-preview-image"),
+  ).toHaveAttribute("src", avatarUrl);
   await page.getByTestId("profile-avatar-done").click();
   await expect(page.getByTestId("profile-avatar-editor-shell")).toHaveCount(0);
   await page.getByTestId("settings-back-to-app").click();
