@@ -4,7 +4,7 @@
 //! Config file (TOML) for complex subscription rules.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -799,8 +799,13 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
 /// The env var is forwarded by the `@agentclientprotocol/codex-acp` adapter (1.x) as a
 /// session-level config override (via `CODEX_CONFIG` → `thread/start config`), which is
 /// equivalent to the TOML override `sandbox_workspace_write.network_access = true`.
-/// That sets `NetworkSandboxPolicy::Enabled`, causing the Seatbelt policy to include
-/// `(allow network-outbound)` — full outbound TCP/TLS at the OS level.
+/// That is what MCP subprocesses (including `buzz-cli`) read.
+///
+/// It does **not** change the per-turn sandbox Codex ACP 1.1.7 applies in
+/// `sendPrompt`: `AgentMode.Agent` hardcodes `networkAccess: false` and
+/// `approvalPolicy: "on-request"`. Flipping that would require
+/// `INITIAL_AGENT_MODE=agent-full-access` (approval=`never`) — a broader
+/// policy change than Nathan's 08-11 `auto_review` stays-on decision.
 ///
 /// URL validation is preserved as a guard: injection is skipped when the relay URL cannot
 /// be parsed, avoiding accidental sandbox widening for malformed configs.
@@ -837,6 +842,48 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
         "CODEX_CONFIG".into(),
         "{\"sandbox_workspace_write\":{\"network_access\":true}}".into(),
     ))
+}
+
+/// Exact argv prefix Codex execpolicy treats as `buzz messages send`.
+///
+/// Broader prefixes (`["/bin/zsh", "-lc"]`, `["buzz"]`) would unmuzzle
+/// commands Nathan's 08-11 decision left under `auto_review`. Do not widen.
+pub const CODEX_RELAY_SEND_PREFIX: &[&str] = &["buzz", "messages", "send"];
+
+/// Filename written under `{workspace}/.codex/rules/` so a Codex session
+/// whose cwd is the workspace loads this allowlist. Content is exact-prefix
+/// only; `auto_review` stays on for every other command.
+pub const CODEX_RELAY_SEND_RULES_FILE: &str = "buzz-acp-relay-send.rules";
+
+/// Starlark execpolicy that allows only `buzz messages send …`.
+pub fn codex_relay_send_execpolicy() -> String {
+    format!(
+        "prefix_rule(pattern=[\"{}\"], decision=\"allow\", justification=\"owner-authorized Smith Crafts Buzz relay reporting\")\n",
+        CODEX_RELAY_SEND_PREFIX.join("\", \"")
+    )
+}
+
+/// True when `tokens` is `buzz messages send` plus optional arguments.
+#[allow(dead_code)] // public matcher for the installed execpolicy; used by tests
+pub fn command_is_relay_send(tokens: &[&str]) -> bool {
+    tokens.starts_with(CODEX_RELAY_SEND_PREFIX)
+}
+
+/// Install the exact-prefix allowlist into `workspace/.codex/rules/`.
+///
+/// Idempotent: rewritten only when content differs. Non-Codex callers should
+/// not invoke this. Failures are returned so the spawn path can warn without
+/// aborting the agent.
+pub fn install_codex_relay_send_allowlist(workspace: &Path) -> std::io::Result<PathBuf> {
+    let dir = workspace.join(".codex").join("rules");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(CODEX_RELAY_SEND_RULES_FILE);
+    let desired = codex_relay_send_execpolicy();
+    match std::fs::read_to_string(&path) {
+        Ok(existing) if existing == desired => {}
+        _ => std::fs::write(&path, desired)?,
+    }
+    Ok(path)
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -1833,6 +1880,62 @@ mod tests {
             val.contains("\"network_access\":true"),
             "JSON must set network_access=true"
         );
+    }
+
+    #[test]
+    fn relay_send_allowlist_matches_only_exact_prefix() {
+        assert!(command_is_relay_send(&[
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "53f97470-aab9-43f7-87c0-8506c7208d73",
+            "--content",
+            "hi",
+        ]));
+        assert!(command_is_relay_send(&["buzz", "messages", "send"]));
+        assert!(!command_is_relay_send(&[
+            "buzz",
+            "messages",
+            "get",
+            "--channel",
+            "x"
+        ]));
+        assert!(!command_is_relay_send(&["buzz", "repos", "create"]));
+        assert!(!command_is_relay_send(&["rm", "-rf", "/"]));
+        // Live Codex wraps via `/bin/zsh -lc '…'`. Allowing that wrapper would
+        // unmuzzle every shell command; the allowlist must not match it.
+        assert!(!command_is_relay_send(&[
+            "/bin/zsh",
+            "-lc",
+            "buzz messages send --channel x --content y",
+        ]));
+    }
+
+    #[test]
+    fn relay_send_execpolicy_is_exact_prefix_starlark() {
+        let policy = codex_relay_send_execpolicy();
+        assert!(policy.contains("pattern=[\"buzz\", \"messages\", \"send\"]"));
+        assert!(policy.contains("decision=\"allow\""));
+        assert!(!policy.contains("/bin/zsh"));
+        assert!(!policy.contains("approval_policy"));
+        assert!(!policy.contains("approvals_reviewer"));
+    }
+
+    #[test]
+    fn install_relay_send_allowlist_is_idempotent() {
+        let dir =
+            std::env::temp_dir().join(format!("buzz-acp-relay-send-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = install_codex_relay_send_allowlist(&dir).unwrap();
+        let second = install_codex_relay_send_allowlist(&dir).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            codex_relay_send_execpolicy()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
