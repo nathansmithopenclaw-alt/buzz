@@ -657,6 +657,10 @@ fn request_rejection_message(sub_id: Option<&str>, reason: &str) -> String {
     }
 }
 
+fn admission_retry_seconds(reset_in_secs: u64) -> u64 {
+    reset_in_secs.max(1)
+}
+
 async fn enforce_ws_admission(
     msg: &ClientMessage,
     conn: &ConnectionState,
@@ -726,6 +730,7 @@ fn send_admission_result(
     match result {
         Ok(()) => true,
         Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
+            let reset_in_secs = admission_retry_seconds(reset_in_secs);
             metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota").increment(1);
             conn.send(request_rejection_message(
                 sub_id,
@@ -860,6 +865,12 @@ mod tests {
         let notice: serde_json::Value =
             serde_json::from_str(&request_rejection_message(None, reason)).expect("parse NOTICE");
         assert_eq!(notice, serde_json::json!(["NOTICE", reason]));
+    }
+
+    #[test]
+    fn admission_rejection_never_emits_a_zero_second_retry_hint() {
+        assert_eq!(admission_retry_seconds(0), 1);
+        assert_eq!(admission_retry_seconds(7), 7);
     }
 
     #[tokio::test]

@@ -28,6 +28,43 @@ test("Dispatch experiment enables the sidebar route shell", async ({
   ).toBeVisible();
 });
 
+test("Dispatch shows a retrying state and recovers from a rate-limited history page", async ({
+  page,
+}) => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  await installMockBridge(
+    page,
+    {
+      dispatchHistoryRateLimitCount: 1,
+      dispatch: {
+        workspace: { id: workspaceId, name: "Dispatch Test" },
+        context: {
+          issues: [],
+          activity: [],
+          comments: [],
+          linkedTasks: [],
+          projects: [],
+          diagnostics: [],
+          taskDiagnostics: [],
+          viewerRole: "maintainer",
+          sectionErrors: { comments: null, projects: null, tasks: null },
+          snapshotAt: new Date().toISOString(),
+        },
+      },
+    },
+    { seedPreviewFeatures: true },
+  );
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-dispatch-view").click();
+
+  await expect(page.getByTestId("dispatch-rate-limit-retrying")).toBeVisible();
+  await expect(
+    page.getByTestId("dispatch-rate-limit-retrying-loading"),
+  ).toContainText("retrying Tracker history");
+  await expect(page.getByTestId("dispatch-rate-limit-retrying")).toHaveCount(0);
+  await expect(page.getByTestId("dispatch-new-issue")).toBeEnabled();
+});
+
 test("New Issue creates a revision-zero issue visible in Board, List, and Triage", async ({
   page,
 }) => {
