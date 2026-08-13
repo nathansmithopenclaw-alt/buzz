@@ -56,13 +56,6 @@ fn watch_key(pubkey: &str) -> String {
     pubkey.to_ascii_lowercase()
 }
 
-#[cfg(test)]
-pub fn reset_crash_watches_for_tests() {
-    if let Ok(mut watches) = crash_watches().lock() {
-        watches.clear();
-    }
-}
-
 /// Record that an automatic (inbound / apply-update) spawn just happened.
 pub fn note_automatic_spawn(pubkey: &str) {
     if let Ok(mut watches) = crash_watches().lock() {
@@ -205,9 +198,20 @@ mod tests {
     use super::*;
     use crate::managed_agents::BackendKind;
 
-    fn record() -> ManagedAgentRecord {
+    /// 64-char hex unique per tag so parallel tests do not share crash-watch
+    /// entries. Distinct keys isolate `CRASH_WATCHES` without a global reset.
+    fn isolated_pubkey(tag: &str) -> String {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in tag.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        format!("{hash:016x}{}", "00".repeat(24))
+    }
+
+    fn record(tag: &str) -> ManagedAgentRecord {
         let mut record: ManagedAgentRecord = serde_json::from_value(serde_json::json!({
-            "pubkey": "aa".repeat(32),
+            "pubkey": isolated_pubkey(tag),
             "name": "Probe",
             "relay_url": "",
             "acp_command": "",
@@ -248,9 +252,8 @@ mod tests {
 
     #[test]
     fn inbound_spawns_stopped_active_owner_mention() {
-        reset_crash_watches_for_tests();
         let decision = decide_inbound_respawn(
-            &record(),
+            &record("inbound_spawns_stopped_active_owner_mention"),
             &owner(),
             Some(&owner()),
             &siblings(),
@@ -262,8 +265,7 @@ mod tests {
 
     #[test]
     fn inbound_skips_archived() {
-        reset_crash_watches_for_tests();
-        let mut archived = record();
+        let mut archived = record("inbound_skips_archived");
         archived.is_active = false;
         let decision = decide_inbound_respawn(
             &archived,
@@ -278,8 +280,7 @@ mod tests {
 
     #[test]
     fn inbound_skips_provider_backend() {
-        reset_crash_watches_for_tests();
-        let mut remote = record();
+        let mut remote = record("inbound_skips_provider_backend");
         remote.backend = BackendKind::Provider {
             id: "remote".into(),
             config: serde_json::json!({}),
@@ -291,9 +292,8 @@ mod tests {
 
     #[test]
     fn inbound_skips_already_running() {
-        reset_crash_watches_for_tests();
         let decision = decide_inbound_respawn(
-            &record(),
+            &record("inbound_skips_already_running"),
             &owner(),
             Some(&owner()),
             &siblings(),
@@ -305,8 +305,7 @@ mod tests {
 
     #[test]
     fn inbound_skips_self_authored() {
-        reset_crash_watches_for_tests();
-        let agent = record();
+        let agent = record("inbound_skips_self_authored");
         let decision = decide_inbound_respawn(
             &agent,
             &agent.pubkey,
@@ -320,9 +319,8 @@ mod tests {
 
     #[test]
     fn inbound_owner_only_drops_stranger() {
-        reset_crash_watches_for_tests();
         let decision = decide_inbound_respawn(
-            &record(),
+            &record("inbound_owner_only_drops_stranger"),
             &stranger(),
             Some(&owner()),
             &siblings(),
@@ -334,9 +332,8 @@ mod tests {
 
     #[test]
     fn inbound_owner_only_accepts_sibling() {
-        reset_crash_watches_for_tests();
         let decision = decide_inbound_respawn(
-            &record(),
+            &record("inbound_owner_only_accepts_sibling"),
             &sibling(),
             Some(&owner()),
             &siblings(),
@@ -348,8 +345,7 @@ mod tests {
 
     #[test]
     fn inbound_allowlist_accepts_listed_stranger() {
-        reset_crash_watches_for_tests();
-        let mut listed = record();
+        let mut listed = record("inbound_allowlist_accepts_listed_stranger");
         listed.respond_to = RespondTo::Allowlist;
         listed.respond_to_allowlist = vec![stranger()];
         let decision = decide_inbound_respawn(
@@ -365,8 +361,7 @@ mod tests {
 
     #[test]
     fn inbound_dm_ignores_anyone_and_allowlist() {
-        reset_crash_watches_for_tests();
-        let mut anyone = record();
+        let mut anyone = record("inbound_dm_ignores_anyone_and_allowlist");
         anyone.respond_to = RespondTo::Anyone;
         let decision = decide_inbound_respawn(
             &anyone,
@@ -381,8 +376,7 @@ mod tests {
 
     #[test]
     fn inbound_anyone_accepts_stranger_in_channel() {
-        reset_crash_watches_for_tests();
-        let mut anyone = record();
+        let mut anyone = record("inbound_anyone_accepts_stranger_in_channel");
         anyone.respond_to = RespondTo::Anyone;
         let decision = decide_inbound_respawn(
             &anyone,
@@ -397,32 +391,26 @@ mod tests {
 
     #[test]
     fn crash_loop_blocks_after_cap() {
-        reset_crash_watches_for_tests();
-        let pubkey = record().pubkey;
+        let agent = record("crash_loop_blocks_after_cap");
+        let pubkey = agent.pubkey.clone();
         for _ in 0..CRASH_LOOP_CAP {
             note_automatic_spawn(&pubkey);
             assert!(note_unexpected_exit(&pubkey) > 0);
         }
         assert!(crash_loop_blocked(&pubkey));
-        let decision = decide_inbound_respawn(
-            &record(),
-            &owner(),
-            Some(&owner()),
-            &siblings(),
-            false,
-            false,
-        );
+        let decision =
+            decide_inbound_respawn(&agent, &owner(), Some(&owner()), &siblings(), false, false);
         assert_eq!(decision, InboundRespawnDecision::SkipCrashBackoff);
         assert_eq!(
-            decide_apply_restart(&record(), false),
+            decide_apply_restart(&agent, false),
             ApplyRestartDecision::SkipCrashBackoff
         );
     }
 
     #[test]
     fn owner_clear_recovers_crash_loop() {
-        reset_crash_watches_for_tests();
-        let pubkey = record().pubkey;
+        let agent = record("owner_clear_recovers_crash_loop");
+        let pubkey = agent.pubkey.clone();
         for _ in 0..CRASH_LOOP_CAP {
             note_automatic_spawn(&pubkey);
             note_unexpected_exit(&pubkey);
@@ -430,7 +418,7 @@ mod tests {
         clear_crash_backoff(&pubkey);
         assert!(!crash_loop_blocked(&pubkey));
         assert_eq!(
-            decide_apply_restart(&record(), false),
+            decide_apply_restart(&agent, false),
             ApplyRestartDecision::Start
         );
     }
@@ -450,8 +438,8 @@ mod tests {
 
     #[test]
     fn wired_automatic_sequence_reaches_crash_loop_cap() {
-        reset_crash_watches_for_tests();
-        let pubkey = record().pubkey;
+        let agent = record("wired_automatic_sequence_reaches_crash_loop_cap");
+        let pubkey = agent.pubkey.clone();
         for _ in 0..CRASH_LOOP_CAP {
             assert!(
                 !crash_loop_blocked(&pubkey),
@@ -461,22 +449,14 @@ mod tests {
         }
         assert!(crash_loop_blocked(&pubkey));
         assert_eq!(
-            decide_inbound_respawn(
-                &record(),
-                &owner(),
-                Some(&owner()),
-                &siblings(),
-                false,
-                false,
-            ),
+            decide_inbound_respawn(&agent, &owner(), Some(&owner()), &siblings(), false, false,),
             InboundRespawnDecision::SkipCrashBackoff
         );
     }
 
     #[test]
     fn owner_start_clear_does_not_run_on_automatic_cycles() {
-        reset_crash_watches_for_tests();
-        let pubkey = record().pubkey;
+        let pubkey = record("owner_start_clear_does_not_run_on_automatic_cycles").pubkey;
         for _ in 0..(CRASH_LOOP_CAP - 1) {
             wired_automatic_cycle(&pubkey);
         }
@@ -491,8 +471,7 @@ mod tests {
 
     #[test]
     fn inserting_owner_clear_on_automatic_path_never_reaches_cap() {
-        reset_crash_watches_for_tests();
-        let pubkey = record().pubkey;
+        let pubkey = record("inserting_owner_clear_on_automatic_path_never_reaches_cap").pubkey;
         for _ in 0..CRASH_LOOP_CAP {
             // The bb78494b bug: auto path called start_managed_agent which
             // cleared first. This characterization stays so a reintroduction
@@ -508,7 +487,7 @@ mod tests {
 
     #[test]
     fn crash_loop_error_names_the_agent() {
-        let pubkey = record().pubkey;
+        let pubkey = record("crash_loop_error_names_the_agent").pubkey;
         let message = crash_loop_error(&pubkey);
         assert!(message.contains(&pubkey), "{message}");
         assert!(message.contains(&CRASH_LOOP_CAP.to_string()), "{message}");
@@ -516,17 +495,15 @@ mod tests {
 
     #[test]
     fn apply_restart_starts_stopped_active() {
-        reset_crash_watches_for_tests();
         assert_eq!(
-            decide_apply_restart(&record(), false),
+            decide_apply_restart(&record("apply_restart_starts_stopped_active"), false),
             ApplyRestartDecision::Start
         );
     }
 
     #[test]
     fn apply_restart_skips_archived() {
-        reset_crash_watches_for_tests();
-        let mut archived = record();
+        let mut archived = record("apply_restart_skips_archived");
         archived.is_active = false;
         assert_eq!(
             decide_apply_restart(&archived, false),
@@ -536,8 +513,7 @@ mod tests {
 
     #[test]
     fn unexpected_exit_without_auto_spawn_does_not_count() {
-        reset_crash_watches_for_tests();
-        let pubkey = record().pubkey;
+        let pubkey = record("unexpected_exit_without_auto_spawn_does_not_count").pubkey;
         assert_eq!(note_unexpected_exit(&pubkey), 0);
         assert!(!crash_loop_blocked(&pubkey));
     }
