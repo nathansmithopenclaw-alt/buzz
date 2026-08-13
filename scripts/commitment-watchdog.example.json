@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "watch_root": "/absolute/path/to/commitments",
+  "state_root": "/absolute/path/to/watchdog-state",
+  "log_path": "/absolute/path/to/watchdog.log",
+  "relay_url": "wss://relay.example.com",
+  "buzz_cli": "/absolute/path/to/buzz",
+  "keychain_service": "buzz-watchdog-signing-key",
+  "expected_signer_pubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "marker_name": ".buzz-commitment.json",
+  "claim_ttl_seconds": 300
+}

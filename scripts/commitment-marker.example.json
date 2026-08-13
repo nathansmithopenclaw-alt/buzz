@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "commitment_id": "release-build",
+  "epoch": "2026-08-12T23-30Z",
+  "description": "Release build and installed-build acceptance",
+  "channel_id": "00000000-0000-0000-0000-000000000000",
+  "reply_to": "",
+  "delegator_display": "Project Orchestrator",
+  "delegator_pubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "fallback_mentions": [],
+  "stale_after_seconds": 900,
+  "heartbeat_paths": [
+    "/absolute/path/to/release-build.heartbeat"
+  ]
+}

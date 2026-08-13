@@ -293,9 +293,13 @@ desktop-e2e-pre-push: _ensure-migrations
     cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
+ci: check commitment-watchdog-test test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
+
+# Opt-in work-commitment liveness and escalation contract (infra-free).
+commitment-watchdog-test:
+    ./scripts/test-commitment-watchdog.sh
 
 # Run all tests (unit + integration)
 test:
