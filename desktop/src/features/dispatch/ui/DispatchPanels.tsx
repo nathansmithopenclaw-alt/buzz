@@ -1,4 +1,4 @@
-import * as React from "react";
+import type * as React from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -26,11 +26,11 @@ import type { DispatchIssue, DispatchProject, DispatchStatus } from "../types";
 import {
   assigneeLabel,
   blockedIssueIds,
-  EMPTY_DISPATCH_FILTERS,
   filterDispatchIssues,
   groupDispatchIssues,
   projectLabel,
   shortPubkey,
+  sortDispatchBoardIssues,
   sortDispatchIssues,
   statusLabel,
   type DispatchFilters,
@@ -390,20 +390,33 @@ function DispatchFiltersBar({
 }
 
 export function DispatchBoardPanel({
+  filters,
+  groupBy,
   issues,
+  onFiltersChange,
+  onGroupByChange,
   projects,
   profiles,
   onOpenIssue,
+  onShowMore,
 }: {
+  filters: DispatchFilters;
+  groupBy: DispatchGroupBy;
   issues: DispatchIssue[];
+  onFiltersChange: (filters: DispatchFilters) => void;
+  onGroupByChange: (groupBy: DispatchGroupBy) => void;
   projects: DispatchProject[];
   profiles: DispatchProfileMap;
   onOpenIssue: (issueId: string) => void;
+  onShowMore: (input: {
+    excludedIssueIds: string[];
+    groupBy: DispatchGroupBy;
+    groupId: string;
+  }) => void;
 }) {
-  const [filters, setFilters] = React.useState(EMPTY_DISPATCH_FILTERS);
-  const [groupBy, setGroupBy] = React.useState<DispatchGroupBy>("status");
   const filtered = filterDispatchIssues(issues, filters);
-  const grouped = groupDispatchIssues(filtered, groupBy, projects, profiles);
+  const ordered = sortDispatchBoardIssues(filtered, projects, profiles);
+  const grouped = groupDispatchIssues(ordered, groupBy, projects, profiles);
   const groups =
     groupBy === "status"
       ? filtered.length === 0
@@ -434,8 +447,8 @@ export function DispatchBoardPanel({
         filters={filters}
         groupBy={groupBy}
         issues={issues}
-        onChange={setFilters}
-        onGroupByChange={setGroupBy}
+        onChange={onFiltersChange}
+        onGroupByChange={onGroupByChange}
         projects={projects}
       />
       <div
@@ -471,9 +484,23 @@ export function DispatchBoardPanel({
                 />
               ))}
               {group.issues.length > CARD_LIMIT ? (
-                <div className="py-1 text-center text-2xs text-muted-foreground">
+                <button
+                  aria-label={`View ${group.issues.length - CARD_LIMIT} more ${group.label} issues in List`}
+                  className="rounded-md py-1 text-center text-2xs text-muted-foreground transition-colors hover:bg-accent/45 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                  data-testid={`dispatch-more-${group.id}`}
+                  onClick={() =>
+                    onShowMore({
+                      excludedIssueIds: group.issues
+                        .slice(0, CARD_LIMIT)
+                        .map((issue) => issue.issueId),
+                      groupBy,
+                      groupId: group.id,
+                    })
+                  }
+                  type="button"
+                >
                   + {group.issues.length - CARD_LIMIT} more
-                </div>
+                </button>
               ) : null}
             </div>
           </section>
@@ -510,30 +537,42 @@ function formatDue(issue: DispatchIssue): string {
 }
 
 export function DispatchListPanel({
+  excludedIssueIds,
+  filters,
   issues,
+  onClearOverflow,
+  onFiltersChange,
   projects,
   profiles,
   onOpenIssue,
+  onSortChange,
+  sort,
 }: {
+  excludedIssueIds: string[];
+  filters: DispatchFilters;
   issues: DispatchIssue[];
+  onClearOverflow: () => void;
+  onFiltersChange: (filters: DispatchFilters) => void;
   projects: DispatchProject[];
   profiles: DispatchProfileMap;
   onOpenIssue: (issueId: string) => void;
+  onSortChange: (sort: DispatchSort) => void;
+  sort: DispatchSort;
 }) {
-  const [filters, setFilters] = React.useState(EMPTY_DISPATCH_FILTERS);
-  const [sort, setSort] = React.useState<DispatchSort>({
-    key: "identifier",
-    direction: "asc",
-  });
   const filtered = filterDispatchIssues(issues, filters);
-  const sorted = sortDispatchIssues(filtered, sort, projects, profiles);
+  const excluded = new Set(excludedIssueIds);
+  const sorted = sortDispatchIssues(
+    filtered.filter((issue) => !excluded.has(issue.issueId)),
+    sort,
+    projects,
+    profiles,
+  );
   const blocked = blockedIssueIds(issues);
   const changeSort = (key: DispatchSortKey) =>
-    setSort((current) => ({
+    onSortChange({
       key,
-      direction:
-        current.key === key && current.direction === "asc" ? "desc" : "asc",
-    }));
+      direction: sort.key === key && sort.direction === "asc" ? "desc" : "asc",
+    });
   return (
     <div
       className="flex min-h-0 flex-1 flex-col"
@@ -542,9 +581,24 @@ export function DispatchListPanel({
       <DispatchFiltersBar
         filters={filters}
         issues={issues}
-        onChange={setFilters}
+        onChange={onFiltersChange}
         projects={projects}
       />
+      {excludedIssueIds.length > 0 ? (
+        <div
+          className="flex items-center justify-between border-b border-border/45 bg-muted/25 px-5 py-2 text-xs text-muted-foreground"
+          data-testid="dispatch-overflow-context"
+        >
+          <span>Showing the additional items from this Board column.</span>
+          <button
+            className="font-medium text-foreground hover:underline"
+            onClick={onClearOverflow}
+            type="button"
+          >
+            Show all matching issues
+          </button>
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1 overflow-auto">
         <table
           className="w-full min-w-[940px] table-fixed border-collapse text-xs"
@@ -556,6 +610,7 @@ export function DispatchListPanel({
                 <th className="px-3 py-2 font-medium" key={column.key}>
                   <button
                     className="flex items-center gap-1 hover:text-foreground"
+                    data-testid={`dispatch-sort-${column.key}`}
                     onClick={() => changeSort(column.key)}
                     type="button"
                   >

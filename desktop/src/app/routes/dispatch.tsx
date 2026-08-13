@@ -1,6 +1,7 @@
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 
+import { validateDispatchSearch } from "@/features/dispatch/dispatchSearch";
 import { usePreviewFeatureWarning } from "@/shared/features";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
@@ -11,6 +12,7 @@ const DispatchScreen = React.lazy(async () => {
 
 export const Route = createFileRoute("/dispatch")({
   component: DispatchRouteComponent,
+  validateSearch: validateDispatchSearch,
 });
 
 function DispatchRouteComponent() {

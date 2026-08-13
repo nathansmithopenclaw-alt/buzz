@@ -1,6 +1,9 @@
 import { expect, test } from "@playwright/test";
 
-import type { DispatchIssue } from "../../src/features/dispatch/types";
+import type {
+  DispatchContext,
+  DispatchIssue,
+} from "../../src/features/dispatch/types";
 import { installMockBridge } from "../helpers/bridge";
 
 test("Dispatch experiment enables the sidebar route shell", async ({
@@ -39,6 +42,9 @@ for (const theme of ["catppuccin-latte", "catppuccin-mocha"] as const) {
       rootEvent: "1".repeat(64),
       rootCreatedAt: 1,
       tipEvent: "2".repeat(64),
+      tipCreatedAt: 1,
+      revision: 0,
+      enteredStatusAt: 1,
       identifier: "SMI-1",
       title: "Dispatch fixture issue",
       body: "Fixture body",
@@ -130,8 +136,8 @@ for (const theme of ["catppuccin-latte", "catppuccin-mocha"] as const) {
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.getByTestId("open-dispatch-view").click();
 
-    await expect(page.getByTestId("dispatch-workspace-picker")).toHaveValue(
-      workspaceId,
+    await expect(page.getByTestId("dispatch-workspace-label")).toContainText(
+      "dispatch",
     );
     await expect(page.getByTestId("dispatch-board")).toBeVisible();
     await expect(page.getByTestId("dispatch-issue-card")).toHaveCount(6);
@@ -196,3 +202,230 @@ for (const theme of ["catppuccin-latte", "catppuccin-mocha"] as const) {
     await expect(page.getByText("Relay coverage review")).toBeVisible();
   });
 }
+
+const ACCEPTANCE_WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+function acceptanceIssue(
+  overrides: Partial<DispatchIssue> &
+    Pick<DispatchIssue, "identifier" | "issueId" | "title">,
+): DispatchIssue {
+  return {
+    streamId: ACCEPTANCE_WORKSPACE,
+    rootEvent: overrides.issueId.replaceAll("-", "").padEnd(64, "0"),
+    rootCreatedAt: 100,
+    tipEvent: overrides.issueId.replaceAll("-", "").padEnd(64, "1"),
+    tipCreatedAt: 100,
+    revision: 0,
+    enteredStatusAt: 100,
+    body: "Acceptance fixture",
+    status: "backlog",
+    priority: null,
+    assignee: null,
+    projectId: null,
+    due: null,
+    estimateMinutes: null,
+    homeChannelId: ACCEPTANCE_WORKSPACE,
+    workflow: "default",
+    labels: ["acceptance"],
+    externalRefs: [],
+    relations: [],
+    ...overrides,
+  };
+}
+
+function acceptanceContext(issues: DispatchIssue[]): DispatchContext {
+  return {
+    issues,
+    activity: [],
+    comments: [],
+    linkedTasks: [],
+    projects: [
+      {
+        projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        slug: "desktop",
+        name: "Desktop",
+      },
+    ],
+    diagnostics: [],
+    taskDiagnostics: [],
+    viewerRole: "maintainer",
+    sectionErrors: { comments: null, projects: null, tasks: null },
+    snapshotAt: "2026-08-13T00:00:00Z",
+  };
+}
+
+function orderedAcceptanceIssues(): DispatchIssue[] {
+  return [
+    acceptanceIssue({
+      issueId: "00000000-0000-4000-8000-000000000004",
+      identifier: "D-4",
+      title: "Lane P1 newest",
+      priority: "P1",
+      tipCreatedAt: 500,
+    }),
+    acceptanceIssue({
+      issueId: "00000000-0000-4000-8000-000000000002",
+      identifier: "D-2",
+      title: "Lane P0 older",
+      priority: "P0",
+      tipCreatedAt: 200,
+    }),
+    acceptanceIssue({
+      issueId: "00000000-0000-4000-8000-000000000006",
+      identifier: "D-6",
+      title: "Lane no priority",
+      priority: null,
+      tipCreatedAt: 600,
+    }),
+    acceptanceIssue({
+      issueId: "00000000-0000-4000-8000-000000000001",
+      identifier: "D-1",
+      title: "Lane P0 newest",
+      priority: "P0",
+      tipCreatedAt: 300,
+    }),
+    acceptanceIssue({
+      issueId: "00000000-0000-4000-8000-000000000005",
+      identifier: "D-5",
+      title: "Lane P2 newest",
+      priority: "P2",
+      tipCreatedAt: 700,
+    }),
+    acceptanceIssue({
+      issueId: "00000000-0000-4000-8000-000000000003",
+      identifier: "D-3",
+      title: "Lane P1 older",
+      priority: "P1",
+      tipCreatedAt: 400,
+    }),
+  ];
+}
+
+async function openAcceptanceDispatch(
+  page: Parameters<typeof installMockBridge>[0],
+  issues = orderedAcceptanceIssues(),
+  workspaces?: Array<{ id: string; name: string; populated: boolean }>,
+) {
+  await installMockBridge(
+    page,
+    {
+      dispatch: {
+        workspace: { id: ACCEPTANCE_WORKSPACE, name: "dispatch" },
+        workspaces,
+        context: acceptanceContext(issues),
+      },
+    },
+    { seedPreviewFeatures: true },
+  );
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-dispatch-view").click();
+  await expect(page.getByTestId("dispatch-board")).toBeVisible();
+}
+
+function routeSearch(url: string): URLSearchParams {
+  const parsed = new URL(url);
+  return new URLSearchParams(parsed.hash.split("?")[1] ?? parsed.search);
+}
+
+test("Board cards are ordered by priority then most-recently-updated", async ({
+  page,
+}) => {
+  await openAcceptanceDispatch(page);
+
+  const cards = page
+    .getByTestId("dispatch-group-backlog")
+    .getByTestId("dispatch-issue-card");
+  await expect(cards).toHaveCount(3);
+  await expect(cards.nth(0)).toContainText("Lane P0 newest");
+  await expect(cards.nth(1)).toContainText("Lane P0 older");
+  await expect(cards.nth(2)).toContainText("Lane P1 newest");
+});
+
+test("+N more opens List with the Board filters and exactly the overflow items", async ({
+  page,
+}) => {
+  await openAcceptanceDispatch(page);
+  await page.getByTestId("dispatch-filter-query").fill("lane");
+  await page.getByTestId("dispatch-filter-label").selectOption("acceptance");
+
+  await page.getByTestId("dispatch-more-backlog").click();
+
+  await expect(page.getByTestId("dispatch-list-row")).toHaveCount(3);
+  await expect(page.getByTestId("dispatch-overflow-context")).toBeVisible();
+  await expect(page.getByText("Lane P1 older")).toBeVisible();
+  await expect(page.getByText("Lane P2 newest")).toBeVisible();
+  await expect(page.getByText("Lane no priority")).toBeVisible();
+  await expect(page.getByText("Lane P0 newest")).toHaveCount(0);
+  const search = routeSearch(page.url());
+  expect(search.get("view")).toBe("list");
+  expect(search.get("status")).toBe("backlog");
+  expect(search.get("label")).toBe("acceptance");
+  expect(search.get("query")).toBe("lane");
+  expect(search.get("sort")).toBe("priority");
+  expect(search.get("exclude")?.split(",")).toHaveLength(3);
+});
+
+test("workspace control collapses one populated workspace and separates empty initialization", async ({
+  page,
+}) => {
+  const emptyWorkspace = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  await openAcceptanceDispatch(page, orderedAcceptanceIssues(), [
+    { id: ACCEPTANCE_WORKSPACE, name: "dispatch", populated: true },
+    { id: emptyWorkspace, name: "fresh-lab", populated: false },
+  ]);
+
+  await expect(page.getByTestId("dispatch-workspace-picker")).toHaveCount(0);
+  await expect(page.getByTestId("dispatch-workspace-label")).toContainText(
+    "dispatch",
+  );
+  await page.getByTestId("dispatch-empty-workspace-init").click();
+  await expect(
+    page.getByText("Existing issues stay in their current workspace."),
+  ).toBeVisible();
+  await page.getByTestId(`dispatch-init-workspace-${emptyWorkspace}`).click();
+  await expect(page).toHaveURL(new RegExp(`workspace=${emptyWorkspace}`));
+  await expect(page.getByTestId("dispatch-workspace-label")).toContainText(
+    "Starting · fresh-lab",
+  );
+  await page.getByTestId("dispatch-view-populated-workspace").click();
+  await expect(page.getByTestId("dispatch-workspace-label")).toContainText(
+    "dispatch",
+  );
+});
+
+test("Board and List URL state survives issue-detail back navigation", async ({
+  page,
+}) => {
+  const projectId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const issues = orderedAcceptanceIssues().map((issue, index) => ({
+    ...issue,
+    projectId,
+    priority: index < 4 ? ("P1" as const) : issue.priority,
+  }));
+  await openAcceptanceDispatch(page, issues);
+  await page.getByTestId("dispatch-filter-status").selectOption("backlog");
+  await page.getByTestId("dispatch-filter-priority").selectOption("P1");
+  await page.getByTestId("dispatch-filter-query").fill("lane");
+  await page.getByTestId("dispatch-group-by").selectOption("project");
+  await page.getByTestId("dispatch-tab-list").click();
+  await page.getByTestId("dispatch-sort-title").click();
+  await page.getByTestId("dispatch-sort-title").click();
+  await page.getByTestId("dispatch-list-row").first().click();
+  await expect(page.getByTestId("dispatch-issue-detail")).toBeVisible();
+
+  await page.getByRole("button", { name: /^Dispatch ›/ }).click();
+
+  await expect(page.getByTestId("dispatch-list")).toBeVisible();
+  await expect(page.getByTestId("dispatch-filter-status")).toHaveValue(
+    "backlog",
+  );
+  await expect(page.getByTestId("dispatch-filter-priority")).toHaveValue("P1");
+  await expect(page.getByTestId("dispatch-filter-query")).toHaveValue("lane");
+  const search = routeSearch(page.url());
+  expect(search.get("view")).toBe("list");
+  expect(search.get("group")).toBe("project");
+  expect(search.get("sort")).toBe("title");
+  expect(search.get("direction")).toBe("desc");
+  await page.getByTestId("dispatch-tab-board").click();
+  await expect(page.getByTestId("dispatch-group-by")).toHaveValue("project");
+});

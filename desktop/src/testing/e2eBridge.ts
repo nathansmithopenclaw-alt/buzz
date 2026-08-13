@@ -188,6 +188,7 @@ type E2eConfig = {
     /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */
     dispatch?: {
       workspace: { id: string; name: string };
+      workspaces?: Array<{ id: string; name: string; populated: boolean }>;
       context: DispatchContext;
     };
     ttsSettings?: {
@@ -9805,7 +9806,9 @@ function emitMockDispatchFixture(
 ): boolean {
   const fixture = getConfig()?.mock?.dispatch;
   if (!fixture) return false;
-  const { id, name } = fixture.workspace;
+  const workspaces = fixture.workspaces ?? [
+    { ...fixture.workspace, populated: true },
+  ];
   const kinds = new Set(filter.kinds ?? []);
   const sectionErrors = mockDispatchContext?.sectionErrors;
   const failure =
@@ -9821,26 +9824,63 @@ function emitMockDispatchFixture(
     return true;
   }
   const matching: RelayEvent[] = [];
-  if (kinds.has(39002) && (filter["#p"] || filter["#d"]?.includes(id))) {
-    matching.push(
-      dispatchFixtureEvent("a", 39002, [
-        ["d", id],
-        ["p", MOCK_IDENTITY_PUBKEY, "", "owner"],
-      ]),
-    );
-  } else if (kinds.has(39000) && filter["#d"]?.includes(id)) {
-    matching.push(
-      dispatchFixtureEvent("b", 39000, [["d", id]], JSON.stringify({ name })),
-    );
+  if (kinds.has(39002) && (filter["#p"] || filter["#d"])) {
+    workspaces
+      .filter(
+        (workspace) =>
+          Boolean(filter["#p"]) || filter["#d"]?.includes(workspace.id),
+      )
+      .forEach((workspace, index) => {
+        matching.push(
+          dispatchFixtureEvent((index + 1).toString(16), 39002, [
+            ["d", workspace.id],
+            ["p", MOCK_IDENTITY_PUBKEY, "", "owner"],
+          ]),
+        );
+      });
+  } else if (kinds.has(39000) && filter["#d"]) {
+    workspaces
+      .filter((workspace) => filter["#d"]?.includes(workspace.id))
+      .forEach((workspace, index) => {
+        matching.push(
+          dispatchFixtureEvent(
+            (index + 5).toString(16),
+            39000,
+            [["d", workspace.id]],
+            JSON.stringify({ name: workspace.name }),
+          ),
+        );
+      });
   } else if (
     [40020, 40021, 40022, 40025].some((kind) => kinds.has(kind)) &&
-    filter["#h"]?.includes(id)
+    filter["#h"]
   ) {
-    matching.push(dispatchFixtureEvent("c", 40020, [["h", id]], "{}"));
-  } else if (kinds.has(30621) && filter["#buzz-workspace"]?.includes(id)) {
-    matching.push(
-      dispatchFixtureEvent("e", 30621, [["buzz-workspace", id]], ""),
-    );
+    workspaces
+      .filter(
+        (workspace) =>
+          workspace.populated && filter["#h"]?.includes(workspace.id),
+      )
+      .forEach((workspace, index) => {
+        matching.push(
+          dispatchFixtureEvent((index + 9).toString(16), 40020, [
+            ["h", workspace.id],
+          ]),
+        );
+      });
+  } else if (kinds.has(30621) && filter["#buzz-workspace"]) {
+    workspaces
+      .filter(
+        (workspace) =>
+          workspace.populated &&
+          filter["#buzz-workspace"]?.includes(workspace.id),
+      )
+      .forEach((workspace, index) => {
+        matching.push(
+          dispatchFixtureEvent((index + 13).toString(16), 30621, [
+            ["buzz-workspace", workspace.id],
+          ]),
+        );
+      });
   } else {
     return false;
   }
@@ -11340,6 +11380,22 @@ export function maybeInstallE2eTauriMocks() {
         }
         if (!mockDispatchContext) {
           throw new Error("No mocked Dispatch fold is configured.");
+        }
+        const workspaceId = (payload as { workspaceId?: string })?.workspaceId;
+        if (
+          workspaceId &&
+          workspaceId !== activeConfig?.mock?.dispatch?.workspace.id
+        ) {
+          return {
+            ...structuredClone(mockDispatchContext),
+            issues: [],
+            activity: [],
+            comments: [],
+            linkedTasks: [],
+            projects: [],
+            diagnostics: [],
+            taskDiagnostics: [],
+          };
         }
         return structuredClone(mockDispatchContext);
       }

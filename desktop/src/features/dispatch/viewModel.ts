@@ -232,10 +232,29 @@ export function sortDispatchIssues(
       typeof a === "number" && typeof b === "number"
         ? a - b
         : String(a).localeCompare(String(b));
+    const priorityRecency =
+      sort.key === "priority" && compared === 0
+        ? right.tipCreatedAt - left.tipCreatedAt
+        : 0;
     return (
-      compared * direction || left.identifier.localeCompare(right.identifier)
+      compared * direction ||
+      priorityRecency ||
+      left.identifier.localeCompare(right.identifier)
     );
   });
+}
+
+export function sortDispatchBoardIssues(
+  issues: DispatchIssue[],
+  projects: DispatchProject[],
+  profiles: DispatchProfileMap,
+): DispatchIssue[] {
+  return sortDispatchIssues(
+    issues,
+    { key: "priority", direction: "asc" },
+    projects,
+    profiles,
+  );
 }
 
 export function blockedIssueIds(issues: DispatchIssue[]): Set<string> {

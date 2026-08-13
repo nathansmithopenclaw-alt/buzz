@@ -2,7 +2,6 @@ import * as React from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   AlertTriangle,
-  Hash,
   LayoutGrid,
   List,
   RefreshCw,
@@ -17,8 +16,23 @@ import { cn } from "@/shared/lib/cn";
 import { getStorageItem, setStorageItem } from "@/shared/lib/safeStorage";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { Button } from "@/shared/ui/button";
+import {
+  DISPATCH_SEARCH_KEYS,
+  dispatchFilterSearchPatch,
+  dispatchFiltersFromSearch,
+  dispatchSearchForNavigation,
+  encodeExcludedIssueIds,
+  parseExcludedIssueIds,
+  type DispatchView,
+} from "../dispatchSearch";
 import { useDispatchContext, useDispatchWorkspaces } from "../hooks";
 import type { DispatchWorkspace } from "../types";
+import type {
+  DispatchFilters,
+  DispatchGroupBy,
+  DispatchSortKey,
+} from "../viewModel";
+import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import {
   DispatchBoardPanel,
   DispatchListPanel,
@@ -26,20 +40,31 @@ import {
 } from "./DispatchPanels";
 import { MyIssues } from "./MyIssues";
 import { TriageInbox } from "./TriageInbox";
+import { DispatchWorkspaceControl } from "./DispatchWorkspaceControl";
 
 const LAST_WORKSPACE_KEY = "buzz-dispatch-last-workspace-v1";
-
-type DispatchView = "board" | "list" | "triage" | "my-issues";
 
 function initialWorkspaceId(workspaces: DispatchWorkspace[]): string | null {
   const persisted = getStorageItem(LAST_WORKSPACE_KEY);
   if (persisted && workspaces.some((workspace) => workspace.id === persisted)) {
     return persisted;
   }
-  const withData = workspaces.filter(
-    (workspace) => workspace.trackerEventCount > 0,
-  );
-  return withData.length === 1 ? withData[0].id : null;
+  return workspaces.length === 1 ? workspaces[0].id : null;
+}
+
+function filtersForGroup(
+  filters: DispatchFilters,
+  groupBy: DispatchGroupBy,
+  groupId: string,
+): DispatchFilters {
+  if (groupBy === "status") {
+    return { ...filters, status: groupId as DispatchFilters["status"] };
+  }
+  if (groupBy === "priority") {
+    return { ...filters, priority: groupId as DispatchFilters["priority"] };
+  }
+  if (groupBy === "assignee") return { ...filters, assignee: groupId };
+  return { ...filters, project: groupId };
 }
 
 function workspacePrefix(identifiers: string[]): string | null {
@@ -64,33 +89,50 @@ const tabClassName =
 
 export function DispatchScreen() {
   const navigate = useNavigate();
+  const { applyPatch, values } = useHistorySearchState(DISPATCH_SEARCH_KEYS);
   const identity = useIdentityQuery();
   const workspaceQuery = useDispatchWorkspaces();
   const { channels } = useChannelNavigation();
-  const [view, setView] = React.useState<DispatchView>("board");
-  const [workspaceId, setWorkspaceId] = React.useState<string | null>(null);
-  const initializedFor = React.useRef<string | null>(null);
+  const populatedWorkspaces = React.useMemo(
+    () =>
+      workspaceQuery.workspaces.filter(
+        (workspace) => workspace.trackerEventCount > 0,
+      ),
+    [workspaceQuery.workspaces],
+  );
+  const emptyWorkspaces = React.useMemo(
+    () =>
+      workspaceQuery.workspaces.filter(
+        (workspace) => workspace.trackerEventCount === 0,
+      ),
+    [workspaceQuery.workspaces],
+  );
+  const workspaceId =
+    workspaceQuery.workspaces.find(
+      (workspace) => workspace.id === values.workspace,
+    )?.id ?? null;
+  const activeWorkspace =
+    workspaceQuery.workspaces.find(
+      (workspace) => workspace.id === workspaceId,
+    ) ?? null;
+  const view = (values.view as DispatchView | null) ?? "board";
+  const filters = dispatchFiltersFromSearch(values);
+  const groupBy = (values.group as DispatchGroupBy | null) ?? "status";
+  const sort = {
+    key: (values.sort as DispatchSortKey | null) ?? "identifier",
+    direction: (values.direction as "asc" | "desc" | null) ?? "asc",
+  };
+  const excludedIssueIds = parseExcludedIssueIds(values.exclude);
 
   React.useEffect(() => {
-    const key = workspaceQuery.workspaces
-      .map((workspace) => workspace.id)
-      .join(",");
-    if (workspaceQuery.isLoading || initializedFor.current === key) return;
-    initializedFor.current = key;
-    setWorkspaceId((current) => {
-      if (
-        current &&
-        workspaceQuery.workspaces.some((workspace) => workspace.id === current)
-      ) {
-        return current;
-      }
-      return initialWorkspaceId(workspaceQuery.workspaces);
-    });
-  }, [workspaceQuery.isLoading, workspaceQuery.workspaces]);
+    if (workspaceQuery.isLoading || workspaceId) return;
+    const initial = initialWorkspaceId(populatedWorkspaces);
+    if (initial) applyPatch({ workspace: initial }, { replace: true });
+  }, [applyPatch, populatedWorkspaces, workspaceId, workspaceQuery.isLoading]);
 
-  const selectWorkspace = (next: string | null) => {
-    setWorkspaceId(next);
-    if (next) setStorageItem(LAST_WORKSPACE_KEY, next);
+  const selectWorkspace = (next: string) => {
+    applyPatch({ workspace: next, exclude: null }, { replace: true });
+    setStorageItem(LAST_WORKSPACE_KEY, next);
   };
   const context = useDispatchContext(workspaceId);
   const assigneePubkeys = React.useMemo(
@@ -115,9 +157,19 @@ export function DispatchScreen() {
     void navigate({
       to: "/dispatch/issue/$issueId",
       params: { issueId },
-      search: { workspace: workspaceId },
+      search: dispatchSearchForNavigation(values, workspaceId),
     });
   };
+  const changeView = (next: DispatchView) =>
+    applyPatch(
+      { view: next === "board" ? null : next, exclude: null },
+      { replace: true },
+    );
+  const changeFilters = (next: DispatchFilters) =>
+    applyPatch(
+      { ...dispatchFilterSearchPatch(next), exclude: null },
+      { replace: true },
+    );
 
   return (
     <DispatchPanelsTooltipProvider>
@@ -130,30 +182,13 @@ export function DispatchScreen() {
             <h1 className="flex items-center gap-2 text-base font-semibold">
               <Waypoints className="h-4 w-4" /> Dispatch
             </h1>
-            {workspaceQuery.workspaces.length > 0 ? (
-              <label className="flex items-center gap-1 rounded-full border border-border/45 bg-muted/55 px-2.5 py-1 text-xs text-muted-foreground">
-                <Hash className="h-3.5 w-3.5" />
-                <select
-                  aria-label="Dispatch workspace"
-                  className="max-w-48 bg-transparent text-xs text-muted-foreground outline-hidden"
-                  data-testid="dispatch-workspace-picker"
-                  onChange={(event) =>
-                    selectWorkspace(event.target.value || null)
-                  }
-                  value={workspaceId ?? ""}
-                >
-                  <option value="">Select workspace</option>
-                  {workspaceQuery.workspaces.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {candidate.name}
-                      {candidate.id === workspaceId && prefix
-                        ? ` · ${prefix}`
-                        : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
+            <DispatchWorkspaceControl
+              activeWorkspace={activeWorkspace}
+              emptyWorkspaces={emptyWorkspaces}
+              onSelect={selectWorkspace}
+              populatedWorkspaces={populatedWorkspaces}
+              prefix={prefix}
+            />
             <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
               <span>{syncedLabel(context.snapshotAt)}</span>
               <Button
@@ -180,7 +215,8 @@ export function DispatchScreen() {
                 tabClassName,
                 view === "board" && "text-foreground after:bg-primary",
               )}
-              onClick={() => setView("board")}
+              data-testid="dispatch-tab-board"
+              onClick={() => changeView("board")}
               type="button"
             >
               <LayoutGrid className="h-4 w-4" /> Board
@@ -192,7 +228,7 @@ export function DispatchScreen() {
                 view === "list" && "text-foreground after:bg-primary",
               )}
               data-testid="dispatch-tab-list"
-              onClick={() => setView("list")}
+              onClick={() => changeView("list")}
               type="button"
             >
               <List className="h-4 w-4" /> List
@@ -203,7 +239,7 @@ export function DispatchScreen() {
                 tabClassName,
                 view === "triage" && "text-foreground after:bg-primary",
               )}
-              onClick={() => setView("triage")}
+              onClick={() => changeView("triage")}
               type="button"
             >
               <AlertTriangle className="h-4 w-4" /> Triage
@@ -219,7 +255,7 @@ export function DispatchScreen() {
                 tabClassName,
                 view === "my-issues" && "text-foreground after:bg-primary",
               )}
-              onClick={() => setView("my-issues")}
+              onClick={() => changeView("my-issues")}
               type="button"
             >
               <UserRound className="h-4 w-4" /> My Issues
@@ -251,10 +287,15 @@ export function DispatchScreen() {
           <div className="m-auto max-w-md text-center text-sm text-muted-foreground">
             No Tracker-enabled member workspaces were found for this identity.
           </div>
+        ) : populatedWorkspaces.length === 0 && !workspaceId ? (
+          <div className="m-auto max-w-md text-center text-sm text-muted-foreground">
+            No populated Dispatch workspaces yet. Use Start Dispatch above to
+            choose where new issues will live.
+          </div>
         ) : !workspaceId ? (
           <div className="m-auto max-w-md text-center text-sm text-muted-foreground">
-            Choose a workspace above. Dispatch never assumes a production
-            workspace.
+            Choose a workspace above to view its issues. This changes only the
+            current view; it never moves issues between workspaces.
           </div>
         ) : context.error ? (
           <div className="m-auto max-w-md text-center text-sm text-destructive">
@@ -268,18 +309,64 @@ export function DispatchScreen() {
           <section className="flex min-h-0 flex-1 flex-col overflow-auto">
             {view === "board" ? (
               <DispatchBoardPanel
+                filters={filters}
+                groupBy={groupBy}
                 issues={context.issues}
+                onFiltersChange={changeFilters}
+                onGroupByChange={(next) =>
+                  applyPatch(
+                    { group: next === "status" ? null : next, exclude: null },
+                    { replace: true },
+                  )
+                }
                 onOpenIssue={openIssue}
+                onShowMore={({
+                  excludedIssueIds: excluded,
+                  groupBy,
+                  groupId,
+                }) => {
+                  const groupedFilters = filtersForGroup(
+                    filters,
+                    groupBy,
+                    groupId,
+                  );
+                  applyPatch(
+                    {
+                      ...dispatchFilterSearchPatch(groupedFilters),
+                      view: "list",
+                      sort: "priority",
+                      direction: null,
+                      exclude: encodeExcludedIssueIds(excluded),
+                    },
+                    { replace: true },
+                  );
+                }}
                 profiles={profiles}
                 projects={context.projects}
               />
             ) : null}
             {view === "list" ? (
               <DispatchListPanel
+                excludedIssueIds={excludedIssueIds}
+                filters={filters}
                 issues={context.issues}
+                onClearOverflow={() =>
+                  applyPatch({ exclude: null }, { replace: true })
+                }
+                onFiltersChange={changeFilters}
                 onOpenIssue={openIssue}
+                onSortChange={(next) =>
+                  applyPatch(
+                    {
+                      sort: next.key === "identifier" ? null : next.key,
+                      direction: next.direction === "asc" ? null : "desc",
+                    },
+                    { replace: true },
+                  )
+                }
                 profiles={profiles}
                 projects={context.projects}
+                sort={sort}
               />
             ) : null}
             {view === "triage" ? (

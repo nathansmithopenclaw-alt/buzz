@@ -1,6 +1,7 @@
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 
+import { validateDispatchSearch } from "@/features/dispatch/dispatchSearch";
 import { usePreviewFeatureWarning } from "@/shared/features";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
@@ -13,19 +14,20 @@ const DispatchIssueDetailScreen = React.lazy(async () => {
 
 export const Route = createFileRoute("/dispatch/issue/$issueId")({
   component: DispatchIssueRouteComponent,
-  validateSearch: (search: Record<string, unknown>) => ({
-    workspace:
-      typeof search.workspace === "string" ? search.workspace : undefined,
-  }),
+  validateSearch: validateDispatchSearch,
 });
 
 function DispatchIssueRouteComponent() {
   usePreviewFeatureWarning("dispatch");
   const { issueId } = Route.useParams();
-  const { workspace } = Route.useSearch();
+  const search = Route.useSearch();
   return (
     <React.Suspense fallback={<ViewLoadingFallback kind="dispatch" />}>
-      <DispatchIssueDetailScreen issueId={issueId} workspaceId={workspace} />
+      <DispatchIssueDetailScreen
+        issueId={issueId}
+        returnSearch={search}
+        workspaceId={search.workspace}
+      />
     </React.Suspense>
   );
 }
