@@ -7,6 +7,7 @@ import {
   filterDispatchIssues,
   groupDispatchIssues,
   shortPubkey,
+  sortDispatchBoardIssues,
   sortDispatchIssues,
 } from "./viewModel.ts";
 
@@ -17,6 +18,9 @@ function issue(overrides) {
     rootEvent: "1".repeat(64),
     rootCreatedAt: 1,
     tipEvent: "2".repeat(64),
+    tipCreatedAt: 1,
+    revision: 0,
+    enteredStatusAt: 1,
     identifier: "SMI-1",
     title: "Dispatch fixture",
     body: "fixture body",
@@ -99,6 +103,28 @@ test("list sorting is stable and long identifiers have a bounded fallback", () =
     ["Alpha", "Zulu"],
   );
   assert.equal(shortPubkey("f".repeat(64)), "ffffffff…ffff");
+});
+
+test("board order is P0 first, then most recently updated within priority", () => {
+  const issues = [
+    issue({ identifier: "SMI-3", priority: "P1", tipCreatedAt: 300 }),
+    issue({ identifier: "SMI-2", priority: "P0", tipCreatedAt: 100 }),
+    issue({ identifier: "SMI-1", priority: "P0", tipCreatedAt: 200 }),
+    issue({ identifier: "SMI-4", priority: null, tipCreatedAt: 400 }),
+  ];
+  assert.deepEqual(
+    sortDispatchBoardIssues(issues, [], {}).map((value) => value.identifier),
+    ["SMI-1", "SMI-2", "SMI-3", "SMI-4"],
+  );
+  assert.deepEqual(
+    sortDispatchIssues(
+      issues,
+      { key: "priority", direction: "asc" },
+      [],
+      {},
+    ).map((value) => value.identifier),
+    ["SMI-1", "SMI-2", "SMI-3", "SMI-4"],
+  );
 });
 
 test("blocked indicator is derived from folded relation projections", () => {

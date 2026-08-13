@@ -14,6 +14,7 @@ import {
 } from "../selectors.mjs";
 import type { DispatchComment, DispatchIssue } from "../types";
 import { useDispatchContext, useDispatchWorkspaces } from "../hooks";
+import type { DispatchRouteSearch } from "../dispatchSearch";
 import {
   IssueDetail,
   IssueDetailSkeleton,
@@ -22,9 +23,11 @@ import {
 
 export function DispatchIssueDetailScreen({
   issueId,
+  returnSearch,
   workspaceId,
 }: {
   issueId: string;
+  returnSearch: DispatchRouteSearch;
   workspaceId?: string;
 }) {
   const navigate = useNavigate();
@@ -71,7 +74,7 @@ export function DispatchIssueDetailScreen({
     ]),
   ];
   const profiles = useUsersBatchQuery(authors);
-  const goBack = () => void navigate({ to: "/dispatch" });
+  const goBack = () => void navigate({ to: "/dispatch", search: returnSearch });
 
   if (context.isLoading || workspaces.isLoading) return <IssueDetailSkeleton />;
   if (context.error)
@@ -154,7 +157,7 @@ export function DispatchIssueDetailScreen({
         void navigate({
           to: "/dispatch/issue/$issueId",
           params: { issueId: target },
-          search: { workspace: resolvedWorkspace },
+          search: { ...returnSearch, workspace: resolvedWorkspace },
         })
       }
       profiles={profiles.data?.profiles}

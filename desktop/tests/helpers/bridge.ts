@@ -152,6 +152,7 @@ type MockBridgeOptions = {
   /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */
   dispatch?: {
     workspace: { id: string; name: string };
+    workspaces?: Array<{ id: string; name: string; populated: boolean }>;
     context: DispatchContext;
   };
   ttsSettings?: {
