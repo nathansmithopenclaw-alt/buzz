@@ -4,6 +4,11 @@
 //! (`is_active = false`) agents, and must not spawn for an inbound event
 //! the agent would refuse under `respond_to`. Those decisions live here so
 //! spawn, apply-update, and the inbound mention hook share one predicate.
+//!
+//! Bound: inbound resurrection only sees events the owner's Desktop
+//! subscription already receives (channels/DMs the owner is a member of).
+//! An agent mentioned in a channel the owner is not in cannot be revived
+//! from this path.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -105,9 +110,9 @@ pub fn crash_loop_blocked(pubkey: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn crash_loop_error(_pubkey: &str) -> String {
+pub fn crash_loop_error(pubkey: &str) -> String {
     format!(
-        "harness crash-looped {CRASH_LOOP_CAP} times within {INSTANT_DEATH_WINDOW:?} of automatic spawn; owner must start it"
+        "harness {pubkey} crash-looped {CRASH_LOOP_CAP} times within {INSTANT_DEATH_WINDOW:?} of automatic spawn; owner must start it"
     )
 }
 
@@ -428,6 +433,85 @@ mod tests {
             decide_apply_restart(&record(), false),
             ApplyRestartDecision::Start
         );
+    }
+
+    /// Automatic path: `start_managed_agent_inner` (no clear) then
+    /// `note_automatic_spawn` then unexpected death. Owner path: `clear_crash_backoff`
+    /// then inner. Inserting `clear` on the auto path is the bb78494b defect —
+    /// deaths oscillate 0↔1 and `CRASH_LOOP_CAP` is never reached.
+    fn wired_automatic_cycle(pubkey: &str) {
+        note_automatic_spawn(pubkey);
+        note_unexpected_exit(pubkey);
+    }
+
+    fn wired_owner_start(pubkey: &str) {
+        clear_crash_backoff(pubkey);
+    }
+
+    #[test]
+    fn wired_automatic_sequence_reaches_crash_loop_cap() {
+        reset_crash_watches_for_tests();
+        let pubkey = record().pubkey;
+        for _ in 0..CRASH_LOOP_CAP {
+            assert!(
+                !crash_loop_blocked(&pubkey),
+                "cap must be unreachable before {CRASH_LOOP_CAP} automatic deaths"
+            );
+            wired_automatic_cycle(&pubkey);
+        }
+        assert!(crash_loop_blocked(&pubkey));
+        assert_eq!(
+            decide_inbound_respawn(
+                &record(),
+                &owner(),
+                Some(&owner()),
+                &siblings(),
+                false,
+                false,
+            ),
+            InboundRespawnDecision::SkipCrashBackoff
+        );
+    }
+
+    #[test]
+    fn owner_start_clear_does_not_run_on_automatic_cycles() {
+        reset_crash_watches_for_tests();
+        let pubkey = record().pubkey;
+        for _ in 0..(CRASH_LOOP_CAP - 1) {
+            wired_automatic_cycle(&pubkey);
+        }
+        assert!(!crash_loop_blocked(&pubkey));
+        // The owner Tauri wrapper is the only caller of clear. One more
+        // automatic cycle without that clear must trip the cap.
+        wired_automatic_cycle(&pubkey);
+        assert!(crash_loop_blocked(&pubkey));
+        wired_owner_start(&pubkey);
+        assert!(!crash_loop_blocked(&pubkey));
+    }
+
+    #[test]
+    fn inserting_owner_clear_on_automatic_path_never_reaches_cap() {
+        reset_crash_watches_for_tests();
+        let pubkey = record().pubkey;
+        for _ in 0..CRASH_LOOP_CAP {
+            // The bb78494b bug: auto path called start_managed_agent which
+            // cleared first. This characterization stays so a reintroduction
+            // is visible next to the passing wired-order test.
+            wired_owner_start(&pubkey);
+            wired_automatic_cycle(&pubkey);
+        }
+        assert!(
+            !crash_loop_blocked(&pubkey),
+            "clear-then-spawn is the defect: deaths reset every cycle"
+        );
+    }
+
+    #[test]
+    fn crash_loop_error_names_the_agent() {
+        let pubkey = record().pubkey;
+        let message = crash_loop_error(&pubkey);
+        assert!(message.contains(&pubkey), "{message}");
+        assert!(message.contains(&CRASH_LOOP_CAP.to_string()), "{message}");
     }
 
     #[test]

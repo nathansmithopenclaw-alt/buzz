@@ -1,7 +1,8 @@
 //! Tauri commands that resurrect a stopped managed-agent harness.
 //!
 //! Decision logic lives in `managed_agents::resurrection`. These commands
-//! load live process state and call `start_managed_agent`.
+//! load live process state and call `start_managed_agent_inner` (no
+//! crash-loop clear — that is owner-start only).
 
 use std::collections::HashSet;
 
@@ -15,7 +16,7 @@ use crate::managed_agents::{
     BackendKind, InboundRespawnDecision,
 };
 
-use super::agents::{start_managed_agent, workspace_owner_hex};
+use super::agents::{start_managed_agent_inner, workspace_owner_hex};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,7 +106,7 @@ pub async fn ensure_managed_agent_for_inbound(
 
     match decision {
         InboundRespawnDecision::Spawn => {
-            match start_managed_agent(spawn_pubkey.clone(), app, state).await {
+            match start_managed_agent_inner(spawn_pubkey.clone(), app, state).await {
                 Ok(_) => {
                     note_automatic_spawn(&spawn_pubkey);
                     Ok(InboundRespawnResult {
@@ -181,7 +182,7 @@ pub async fn resurrect_stopped_active_instances(
     let mut failed = Vec::new();
     for candidate in candidates {
         let spawn_state = app.state::<AppState>();
-        match start_managed_agent(candidate.clone(), app.clone(), spawn_state).await {
+        match start_managed_agent_inner(candidate.clone(), app.clone(), spawn_state).await {
             Ok(_) => {
                 note_automatic_spawn(&candidate);
                 started.push(candidate);
