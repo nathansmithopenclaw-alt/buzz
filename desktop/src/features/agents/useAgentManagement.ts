@@ -484,9 +484,22 @@ export function useAgentManagement() {
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
       await updatePersonaMutation.mutateAsync(input);
-      await resurrectStoppedActiveInstances({ personaId: input.id }).catch(
-        () => undefined,
-      );
+      try {
+        const resurrection = await resurrectStoppedActiveInstances({
+          personaId: input.id,
+        });
+        if (resurrection.failed.length > 0) {
+          console.error(
+            "[apply-update] resurrect_stopped_active_instances start failures",
+            resurrection.failed,
+          );
+        }
+      } catch (error) {
+        console.error(
+          "[apply-update] resurrect_stopped_active_instances failed",
+          error,
+        );
+      }
       await onUpdated?.();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
