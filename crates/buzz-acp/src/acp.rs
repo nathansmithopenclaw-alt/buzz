@@ -618,6 +618,30 @@ impl AcpClient {
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
+        if has_generated_codex_config {
+            // Workspace-local exact-prefix allowlist for `buzz messages send`.
+            // auto_review stays on for every other command (Nathan 08-11).
+            match std::env::current_dir() {
+                Ok(cwd) => match crate::config::install_codex_relay_send_allowlist(&cwd) {
+                    Ok(path) => tracing::info!(
+                        target: "acp::codex",
+                        path = %path.display(),
+                        "installed Codex execpolicy allowlist for buzz messages send"
+                    ),
+                    Err(error) => tracing::warn!(
+                        target: "acp::codex",
+                        error = %error,
+                        "failed to install Codex execpolicy allowlist for buzz messages send"
+                    ),
+                },
+                Err(error) => tracing::warn!(
+                    target: "acp::codex",
+                    error = %error,
+                    "cannot resolve cwd to install Codex execpolicy allowlist"
+                ),
+            }
+        }
+
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(args)
             .stdin(Stdio::piped())

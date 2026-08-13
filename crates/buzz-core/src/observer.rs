@@ -22,7 +22,15 @@ pub const NIP44_MIN_CONTENT_LEN: usize = 132;
 /// Maximum NIP-44 v2 ciphertext length.
 pub const NIP44_MAX_CONTENT_LEN: usize = 87_472;
 /// Maximum observer plaintext JSON size accepted by helpers.
-pub const OBSERVER_MAX_PLAINTEXT_LEN: usize = 65_535;
+///
+/// rust-nostr 0.44.7 `nip44::v2::pad` rejects plaintext above
+/// `MAX_SUPPORTED_PLAINTEXT_SIZE` = 65_536 − 128 = **65_408**
+/// (`nostr-0.44.7/src/nips/nip44/v2.rs`). The NIP-44 spec's 65_535 unpadded
+/// ceiling is therefore a lie for this codec: frames of 65_409..=65_535 pass a
+/// spec-sized pre-check and then die inside `encrypt` with
+/// `NIP-44 error: message too long`. Keep this constant equal to the codec
+/// limit so packer, trimmer, and encrypt agree.
+pub const OBSERVER_MAX_PLAINTEXT_LEN: usize = 65_408;
 
 /// Errors returned by observer payload encryption/decryption helpers.
 #[derive(Debug, Error)]
@@ -137,6 +145,53 @@ mod tests {
         let decrypted: serde_json::Value =
             decrypt_observer_payload(&recipient, &event).expect("decrypt payload");
         assert_eq!(decrypted, payload);
+    }
+
+    #[test]
+    fn encrypt_observer_payload_accepts_exact_codec_ceiling() {
+        let sender = Keys::generate();
+        let recipient = Keys::generate();
+        let payload = json_of_serialized_len(OBSERVER_MAX_PLAINTEXT_LEN);
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap().len(),
+            OBSERVER_MAX_PLAINTEXT_LEN
+        );
+        let encrypted = encrypt_observer_payload(&sender, &recipient.public_key(), &payload)
+            .expect("65408-byte plaintext must encrypt");
+        assert!(content_looks_like_nip44(&encrypted));
+    }
+
+    #[test]
+    fn encrypt_observer_payload_rejects_one_byte_over_codec_ceiling() {
+        let sender = Keys::generate();
+        let recipient = Keys::generate();
+        for over in [1_usize, 65_535 - OBSERVER_MAX_PLAINTEXT_LEN] {
+            let payload = json_of_serialized_len(OBSERVER_MAX_PLAINTEXT_LEN + over);
+            let got = serde_json::to_string(&payload).unwrap().len();
+            assert_eq!(got, OBSERVER_MAX_PLAINTEXT_LEN + over);
+            let err = encrypt_observer_payload(&sender, &recipient.public_key(), &payload)
+                .expect_err("over-ceiling plaintext must not reach nip44::encrypt");
+            assert!(
+                matches!(
+                    err,
+                    ObserverPayloadError::PlaintextTooLarge {
+                        max: OBSERVER_MAX_PLAINTEXT_LEN,
+                        got: got_len
+                    } if got_len == got
+                ),
+                "expected PlaintextTooLarge at {got}, got {err}"
+            );
+        }
+    }
+
+    /// Build a JSON object whose `serde_json::to_string` length is exactly `len`.
+    fn json_of_serialized_len(len: usize) -> serde_json::Value {
+        let prefix = "{\"k\":\"";
+        let suffix = "\"}";
+        let fill = len
+            .checked_sub(prefix.len() + suffix.len())
+            .expect("requested length smaller than JSON envelope");
+        serde_json::json!({ "k": "x".repeat(fill) })
     }
 
     #[test]

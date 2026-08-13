@@ -768,11 +768,12 @@ struct ObserverChunkKey {
     agent_index: Option<usize>,
 }
 
-/// Flush coalesced chunks before they exceed the NIP-44 plaintext limit (65,535 bytes).
+/// Flush coalesced chunks before they exceed the NIP-44 plaintext limit.
 /// Leave headroom for the JSON envelope wrapping the text. This is a SOFT pre-flush
 /// of raw text below the hard cap; `fit_observer_event_to_budget` (the final ceiling,
-/// keyed to `OBSERVER_MAX_PLAINTEXT_LEN` in buzz-core/observer.rs:25) is what actually
-/// guarantees the serialized frame fits. Edit one of these two and review the other.
+/// keyed to `OBSERVER_MAX_PLAINTEXT_LEN` in buzz-core — rust-nostr 0.44.7's
+/// 65_408-byte `pad()` limit, not the 65_535 spec ceiling) is what actually
+/// guarantees the serialized frame encrypts. Edit one of these two and review the other.
 const OBSERVER_CHUNK_MAX_TEXT_BYTES: usize = 60_000;
 
 impl ObserverChunkCoalescer {
@@ -8745,5 +8746,65 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+
+    fn encrypt_or_err(event: &observer::ObserverEvent) -> Result<String, String> {
+        let keys = nostr::Keys::generate();
+        let recipient = nostr::Keys::generate();
+        encrypt_observer_payload(&keys, &recipient.public_key(), event).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn test_codec_ceiling_frame_encrypts_without_trim() {
+        // A frame whose serialized form is exactly the rust-nostr pad() limit
+        // must encrypt as-is. This is the "65408 ok" boundary.
+        let envelope = serialized(&event_with_payload(
+            "acp_read",
+            serde_json::json!({ "body": "" }),
+        ));
+        let fill = OBSERVER_MAX_PLAINTEXT_LEN
+            .checked_sub(envelope.len())
+            .expect("empty-body envelope larger than the codec ceiling");
+        let event = event_with_payload("acp_read", serde_json::json!({ "body": "x".repeat(fill) }));
+        assert_eq!(serialized(&event).len(), OBSERVER_MAX_PLAINTEXT_LEN);
+        encrypt_or_err(&event).expect("exact codec-ceiling frame must encrypt");
+    }
+
+    #[test]
+    fn test_old_spec_ceiling_is_trimmed_then_encrypts() {
+        // 65_409..=65_535 is the death zone against rust-nostr 0.44.7: the
+        // pre-trimmer packer used to ship these, encrypt failed with
+        // "NIP-44 error: message too long", and the frame was dropped.
+        // After trim, encrypt must succeed.
+        let sender = nostr::Keys::generate();
+        let recipient = nostr::Keys::generate();
+        for over in [1_usize, 65_535 - OBSERVER_MAX_PLAINTEXT_LEN] {
+            let target = OBSERVER_MAX_PLAINTEXT_LEN + over;
+            let envelope = serialized(&event_with_payload(
+                "acp_read",
+                serde_json::json!({ "body": "" }),
+            ));
+            let fill = target
+                .checked_sub(envelope.len())
+                .expect("envelope larger than target");
+            let mut event =
+                event_with_payload("acp_read", serde_json::json!({ "body": "x".repeat(fill) }));
+            assert_eq!(serialized(&event).len(), target, "precondition over={over}");
+
+            let raw_err = encrypt_observer_payload(&sender, &recipient.public_key(), &event)
+                .expect_err("untrimmed death-zone frame must not encrypt");
+            assert!(
+                raw_err.to_string().contains("exceeds") || raw_err.to_string().contains("too long"),
+                "untrimmed error should be a size reject, got {raw_err}"
+            );
+
+            fit_observer_event_to_budget(&mut event);
+            assert!(
+                serialized(&event).len() <= OBSERVER_MAX_PLAINTEXT_LEN,
+                "trim must bring over={over} under the codec ceiling"
+            );
+            encrypt_observer_payload(&sender, &recipient.public_key(), &event)
+                .unwrap_or_else(|e| panic!("trimmed over={over} frame must encrypt: {e}"));
+        }
     }
 }
