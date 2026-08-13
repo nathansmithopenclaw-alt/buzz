@@ -1,4 +1,5 @@
 import type { AgentManagementRequest } from "./agentManagement";
+import { resurrectStoppedActiveInstances } from "@/shared/api/tauriManagedAgents";
 import {
   applyDelegatedPersonaEnvVars,
   type DelegatedPersonaEnvVarsResult,
@@ -8,8 +9,16 @@ type EnvRequest = Extract<AgentManagementRequest, { action: "update" }> & {
   request: { envVars: Record<string, string> };
 };
 
+export type ApplyResurrectionResult = {
+  started: string[];
+  failed: string[];
+};
+
 type ApplyBridge = {
   applyPatch: typeof applyDelegatedPersonaEnvVars;
+  resurrectStopped: (input: {
+    personaId: string;
+  }) => Promise<ApplyResurrectionResult>;
 };
 
 export type DelegatedEnvActivationCounts = {
@@ -44,15 +53,54 @@ export function delegatedEnvAuditTarget(
   return `saved env for agent ${agentName}; changes take effect on next spawn`;
 }
 
-export function applyDelegatedPersonaEnvVarsWith(
+export function mergeResurrectionIntoActivation(
+  activation: DelegatedPersonaEnvVarsResult,
+  resurrection: ApplyResurrectionResult,
+): DelegatedPersonaEnvVarsResult {
+  return {
+    ...activation,
+    started_count: activation.started_count + resurrection.started.length,
+    failed_start_count:
+      activation.failed_start_count + resurrection.failed.length,
+  };
+}
+
+/**
+ * Delegated `env_vars` apply path used by `autoApproveUpdate`.
+ *
+ * The env command only starts agents that flip NotReady→Ready. A killed
+ * harness that was already Ready returns 0/0/0 and never respawns unless
+ * this wrapper calls `resurrect_stopped_active_instances` afterward.
+ * Resurrection failures are logged and counted; the env write stays durable.
+ */
+export async function applyDelegatedPersonaEnvVarsWith(
   request: EnvRequest,
   personaId: string,
   bridge: ApplyBridge,
 ): Promise<DelegatedPersonaEnvVarsResult> {
-  return bridge.applyPatch({
+  const activation = await bridge.applyPatch({
     id: personaId,
     envVars: request.request.envVars,
   });
+  try {
+    const resurrection = await bridge.resurrectStopped({ personaId });
+    if (resurrection.failed.length > 0) {
+      console.error(
+        "[delegated-apply] resurrect_stopped_active_instances start failures",
+        resurrection.failed,
+      );
+    }
+    return mergeResurrectionIntoActivation(activation, resurrection);
+  } catch (error) {
+    console.error(
+      "[delegated-apply] resurrect_stopped_active_instances failed after env apply",
+      error,
+    );
+    return {
+      ...activation,
+      failed_start_count: activation.failed_start_count + 1,
+    };
+  }
 }
 
 export function applyDelegatedPersonaEnvVarsRequest(
@@ -61,5 +109,6 @@ export function applyDelegatedPersonaEnvVarsRequest(
 ): Promise<DelegatedPersonaEnvVarsResult> {
   return applyDelegatedPersonaEnvVarsWith(request, personaId, {
     applyPatch: applyDelegatedPersonaEnvVars,
+    resurrectStopped: resurrectStoppedActiveInstances,
   });
 }
