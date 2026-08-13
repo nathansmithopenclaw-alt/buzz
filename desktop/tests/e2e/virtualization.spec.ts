@@ -173,7 +173,9 @@ test.describe("list virtualization", () => {
         );
       });
     await dispatchSpace();
-    await expect(page.getByTestId("sidebar-section-drag-overlay")).toBeVisible();
+    await expect(
+      page.getByTestId("sidebar-section-drag-overlay"),
+    ).toBeVisible();
     await page.keyboard.press("ArrowDown");
     await expect.poll(sectionOrder).toEqual(["Archive", "Priority"]);
     await dispatchSpace();

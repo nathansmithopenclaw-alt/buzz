@@ -260,7 +260,7 @@ export function SidebarDndContext({
         return;
       }
     },
-    [sectionIds, onAssignChannel, onUnassignChannel, onReorderSections],
+    [onAssignChannel, onUnassignChannel],
   );
 
   const handleDragOver = React.useCallback(
