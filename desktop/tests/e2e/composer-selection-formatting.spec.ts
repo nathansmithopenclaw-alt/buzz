@@ -272,7 +272,12 @@ for (const format of [
     await input.pressSequentially("before");
     await input.press("Shift+Enter");
     await applyCaretFormat(page, format.label);
-    await input.pressSequentially("inside");
+    await expect(input).toBeFocused();
+    // Continue with the user's active keyboard target. Locator typing invokes
+    // HTMLElement.focus() first; on contenteditable that browser action moves
+    // a collapsed DOM caret to the first paragraph and does not model typing
+    // immediately after a toolbar command.
+    await page.keyboard.type("inside");
 
     await expect(input.locator(":scope > p").first()).toHaveText("before");
     await expect(input.locator(`:scope > ${format.selector}`)).toHaveText(
@@ -509,7 +514,8 @@ test("caret-only block formatting serializes the prior draft unchanged", async (
   await input.pressSequentially("before");
   await input.press("Shift+Enter");
   await applyCaretFormat(page, "Bullet list");
-  await input.pressSequentially("item");
+  await expect(input).toBeFocused();
+  await page.keyboard.type("item");
 
   await page.getByTestId("send-message").click();
   await expect

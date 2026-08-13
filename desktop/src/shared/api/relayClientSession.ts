@@ -15,6 +15,7 @@ import {
 import {
   getTextPayload,
   type ConnectionState,
+  type LiveSubscriptionReadiness,
   type PendingEvent,
   type RelayLiveSubscriptionOptions,
   type RelaySubscription,
@@ -426,7 +427,6 @@ export class RelayClient {
       onEvent,
     );
   }
-
   async preconnect() {
     // Explicit re-engagement (reconnect card / community switch): clears the
     // terminal latch and AUTH rejection streak, and bypasses backoff once.
@@ -602,18 +602,18 @@ export class RelayClient {
   ) {
     await this.ensureConnected();
     const subId = `live-${crypto.randomUUID()}`;
-    let resolveReady = () => {
-      return;
-    };
+    let resolveReady = (_readiness: LiveSubscriptionReadiness) => {};
     const ready = new Promise<void>((resolve) => {
-      resolveReady = () => {
+      resolveReady = (readiness) => {
         window.clearTimeout(fallbackTimeout);
+        options?.onReady?.(readiness);
         resolve();
       };
     });
-    const fallbackTimeout = window.setTimeout(() => {
-      resolveReady();
-    }, 250);
+    const fallbackTimeout = window.setTimeout(
+      () => resolveReady("timeout"),
+      250,
+    );
 
     this.subscriptions.set(subId, {
       mode: "live",
@@ -887,6 +887,7 @@ export class RelayClient {
   }
 
   private handleEose(subId: string) {
+    this.flushEventBuffer(); // Deliver preceding EVENT frames before EOSE.
     handleSubscriptionEose({
       subscriptions: this.subscriptions,
       subId,
@@ -1068,18 +1069,15 @@ export class RelayClient {
         this.subscriptions.delete(subId);
         continue;
       }
-
-      subscription.resolveReady?.();
+      subscription.resolveReady?.("closed");
       subscription.resolveReady = undefined;
       clearClosedRetry(subscription);
     }
-
     for (const [eventId, pendingEvent] of this.pendingEvents) {
       window.clearTimeout(pendingEvent.timeout);
       pendingEvent.reject(error);
       this.pendingEvents.delete(eventId);
     }
-
     if (options?.reconnect !== false) {
       this.scheduleReconnect();
     }

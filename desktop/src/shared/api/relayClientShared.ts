@@ -40,6 +40,7 @@ export type RelaySubscriptionFilter = {
 
 export type RelayLiveSubscriptionOptions = {
   onTerminalClosed?: (message: string) => void;
+  onReady?: (readiness: LiveSubscriptionReadiness) => void;
 };
 
 type HistorySubscription = {
@@ -58,11 +59,13 @@ type FirstEventSubscription = {
   timeout: number;
 };
 
+export type LiveSubscriptionReadiness = "eose" | "closed" | "timeout";
+
 type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
   onEvent: (event: RelayEvent) => void;
-  resolveReady?: () => void;
+  resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
   lastSeenCreatedAt?: number;
   /**
    * Lower bound of a reconnect backfill window that has not yet completed.

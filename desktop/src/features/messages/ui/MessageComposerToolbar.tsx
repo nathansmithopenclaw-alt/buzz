@@ -6,7 +6,10 @@ import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
-import { FormattingToolbar } from "./FormattingToolbar";
+import {
+  FormattingToolbar,
+  type FormattingSelectionRange,
+} from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
@@ -22,6 +25,7 @@ export const MessageComposerToolbar = React.memo(
     editor,
     extraActions,
     formattingDisabled,
+    formattingSelection,
     isEmojiPickerOpen,
     isFormattingOpen,
     isSending,
@@ -39,6 +43,7 @@ export const MessageComposerToolbar = React.memo(
     editor: Editor | null;
     extraActions?: React.ReactNode;
     formattingDisabled: boolean;
+    formattingSelection?: FormattingSelectionRange | null;
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
     isSending: boolean;
@@ -95,7 +100,10 @@ export const MessageComposerToolbar = React.memo(
                         aria-pressed={isFormattingOpen}
                         disabled={composerDisabled}
                         onClick={() => onFormattingToggle(!isFormattingOpen)}
-                        onMouseDown={onCaptureSelection}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          onCaptureSelection();
+                        }}
                         size="icon"
                         type="button"
                         variant={isFormattingOpen ? "default" : "ghost"}
@@ -119,7 +127,10 @@ export const MessageComposerToolbar = React.memo(
                         aria-label="Close formatting"
                         disabled={composerDisabled}
                         onClick={() => onFormattingToggle(false)}
-                        onMouseDown={onCaptureSelection}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          onCaptureSelection();
+                        }}
                         size="icon"
                         type="button"
                         variant="ghost"
@@ -142,6 +153,7 @@ export const MessageComposerToolbar = React.memo(
                   <FormattingToolbar
                     editor={editor}
                     disabled={formattingDisabled}
+                    initialSelection={formattingSelection}
                     onLinkButton={onLinkButton}
                   />
                 </motion.div>

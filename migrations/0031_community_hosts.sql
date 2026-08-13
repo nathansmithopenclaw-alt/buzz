@@ -45,3 +45,17 @@ FOR EACH ROW EXECUTE FUNCTION sync_community_canonical_host();
 -- security boundary that prevents one authority from naming two tenants.
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('community_hosts', 'operator-global host routing registry; community_id is the mapped tenant');
+
+-- Migration 0030 predates this operator-global routing table and therefore
+-- cannot name it in the deletion control plane's hard-coded taxonomy. Keep
+-- host aliases available for tombstoned routing while excluding them from
+-- tenant-owned inventory and write-fence attachment.
+CREATE OR REPLACE FUNCTION community_write_fence_excluded_table(target NAME) RETURNS BOOLEAN
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS $$
+    SELECT target::TEXT = ANY (ARRAY[
+        'community_deletion_requests', 'community_deletion_approvals',
+        'community_deletion_checkpoints', 'community_serving_write_leases',
+        'community_deletion_executor_heartbeats', 'product_feedback',
+        'rate_limit_violations', 'community_hosts'
+    ]::TEXT[])
+$$;

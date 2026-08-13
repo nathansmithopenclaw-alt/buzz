@@ -59,6 +59,44 @@ export function resolveBaseRef(repoRoot, env = process.env) {
   }
 }
 
+/**
+ * Resolve every parent whose already-accepted file sizes a merge candidate may
+ * inherit. A normal feature branch keeps the historical single merge-base
+ * behavior. An in-progress or committed merge compares against both parents,
+ * so unchanged files from either accepted line are grandfathered without
+ * allowing merge-only growth beyond the larger parent.
+ */
+export function resolveBaseRefs(repoRoot, env = process.env) {
+  if (env.CHECK_FILE_SIZES_BASE) {
+    return [env.CHECK_FILE_SIZES_BASE];
+  }
+
+  try {
+    const mergeHead = git(
+      ["rev-parse", "--quiet", "--verify", "MERGE_HEAD"],
+      repoRoot,
+      { stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    if (mergeHead) {
+      return [git(["rev-parse", "HEAD"], repoRoot).trim(), mergeHead];
+    }
+  } catch {
+    // No merge is in progress.
+  }
+
+  const headAndParents = git(
+    ["rev-list", "--parents", "-n", "1", "HEAD"],
+    repoRoot,
+  )
+    .trim()
+    .split(/\s+/);
+  if (headAndParents.length > 2) {
+    return headAndParents.slice(1);
+  }
+
+  return [resolveBaseRef(repoRoot, env)];
+}
+
 export function parseChangedFiles(output) {
   const fields = output.split("\0");
   const changes = [];
@@ -102,9 +140,14 @@ function changedProjectFiles({ repoRoot, projectRelative, baseRef }) {
 }
 
 function readBaseFile(repoRoot, baseRef, filePath) {
-  return git(["show", `${baseRef}:${filePath}`], repoRoot, {
-    encoding: null,
-  }).toString("utf8");
+  try {
+    return git(["show", `${baseRef}:${filePath}`], repoRoot, {
+      encoding: null,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).toString("utf8");
+  } catch {
+    return null;
+  }
 }
 
 export async function runFileSizeCheck({ projectRoot, rules, label }) {
@@ -113,17 +156,31 @@ export async function runFileSizeCheck({ projectRoot, rules, label }) {
   // cannot collapse the project pathspec to an empty string.
   const repoRoot = path.dirname(projectRoot);
   const projectRelative = toPosixPath(path.basename(projectRoot));
-  const baseRef = resolveBaseRef(repoRoot);
+  const baseRefs = resolveBaseRefs(repoRoot);
 
   // Fail clearly instead of silently turning a missing/shallow base into a pass.
-  git(["cat-file", "-e", `${baseRef}^{commit}`], repoRoot);
+  for (const baseRef of baseRefs) {
+    git(["cat-file", "-e", `${baseRef}^{commit}`], repoRoot);
+  }
 
   const violations = [];
-  for (const change of changedProjectFiles({
-    repoRoot,
-    projectRelative,
-    baseRef,
-  })) {
+  const changesByPath = new Map();
+  for (const baseRef of baseRefs) {
+    for (const change of changedProjectFiles({
+      repoRoot,
+      projectRelative,
+      baseRef,
+    })) {
+      const existing = changesByPath.get(change.path) ?? {
+        ...change,
+        basePaths: new Map(),
+      };
+      existing.basePaths.set(baseRef, change.oldPath ?? change.path);
+      changesByPath.set(change.path, existing);
+    }
+  }
+
+  for (const change of changesByPath.values()) {
     if (change.status === "D") continue;
 
     const relativePath = toPosixPath(
@@ -134,10 +191,13 @@ export async function runFileSizeCheck({ projectRoot, rules, label }) {
 
     const candidatePath = path.join(repoRoot, change.path);
     const candidateLines = countLines(await fs.readFile(candidatePath, "utf8"));
-    const basePath = change.oldPath ?? change.path;
-    const baseContent =
-      change.status === "A" ? null : readBaseFile(repoRoot, baseRef, basePath);
-    const baseLines = baseContent == null ? null : countLines(baseContent);
+    const baseLineCounts = baseRefs.flatMap((baseRef) => {
+      const basePath = change.basePaths.get(baseRef) ?? change.path;
+      const baseContent = readBaseFile(repoRoot, baseRef, basePath);
+      return baseContent == null ? [] : [countLines(baseContent)];
+    });
+    const baseLines =
+      baseLineCounts.length === 0 ? null : Math.max(...baseLineCounts);
     const result = evaluateFileSize({
       baseLines,
       candidateLines,
@@ -156,7 +216,9 @@ export async function runFileSizeCheck({ projectRoot, rules, label }) {
 
   if (violations.length === 0) return;
 
-  console.error(`${label} file size ratchet failed (base ${baseRef}):`);
+  console.error(
+    `${label} file size ratchet failed (base ${baseRefs.join(", ")}):`,
+  );
   for (const violation of violations) {
     const before = violation.baseLines == null ? "new" : violation.baseLines;
     const delta =

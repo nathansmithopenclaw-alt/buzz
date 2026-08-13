@@ -16,8 +16,8 @@ use crate::{
         load_personas, managed_agent_avatar_url, managed_agent_runtime_keys, record_agent_command,
         resolve_effective_agent_env, save_managed_agents, save_personas,
         stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
-        AgentDefinition, AgentReadiness, BackendKind, LinkedInstanceBehaviorPatch,
-        ManagedAgentRecord, RespondTo, UpdatePersonaRequest,
+        validate_agent_definition_text, AgentDefinition, AgentReadiness, BackendKind,
+        LinkedInstanceBehaviorPatch, ManagedAgentRecord, RespondTo, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -505,6 +505,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let state = app.state::<AppState>();
             let display_name = trim_required(&input.display_name, "Display name")?;
             let system_prompt = input.system_prompt.clone();
+            validate_agent_definition_text(&display_name, &system_prompt)?;
             let avatar_url = trim_optional(input.avatar_url);
             let runtime = trim_optional(input.runtime);
             let model = trim_optional(input.model);
