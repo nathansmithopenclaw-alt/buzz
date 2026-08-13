@@ -10,6 +10,7 @@ import {
   evaluateFileSize,
   parseChangedFiles,
   resolveBaseRef,
+  resolveBaseRefs,
 } from "./check-file-sizes-core.mjs";
 
 function git(repo, ...args) {
@@ -35,6 +36,25 @@ test("local base resolution uses the branch merge-base and fails without origin/
     () => resolveBaseRef(repo, {}),
     /Fetch origin\/main or set CHECK_FILE_SIZES_BASE/,
   );
+});
+
+test("merge base resolution keeps both accepted parents", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "file-size-merge-base-"));
+  git(repo, "init", "-b", "main");
+  git(repo, "config", "user.name", "Test");
+  git(repo, "config", "user.email", "test@example.com");
+  git(repo, "commit", "--allow-empty", "-m", "base");
+  git(repo, "remote", "add", "origin", repo);
+  git(repo, "fetch", "origin", "main:refs/remotes/origin/main");
+  git(repo, "switch", "-c", "upstream");
+  git(repo, "commit", "--allow-empty", "-m", "upstream");
+  const upstream = git(repo, "rev-parse", "HEAD");
+  git(repo, "switch", "main");
+  git(repo, "commit", "--allow-empty", "-m", "local");
+  const local = git(repo, "rev-parse", "HEAD");
+  git(repo, "merge", "--no-ff", "upstream", "-m", "merge");
+
+  assert.deepEqual(resolveBaseRefs(repo, {}), [local, upstream]);
 });
 
 test("counts empty, LF, and CRLF content with the existing semantics", () => {

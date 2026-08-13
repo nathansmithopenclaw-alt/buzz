@@ -4,17 +4,56 @@
 //! multi-tenant rewrite owns a clean consolidated `0001`; legacy single-tenant
 //! cutover/backfill is a separate operator script, not startup migration state.
 
-use sqlx::PgPool;
+use std::future::Future;
 
+use sqlx::{Connection, PgConnection, PgPool};
+
+use crate::deletion::SCHEMA_DESTRUCTION_LOCK_KEY;
 use crate::Result;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
+// Exact SHA-384 recorded by SQLx for the community-host migration shipped on
+// Smith Crafts main at b7471a7e, before this fold extended version 31 with the
+// upstream deletion-taxonomy union.
+const LEGACY_COMMUNITY_HOSTS_CHECKSUM_HEX: &str =
+    "9fbe56cf998e83527ac1cc343dfb0ddeda883c32a5656f01412aed448cc27e566875eb017e65f1c2ace41dc2cae36b5d";
+const COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL: &str = r#"
+CREATE OR REPLACE FUNCTION community_write_fence_excluded_table(target NAME) RETURNS BOOLEAN
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS $$
+    SELECT target::TEXT = ANY (ARRAY[
+        'community_deletion_requests', 'community_deletion_approvals',
+        'community_deletion_checkpoints', 'community_serving_write_leases',
+        'community_deletion_executor_heartbeats', 'product_feedback',
+        'rate_limit_violations', 'community_hosts'
+    ]::TEXT[])
+$$
+"#;
+
 /// Run all pending Buzz database migrations.
+///
+/// The entire run holds the exclusive [`SCHEMA_DESTRUCTION_LOCK_KEY`] session
+/// lock, serializing schema changes against destructive deletion transactions
+/// (which take the shared counterpart while they validate the live catalog
+/// and act on it). Every migration statement executes on the same backend
+/// that owns the lock — see [`with_exclusive_schema_destruction_lock`] for
+/// why that binding, not the explicit unlock, is the safety contract.
+/// Migration execution must never bypass this wrapper — a source lint
+/// (`migration_execution_cannot_bypass_schema_destruction_lock`) enforces
+/// that `MIGRATOR.run` has no other call site.
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
-    reconcile_fold_migration_27(pool).await?;
-    reject_legacy_nip_rs_cardinality_ambiguity(pool).await?;
-    MIGRATOR.run(pool).await?;
+    with_exclusive_schema_destruction_lock(pool, |mut conn| async move {
+        let outcome = run_migrations_locked(&mut conn).await;
+        (conn, outcome)
+    })
+    .await
+}
+
+async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
+    reconcile_fold_migration_collisions(conn).await?;
+    reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
+    MIGRATOR.run(&mut *conn).await?;
+    ensure_community_hosts_deletion_taxonomy(conn).await?;
     // The replica-fence proof (see `replica_fence`) requires the commit-time
     // `created_at` floor trigger from migration 0021 — correctly shaped — on
     // the `events` parent and every partition. `CREATE TABLE .. PARTITION OF`
@@ -22,22 +61,27 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     // PARTITION` or created by an older code path would silently escape the
     // guard, so migration fails closed if any is missing. (The fence probe
     // re-runs this same check at startup on non-migrating relays.)
-    crate::replica_fence::verify_floor_guard_catalog(pool).await?;
+    crate::replica_fence::verify_floor_guard_catalog(&mut *conn).await?;
     Ok(())
 }
 
-/// Reconcile the one version collision created by the T6 upstream fold.
+/// Reconcile migration-version collisions introduced by upstream folds.
 ///
 /// The Smith Crafts line shipped `0027_community_hosts`; upstream independently
 /// shipped `0027_channels_id_lookup_index` and then `0028_long_reaction_payloads`.
-/// Fresh databases use the upstream numbering and apply community hosts as
-/// version 29. A database that already applied the Smith Crafts version 27 has
-/// the exact version-29 checksum, so move that ledger row forward before SQLx
-/// validates checksums. No schema is reverted or replayed.
-async fn reconcile_fold_migration_27(pool: &PgPool) -> Result<()> {
+/// The first fold moved that already-applied row to version 29. Upstream then
+/// published community deletion as versions 29 and 30, colliding again with
+/// Smith Crafts production databases that already record community hosts at
+/// 29. The canonical fold keeps upstream's checksums at 27-30 and places the
+/// unchanged community-host migration at version 31.
+///
+/// Move a recognized community-host ledger row from either legacy version to
+/// 31 before SQLx validates checksums. The schema is neither reverted nor
+/// replayed. Unknown, failed, or duplicate rows fail closed.
+async fn reconcile_fold_migration_collisions(conn: &mut PgConnection) -> Result<()> {
     let migrations_table: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?;
     if migrations_table.is_none() {
         return Ok(());
@@ -46,15 +90,39 @@ async fn reconcile_fold_migration_27(pool: &PgPool) -> Result<()> {
     let canonical_27 = MIGRATOR
         .iter()
         .find(|migration| migration.version == 27)
-        .expect("migration 27 must remain the upstream channel-id index");
-    let community_hosts_29 = MIGRATOR
+        .ok_or_else(|| {
+            crate::DbError::InvalidData(
+                "migration reconciliation requires upstream migration 27".into(),
+            )
+        })?;
+    let canonical_29 = MIGRATOR
         .iter()
         .find(|migration| migration.version == 29)
-        .expect("migration 29 must be the renumbered community-host migration");
+        .ok_or_else(|| {
+            crate::DbError::InvalidData(
+                "migration reconciliation requires upstream migration 29".into(),
+            )
+        })?;
+    let community_hosts_31 = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 31)
+        .ok_or_else(|| {
+            crate::DbError::InvalidData(
+                "migration reconciliation requires community-host migration 31".into(),
+            )
+        })?;
+    let legacy_community_hosts_checksum = hex::decode(LEGACY_COMMUNITY_HOSTS_CHECKSUM_HEX)
+        .map_err(|error| {
+            crate::DbError::InvalidData(format!(
+                "invalid embedded legacy community-host checksum: {error}"
+            ))
+        })?;
 
-    let mut transaction = pool.begin().await?;
+    let mut transaction = conn.begin().await?;
     // Serialize the ledger rewrite across concurrently starting relay
-    // processes. SQLx subsequently takes its own advisory migration lock.
+    // processes. The outer schema/destruction session lock already serializes
+    // this whole path against destructive community operations; SQLx later
+    // takes its own advisory migration lock.
     sqlx::query("LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *transaction)
         .await?;
@@ -63,39 +131,98 @@ async fn reconcile_fold_migration_27(pool: &PgPool) -> Result<()> {
         sqlx::query_as("SELECT checksum, success FROM _sqlx_migrations WHERE version = 27")
             .fetch_optional(&mut *transaction)
             .await?;
+    let applied_29: Option<(Vec<u8>, bool)> =
+        sqlx::query_as("SELECT checksum, success FROM _sqlx_migrations WHERE version = 29")
+            .fetch_optional(&mut *transaction)
+            .await?;
+    let applied_31: Option<(Vec<u8>, bool)> =
+        sqlx::query_as("SELECT checksum, success FROM _sqlx_migrations WHERE version = 31")
+            .fetch_optional(&mut *transaction)
+            .await?;
+
+    let mut community_hosts_at_31 = match applied_31 {
+        None => false,
+        Some((checksum, true)) if checksum.as_slice() == community_hosts_31.checksum.as_ref() => {
+            true
+        }
+        Some((_checksum, false)) => {
+            return Err(crate::DbError::InvalidData(
+                "upstream fold migration reconciliation blocked: migration 31 is recorded as failed"
+                    .into(),
+            ));
+        }
+        Some((_checksum, true)) => {
+            return Err(crate::DbError::InvalidData(
+                "upstream fold migration reconciliation blocked: migration 31 has an unknown checksum"
+                    .into(),
+            ));
+        }
+    };
 
     match applied_27 {
         None => {}
         Some((checksum, true)) if checksum.as_slice() == canonical_27.checksum.as_ref() => {}
-        Some((checksum, true)) if checksum.as_slice() == community_hosts_29.checksum.as_ref() => {
-            let version_29_exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 29)",
-            )
-            .fetch_one(&mut *transaction)
-            .await?;
-            if version_29_exists {
+        Some((checksum, true)) if checksum.as_slice() == legacy_community_hosts_checksum => {
+            if community_hosts_at_31 {
                 return Err(crate::DbError::InvalidData(
-                    "T6 migration reconciliation blocked: both the legacy community-host version 27 and version 29 are recorded"
+                    "upstream fold migration reconciliation blocked: community hosts are recorded at both versions 27 and 31"
                         .into(),
                 ));
             }
 
             sqlx::query(
                 "UPDATE _sqlx_migrations \
-                 SET version = 29, description = 'community hosts' \
+                 SET version = 31, description = 'community hosts', checksum = $1 \
                  WHERE version = 27 AND success",
             )
+            .bind(community_hosts_31.checksum.as_ref())
+            .execute(&mut *transaction)
+            .await?;
+            community_hosts_at_31 = true;
+        }
+        Some((_checksum, false)) => {
+            return Err(crate::DbError::InvalidData(
+                "upstream fold migration reconciliation blocked: migration 27 is recorded as failed"
+                    .into(),
+            ));
+        }
+        Some((_checksum, true)) => {
+            return Err(crate::DbError::InvalidData(
+                "upstream fold migration reconciliation blocked: migration 27 has an unknown checksum"
+                    .into(),
+            ));
+        }
+    }
+
+    match applied_29 {
+        None => {}
+        Some((checksum, true)) if checksum.as_slice() == canonical_29.checksum.as_ref() => {}
+        Some((checksum, true)) if checksum.as_slice() == legacy_community_hosts_checksum => {
+            if community_hosts_at_31 {
+                return Err(crate::DbError::InvalidData(
+                    "upstream fold migration reconciliation blocked: community hosts are recorded at both versions 29 and 31"
+                        .into(),
+                ));
+            }
+            sqlx::query(
+                "UPDATE _sqlx_migrations \
+                 SET version = 31, description = 'community hosts', checksum = $1 \
+                 WHERE version = 29 AND success",
+            )
+            .bind(community_hosts_31.checksum.as_ref())
             .execute(&mut *transaction)
             .await?;
         }
         Some((_checksum, false)) => {
             return Err(crate::DbError::InvalidData(
-                "T6 migration reconciliation blocked: migration 27 is recorded as failed".into(),
+                "upstream fold migration reconciliation blocked: migration 29 is recorded as failed"
+                    .into(),
             ));
         }
         Some((_checksum, true)) => {
             return Err(crate::DbError::InvalidData(
-                "T6 migration reconciliation blocked: migration 27 has an unknown checksum".into(),
+                "upstream fold migration reconciliation blocked: migration 29 has an unknown checksum"
+                    .into(),
             ));
         }
     }
@@ -104,21 +231,74 @@ async fn reconcile_fold_migration_27(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+/// Repair the only schema delta that cannot be replayed when a recognized
+/// brownfield community-host ledger row is promoted directly to canonical 31.
+/// A crash after the ledger transaction but before this step is retry-safe:
+/// the next migration run observes the missing classification and installs it.
+async fn ensure_community_hosts_deletion_taxonomy(conn: &mut PgConnection) -> Result<()> {
+    let excluded: bool =
+        sqlx::query_scalar("SELECT community_write_fence_excluded_table('community_hosts')")
+            .fetch_one(&mut *conn)
+            .await?;
+    if !excluded {
+        sqlx::query(COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Run `op` while holding the exclusive schema/destruction session lock.
+///
+/// `op` receives ownership of the detached connection that owns the advisory
+/// lock and must run every statement on it, handing the same connection back
+/// with its outcome. That same-backend lifetime — not the explicit unlock —
+/// is the safety contract: PostgreSQL releases a session lock only when its
+/// backend finishes, so cancelling this future (dropping the connection while
+/// a migration statement is still executing server-side) cannot expose the
+/// lock to shared destructive holders before that statement's backend
+/// terminates. On completion the lock is explicitly released on the returned
+/// connection (success and error alike) and the connection is closed, never
+/// returning a locked session to the pool.
+pub(crate) async fn with_exclusive_schema_destruction_lock<T, F, Fut>(
+    pool: &PgPool,
+    op: F,
+) -> Result<T>
+where
+    F: FnOnce(PgConnection) -> Fut,
+    Fut: Future<Output = (PgConnection, Result<T>)>,
+{
+    let mut lock_conn = pool.acquire().await?.detach();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
+        .execute(&mut lock_conn)
+        .await?;
+    let (mut lock_conn, outcome) = op(lock_conn).await;
+    let unlock = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
+        .execute(&mut lock_conn)
+        .await;
+    let _ = lock_conn.close().await;
+    let value = outcome?;
+    unlock?;
+    Ok(value)
+}
+
 /// Migration 0007 is checksum-frozen and predates exact NIP-RS tag-cardinality
 /// enforcement. A populated database still on 0001-0006 must not let 0007
 /// irreversibly purge duplicate-tag history. Fail before sqlx starts its
 /// migration transaction so an operator can inspect and repair those rows.
-async fn reject_legacy_nip_rs_cardinality_ambiguity(pool: &PgPool) -> Result<()> {
+async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> Result<()> {
     let migrations_table: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?;
     if migrations_table.is_none() {
         return Ok(());
     }
     let applied: Option<i64> =
         sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?;
     if applied.is_none_or(|version| version >= 7) {
         return Ok(());
@@ -162,7 +342,7 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(pool: &PgPool) -> Result<()>
                )\
          )",
     )
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await?;
 
     if ambiguous {
@@ -428,6 +608,13 @@ mod tests {
             "push_gateway_delivery_request_replays",
             "product_feedback",
             "replica_heartbeat",
+            "community_deletion_requests",
+            "community_deletion_approvals",
+            "community_deletion_checkpoints",
+            "community_deletion_manifest_keys",
+            "storage_taxonomy_sweeps",
+            "community_serving_write_leases",
+            "community_deletion_executor_heartbeats",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -641,7 +828,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 29);
+        assert_eq!(migrations.len(), 31);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -999,27 +1186,17 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
-        // Channel-id lookup index (0027): serves the tenant-independent
-        // `channels` lookups that carry no community_id predicate, which no
-        // community_id-leading index can satisfy. Covering + partial so the
-        // planner can go index-only; asserted NOT UNIQUE because `id` alone is
-        // not unique in this table (the same channel id may exist under more
-        // than one community), so a unique index would encode a false
-        // constraint and fail to build on such a database.
+
+        // Channel-id lookup index (0027): serves tenant-independent channel lookups.
         assert_eq!(migrations[26].version, 27);
         let channel_id_index = migrations[26].sql.as_str();
         assert!(channel_id_index.contains("idx_channels_id_live"));
         assert!(channel_id_index.contains("INCLUDE (community_id)"));
         assert!(channel_id_index.contains("WHERE deleted_at IS NULL"));
-        assert!(
-            !channel_id_index.contains("CREATE UNIQUE INDEX"),
-            "channels.id is not unique across communities — index must not be UNIQUE",
-        );
-        assert!(
-            desired_schema.contains("idx_channels_id_live"),
-            "desired-state schema must carry the channel-id lookup index",
-        );
+        assert!(!channel_id_index.contains("CREATE UNIQUE INDEX"));
+        assert!(desired_schema.contains("idx_channels_id_live"));
 
+        // Main owns 0028 for long reaction payloads.
         assert_eq!(migrations[27].version, 28);
         let long_reactions = migrations[27].sql.as_str();
         assert!(
@@ -1027,11 +1204,47 @@ mod tests {
         );
         assert!(desired_schema.contains("emoji               VARCHAR(66) NOT NULL"));
 
-        // Community host aliases were the colliding Smith Crafts 0027. The
-        // fold moves them forward to 0029 so upstream 0027/0028 retain their
-        // published checksums and both fresh and brownfield databases converge.
+        // Durable whole-community deletion control plane and universal DB fence.
         assert_eq!(migrations[28].version, 29);
-        let community_hosts = migrations[28].sql.as_str();
+        let deletion = migrations[28].sql.as_str();
+        assert!(deletion.contains("CREATE TABLE community_deletion_requests"));
+        assert!(deletion.contains("CREATE TABLE community_deletion_approvals"));
+        assert!(deletion.contains("CREATE TABLE community_deletion_checkpoints"));
+        assert!(deletion.contains("CREATE TABLE community_serving_write_leases"));
+        assert!(deletion.contains("CREATE TABLE community_deletion_executor_heartbeats"));
+        assert!(deletion.contains("CREATE FUNCTION community_write_allowed"));
+        assert!(deletion.contains("LANGUAGE plpgsql VOLATILE"));
+        assert!(deletion.contains("CREATE FUNCTION assert_community_write_allowed"));
+        assert!(deletion.contains("current_setting('transaction_isolation') <> 'read committed'"));
+        assert!(deletion.contains("ERRCODE = 'invalid_transaction_state'"));
+        assert!(deletion.contains("CREATE FUNCTION enforce_community_write_fence"));
+        assert!(deletion.contains("CREATE FUNCTION attach_community_write_fence"));
+        assert!(deletion.contains("community_write_fence_excluded_table"));
+        assert!(deletion.contains("CREATE FUNCTION enforce_community_tombstone"));
+        assert!(deletion.contains("community tombstones are permanent"));
+        assert!(deletion.contains("SET LOCAL lock_timeout = '5s'"));
+        assert!(deletion.contains("'active', 'quiescing', 'fenced', 'tombstone'"));
+        assert!(deletion.contains("_operator_global_tables"));
+        assert!(deletion.contains("'submitted', 'inventoried', 'approved', 'fenced', 'drained'"));
+        assert!(deletion.contains("UNIQUE (id, community_id, inventory_digest)"));
+        assert!(deletion.contains("FOREIGN KEY (request_id, community_id, inventory_digest)"));
+        assert!(deletion.contains("prevent_community_deletion_request_retargeting"));
+        assert!(deletion.contains("prevent_community_deletion_approval_removal"));
+
+        assert!(deletion.contains("retry_stage TEXT CHECK"));
+        assert!(desired_schema.contains("retry_stage TEXT CHECK"));
+
+        // Recovery migration 0030 alters populated tables and must preserve
+        // the same fail-fast lock behavior as the deletion migration.
+        assert_eq!(migrations[29].version, 30);
+        let deletion_recovery = migrations[29].sql.as_str();
+        assert!(deletion_recovery.contains("SET LOCAL lock_timeout = '5s'"));
+
+        // Community host aliases were first shipped locally as 0027, then
+        // reconciled to 0029 by the previous fold. Upstream now owns 0029/0030,
+        // so the unchanged host migration moves to 0031.
+        assert_eq!(migrations[30].version, 31);
+        let community_hosts = migrations[30].sql.as_str();
         assert!(community_hosts.contains("CREATE TABLE community_hosts"));
         assert!(community_hosts.contains("CREATE UNIQUE INDEX idx_community_hosts_host"));
         assert!(community_hosts.contains("SELECT host, id FROM communities"));
@@ -1182,6 +1395,547 @@ mod tests {
         );
     }
 
+    #[test]
+    fn migration_execution_cannot_bypass_schema_destruction_lock() {
+        fn rust_sources(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read workspace source dir") {
+                let path = entry.expect("read workspace source entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "target") {
+                        continue;
+                    }
+                    rust_sources(&path, files);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        fn count(haystack: &str, needle: &str) -> usize {
+            haystack.matches(needle).count()
+        }
+
+        // Build the needles so this test's own source never matches them.
+        let migrate_macro = ["sqlx", "::migrate!"].concat();
+        let migrator_run = ["MIGRATOR", ".run("].concat();
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let this_file = manifest_dir.join("src/migration.rs");
+        let crates_dir = manifest_dir.parent().expect("workspace crates dir");
+        // The push gateway migrates its own dedicated authority database; it
+        // never holds relay tenant tables, so it is exempt from the relay
+        // schema/destruction lock. The community_id check below keeps that
+        // exemption honest.
+        let push_gateway_exception = crates_dir.join("buzz-push-gateway/src/postgres.rs");
+        let push_gateway_migrations = crates_dir.join("buzz-push-gateway/migrations");
+        for entry in
+            std::fs::read_dir(&push_gateway_migrations).expect("read push gateway migrations")
+        {
+            let path = entry.expect("read push gateway migration entry").path();
+            let sql = std::fs::read_to_string(&path).expect("read push gateway migration");
+            assert!(
+                !sql.to_ascii_lowercase().contains("community_id"),
+                "{} defines community-scoped data; its migrator would bypass the \
+                 schema/destruction lock and must move under buzz-db migrations",
+                path.display()
+            );
+        }
+        let mut files = Vec::new();
+        rust_sources(crates_dir, &mut files);
+        for path in &files {
+            let source = std::fs::read_to_string(path).expect("read rust source");
+            let (macro_hits, run_hits) = (
+                count(&source, &migrate_macro),
+                count(&source, &migrator_run),
+            );
+            if *path == this_file {
+                assert_eq!(
+                    (macro_hits, run_hits),
+                    (1, 1),
+                    "migration.rs must embed the migrator once and run it exactly once, \
+                     inside the locked wrapper"
+                );
+            } else if *path == push_gateway_exception {
+                continue;
+            } else {
+                assert_eq!(
+                    (macro_hits, run_hits),
+                    (0, 0),
+                    "{} embeds or runs a SQLx migrator outside the schema/destruction \
+                     lock contract; route migration execution through \
+                     buzz_db migration::run_migrations",
+                    path.display()
+                );
+            }
+        }
+
+        // Within migration.rs, the single run site must sit inside
+        // `run_migrations_locked`, and the only public entry point must wrap
+        // it in the exclusive session lock.
+        let source = std::fs::read_to_string(&this_file).expect("read migration.rs");
+        let entry = source
+            .find("pub async fn run_migrations(")
+            .expect("public migration entry point");
+        let locked = source
+            .find("async fn run_migrations_locked(")
+            .expect("locked migration body");
+        let wrapper = source
+            .find("async fn with_exclusive_schema_destruction_lock")
+            .expect("exclusive lock wrapper");
+        let run_site = source.find(&migrator_run).expect("migrator run site");
+        assert!(
+            source[entry..locked].contains("with_exclusive_schema_destruction_lock("),
+            "run_migrations must delegate through the exclusive schema/destruction lock"
+        );
+        assert!(
+            run_site > locked && run_site < wrapper,
+            "the migrator run site must live inside run_migrations_locked"
+        );
+        assert!(
+            source[wrapper..].contains("pg_advisory_lock($1)")
+                && source[wrapper..].contains("pg_advisory_unlock($1)"),
+            "the lock wrapper must acquire and explicitly release the session lock"
+        );
+    }
+
+    /// Structural parity between migration 0029's deletion surface and the
+    /// desired-state bootstrap schema (`schema/schema.sql`).
+    ///
+    /// Compares parsed statements, not substrings: every deletion control-
+    /// plane table, function, trigger, and index 0028 creates must exist in
+    /// schema.sql with an identical normalized definition; every operator-
+    /// global registry row 0028 inserts must be inserted by schema.sql; the
+    /// write-fence attachment target sets must be equal; and every column
+    /// 0028 adds to `communities` must exist in the desired-state
+    /// `communities` table. A desired-state bootstrap that passes this test
+    /// cannot silently omit part of the deletion surface the way the
+    /// pre-parity schema.sql omitted `community_deletion_manifest_keys` (and
+    /// its immutability trigger) and `storage_taxonomy_sweeps` — booting
+    /// healthy, then wedging post-fence when the freeze stage first touched
+    /// the missing relation.
+    #[test]
+    fn deletion_surface_parity_between_migration_0029_and_schema_sql() {
+        use std::collections::BTreeMap;
+
+        #[derive(Default)]
+        struct DeletionSurface {
+            tables: BTreeMap<String, String>,
+            functions: BTreeMap<String, String>,
+            triggers: BTreeMap<String, String>,
+            indexes: BTreeSet<String>,
+            registry_rows: BTreeSet<(String, String)>,
+            fence_attachments: BTreeSet<String>,
+            communities_added_columns: BTreeSet<String>,
+        }
+
+        fn quoted_strings(statement: &str) -> Vec<String> {
+            let mut strings = Vec::new();
+            let mut current: Option<String> = None;
+            let mut chars = statement.chars().peekable();
+            while let Some(ch) = chars.next() {
+                match (&mut current, ch) {
+                    (None, '\'') => current = Some(String::new()),
+                    (Some(literal), '\'') => {
+                        if chars.peek() == Some(&'\'') {
+                            literal.push('\'');
+                            chars.next();
+                        } else {
+                            strings.push(current.take().expect("open literal"));
+                        }
+                    }
+                    (Some(literal), other) => literal.push(other),
+                    (None, _) => {}
+                }
+            }
+            strings
+        }
+
+        fn surface(sql: &str) -> DeletionSurface {
+            let mut surface = DeletionSurface::default();
+            for statement in split_sql_statements(sql) {
+                let normalized = normalize_sql(&statement);
+                if normalized.starts_with("create table") {
+                    let table = identifier_after_keyword(&statement, "create table")
+                        .expect("table identifier");
+                    surface.tables.insert(table, normalized.clone());
+                } else if normalized.starts_with("create function")
+                    || normalized.starts_with("create or replace function")
+                {
+                    let function = identifier_after_keyword(&statement, "function")
+                        .expect("function identifier");
+                    surface.functions.insert(function, normalized.clone());
+                } else if normalized.starts_with("create trigger") {
+                    let trigger = identifier_after_keyword(&statement, "create trigger")
+                        .expect("trigger identifier");
+                    surface.triggers.insert(trigger, normalized.clone());
+                } else if normalized.starts_with("create index")
+                    || normalized.starts_with("create unique index")
+                {
+                    surface.indexes.insert(normalized.clone());
+                } else if normalized.starts_with("insert into _operator_global_tables") {
+                    let literals = quoted_strings(&statement);
+                    assert!(
+                        literals.len().is_multiple_of(2),
+                        "operator-global registry insert must be (table_name, reason) rows"
+                    );
+                    for row in literals.chunks(2) {
+                        surface
+                            .registry_rows
+                            .insert((row[0].clone(), row[1].clone()));
+                    }
+                } else if normalized.starts_with("alter table communities") {
+                    for added in normalized.split("add column ").skip(1) {
+                        let column = added
+                            .split_whitespace()
+                            .next()
+                            .expect("added column name")
+                            .to_owned();
+                        surface.communities_added_columns.insert(column);
+                    }
+                }
+                if let Some(position) = normalized.find("attach_community_write_fence('") {
+                    let target = normalized[position + "attach_community_write_fence('".len()..]
+                        .split('\'')
+                        .next()
+                        .expect("fence attachment target")
+                        .to_owned();
+                    surface.fence_attachments.insert(target);
+                }
+            }
+            surface
+        }
+
+        let migration_0029: &str = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 29)
+            .expect("embedded migration 0029")
+            .sql
+            .as_ref();
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let schema_sql = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
+            .expect("read schema/schema.sql");
+
+        let migration = surface(migration_0029);
+        let schema = surface(&schema_sql);
+
+        assert_eq!(
+            migration.tables.len(),
+            7,
+            "0029 deletion control plane must define exactly the known tables: {:?}",
+            migration.tables.keys().collect::<Vec<_>>()
+        );
+        assert!(!migration.fence_attachments.is_empty());
+        assert!(!migration.registry_rows.is_empty());
+
+        for (table, definition) in &migration.tables {
+            let in_schema = schema
+                .tables
+                .get(table)
+                .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
+            if table != "community_deletion_requests" {
+                assert_eq!(
+                    in_schema, definition,
+                    "schema.sql definition of {table} drifted from migration 0029"
+                );
+            }
+        }
+        for (function, definition) in &migration.functions {
+            let in_schema = schema
+                .functions
+                .get(function)
+                .unwrap_or_else(|| panic!("schema.sql is missing deletion function {function}"));
+            if function != "community_write_fence_excluded_table" {
+                assert_eq!(
+                    in_schema, definition,
+                    "schema.sql definition of {function}() drifted from migration 0029"
+                );
+            }
+        }
+        for (trigger, definition) in &migration.triggers {
+            let in_schema = schema
+                .triggers
+                .get(trigger)
+                .unwrap_or_else(|| panic!("schema.sql is missing deletion trigger {trigger}"));
+            assert_eq!(
+                in_schema, definition,
+                "schema.sql definition of trigger {trigger} drifted from migration 0029"
+            );
+        }
+        for index in &migration.indexes {
+            assert!(
+                schema.indexes.contains(index),
+                "schema.sql is missing (or drifted on) deletion index: {index}"
+            );
+        }
+        for row in &migration.registry_rows {
+            assert!(
+                schema.registry_rows.contains(row),
+                "schema.sql is missing operator-global registry row {row:?}"
+            );
+        }
+        let mut expected_fences = migration.fence_attachments.clone();
+        expected_fences.remove("product_feedback");
+        expected_fences.remove("rate_limit_violations");
+        assert_eq!(
+            expected_fences, schema.fence_attachments,
+            "write-fence attachment targets differ after recovery policy"
+        );
+
+        // 0029's ALTER TABLE additions are expressed inline by the
+        // desired-state `communities` definition; require the columns to
+        // exist there (exact definition equality is impossible across the
+        // ALTER/inline representations — behavior is pinned by the
+        // desired-state bootstrap deletion test).
+        let communities_columns = split_sql_statements(&schema_sql)
+            .into_iter()
+            .find_map(|statement| {
+                let (table, body) = create_table_body(&statement)?;
+                (table == "communities").then_some(body)
+            })
+            .expect("schema.sql defines communities");
+        let column_names: BTreeSet<String> = communities_columns
+            .iter()
+            .filter_map(|definition| column_definition_name(definition))
+            .collect();
+        for column in &migration.communities_added_columns {
+            assert!(
+                column_names.contains(column),
+                "schema.sql communities table is missing 0028 column {column}"
+            );
+        }
+        assert!(!migration.communities_added_columns.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn schema_destruction_lock_excludes_shared_holders_and_releases_on_both_paths() {
+        let pool = connect_test_pool().await;
+        async fn assert_exclusive_lock_free(pool: &PgPool) {
+            let mut probe = pool.acquire().await.expect("acquire lock probe");
+            let free: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
+                .fetch_one(&mut *probe)
+                .await
+                .expect("probe try-lock");
+            assert!(free, "schema/destruction session lock must be released");
+            sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
+                .execute(&mut *probe)
+                .await
+                .expect("probe unlock");
+        }
+
+        let probe_pool = pool.clone();
+        with_exclusive_schema_destruction_lock(&pool, move |conn| async move {
+            // While a migration run is in flight, destructive transactions
+            // must be unable to take their shared counterpart.
+            let mut probe = probe_pool.acquire().await.expect("acquire shared probe");
+            let shared_available: bool =
+                sqlx::query_scalar("SELECT pg_try_advisory_lock_shared($1)")
+                    .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
+                    .fetch_one(&mut *probe)
+                    .await
+                    .expect("probe shared try-lock");
+            assert!(
+                !shared_available,
+                "exclusive migration lock must exclude shared destructive holders"
+            );
+            (conn, Ok(()))
+        })
+        .await
+        .expect("locked migration op");
+        assert_exclusive_lock_free(&pool).await;
+
+        let failed: Result<()> = with_exclusive_schema_destruction_lock(&pool, |conn| async {
+            (
+                conn,
+                Err(crate::DbError::InvalidData(
+                    "forced migration failure".into(),
+                )),
+            )
+        })
+        .await;
+        assert!(failed.is_err(), "op failure must propagate");
+        assert_exclusive_lock_free(&pool).await;
+    }
+
+    /// Cancellation must not release the exclusion contract while migration
+    /// SQL is still executing server-side.
+    ///
+    /// The op parks an `ALTER TABLE` behind an ACCESS EXCLUSIVE table lock
+    /// held by another session, then the whole locked run is aborted. Because
+    /// the advisory lock lives on the same backend that runs the DDL,
+    /// dropping the client future cannot release it: the backend keeps the
+    /// session lock until it finishes the statement and dies on the closed
+    /// socket. The shared (destructive) counterpart must stay unavailable for
+    /// that entire interval — and the orphaned DDL really does commit after
+    /// cancellation, which is exactly the window the lock has to cover.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cancelled_migration_cannot_expose_shared_lock_while_ddl_backend_lives() {
+        use std::time::Instant;
+
+        use sqlx::AssertSqlSafe;
+
+        // Dedicated database: the probe table and the orphaned backend must
+        // stay invisible to concurrent tests in the shared database.
+        let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        let admin = PgPool::connect(&base_url)
+            .await
+            .expect("connect admin database");
+        let probe_db = format!("buzz_lock_cancel_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {probe_db}")))
+            .execute(&admin)
+            .await
+            .expect("create probe database");
+        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
+        let pool = PgPool::connect(&format!("{base_prefix}/{probe_db}"))
+            .await
+            .expect("connect probe database");
+        sqlx::query("CREATE TABLE schema_lock_cancel_probe (id int)")
+            .execute(&pool)
+            .await
+            .expect("create probe table");
+
+        // Park the migration DDL server-side: the op's ALTER TABLE waits on
+        // this ACCESS EXCLUSIVE lock, pinning the backend mid-statement.
+        let mut blocker = pool.begin().await.expect("open blocker transaction");
+        sqlx::query("LOCK TABLE schema_lock_cancel_probe IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .expect("hold probe table lock");
+
+        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<i32>();
+        let task_pool = pool.clone();
+        let locked_run = tokio::spawn(async move {
+            with_exclusive_schema_destruction_lock(&task_pool, move |mut conn| async move {
+                let outcome: Result<()> = async {
+                    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(&mut conn)
+                        .await?;
+                    let _ = pid_tx.send(pid);
+                    sqlx::query(
+                        "ALTER TABLE schema_lock_cancel_probe \
+                         ADD COLUMN committed_after_cancel int",
+                    )
+                    .execute(&mut conn)
+                    .await?;
+                    Ok(())
+                }
+                .await;
+                (conn, outcome)
+            })
+            .await
+        });
+        let ddl_pid = pid_rx.await.expect("locked op reports its backend pid");
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE pid = $1 AND wait_event_type = 'Lock')",
+            )
+            .bind(ddl_pid)
+            .fetch_one(&pool)
+            .await
+            .expect("poll DDL wait state");
+            if waiting {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "migration DDL never parked on the table lock"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        locked_run.abort();
+        let joined = locked_run.await;
+        assert!(
+            joined.is_err_and(|err| err.is_cancelled()),
+            "locked migration run must abort mid-statement"
+        );
+
+        // The client future is gone, but the DDL backend is alive: the shared
+        // destructive lock must remain unavailable for that whole interval.
+        for _ in 0..20 {
+            let backend_alive: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)")
+                    .bind(ddl_pid)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("poll DDL backend liveness");
+            assert!(
+                backend_alive,
+                "parked DDL backend must outlive client cancellation"
+            );
+            let shared_free: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock_shared($1)")
+                .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
+                .fetch_one(&pool)
+                .await
+                .expect("probe shared lock");
+            assert!(
+                !shared_free,
+                "cancellation must not expose the shared lock while migration DDL is executing"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Release the table lock: the orphaned backend finishes the ALTER,
+        // commits, then exits on the dead socket — only then may shared
+        // destructive holders enter.
+        blocker.rollback().await.expect("release probe table lock");
+        let mut probe = pool.acquire().await.expect("acquire shared-lock probe");
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let shared_free: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock_shared($1)")
+                .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
+                .fetch_one(&mut *probe)
+                .await
+                .expect("probe shared lock after backend exit");
+            if shared_free {
+                sqlx::query("SELECT pg_advisory_unlock_shared($1)")
+                    .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
+                    .execute(&mut *probe)
+                    .await
+                    .expect("release shared probe lock");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "shared lock must become available once the DDL backend exits"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        drop(probe);
+
+        // The cancelled statement committed after the client vanished —
+        // exactly the interval the same-backend lock covered.
+        let committed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+             WHERE table_name = 'schema_lock_cancel_probe' \
+               AND column_name = 'committed_after_cancel')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect orphaned DDL outcome");
+        assert!(
+            committed,
+            "orphaned migration DDL commits after cancellation; the lock must cover it"
+        );
+
+        pool.close().await;
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP DATABASE {probe_db} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop probe database");
+    }
+
     async fn connect_test_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
@@ -1201,6 +1955,17 @@ mod tests {
             .execute(pool)
             .await
             .expect("create public schema");
+    }
+
+    async fn apply_legacy_community_hosts_schema(pool: &PgPool) {
+        let canonical = include_str!("../../../migrations/0031_community_hosts.sql");
+        let (legacy, _) = canonical
+            .split_once("-- Migration 0030 predates this operator-global routing table")
+            .expect("canonical community-host migration retains legacy prefix");
+        sqlx::raw_sql(legacy)
+            .execute(pool)
+            .await
+            .expect("apply legacy community-host schema");
     }
 
     async fn applied_versions(pool: &PgPool) -> Vec<i64> {
@@ -1226,6 +1991,15 @@ mod tests {
                 .await
                 .expect("read community-host table");
         assert_eq!(community_hosts.as_deref(), Some("community_hosts"));
+        let routing_is_operator_global: bool =
+            sqlx::query_scalar("SELECT community_write_fence_excluded_table('community_hosts')")
+                .fetch_one(pool)
+                .await
+                .expect("read community-host deletion taxonomy");
+        assert!(
+            routing_is_operator_global,
+            "community_hosts must not be treated as tenant-owned deletion inventory"
+        );
 
         let reaction_width: i32 = sqlx::query_scalar(
             "SELECT character_maximum_length::int \
@@ -1307,7 +2081,15 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(29));
+        let latest_version = MIGRATOR
+            .iter()
+            .map(|migration| migration.version)
+            .max()
+            .expect("embedded migrator is non-empty");
+        assert_eq!(
+            applied_versions(&pool).await.last().copied(),
+            Some(latest_version)
+        );
     }
 
     #[tokio::test]
@@ -1429,18 +2211,175 @@ mod tests {
             search_expression.contains("ELSE NULL::tsvector"),
             "fresh installs must default non-allowlisted kinds to NULL: {search_expression}"
         );
+        let active_a = uuid::Uuid::new_v4();
+        let active_b = uuid::Uuid::new_v4();
+        let to_fence = uuid::Uuid::new_v4();
+        for (community, label) in [
+            (active_a, "active-a"),
+            (active_b, "active-b"),
+            (to_fence, "to-fence"),
+        ] {
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community)
+                .bind(format!("late-fence-{label}-{}.example", community.simple()))
+                .execute(&pool)
+                .await
+                .expect("insert late-table test community");
+        }
+        sqlx::query(
+            "CREATE TABLE late_created_scoped (\
+                 community_id UUID NOT NULL, id BIGINT PRIMARY KEY, value TEXT NOT NULL\
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create late scoped table");
+        sqlx::query("SELECT attach_community_write_fence('late_created_scoped'::regclass)")
+            .execute(&pool)
+            .await
+            .expect("attach late create fence");
+        sqlx::query("CREATE TABLE late_altered_scoped (id BIGINT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("create table before late alter");
+        sqlx::query("ALTER TABLE late_altered_scoped ADD COLUMN community_id UUID NOT NULL")
+            .execute(&pool)
+            .await
+            .expect("add late community id");
+        sqlx::query("SELECT attach_community_write_fence('late_altered_scoped'::regclass)")
+            .execute(&pool)
+            .await
+            .expect("attach late alter fence");
+        let attached: Vec<String> = sqlx::query_scalar(
+            "SELECT c.relname FROM pg_trigger trigger \
+             JOIN pg_class c ON c.oid = trigger.tgrelid \
+             JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
+             WHERE c.relname IN ('late_created_scoped', 'late_altered_scoped') \
+               AND procedure.proname = 'enforce_community_write_fence' \
+               AND NOT trigger.tgisinternal ORDER BY c.relname",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read late trigger catalog");
+        assert_eq!(attached, vec!["late_altered_scoped", "late_created_scoped"]);
+        let malformed_fence_triggers: i64 = sqlx::query_scalar(
+            "SELECT count(*)::BIGINT FROM pg_trigger trigger \
+             JOIN pg_class c ON c.oid = trigger.tgrelid \
+             JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
+             WHERE c.relname IN ('late_created_scoped', 'late_altered_scoped') \
+               AND procedure.proname = 'enforce_community_write_fence' \
+               AND NOT trigger.tgisinternal \
+               AND (trigger.tgenabled <> 'O' OR (trigger.tgtype & 31) <> 31)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("validate late trigger mode and operations");
+        assert_eq!(malformed_fence_triggers, 0);
+
+        sqlx::query(
+            "INSERT INTO late_created_scoped (community_id, id, value) \
+             VALUES ($1, 1, 'same'), ($2, 2, 'source-fenced'), \
+                    ($1, 3, 'destination-fenced'), ($1, 4, 'opposite-a'), \
+                    ($3, 5, 'opposite-b')",
+        )
+        .bind(active_a)
+        .bind(to_fence)
+        .bind(active_b)
+        .execute(&pool)
+        .await
+        .expect("seed late table while communities active");
+        sqlx::query("UPDATE late_created_scoped SET value = 'same-ok' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("same-tenant active update");
+        sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 1")
+            .bind(active_b)
+            .execute(&pool)
+            .await
+            .expect("active-to-active update");
+
+        let mut fence_connection = pool.acquire().await.expect("fence connection");
+        sqlx::query("BEGIN")
+            .execute(&mut *fence_connection)
+            .await
+            .expect("begin direct fence");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                    set_config('buzz.deletion_fence_generation', '1', true)",
+        )
+        .bind(to_fence.to_string())
+        .execute(&mut *fence_connection)
+        .await
+        .expect("authorize direct fence");
+        sqlx::query(
+            "UPDATE communities SET deletion_state = 'fenced', \
+                    deletion_fence_generation = 1, archived_at = now() WHERE id = $1",
+        )
+        .bind(to_fence)
+        .execute(&mut *fence_connection)
+        .await
+        .expect("fence test destination");
+        sqlx::query("COMMIT")
+            .execute(&mut *fence_connection)
+            .await
+            .expect("commit direct fence");
+
+        let active_to_fenced =
+            sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 3")
+                .bind(to_fence)
+                .execute(&pool)
+                .await
+                .expect_err("active to fenced destination must fail");
+        assert!(active_to_fenced
+            .to_string()
+            .contains("community write fenced"));
+        let fenced_to_active =
+            sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 2")
+                .bind(active_a)
+                .execute(&pool)
+                .await
+                .expect_err("fenced source to active destination must fail");
+        assert!(fenced_to_active
+            .to_string()
+            .contains("community write fenced"));
+        let row_locations: Vec<(i64, uuid::Uuid)> = sqlx::query_as(
+            "SELECT id, community_id FROM late_created_scoped WHERE id IN (2, 3) ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("failed moves preserve row location");
+        assert_eq!(row_locations, vec![(2, to_fence), (3, active_a)]);
+
+        let move_a = sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 4")
+            .bind(active_b)
+            .execute(&pool);
+        let move_b = sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 5")
+            .bind(active_a)
+            .execute(&pool);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let (a, b) = tokio::join!(move_a, move_b);
+            a.expect("opposite active move A");
+            b.expect("opposite active move B");
+        })
+        .await
+        .expect("opposite cross-tenant updates must not deadlock");
+
+        sqlx::query("DROP TABLE late_created_scoped, late_altered_scoped")
+            .execute(&pool)
+            .await
+            .expect("drop late-table fixtures");
         assert_t6_fold_objects(&pool).await;
     }
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn upstream_0028_upgrade_applies_renumbered_community_hosts() {
+    async fn upstream_0030_upgrade_applies_renumbered_community_hosts() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
-            .run_to(28, &pool)
+            .run_to(30, &pool)
             .await
-            .expect("apply upstream migrations through 28");
+            .expect("apply upstream migrations through 30");
 
         let community_id = uuid::Uuid::new_v4();
         let host = format!("upstream-upgrade-{}.example", community_id.simple());
@@ -1449,12 +2388,12 @@ mod tests {
             .bind(&host)
             .execute(&pool)
             .await
-            .expect("insert pre-29 community");
+            .expect("insert pre-31 community");
 
         run_migrations(&pool)
             .await
             .expect("apply renumbered community-host migration");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(29));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(31));
         assert_t6_fold_objects(&pool).await;
         let mapped: uuid::Uuid = sqlx::query_scalar(
             "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
@@ -1468,16 +2407,16 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn smith_crafts_0027_upgrade_reconciles_ledger_and_applies_upstream_migrations() {
+    async fn smith_crafts_0029_upgrade_reconciles_ledger_and_applies_upstream_deletion() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
-            .run_to(26, &pool)
+            .run_to(28, &pool)
             .await
-            .expect("apply common migrations through 26");
+            .expect("apply common migrations through 28");
 
         let community_id = uuid::Uuid::new_v4();
-        let host = format!("smith-upgrade-{}.example", community_id.simple());
+        let host = format!("smith-0029-upgrade-{}.example", community_id.simple());
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
             .bind(community_id)
             .bind(&host)
@@ -1485,30 +2424,23 @@ mod tests {
             .await
             .expect("insert pre-collision community");
 
-        sqlx::raw_sql(include_str!("../../../migrations/0029_community_hosts.sql"))
-            .execute(&pool)
-            .await
-            .expect("simulate shipped Smith Crafts migration 27");
-        let community_hosts = MIGRATOR
-            .iter()
-            .find(|migration| migration.version == 29)
-            .expect("renumbered community-host migration");
+        apply_legacy_community_hosts_schema(&pool).await;
         sqlx::query(
             "INSERT INTO _sqlx_migrations \
              (version, description, success, checksum, execution_time) \
-             VALUES (27, 'community hosts', true, $1, 0)",
+             VALUES (29, 'community hosts', true, $1, 0)",
         )
-        .bind(community_hosts.checksum.as_ref())
+        .bind(hex::decode(LEGACY_COMMUNITY_HOSTS_CHECKSUM_HEX).expect("legacy checksum"))
         .execute(&pool)
         .await
-        .expect("record legacy community-host migration as version 27");
+        .expect("record shipped community-host migration as version 29");
 
         run_migrations(&pool)
             .await
-            .expect("reconcile version collision and apply upstream 27/28");
+            .expect("move community hosts to 31 and apply upstream 29/30");
         assert_eq!(
             applied_versions(&pool).await,
-            (1_i64..=29).collect::<Vec<_>>()
+            (1_i64..=31).collect::<Vec<_>>()
         );
         assert_t6_fold_objects(&pool).await;
         let mapped: uuid::Uuid = sqlx::query_scalar(
@@ -1517,7 +2449,130 @@ mod tests {
         .bind(&host)
         .fetch_one(&pool)
         .await
-        .expect("legacy community-host data remains present");
+        .expect("existing community-host data remains present");
         assert_eq!(mapped, community_id);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fold_reconciliation_rejects_unknown_failed_and_duplicate_ledger_rows() {
+        let pool = connect_test_pool().await;
+        let community_hosts = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 31)
+            .expect("renumbered community-host migration");
+
+        for (label, checksum, success, duplicate_at_31, expected) in [
+            (
+                "unknown",
+                vec![0_u8; 32],
+                true,
+                false,
+                "migration 29 has an unknown checksum",
+            ),
+            (
+                "failed",
+                hex::decode(LEGACY_COMMUNITY_HOSTS_CHECKSUM_HEX).expect("legacy checksum"),
+                false,
+                false,
+                "migration 29 is recorded as failed",
+            ),
+            (
+                "duplicate",
+                hex::decode(LEGACY_COMMUNITY_HOSTS_CHECKSUM_HEX).expect("legacy checksum"),
+                true,
+                true,
+                "community hosts are recorded at both versions 29 and 31",
+            ),
+        ] {
+            reset_public_schema(&pool).await;
+            MIGRATOR
+                .run_to(28, &pool)
+                .await
+                .expect("apply common migrations through 28");
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations \
+                 (version, description, success, checksum, execution_time) \
+                 VALUES (29, $1, $2, $3, 0)",
+            )
+            .bind(format!("{label} community hosts"))
+            .bind(success)
+            .bind(&checksum)
+            .execute(&pool)
+            .await
+            .expect("insert adversarial migration-29 ledger row");
+            if duplicate_at_31 {
+                sqlx::query(
+                    "INSERT INTO _sqlx_migrations \
+                     (version, description, success, checksum, execution_time) \
+                     VALUES (31, 'community hosts', true, $1, 0)",
+                )
+                .bind(community_hosts.checksum.as_ref())
+                .execute(&pool)
+                .await
+                .expect("insert duplicate migration-31 ledger row");
+            }
+
+            let mut connection = pool.acquire().await.expect("acquire test connection");
+            let error = reconcile_fold_migration_collisions(&mut connection)
+                .await
+                .expect_err("adversarial ledger shape must fail closed");
+            assert!(
+                error.to_string().contains(expected),
+                "{label} ledger row returned unexpected error: {error}"
+            );
+            connection
+                .detach()
+                .close()
+                .await
+                .expect("close failed reconciliation connection");
+
+            let preserved: (Vec<u8>, bool) =
+                sqlx::query_as("SELECT checksum, success FROM _sqlx_migrations WHERE version = 29")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("failed reconciliation preserves migration-29 row");
+            assert_eq!(preserved, (checksum, success));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn smith_crafts_0027_upgrade_reconciles_ledger_and_applies_both_folds() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(26, &pool)
+            .await
+            .expect("apply common migrations through 26");
+
+        let community_id = uuid::Uuid::new_v4();
+        let host = format!("smith-0027-upgrade-{}.example", community_id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .expect("insert legacy pre-collision community");
+
+        apply_legacy_community_hosts_schema(&pool).await;
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) \
+             VALUES (27, 'community hosts', true, $1, 0)",
+        )
+        .bind(hex::decode(LEGACY_COMMUNITY_HOSTS_CHECKSUM_HEX).expect("legacy checksum"))
+        .execute(&pool)
+        .await
+        .expect("record legacy community-host migration as version 27");
+
+        run_migrations(&pool)
+            .await
+            .expect("move community hosts to 31 and apply upstream 27-30");
+        assert_eq!(
+            applied_versions(&pool).await,
+            (1_i64..=31).collect::<Vec<_>>()
+        );
+        assert_t6_fold_objects(&pool).await;
     }
 }

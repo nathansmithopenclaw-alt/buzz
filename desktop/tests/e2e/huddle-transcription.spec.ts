@@ -701,11 +701,11 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
   expect(new Set(assignedVoices).size).toBe(2);
 
   await page.getByRole("button", { name: "Voice settings for alice" }).click();
-  await waitForAnimations(page);
   const voiceMenu = page.locator(
     '[data-testid="huddle-agent-voice-menu-content"][data-state="open"]',
   );
   await expect(voiceMenu).toBeVisible();
+  await waitForAnimations(page);
   await expect(
     voiceMenu.getByText("Agent text-to-speech", { exact: true }),
   ).toBeVisible();

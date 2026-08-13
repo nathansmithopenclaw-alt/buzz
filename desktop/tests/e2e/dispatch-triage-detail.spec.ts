@@ -170,7 +170,7 @@ async function openDispatch(
 }
 
 async function openPrimaryIssue(page: import("@playwright/test").Page) {
-  await page.getByRole("button", { name: /Triage/ }).click();
+  await page.getByRole("button", { name: /^Triage(?: \d+)?$/ }).click();
   await page
     .getByTestId("dispatch-issue-11111111-1111-4111-8111-111111111111")
     .click();
@@ -181,7 +181,7 @@ test("triage renders unassigned and assigned current-fold sections in P0-first t
   page,
 }) => {
   await openDispatch(page);
-  await page.getByRole("button", { name: /Triage/ }).click();
+  await page.getByRole("button", { name: /^Triage(?: \d+)?$/ }).click();
   await expect(page.getByTestId("dispatch-triage")).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Unassigned · 3" }),

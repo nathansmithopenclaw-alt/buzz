@@ -8,6 +8,7 @@ import {
   type RawInstallRuntimeResult,
 } from "@/shared/api/installTypes";
 import { claudeAccountBindingFromRaw } from "@/shared/api/claudeAccountBinding";
+import type { RawSendChannelMessageResult } from "@/shared/api/tauriMessageTypes";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -97,14 +98,6 @@ type RawSearchResponse = {
   hits: RawSearchHit[];
   found: number;
 };
-type RawSendChannelMessageResult = {
-  event_id: string;
-  parent_event_id: string | null;
-  root_event_id: string | null;
-  depth: number;
-  created_at: number;
-};
-
 type RawRelayAgent = {
   pubkey: string;
   name: string;
@@ -551,6 +544,7 @@ export async function sendChannelMessage(
   emojiTags?: string[][],
   mentionTags?: string[][],
   linkPreviewTags?: string[][],
+  sentFromThreadTag?: string[],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -562,11 +556,11 @@ export async function sendChannelMessage(
       emojiTags: emojiTags ?? null,
       mentionTags: mentionTags ?? null,
       linkPreviewTags,
+      sentFromThreadTag: sentFromThreadTag ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
     },
   );
-
   return {
     eventId: response.event_id,
     parentEventId: response.parent_event_id,

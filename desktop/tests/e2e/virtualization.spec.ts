@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import type { Locator, Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -24,23 +24,6 @@ async function seedChannelSections(page: Page) {
     },
     { pubkey: MOCK_PUBKEY, sections: [SECTION_TOP, SECTION_BOTTOM] },
   );
-}
-
-// dnd-kit's PointerSensor activates only after the pointer travels past its
-// 6px distance constraint, so a single move never starts a drag. This walks the
-// pointer down, past the activation threshold, onto the target, then releases —
-// the sequence dnd-kit needs to fire onDragEnd and commit the reorder.
-async function dragOver(page: Page, source: Locator, target: Locator) {
-  const from = await source.boundingBox();
-  const to = await target.boundingBox();
-  if (!from || !to) throw new Error("drag handles not laid out");
-  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2 + 10);
-  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, {
-    steps: 10,
-  });
-  await page.mouse.up();
 }
 
 test.describe("list virtualization", () => {
@@ -174,11 +157,31 @@ test.describe("list virtualization", () => {
       );
     expect(await sectionOrder()).toEqual(["Priority", "Archive"]);
 
-    // Drag "Priority" past "Archive" — onDragEnd commits arrayMove and persists
-    // the new order. The drop must land for the order to flip.
-    await dragOver(page, topHeader, bottomHeader);
+    // Keyboard reordering is the deterministic accessibility path through the
+    // same dnd-kit onDragEnd/arrayMove persistence boundary. Synthetic Space
+    // avoids Chromium's native button click after the sensor prevents default.
+    await topHeader.focus();
+    const dispatchSpace = () =>
+      topHeader.evaluate((element) => {
+        element.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: " ",
+            code: "Space",
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+    await dispatchSpace();
+    await expect(
+      page.getByTestId("sidebar-section-drag-overlay"),
+    ).toBeVisible();
+    await page.keyboard.press("ArrowDown");
+    await expect.poll(sectionOrder).toEqual(["Archive", "Priority"]);
+    await dispatchSpace();
+    await expect(page.getByTestId("sidebar-section-drag-overlay")).toBeHidden();
 
-    // The drop landed: order flipped. A no-op drag would leave it unchanged.
+    // The drop preserved the committed order. A no-op drag leaves it unchanged.
     await expect.poll(sectionOrder).toEqual(["Archive", "Priority"]);
     // Both section rows stayed committed in the DOM across the reorder — the
     // content-visibility invariant the divergence rests on (no unmount).

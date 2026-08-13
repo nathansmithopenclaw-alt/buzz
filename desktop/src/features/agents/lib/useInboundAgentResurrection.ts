@@ -50,7 +50,8 @@ export function useInboundAgentResurrection() {
       : undefined;
     // Unknown channel type is treated as a DM so allowlist/anyone cannot
     // transitively grant access (same fail-closed rule as buzz-acp).
-    const isDm = known?.channelType !== "stream" && known?.channelType !== "forum";
+    const isDm =
+      known?.channelType !== "stream" && known?.channelType !== "forum";
     for (const pubkey of targets) {
       const key = `${pubkey}:${event.id}`;
       if (inFlightRef.current.has(key)) continue;

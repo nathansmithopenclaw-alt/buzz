@@ -1,7 +1,9 @@
 // biome-ignore format: keep compact to stay within file size limit
 import {
+  closestCenter,
   DndContext,
   DragOverlay,
+  KeyboardSensor,
   PointerSensor,
   pointerWithin,
   useDraggable,
@@ -9,10 +11,15 @@ import {
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
-import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core";
+import type {
+  DragEndEvent,
+  DragOverEvent,
+  DragStartEvent,
+} from "@dnd-kit/core";
 import {
   SortableContext,
   arrayMove,
+  sortableKeyboardCoordinates,
   verticalListSortingStrategy,
   useSortable,
 } from "@dnd-kit/sortable";
@@ -44,7 +51,12 @@ export function DraggableChannelRow({
       ref={setNodeRef}
       {...attributes}
       {...listeners}
-      className={cn("touch-none", isDragging && "opacity-30")}
+      className={cn(
+        "touch-none transition-[opacity,transform] duration-100 ease-out motion-reduce:transition-none",
+        isDragging && "opacity-30",
+      )}
+      data-sidebar-draggable-channel
+      data-sidebar-drag-state={isDragging ? "dragging" : undefined}
     >
       {children}
     </div>
@@ -150,6 +162,8 @@ export function DragOverlayChannel({ name }: { name: string }) {
     <div
       data-buzz-flat
       className="flex cursor-grabbing items-center gap-2 rounded-md bg-sidebar px-2 py-1.5 text-sm text-sidebar-foreground opacity-90 shadow-lg ring-1 ring-sidebar-border"
+      data-sidebar-drag-overlay
+      data-testid="sidebar-channel-drag-overlay"
     >
       <Hash className="h-4 w-4 shrink-0 text-sidebar-foreground/60" />
       <span className="truncate">{name}</span>
@@ -162,6 +176,8 @@ export function DragOverlaySection({ name }: { name: string }) {
     <div
       data-buzz-flat
       className="flex cursor-grabbing items-center gap-1 rounded-md bg-sidebar px-2 py-1 text-xs font-medium uppercase tracking-wider text-sidebar-foreground/60 opacity-90 shadow-lg ring-1 ring-sidebar-border"
+      data-sidebar-drag-overlay
+      data-testid="sidebar-section-drag-overlay"
     >
       <span>{name}</span>
     </div>
@@ -193,6 +209,9 @@ export function SidebarDndContext({
     React.useState<SidebarDragItem | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
   );
 
   const handleDragStart = React.useCallback(
@@ -236,22 +255,46 @@ export function SidebarDndContext({
           onUnassignChannel(channelId);
         }
       } else if (activeData.type === "section") {
-        const overSectionId =
-          (overData?.sectionId as string | undefined) ?? (over.id as string);
-        const oldIdx = sectionIds.indexOf(active.id as string);
-        const newIdx = sectionIds.indexOf(overSectionId);
-        if (oldIdx !== -1 && newIdx !== -1 && oldIdx !== newIdx) {
-          onReorderSections(arrayMove(sectionIds, oldIdx, newIdx));
-        }
+        // Section order is committed in onDragOver. This is the reliable
+        // dnd-kit path for variable-height section rows and keyboard sorting.
+        return;
       }
     },
-    [sectionIds, onAssignChannel, onUnassignChannel, onReorderSections],
+    [onAssignChannel, onUnassignChannel],
+  );
+
+  const handleDragOver = React.useCallback(
+    (event: DragOverEvent) => {
+      const activeData = event.active.data.current;
+      if (activeData?.type !== "section" || !event.over) return;
+
+      const oldIdx = sectionIds.indexOf(event.active.id as string);
+      const newIdx = sectionIds.indexOf(event.over.id as string);
+      if (oldIdx !== -1 && newIdx !== -1 && oldIdx !== newIdx) {
+        onReorderSections(arrayMove(sectionIds, oldIdx, newIdx));
+      }
+    },
+    [sectionIds, onReorderSections],
   );
 
   return (
     <DndContext
-      collisionDetection={pointerWithin}
+      collisionDetection={(args) => {
+        if (args.active.data.current?.type === "section") {
+          return closestCenter({
+            ...args,
+            droppableContainers: args.droppableContainers.filter(
+              (container) => container.data.current?.type === "section",
+            ),
+          });
+        }
+        const pointerCollisions = pointerWithin(args);
+        return pointerCollisions.length > 0
+          ? pointerCollisions
+          : closestCenter(args);
+      }}
       onDragEnd={handleDragEnd}
+      onDragOver={handleDragOver}
       onDragStart={handleDragStart}
       sensors={sensors}
     >

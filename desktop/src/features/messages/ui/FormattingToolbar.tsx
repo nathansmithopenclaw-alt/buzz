@@ -36,7 +36,7 @@ type FormattingToolbarProps = {
   onLinkButton?: () => void;
 };
 
-type FormattingSelectionRange = {
+export type FormattingSelectionRange = {
   anchor: number;
   head: number;
 };
@@ -127,10 +127,13 @@ export function toggleSpoilerFormatting(editor: Editor): void {
 export const FormattingToolbar = React.memo(function FormattingToolbar({
   editor,
   disabled = false,
+  initialSelection = null,
   onLinkButton,
-}: FormattingToolbarProps) {
+}: FormattingToolbarProps & {
+  initialSelection?: FormattingSelectionRange | null;
+}) {
   const pendingSelectionRef = React.useRef<FormattingSelectionRange | null>(
-    null,
+    initialSelection,
   );
   const [activeStates, setActiveStates] = React.useState<ActiveStates | null>(
     () => (editor ? getActiveStates(editor) : null),
@@ -153,13 +156,16 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   }, [editor]);
 
   const captureSelection = React.useCallback(() => {
-    if (!editor || editor.state.selection.empty) {
-      pendingSelectionRef.current = null;
-      return;
-    }
+    if (!editor) return;
 
     const { anchor, head } = editor.state.selection;
-    pendingSelectionRef.current = { anchor, head };
+    // Opening the animated formatting tray can move DOM focus before this
+    // newly-mounted button receives mousedown. Preserve the selection captured
+    // by the tray toggle for the first command; subsequent commands capture
+    // the editor's then-current selection normally.
+    if (!pendingSelectionRef.current || anchor !== head) {
+      pendingSelectionRef.current = { anchor, head };
+    }
   }, [editor]);
 
   const formattingChain = React.useCallback(() => {
@@ -171,7 +177,6 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
 
     if (
       range &&
-      range.anchor !== range.head &&
       range.anchor <= editor.state.doc.content.size &&
       range.head <= editor.state.doc.content.size
     ) {
@@ -396,7 +401,14 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
               aria-pressed={item.active}
               disabled={disabled}
               onClick={() => item.action()}
-              onMouseDown={captureSelection}
+              onMouseDown={(event) => {
+                // Keep the editor's collapsed caret/range authoritative while
+                // the toolbar button is clicked. Letting the button take
+                // browser focus can collapse a trailing hard-break caret back
+                // into the preceding paragraph before the block command runs.
+                event.preventDefault();
+                captureSelection();
+              }}
               className={cn(
                 "inline-flex h-7 w-7 min-w-7 items-center justify-center rounded-md text-sm font-medium transition-colors",
                 "hover:bg-muted hover:text-foreground",

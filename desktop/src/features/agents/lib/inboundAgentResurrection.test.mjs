@@ -14,7 +14,10 @@ function event(overrides = {}) {
     kind: 9,
     created_at: 1,
     content: "hello",
-    tags: [["p", AGENT], ["h", "channel"]],
+    tags: [
+      ["p", AGENT],
+      ["h", "channel"],
+    ],
     ...overrides,
   };
 }

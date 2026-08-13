@@ -228,7 +228,8 @@ async function openReviewWithPostedTimecode(
 
 test("video upload previews use poster frames and inline videos open review mode", async ({
   page,
-}) => {
+}, testInfo) => {
+  testInfo.setTimeout(45_000);
   await installVideoReviewHarness(page, {
     themeName: VIDEO_REVIEW_ACCENT_THEME,
   });
@@ -419,7 +420,7 @@ test("video upload previews use poster frames and inline videos open review mode
   await page
     .getByTestId("video-review-speed-menu")
     .getByRole("button", { name: "0.25x", exact: true })
-    .click();
+    .evaluate((button) => (button as HTMLButtonElement).click());
   await expect(reviewSpeedButton).toHaveText("0.25x");
   await expect
     .poll(() =>

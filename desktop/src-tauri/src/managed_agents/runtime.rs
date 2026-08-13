@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tauri::AppHandle;
 
-use super::agent_env::build_buzz_agent_provider_defaults;
+use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 
 use crate::{
     managed_agents::{
@@ -25,6 +25,11 @@ pub(crate) use metadata::{
     apply_agent_display_env, persona_drift_state, resolve_session_title, runtime_metadata_env_vars,
     DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
+
+mod child_env;
+#[cfg(test)]
+use child_env::child_rust_log_filter_from;
+use child_env::{apply_thinking_effort_provenance, child_rust_log_filter};
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
@@ -510,6 +515,7 @@ pub fn spawn_agent_child(
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
+    command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {
@@ -691,6 +697,23 @@ pub fn spawn_agent_child(
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
     } else {
         command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
+    }
+    // Shared compute stores `auto`, but the wire name is MeshLLM's virtual
+    // `mesh` model. Translate here too, so the harness and the LLM client are
+    // told the same thing: `BUZZ_ACP_MODEL=auto` would name a model the mesh
+    // never advertises, leaving buzz-acp to warn and fall back on every new
+    // session while `BUZZ_AGENT_MODEL` said `mesh`.
+    #[cfg(feature = "mesh-llm")]
+    let acp_model = match (&mesh_model_id, effective_model.as_deref()) {
+        (Some(mesh_model_id), _) => Some(super::relay_mesh_wire_model(mesh_model_id).to_string()),
+        (None, model) => model.map(str::to_owned),
+    };
+    #[cfg(not(feature = "mesh-llm"))]
+    let acp_model = effective_model.as_deref().map(str::to_owned);
+    if let Some(model) = acp_model.as_deref() {
+        command.env("BUZZ_ACP_MODEL", model);
+    } else {
+        command.env_remove("BUZZ_ACP_MODEL");
     }
     // Session title for the harness to pass out-of-band on `session/new`. The
     // adapter names the session after it; it never reaches the prompt, so this
@@ -934,49 +957,6 @@ pub fn spawn_agent_child(
         adapter_availability: spawned_adapter_availability,
         start_nonce,
     })
-}
-
-fn child_rust_log_filter() -> String {
-    child_rust_log_filter_from(std::env::var("RUST_LOG").ok().as_deref())
-}
-
-const ACP_EFFORT_KEY: &str = "BUZZ_ACP_THINKING_EFFORT";
-const ACP_EFFORT_DEFAULT_KEY: &str = "BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT";
-
-fn apply_thinking_effort_provenance(
-    command: &mut std::process::Command,
-    persona_env: &std::collections::BTreeMap<String, String>,
-    agent_env: &std::collections::BTreeMap<String, String>,
-    global_env: &std::collections::BTreeMap<String, String>,
-) {
-    // Never inherit or accept a forged marker. Desktop sets it only when the
-    // effective generic effort came from the global default layer.
-    command.env_remove(ACP_EFFORT_DEFAULT_KEY);
-    if super::env_vars::env_var_comes_from_global_default(
-        ACP_EFFORT_KEY,
-        persona_env,
-        agent_env,
-        global_env,
-    ) {
-        command.env(ACP_EFFORT_DEFAULT_KEY, "true");
-    }
-}
-
-fn child_rust_log_filter_from(existing: Option<&str>) -> String {
-    let mut directives = existing.unwrap_or_default().trim().to_string();
-    for required in ["buzz_acp=info", "pool::model=info"] {
-        let target = required.split('=').next().unwrap_or(required);
-        if !directives
-            .split(',')
-            .any(|entry| entry.trim().starts_with(target))
-        {
-            if !directives.is_empty() {
-                directives.push(',');
-            }
-            directives.push_str(required);
-        }
-    }
-    directives
 }
 
 pub fn start_managed_agent_process(

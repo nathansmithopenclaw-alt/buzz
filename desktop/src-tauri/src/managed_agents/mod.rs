@@ -13,6 +13,7 @@ mod claude_accounts;
 mod claude_model_catalog;
 pub(crate) mod config_bridge;
 pub(crate) mod custom_harnesses;
+mod definition_validation;
 mod discovery;
 pub(crate) mod effective_config;
 mod env_vars;
@@ -58,6 +59,9 @@ pub use backend::*;
 pub use claude_accounts::*;
 pub(crate) use claude_model_catalog::{
     sync_catalog_and_save_agents, sync_claude_catalog_for_state,
+};
+pub(crate) use definition_validation::{
+    validate_agent_definition_text, validate_managed_agent_definition_text,
 };
 pub use discovery::*;
 pub use env_vars::*;
