@@ -218,7 +218,18 @@ export function DispatchScreen() {
                   <Plus /> New Issue
                 </Button>
               ) : null}
-              <span>{syncedLabel(context.snapshotAt)}</span>
+              <span
+                className={cn(context.isRetrying && "text-warning")}
+                data-testid={
+                  context.isRetrying
+                    ? "dispatch-rate-limit-retrying"
+                    : undefined
+                }
+              >
+                {context.isRetrying
+                  ? "Relay busy · retrying…"
+                  : syncedLabel(context.snapshotAt)}
+              </span>
               <Button
                 aria-label="Refresh Dispatch"
                 data-testid="dispatch-refresh"
@@ -324,6 +335,13 @@ export function DispatchScreen() {
           <div className="m-auto max-w-md text-center text-sm text-muted-foreground">
             Choose a workspace above to view its issues. This changes only the
             current view; it never moves issues between workspaces.
+          </div>
+        ) : context.isRetrying && context.isLoading ? (
+          <div
+            className="m-auto text-sm text-warning"
+            data-testid="dispatch-rate-limit-retrying-loading"
+          >
+            Relay is busy; retrying Tracker history…
           </div>
         ) : context.error ? (
           <div className="m-auto max-w-md text-center text-sm text-destructive">

@@ -147,6 +147,8 @@ type MockInstallRuntimeResult = {
 
 type MockBridgeOptions = {
   dispatchFoldError?: string;
+  /** Number of canonical Dispatch history REQs rejected once with a 1s hint. */
+  dispatchHistoryRateLimitCount?: number;
   /** Tauri window label exposed to the app. Defaults to the main window. */
   windowLabel?: string;
   /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */

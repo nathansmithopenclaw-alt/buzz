@@ -191,6 +191,8 @@ type E2eConfig = {
   mock?: {
     /** Critical root/history failure raised by the Dispatch fold command. */
     dispatchFoldError?: string;
+    /** Number of canonical Dispatch history REQs rejected once with a 1s hint. */
+    dispatchHistoryRateLimitCount?: number;
     /** Tauri window label exposed to the app. Defaults to the main window. */
     windowLabel?: string;
     /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */
@@ -7696,6 +7698,7 @@ function withMockRuntimeConfigMetadata(
 
 let runtimeCatalogDiscoveryCount = 0;
 let mockDispatchContext: DispatchContext | null = null;
+let mockDispatchHistoryRateLimitsRemaining = 0;
 let mockInstallCompleted = false;
 let mockConnectCompleted = false;
 
@@ -9911,6 +9914,20 @@ function emitMockDispatchFixture(
     { ...fixture.workspace, populated: true },
   ];
   const kinds = new Set(filter.kinds ?? []);
+  if (
+    mockDispatchHistoryRateLimitsRemaining > 0 &&
+    kinds.size === 2 &&
+    kinds.has(40020) &&
+    kinds.has(40021)
+  ) {
+    mockDispatchHistoryRateLimitsRemaining -= 1;
+    sendWsText(socket.handler, [
+      "CLOSED",
+      subId,
+      "rate-limited: quota exceeded; retry in 1s",
+    ]);
+    return true;
+  }
   const sectionErrors = mockDispatchContext?.sectionErrors;
   const failure =
     kinds.size === 1 && kinds.has(40022)
@@ -10457,6 +10474,8 @@ export function maybeInstallE2eTauriMocks() {
   mockDispatchContext = config.mock?.dispatch
     ? structuredClone(config.mock.dispatch.context)
     : null;
+  mockDispatchHistoryRateLimitsRemaining =
+    config.mock?.dispatchHistoryRateLimitCount ?? 0;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
