@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   LayoutGrid,
   List,
+  Plus,
   RefreshCw,
   UserRound,
   Waypoints,
@@ -39,6 +40,7 @@ import {
   DispatchPanelsTooltipProvider,
 } from "./DispatchPanels";
 import { MyIssues } from "./MyIssues";
+import { NewIssueDialog } from "./NewIssueDialog";
 import { TriageInbox } from "./TriageInbox";
 import { DispatchWorkspaceControl } from "./DispatchWorkspaceControl";
 
@@ -73,6 +75,16 @@ function workspacePrefix(identifiers: string[]): string | null {
     if (match) return match[1].toUpperCase();
   }
   return null;
+}
+
+function fallbackWorkspacePrefix(name: string): string {
+  const prefix = name
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((word) => word[0]?.toUpperCase())
+    .join("")
+    .slice(0, 4);
+  return prefix || "TRK";
 }
 
 function syncedLabel(snapshotAt: string): string {
@@ -123,6 +135,7 @@ export function DispatchScreen() {
     direction: (values.direction as "asc" | "desc" | null) ?? "asc",
   };
   const excludedIssueIds = parseExcludedIssueIds(values.exclude);
+  const [newIssueOpen, setNewIssueOpen] = React.useState(false);
 
   React.useEffect(() => {
     if (workspaceQuery.isLoading || workspaceId) return;
@@ -149,6 +162,11 @@ export function DispatchScreen() {
   const prefix = workspacePrefix(
     context.issues.map((issue) => issue.identifier),
   );
+  const selectedWorkspace = workspaceQuery.workspaces.find(
+    (workspace) => workspace.id === workspaceId,
+  );
+  const createPrefix =
+    prefix ?? fallbackWorkspacePrefix(selectedWorkspace?.name ?? "");
   const triageCount = context.issues.filter(
     (issue) => issue.status === "triage",
   ).length;
@@ -190,6 +208,16 @@ export function DispatchScreen() {
               prefix={prefix}
             />
             <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+              {view !== "my-issues" ? (
+                <Button
+                  data-testid="dispatch-new-issue"
+                  disabled={!workspaceId || context.viewerRole === "none"}
+                  onClick={() => setNewIssueOpen(true)}
+                  size="sm"
+                >
+                  <Plus /> New Issue
+                </Button>
+              ) : null}
               <span>{syncedLabel(context.snapshotAt)}</span>
               <Button
                 aria-label="Refresh Dispatch"
@@ -394,6 +422,16 @@ export function DispatchScreen() {
             ) : null}
           </section>
         )}
+        {workspaceId ? (
+          <NewIssueDialog
+            identifierPrefix={createPrefix}
+            onOpenChange={setNewIssueOpen}
+            open={newIssueOpen}
+            projects={context.projects}
+            refresh={context.refresh}
+            streamId={workspaceId}
+          />
+        ) : null}
       </main>
     </DispatchPanelsTooltipProvider>
   );

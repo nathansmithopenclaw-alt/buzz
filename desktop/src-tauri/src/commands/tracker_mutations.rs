@@ -1,5 +1,6 @@
 use buzz_sdk_pkg::tracker::{
-    build_tracker_comment, build_tracker_revision, IssueComment, IssueRevision,
+    build_tracker_comment, build_tracker_issue, build_tracker_revision, IssueComment,
+    IssueRevision, IssueRoot,
 };
 use nostr::PublicKey;
 use serde::Serialize;
@@ -13,6 +14,17 @@ pub struct TrackerUnsignedEvent {
     pub content: String,
     pub created_at: u64,
     pub tags: Vec<Vec<String>>,
+}
+
+/// Build and validate a Tracker issue root without signing or publishing it.
+#[tauri::command]
+pub fn build_tracker_issue_event(
+    stream_id: Uuid,
+    root: IssueRoot,
+    author_pubkey: String,
+) -> Result<TrackerUnsignedEvent, String> {
+    let builder = build_tracker_issue(stream_id, &root).map_err(|error| error.to_string())?;
+    unsigned_shape(builder, &author_pubkey)
 }
 
 fn unsigned_shape(
@@ -150,6 +162,50 @@ mod tests {
                 .sign_with_keys(&keys)
                 .expect("sign");
         assert!(Event::from_json(signed.as_json()).is_ok());
+    }
+
+    #[test]
+    fn issue_command_uses_sdk_content_and_preserves_self_assignment_tag() {
+        let keys = Keys::generate();
+        let author = keys.public_key().to_hex();
+        let issue_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let shape = build_tracker_issue_event(
+            Uuid::new_v4(),
+            IssueRoot {
+                v: TRACKER_VERSION,
+                op: "create".into(),
+                issue_id,
+                identifier: format!("DSP-{}", request_id.simple()),
+                title: "Create from Desktop".into(),
+                body: "Root body".into(),
+                status: IssueStatus::Triage,
+                priority: Some(Priority::P1),
+                assignee: Some(author.clone()),
+                project_id: None,
+                due: None,
+                estimate_minutes: None,
+                home_channel_id: None,
+                source_event_id: None,
+                workflow: "default-v1".into(),
+                labels: vec!["desktop".into()],
+                external_refs: Vec::new(),
+                request_id: Some(request_id),
+                import: None,
+            },
+            author.clone(),
+        )
+        .expect("build issue");
+
+        assert_eq!(shape.kind, 40020);
+        assert!(shape
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["request", request_id.to_string().as_str()]));
+        assert!(shape
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["p", author.as_str(), "", "assignee"] }));
     }
 
     #[test]

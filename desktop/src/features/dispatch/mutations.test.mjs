@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   canApplyDispatchMutation,
   publishDispatchComment,
+  publishDispatchIssueCreate,
   publishDispatchIssueMutation,
   TrackerMutationConflictError,
 } from "./mutations.ts";
@@ -34,6 +35,23 @@ function issue(overrides = {}) {
     labels: [],
     externalRefs: [],
     relations: [],
+    ...overrides,
+  };
+}
+
+function createInput(overrides = {}) {
+  const requestId = crypto.randomUUID();
+  return {
+    streamId: crypto.randomUUID(),
+    requestId,
+    identifier: `DSP-${requestId.replaceAll("-", "")}`,
+    title: "Desktop-created issue",
+    body: "  Body\n",
+    status: "triage",
+    priority: "P1",
+    projectId: null,
+    labels: [" UI ", "desktop", "ui"],
+    assignee: PUBKEY,
     ...overrides,
   };
 }
@@ -117,6 +135,113 @@ test("status mutation round-trips through builders and accepts an absent reason"
   assert.equal(optimistic[0].tipEvent, event.id);
   assert.equal(rolledBack.length, 0);
   assert.deepEqual(deps.calls.published, [event]);
+});
+
+test("issue create uses the Rust root builder and refreshes revision zero", async () => {
+  const input = createInput();
+  const event = {
+    ...relayEvent("6".repeat(64)),
+    kind: 40020,
+    tags: [["request", input.requestId]],
+  };
+  const calls = { roots: [], published: [] };
+  const created = issue({
+    streamId: input.streamId,
+    issueId: input.requestId,
+    rootEvent: event.id,
+    tipEvent: event.id,
+    revision: 0,
+    status: "triage",
+  });
+  const result = await publishDispatchIssueCreate(
+    { input, refresh: async () => context([created]) },
+    {
+      identity: async () => ({ pubkey: PUBKEY }),
+      buildIssue: async (value) => {
+        calls.roots.push(value);
+        return { kind: 40020, content: "{}", createdAt: 10, tags: event.tags };
+      },
+      sign: async () => event,
+      fetchRequestEvents: async () => [],
+      publish: async (value) => calls.published.push(value),
+    },
+  );
+
+  assert.equal(result.issue.revision, 0);
+  assert.equal(result.replayed, false);
+  assert.equal(calls.roots[0].root.issue_id, input.requestId);
+  assert.equal(calls.roots[0].root.body, input.body);
+  assert.deepEqual(calls.roots[0].root.labels, ["desktop", "ui"]);
+  assert.deepEqual(calls.published, [event]);
+});
+
+test("issue create replays the same literal request tag without republishing", async () => {
+  const input = createInput();
+  const event = {
+    ...relayEvent("7".repeat(64)),
+    kind: 40020,
+    tags: [["request", input.requestId]],
+  };
+  const created = issue({
+    streamId: input.streamId,
+    issueId: input.requestId,
+    rootEvent: event.id,
+    tipEvent: event.id,
+    revision: 0,
+  });
+  let published = false;
+  const result = await publishDispatchIssueCreate(
+    { input, refresh: async () => context([created]) },
+    {
+      identity: async () => ({ pubkey: PUBKEY }),
+      buildIssue: async () => ({
+        kind: 40020,
+        content: event.content,
+        createdAt: 11,
+        tags: event.tags,
+      }),
+      sign: async () => ({ ...event, created_at: 11 }),
+      fetchRequestEvents: async () => [event],
+      publish: async () => {
+        published = true;
+      },
+    },
+  );
+
+  assert.equal(result.replayed, true);
+  assert.equal(published, false);
+});
+
+test("issue create rejects a request ID already used by another Tracker kind", async () => {
+  const input = createInput();
+  const candidate = {
+    ...relayEvent("8".repeat(64)),
+    kind: 40020,
+    tags: [["request", input.requestId]],
+  };
+  const existingRevision = {
+    ...relayEvent("9".repeat(64)),
+    tags: [["request", input.requestId]],
+  };
+
+  await assert.rejects(
+    publishDispatchIssueCreate(
+      { input, refresh: async () => context([]) },
+      {
+        identity: async () => ({ pubkey: PUBKEY }),
+        buildIssue: async () => ({
+          kind: 40020,
+          content: candidate.content,
+          createdAt: 11,
+          tags: candidate.tags,
+        }),
+        sign: async () => candidate,
+        fetchRequestEvents: async () => [existingRevision],
+        publish: async () => assert.fail("must not publish"),
+      },
+    ),
+    /different Tracker input/,
+  );
 });
 
 test("a conflicting canonical tip rolls back and refetches", async () => {

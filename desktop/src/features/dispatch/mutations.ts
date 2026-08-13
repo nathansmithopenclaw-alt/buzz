@@ -17,6 +17,41 @@ type TrackerUnsignedEvent = {
   tags: string[][];
 };
 
+type TrackerIssueWire = {
+  v: 1;
+  op: "create";
+  issue_id: string;
+  identifier: string;
+  title: string;
+  body: string;
+  status: DispatchStatus;
+  priority: DispatchPriority | null;
+  assignee: string | null;
+  project_id: string | null;
+  due: null;
+  estimate_minutes: null;
+  home_channel_id: string;
+  source_event_id: null;
+  workflow: "default-v1";
+  labels: string[];
+  external_refs: never[];
+  request_id: string;
+  import: null;
+};
+
+export type DispatchIssueCreateInput = {
+  streamId: string;
+  requestId: string;
+  identifier: string;
+  title: string;
+  body: string;
+  status: DispatchStatus;
+  priority: DispatchPriority | null;
+  projectId: string | null;
+  labels: string[];
+  assignee: string | null;
+};
+
 type TrackerRevisionWire = {
   v: 1;
   op: "revise";
@@ -48,6 +83,11 @@ export type DispatchIssueMutation =
 
 type MutationDependencies = {
   identity: () => Promise<{ pubkey: string }>;
+  buildIssue: (input: {
+    streamId: string;
+    root: TrackerIssueWire;
+    authorPubkey: string;
+  }) => Promise<TrackerUnsignedEvent>;
   buildRevision: (input: {
     streamId: string;
     revision: TrackerRevisionWire;
@@ -67,10 +107,44 @@ type MutationDependencies = {
     timeoutMessage: string,
     failureMessage: string,
   ) => Promise<unknown>;
+  fetchRequestEvents: (streamId: string) => Promise<RelayEvent[]>;
 };
+
+async function fetchRequestEvents(streamId: string): Promise<RelayEvent[]> {
+  const events = new Map<string, RelayEvent>();
+  let until: number | undefined;
+  for (;;) {
+    const page = await relayClient.fetchEvents({
+      kinds: [40020, 40021, 40022, 40025, 30621],
+      "#h": [streamId],
+      limit: 500,
+      ...(until === undefined ? {} : { until }),
+    });
+    for (const event of page) events.set(event.id, event);
+    if (page.length < 500) return [...events.values()];
+    const oldest = Math.min(...page.map((event) => event.created_at));
+    const boundary = await relayClient.fetchEvents({
+      kinds: [40020, 40021, 40022, 40025, 30621],
+      "#h": [streamId],
+      since: oldest,
+      until: oldest,
+      limit: 500,
+    });
+    for (const event of boundary) events.set(event.id, event);
+    if (boundary.length >= 500) {
+      throw new Error(
+        "Tracker create idempotency cannot exhaust a timestamp boundary.",
+      );
+    }
+    if (oldest <= 0) return [...events.values()];
+    until = oldest - 1;
+  }
+}
 
 const defaultDependencies: MutationDependencies = {
   identity: getIdentity,
+  buildIssue: (input) =>
+    invokeTauri<TrackerUnsignedEvent>("build_tracker_issue_event", input),
   buildRevision: (input) =>
     invokeTauri<TrackerUnsignedEvent>("build_tracker_revision_event", input),
   buildComment: (input) =>
@@ -85,7 +159,127 @@ const defaultDependencies: MutationDependencies = {
     }),
   publish: (event, timeoutMessage, failureMessage) =>
     relayClient.publishEvent(event, timeoutMessage, failureMessage),
+  fetchRequestEvents,
 };
+
+function hasRequestTag(event: RelayEvent, requestId: string): boolean {
+  return event.tags.some((tag) => tag[0] === "request" && tag[1] === requestId);
+}
+
+function semanticTags(tags: string[][]): string[] {
+  return tags
+    .filter((tag) => tag[0] !== "auth")
+    .map((tag) => JSON.stringify(tag))
+    .sort();
+}
+
+function sameCreateRequest(
+  existing: RelayEvent,
+  candidate: RelayEvent,
+): boolean {
+  return (
+    existing.kind === candidate.kind &&
+    existing.content === candidate.content &&
+    JSON.stringify(semanticTags(existing.tags)) ===
+      JSON.stringify(semanticTags(candidate.tags))
+  );
+}
+
+function normalizeLabels(values: string[]): string[] {
+  const labels = new Set<string>();
+  for (const value of values) {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) continue;
+    if (new TextEncoder().encode(normalized).length > 64) {
+      throw new Error("Labels must contain at most 64 UTF-8 bytes.");
+    }
+    labels.add(normalized);
+  }
+  if (labels.size > 16) {
+    throw new Error("At most 16 labels are allowed.");
+  }
+  return [...labels].sort();
+}
+
+export async function publishDispatchIssueCreate(
+  {
+    input,
+    refresh,
+  }: {
+    input: DispatchIssueCreateInput;
+    refresh: () => Promise<DispatchContext>;
+  },
+  dependencies: MutationDependencies = defaultDependencies,
+): Promise<{ issue: DispatchIssue; replayed: boolean }> {
+  const title = input.title.trim();
+  if (!title) throw new Error("Issue title cannot be empty.");
+  const labels = normalizeLabels(input.labels);
+  const identity = await dependencies.identity();
+  const issueId = input.requestId;
+  const root: TrackerIssueWire = {
+    v: 1,
+    op: "create",
+    issue_id: issueId,
+    identifier: input.identifier,
+    title,
+    body: input.body,
+    status: input.status,
+    priority: input.priority,
+    assignee: input.assignee,
+    project_id: input.projectId,
+    due: null,
+    estimate_minutes: null,
+    home_channel_id: input.streamId,
+    source_event_id: null,
+    workflow: "default-v1",
+    labels,
+    external_refs: [],
+    request_id: input.requestId,
+    import: null,
+  };
+  const shape = await dependencies.buildIssue({
+    streamId: input.streamId,
+    root,
+    authorPubkey: identity.pubkey,
+  });
+  const candidate = await dependencies.sign(shape);
+  const matches = (
+    await dependencies.fetchRequestEvents(input.streamId)
+  ).filter((event) => hasRequestTag(event, input.requestId));
+  if (matches.length > 1) {
+    throw new Error(
+      `Request ${input.requestId} already names multiple Tracker events.`,
+    );
+  }
+  let event = candidate;
+  let replayed = false;
+  if (matches.length === 1) {
+    const existing = matches[0];
+    if (!sameCreateRequest(existing, candidate)) {
+      throw new Error(
+        `Request ${input.requestId} was already used with different Tracker input.`,
+      );
+    }
+    event = existing;
+    replayed = true;
+  } else {
+    await dependencies.publish(
+      candidate,
+      "Timed out creating issue. Retry keeps the same request ID.",
+      "Failed to create issue.",
+    );
+  }
+  const context = await refresh();
+  const issue = context.issues.find(
+    (value) => value.issueId === issueId && value.rootEvent === event.id,
+  );
+  if (!issue) {
+    throw new Error(
+      "Issue reached the relay but is not visible in the canonical fold yet. Retry to reconcile it.",
+    );
+  }
+  return { issue, replayed };
+}
 
 export class TrackerMutationConflictError extends Error {
   constructor() {
