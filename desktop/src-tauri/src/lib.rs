@@ -87,10 +87,9 @@ use tray_menu::show_main_window;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     runtime_identity::log_desktop_identity();
-    // mesh-llm's async chains (model download, node start/join) overflow
-    // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
-    // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
-    // stacks for this reason; give Tauri's command runtime the same headroom
+    // mesh-llm's async chains overflow tokio's default 2 MiB worker stacks — a
+    // stack-guard SIGABRT, not a panic. Upstream mesh-llm and mesh-console both
+    // use 8 MiB worker stacks; give Tauri's command runtime the same headroom
     // before anything else touches tauri::async_runtime.
     #[cfg(feature = "mesh-llm")]
     match tokio::runtime::Builder::new_multi_thread()
@@ -682,6 +681,7 @@ pub fn run() {
             connect_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,
+            build_tracker_issue_event,
             build_tracker_revision_event,
             build_tracker_comment_event,
             sign_nostr_identity_binding,

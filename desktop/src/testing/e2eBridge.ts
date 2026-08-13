@@ -15,7 +15,11 @@ import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
 import { resolveAgentParallelism } from "@/features/agents/lib/agentParallelism";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
-import type { DispatchContext } from "@/features/dispatch/types";
+import type {
+  DispatchContext,
+  DispatchPriority,
+  DispatchStatus,
+} from "@/features/dispatch/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -13173,6 +13177,42 @@ export function maybeInstallE2eTauriMocks() {
           tags,
         };
       }
+      case "build_tracker_issue_event": {
+        const args = payload as {
+          streamId: string;
+          root: {
+            issue_id: string;
+            identifier: string;
+            title: string;
+            status: string;
+            priority: string | null;
+            assignee: string | null;
+            project_id: string | null;
+            labels: string[];
+            request_id: string | null;
+          };
+        };
+        const tags = [
+          ["h", args.streamId],
+          ["d", args.root.issue_id],
+          ["t", "buzz-tracker"],
+          ["subject", args.root.title],
+          ["status", args.root.status],
+          ["identifier", args.root.identifier],
+        ];
+        if (args.root.request_id) tags.push(["request", args.root.request_id]);
+        if (args.root.priority) tags.push(["priority", args.root.priority]);
+        if (args.root.project_id) tags.push(["project", args.root.project_id]);
+        if (args.root.assignee)
+          tags.push(["p", args.root.assignee, "", "assignee"]);
+        for (const label of args.root.labels) tags.push(["l", label]);
+        return {
+          kind: 40020,
+          content: JSON.stringify(args.root),
+          createdAt: Math.floor(Date.now() / 1_000),
+          tags,
+        };
+      }
       case "build_tracker_comment_event": {
         const args = payload as {
           streamId: string;
@@ -13217,14 +13257,50 @@ export function maybeInstallE2eTauriMocks() {
         window.__BUZZ_E2E_SIGNED_EVENTS__?.push(shape);
         if (
           mockDispatchContext &&
-          (signed.kind === 40021 || signed.kind === 40022)
+          (signed.kind === 40020 ||
+            signed.kind === 40021 ||
+            signed.kind === 40022)
         ) {
           const content = JSON.parse(signed.content) as Record<string, unknown>;
           const issueId = String(content.issue_id ?? "");
           const issue = mockDispatchContext.issues.find(
             (candidate) => candidate.issueId === issueId,
           );
-          if (signed.kind === 40021 && issue) {
+          if (signed.kind === 40020 && !issue) {
+            mockDispatchContext.issues.push({
+              streamId: String(content.home_channel_id ?? ""),
+              issueId,
+              rootEvent: signed.id,
+              rootCreatedAt: signed.created_at,
+              tipEvent: signed.id,
+              tipCreatedAt: signed.created_at,
+              revision: 0,
+              enteredStatusAt: signed.created_at,
+              identifier: String(content.identifier ?? ""),
+              title: String(content.title ?? ""),
+              body: String(content.body ?? ""),
+              status: String(content.status ?? "triage") as DispatchStatus,
+              priority: (content.priority ?? null) as DispatchPriority | null,
+              assignee:
+                typeof content.assignee === "string" ? content.assignee : null,
+              projectId:
+                typeof content.project_id === "string"
+                  ? content.project_id
+                  : null,
+              due: null,
+              estimateMinutes: null,
+              homeChannelId:
+                typeof content.home_channel_id === "string"
+                  ? content.home_channel_id
+                  : null,
+              workflow: String(content.workflow ?? "default-v1"),
+              labels: Array.isArray(content.labels)
+                ? content.labels.map(String)
+                : [],
+              externalRefs: [],
+              relations: [],
+            });
+          } else if (signed.kind === 40021 && issue) {
             const set = (content.set ?? {}) as Record<string, unknown>;
             const clear = Array.isArray(content.clear)
               ? content.clear.map(String)

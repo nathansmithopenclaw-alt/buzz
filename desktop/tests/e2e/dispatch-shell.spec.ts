@@ -28,6 +28,69 @@ test("Dispatch experiment enables the sidebar route shell", async ({
   ).toBeVisible();
 });
 
+test("New Issue creates a revision-zero issue visible in Board, List, and Triage", async ({
+  page,
+}) => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  await installMockBridge(
+    page,
+    {
+      dispatch: {
+        workspace: { id: workspaceId, name: "Dispatch Test" },
+        context: {
+          issues: [],
+          activity: [],
+          comments: [],
+          linkedTasks: [],
+          projects: [{ projectId, slug: "desktop", name: "Desktop" }],
+          diagnostics: [],
+          taskDiagnostics: [],
+          viewerRole: "maintainer",
+          sectionErrors: { comments: null, projects: null, tasks: null },
+          snapshotAt: new Date().toISOString(),
+        },
+      },
+    },
+    { seedPreviewFeatures: true },
+  );
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-dispatch-view").click();
+  await page.getByTestId("dispatch-new-issue").click();
+  await page
+    .getByTestId("dispatch-new-issue-title")
+    .fill("Create from Dispatch UI");
+  await page.getByTestId("dispatch-new-issue-body").fill("Canonical root body");
+  await page.getByTestId("dispatch-new-issue-priority").selectOption("P1");
+  await page.getByTestId("dispatch-new-issue-project").selectOption(projectId);
+  await page.getByTestId("dispatch-new-issue-labels").fill("desktop, ui");
+  await page.getByTestId("dispatch-new-issue-submit").click();
+
+  await expect(page.getByTestId("dispatch-new-issue-dialog")).toHaveCount(0);
+  await expect(page.getByText("Create from Dispatch UI")).toBeVisible();
+  await page.getByTestId("dispatch-tab-list").click();
+  await expect(
+    page
+      .getByTestId("dispatch-list-row")
+      .filter({ hasText: "Create from Dispatch UI" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /Triage/ }).click();
+  await expect(page.getByText("Create from Dispatch UI")).toBeVisible();
+  const signed = await page.evaluate(
+    () => window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [],
+  );
+  const root = signed.find((event) => event.kind === 40020);
+  expect(root).toBeTruthy();
+  const content = JSON.parse(root?.content ?? "{}") as {
+    op?: string;
+    status?: string;
+    request_id?: string;
+  };
+  expect(content.op).toBe("create");
+  expect(content.status).toBe("triage");
+  expect(content.request_id).toBeTruthy();
+});
+
 for (const theme of ["catppuccin-latte", "catppuccin-mocha"] as const) {
   test(`Dispatch board and list render canonical fixture projections in ${theme}`, async ({
     page,
