@@ -70,6 +70,7 @@ import {
   completeDelegatedAgentUpdateFailure,
   completeDelegatedAgentUpdateSuccess,
 } from "./delegatedAgentUpdateCompletion";
+import { resurrectStoppedActiveInstances } from "@/shared/api/tauriManagedAgents";
 
 function requesterNameFor(
   agents: readonly { pubkey: string; name: string }[] | undefined,
@@ -483,6 +484,9 @@ export function useAgentManagement() {
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
       await updatePersonaMutation.mutateAsync(input);
+      await resurrectStoppedActiveInstances({ personaId: input.id }).catch(
+        () => undefined,
+      );
       await onUpdated?.();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),

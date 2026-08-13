@@ -173,6 +173,21 @@ export async function publishAgentManagementResult(input: {
   });
 }
 
+export async function ensureManagedAgentForInbound(input: {
+  pubkey: string;
+  authorPubkey: string;
+  isDm: boolean;
+}): Promise<{ pubkey: string; spawned: boolean; reason: string }> {
+  return invokeTauri("ensure_managed_agent_for_inbound", input);
+}
+
+export async function resurrectStoppedActiveInstances(input: {
+  personaId?: string;
+  pubkey?: string;
+}): Promise<{ started: string[]; failed: string[] }> {
+  return invokeTauri("resurrect_stopped_active_instances", input);
+}
+
 export async function startManagedAgent(pubkey: string): Promise<ManagedAgent> {
   const response = await invokeTauri<RawManagedAgent>("start_managed_agent", {
     pubkey,

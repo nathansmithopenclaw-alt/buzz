@@ -1067,6 +1067,23 @@ pub async fn start_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
+    // Owner-initiated start: forget automatic crash-loop state so a human
+    // can recover a flapping agent. Automatic resurrection must call
+    // `start_managed_agent_inner` instead — clearing here would reset the
+    // death counter on every inbound mention and make CRASH_LOOP_CAP
+    // unreachable.
+    crate::managed_agents::clear_crash_backoff(&pubkey);
+    start_managed_agent_inner(pubkey, app, state).await
+}
+
+/// Start without touching crash-loop watches. Used by inbound mention and
+/// apply-update resurrection so automatic respawns can accumulate toward
+/// `CRASH_LOOP_CAP`.
+pub(super) async fn start_managed_agent_inner(
+    pubkey: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ManagedAgentSummary, String> {
     // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
     // Read outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
