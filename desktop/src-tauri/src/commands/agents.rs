@@ -1069,6 +1069,7 @@ pub async fn start_managed_agent(
 ) -> Result<ManagedAgentSummary, String> {
     // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
     // Read outside the records lock to keep lock ordering simple.
+    crate::managed_agents::clear_crash_backoff(&pubkey);
     let owner_hex = workspace_owner_hex(&state)?;
     enum StartTarget {
         Local,

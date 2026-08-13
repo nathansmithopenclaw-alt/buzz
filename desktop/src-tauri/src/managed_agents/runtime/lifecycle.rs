@@ -107,6 +107,18 @@ pub fn sync_managed_agent_processes(
         exited.push(key.clone());
     }
 
+    for key in &exited {
+        super::super::note_unexpected_exit(&key.pubkey);
+        if super::super::crash_loop_blocked(&key.pubkey) {
+            if let Some(record) = records
+                .iter_mut()
+                .find(|record| record.pubkey == key.pubkey)
+            {
+                record.last_error = Some(super::super::crash_loop_error(&key.pubkey));
+            }
+        }
+    }
+
     let exited_pubkeys: Vec<String> = exited.iter().map(|key| key.pubkey.clone()).collect();
     for key in exited {
         runtimes.remove(&key);

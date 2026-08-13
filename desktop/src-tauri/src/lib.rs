@@ -772,6 +772,8 @@ pub fn run() {
             put_managed_agent_runtime_lifecycle,
             create_managed_agent,
             start_managed_agent,
+            ensure_managed_agent_for_inbound,
+            resurrect_stopped_active_instances,
             stop_managed_agent,
             set_agent_managed_profiles,
             set_managed_agent_start_on_app_launch,

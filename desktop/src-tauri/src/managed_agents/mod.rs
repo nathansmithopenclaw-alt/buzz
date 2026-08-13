@@ -31,6 +31,7 @@ pub(crate) mod reconcile;
 mod relay_mesh;
 mod repos;
 mod restore;
+pub(crate) mod resurrection;
 pub mod retention;
 mod runtime;
 mod runtime_catalog;
@@ -83,6 +84,11 @@ pub use repos::{
     write_persisted_repos_dir,
 };
 pub use restore::*;
+pub(crate) use resurrection::{
+    clear_crash_backoff, crash_loop_blocked, crash_loop_error, decide_apply_restart,
+    decide_inbound_respawn, note_automatic_spawn, note_unexpected_exit, ApplyRestartDecision,
+    InboundRespawnDecision,
+};
 pub use runtime::*;
 pub(crate) use runtime_catalog::{record_supports_claude_accounts, runtime_primary_command};
 pub use runtime_commands::*;

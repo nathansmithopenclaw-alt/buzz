@@ -260,6 +260,9 @@ fn start_pair(
     if record.backend != BackendKind::Local {
         return Err("managed runtime pairs require a local agent".into());
     }
+    if !record.is_active {
+        return Err("archived agents cannot be started".into());
+    }
     if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
@@ -466,9 +469,9 @@ pub async fn reconcile_managed_agent_runtimes(
     let records = load_managed_agents(&app)?;
     let mut jobs = Vec::new();
     for community in communities {
-        for record in records
-            .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+        for record in records.iter().filter(|record| {
+            record.start_on_app_launch && record.is_active && record.backend == BackendKind::Local
+        })
         // The legacy per-record relay pin is deliberately ignored here — see
         // `effective_agent_relay_url`. Every local auto-start agent fans out
         // to every configured community.

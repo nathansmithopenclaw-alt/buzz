@@ -20,6 +20,7 @@ import {
   type TrailingDebounce,
 } from "@/shared/lib/trailingDebounce";
 
+import { notifyInboundLiveEvent } from "@/features/agents/lib/inboundAgentResurrection";
 import { isDmNotifiableKind } from "./isDmNotifiableKind";
 import { refreshChannelsWhenIdle } from "./refreshChannelsWhenIdle";
 
@@ -229,6 +230,7 @@ export function useLiveChannelUpdates(
   );
 
   const handleIncomingMessage = React.useEffectEvent((event: RelayEvent) => {
+    notifyInboundLiveEvent(event);
     const channelId = getChannelIdFromTags(event.tags);
     if (!channelId) {
       return;
