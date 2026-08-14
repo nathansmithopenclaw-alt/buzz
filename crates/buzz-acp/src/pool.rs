@@ -243,6 +243,19 @@ impl SessionState {
     }
 }
 
+fn invalidate_session_after_adapter_runtime_failure(
+    state: &mut SessionState,
+    source: &PromptSource,
+    evidence: &TurnDeliveryEvidence,
+) -> bool {
+    if !evidence.adapter_runtime_failure_present {
+        return false;
+    }
+
+    state.invalidate(source);
+    true
+}
+
 /// An agent with its session state, owned by the pool or a running task.
 pub struct OwnedAgent {
     pub index: usize,
@@ -2903,10 +2916,14 @@ pub async fn run_prompt_task(
                         );
                         let delivery_evidence = agent.acp.turn_delivery_evidence();
                         let usage = agent.acp.take_turn_usage();
-                        if delivery_evidence.adapter_runtime_failure_present {
+                        if invalidate_session_after_adapter_runtime_failure(
+                            &mut agent.state,
+                            &source,
+                            &delivery_evidence,
+                        ) {
                             tracing::error!(
                                 target: "pool::prompt",
-                                "agent adapter returned a provider/runtime failure as terminal output"
+                                "agent adapter returned a provider/runtime failure as terminal output; invalidated session for the next explicit retry"
                             );
                             publish_agent_turn_metric(
                                 &ctx,
@@ -2966,10 +2983,14 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             let delivery_evidence = agent.acp.turn_delivery_evidence();
-            if delivery_evidence.adapter_runtime_failure_present {
+            if invalidate_session_after_adapter_runtime_failure(
+                &mut agent.state,
+                &source,
+                &delivery_evidence,
+            ) {
                 tracing::error!(
                     target: "pool::prompt",
-                    "agent adapter returned a provider/runtime failure as terminal output"
+                    "agent adapter returned a provider/runtime failure as terminal output; invalidated session for the next explicit retry"
                 );
                 let usage = agent.acp.take_turn_usage();
                 publish_agent_turn_metric(
@@ -6793,6 +6814,52 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let delivery = state.deliveries.get(&channel).unwrap();
         assert!(!delivery.standing_context_sent);
         assert!(delivery.delivered_event_ids.is_empty());
+    }
+
+    #[test]
+    fn adapter_runtime_failure_invalidates_only_the_failed_channel_session() {
+        let failed_channel = Uuid::new_v4();
+        let healthy_channel = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state
+            .sessions
+            .insert(failed_channel, "poisoned-session".into());
+        state
+            .sessions
+            .insert(healthy_channel, "healthy-session".into());
+        state.turn_counts.insert(failed_channel, 3);
+        state.mark_channel_delivery_success(failed_channel, true, ["old-event".to_string()]);
+
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.adapter_runtime_failure_present = true;
+
+        assert!(invalidate_session_after_adapter_runtime_failure(
+            &mut state,
+            &PromptSource::Channel(failed_channel),
+            &evidence,
+        ));
+        assert!(!state.has_channel_state(&failed_channel));
+        assert_eq!(
+            state.sessions.get(&healthy_channel).map(String::as_str),
+            Some("healthy-session")
+        );
+    }
+
+    #[test]
+    fn ordinary_terminal_output_preserves_the_live_session() {
+        let channel = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.sessions.insert(channel, "live-session".into());
+
+        assert!(!invalidate_session_after_adapter_runtime_failure(
+            &mut state,
+            &PromptSource::Channel(channel),
+            &TurnDeliveryEvidence::default(),
+        ));
+        assert_eq!(
+            state.sessions.get(&channel).map(String::as_str),
+            Some("live-session")
+        );
     }
 
     #[test]
