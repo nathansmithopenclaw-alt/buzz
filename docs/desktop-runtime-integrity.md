@@ -9,8 +9,22 @@ bytes.
 1. Work from an isolated worktree at the intended commit.
 2. Run `just ci`.
 3. Run `just desktop-release-build`. This compiles every bundled sidecar from
-   the same checkout, creates only the macOS app bundle, ad-hoc signs the local
-   bundle as a complete unit, and runs `scripts/verify-desktop-bundle.sh`.
+   the same checkout, creates only the macOS app bundle, signs the bundle as a
+   complete unit, and runs `scripts/verify-desktop-bundle.sh`. The default is
+   ad-hoc signing. A Developer ID rollout must set all three fail-closed inputs:
+
+   ```sh
+   BUZZ_MACOS_SIGNING_IDENTITY='<certificate SHA-1 or exact common name>' \
+   BUZZ_MACOS_SIGNING_KEYCHAIN='/absolute/path/to/login.keychain-db' \
+   BUZZ_MACOS_EXPECTED_TEAM_ID='<10-character Team ID>' \
+   just desktop-release-build
+   ```
+
+   The Developer ID path applies the hardened runtime and required
+   entitlements, requests an Apple timestamp, and verifies the expected
+   authority, Team ID, embedded certificate chain, and timestamp on the main
+   executable and every bundled sidecar. It repeats strict deep verification
+   after a bounded delay before returning success.
 4. Quit Buzz normally. Do not kill it during an agent turn.
 5. Run `just desktop-install-macos`. The installer refuses a live Desktop,
    retains the previous `/Applications/Buzz.app` as a hidden recoverable
@@ -39,9 +53,11 @@ Any missing required binary, invalid code signature, explicit model rejection,
 or model mismatch is a failed handoff. Fix or report it; do not accept the
 adapter default silently.
 
-The local build is ad-hoc signed, not Developer ID signed or notarized. A
-release artifact still requires the repository's Apple signing workflow; a
-strict local `codesign` pass must not be represented as certificate trust.
+The default local build is ad-hoc signed. Selecting Developer ID proves the
+certificate-backed signature and stable Team ID, but it does not notarize the
+artifact. Software distributed outside the Mac App Store must still be
+submitted to Apple's notary service, stapled, and accepted by `spctl`; a strict
+local `codesign` pass must not be represented as notarization.
 
 ## Duplicate-bundle recovery
 
