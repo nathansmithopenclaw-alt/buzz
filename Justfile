@@ -259,8 +259,7 @@ desktop-release-build target="aarch64-apple-darwin":
     pnpm install
     (cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}} --bundles app)
     APP=$(cargo metadata --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")/$TARGET/release/bundle/macos/Buzz.app
-    codesign --force --deep --sign - "$APP"
-    ./scripts/verify-desktop-bundle.sh "$TARGET"
+    ./scripts/sign-desktop-macos.sh "$TARGET" "$APP"
 
 # Install a local desktop-release-build to a single canonical /Applications/Buzz.app,
 # replacing any prior copy instead of leaving numbered duplicates behind.
@@ -293,13 +292,24 @@ desktop-e2e-pre-push: _ensure-migrations
     cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check commitment-watchdog-test test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
+ci: check commitment-watchdog-test desktop-signing-test test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 
 # Opt-in work-commitment liveness and escalation contract (infra-free).
 commitment-watchdog-test:
     ./scripts/test-commitment-watchdog.sh
+
+# macOS-only contract for the local release signing path. Linux CI skips it
+# because codesign and the macOS entitlement tools are unavailable there.
+desktop-signing-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        ./scripts/test-sign-desktop-macos.sh
+    else
+        echo "desktop signing contract: skipped (requires macOS)"
+    fi
 
 # Run all tests (unit + integration)
 test:
