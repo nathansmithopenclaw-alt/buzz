@@ -40,9 +40,10 @@ export function useComposerHeightPadding(
       return;
     }
 
-    // In CSS-variable mode the timeline controls are siblings of the scroll
-    // element. Set the measurement on their shared parent so both the virtual
-    // trailing spacer and floating controls inherit the same live height.
+    // Floating timeline controls are siblings of the scroll element. Set the
+    // measurement on their shared parent in both modes so they inherit the
+    // overlay's live height. CSS-variable mode also uses it for the virtual
+    // trailing spacer; padding mode still applies padding directly below.
     const cssVariableTarget = scrollEl.parentElement ?? scrollEl;
 
     const getScrollElement = (): HTMLElement =>
@@ -83,12 +84,11 @@ export function useComposerHeightPadding(
       const previousPadding = lastPadding;
       const wasAtBottom = isNearBottom();
 
-      if (mode === "css-variable") {
-        cssVariableTarget.style.setProperty(
-          "--composer-overlay-height",
-          `${padding}px`,
-        );
-      } else {
+      cssVariableTarget.style.setProperty(
+        "--composer-overlay-height",
+        `${padding}px`,
+      );
+      if (mode === "padding") {
         scrollEl.style.paddingBottom = `${padding}px`;
       }
       lastPadding = padding;
@@ -123,9 +123,8 @@ export function useComposerHeightPadding(
       if (followBottomFrame !== null) {
         cancelAnimationFrame(followBottomFrame);
       }
-      if (mode === "css-variable") {
-        cssVariableTarget.style.removeProperty("--composer-overlay-height");
-      } else {
+      cssVariableTarget.style.removeProperty("--composer-overlay-height");
+      if (mode === "padding") {
         scrollEl.style.paddingBottom = "";
       }
     };

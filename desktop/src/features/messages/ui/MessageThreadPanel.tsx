@@ -849,7 +849,7 @@ export function MessageThreadPanel({
   const threadFooter = (
     <>
       {!isAtBottom ? (
-        <div className="pointer-events-none absolute inset-x-0 bottom-36 z-50 flex justify-center px-4">
+        <div className="pointer-events-none absolute inset-x-0 bottom-4 z-50 flex translate-y-[calc(-1*var(--composer-overlay-height,8rem))] transform-gpu justify-center px-4 transition-transform duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none">
           <Button
             className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-2xs font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
             data-testid="thread-scroll-to-latest"
