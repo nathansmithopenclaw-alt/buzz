@@ -408,6 +408,115 @@ async fn git_clone_push_fetch_force_roundtrip() {
     assert!(tags.contains("v1.0"), "tag v1.0 cloned back: {tags}");
 }
 
+/// Regression for receive-pack bodies larger than Git's default 1 MiB
+/// `http.postBuffer`. Git sends these as chunked transfer encoding; without
+/// the server acknowledging Git's unauthenticated flush-pkt probe, stock Git
+/// aborts before it sends the authenticated streaming pack.
+#[tokio::test]
+#[ignore = "requires live relay + MinIO + git"]
+async fn git_chunked_push_over_one_mib_succeeds_without_postbuffer_override() {
+    use nostr::ToBech32;
+
+    let owner = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let owner_nsec = owner.secret_key().to_bech32().unwrap();
+    let repo = format!("e2e-git-chunked-{}", uuid::Uuid::new_v4().simple());
+    let s3 = GitS3Probe::from_env();
+
+    let channel = create_test_channel(&owner).await;
+    let announce = EventBuilder::new(Kind::from(30617), "")
+        .tags(vec![
+            Tag::parse(["d", &repo]).unwrap(),
+            Tag::parse(["name", "e2e chunked push repo"]).unwrap(),
+            Tag::parse(["buzz-channel", &channel]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    post_event(&announce).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let tmp = tempdir_named("buzz-e2e-git-chunked");
+    let url = format!("{}/git/{}/{}", relay_http_url(), owner_hex, repo);
+
+    let receive_pack_url = format!("{url}/git-receive-pack");
+    let probe = reqwest::Client::new()
+        .post(&receive_pack_url)
+        .header("Content-Type", "application/x-git-receive-pack-request")
+        .body("0000")
+        .send()
+        .await
+        .expect("send unauthenticated flush-pkt probe");
+    assert_eq!(probe.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        probe
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/x-git-receive-pack-result")
+    );
+
+    let non_probe = reqwest::Client::new()
+        .post(&receive_pack_url)
+        .header("Content-Type", "application/x-git-receive-pack-request")
+        .body("0001")
+        .send()
+        .await
+        .expect("send unauthenticated non-probe body");
+    assert_eq!(non_probe.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(
+        non_probe
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("Nostr ")),
+        "non-probe request must retain the Nostr auth challenge"
+    );
+
+    git(
+        &["clone", "--quiet", &url, "source"],
+        tmp.path(),
+        &owner_nsec,
+    );
+    let source = tmp.path().join("source");
+
+    // Deterministic xorshift bytes are effectively incompressible, keeping the
+    // generated pack above 1 MiB instead of relying on a large sparse/repeated
+    // fixture that Git could compress below the chunked threshold.
+    let mut state = 0x4d595df4d0f33173_u64;
+    let mut asset = vec![0_u8; 2 * 1024 * 1024];
+    for chunk in asset.chunks_mut(8) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+    }
+    std::fs::write(source.join("asset.bin"), asset).unwrap();
+    git(&["add", "asset.bin"], &source, &owner_nsec);
+    git(
+        &["commit", "--quiet", "-m", "add large asset"],
+        &source,
+        &owner_nsec,
+    );
+    git(&["branch", "-M", "main"], &source, &owner_nsec);
+
+    // Deliberately no `-c http.postBuffer=...`: success proves the server
+    // acknowledges Git's probe and then authenticates the real streamed POST.
+    git(&["push", "--quiet", "origin", "main"], &source, &owner_nsec);
+    s3.require_pointer(&owner_hex, &repo).await;
+
+    git(
+        &["clone", "--quiet", &url, "verify"],
+        tmp.path(),
+        &owner_nsec,
+    );
+    assert_eq!(
+        std::fs::metadata(tmp.path().join("verify/asset.bin"))
+            .unwrap()
+            .len(),
+        2 * 1024 * 1024
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires live relay + MinIO + git"]
 async fn git_concurrent_push_one_wins_and_repo_recovers() {

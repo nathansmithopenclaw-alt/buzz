@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, Query, State},
-    http::{header, StatusCode},
+    extract::{FromRequestParts, Path as AxumPath, Query, State},
+    http::{header, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -1093,9 +1093,54 @@ pub async fn upload_pack(
 ///    *only then* builds the 2xx.
 pub async fn receive_pack(
     State(state): State<Arc<AppState>>,
+    AxumPath(params): AxumPath<GitRepoParams>,
+    request: Request<Body>,
+) -> Result<Response, Response> {
+    let (mut parts, body) = request.into_parts();
+    match GitAuth::from_request_parts(&mut parts, &state).await {
+        Ok(auth) => receive_pack_authenticated(state, auth, parts.headers, params, body).await,
+        Err(rejection) => match unauthenticated_receive_pack_probe(body).await {
+            Some(response) => Ok(response),
+            None => Err(rejection),
+        },
+    }
+}
+
+/// Acknowledge Git's unauthenticated large-push probe without touching a repo.
+///
+/// Before streaming a request larger than `http.postBuffer`, stock Git sends
+/// an unauthenticated four-byte flush-pkt POST. Custom credential schemes are
+/// not attached to that probe, and a 401 is a hard failure rather than an auth
+/// retry. A flush-pkt contains no ref update or pack data, so acknowledging
+/// exactly these four bytes is mutation-neutral. The real receive-pack POST
+/// still traverses [`GitAuth`] and the existing push authorization path.
+async fn unauthenticated_receive_pack_probe(body: Body) -> Option<Response> {
+    // Five bytes are enough to distinguish the exact four-byte probe from
+    // every mutating receive-pack request without buffering an attacker-sized
+    // unauthenticated body.
+    let bytes = axum::body::to_bytes(body, 5).await.ok()?;
+    if bytes.as_ref() != b"0000" {
+        return None;
+    }
+
+    Some(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                header::CONTENT_TYPE,
+                "application/x-git-receive-pack-result",
+            )
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(Body::empty())
+            .unwrap(),
+    )
+}
+
+async fn receive_pack_authenticated(
+    state: Arc<AppState>,
     auth: GitAuth,
     headers: axum::http::HeaderMap,
-    AxumPath(params): AxumPath<GitRepoParams>,
+    params: GitRepoParams,
     body: Body,
 ) -> Result<Response, Response> {
     let repo_name = validate_repo_id(&params.owner, &params.repo)?;
@@ -2127,6 +2172,41 @@ mod track_c_tests {
 
     fn oid_sha1() -> String {
         "cb09a769da1c01f458fa6959d4e8eded38fac8d3".to_string()
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_flush_pkt_probe_is_acknowledged_without_output() {
+        let response = unauthenticated_receive_pack_probe(Body::from("0000"))
+            .await
+            .expect("exact flush-pkt is Git's large-push probe");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/x-git-receive-pack-result"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read probe response");
+        assert!(bytes.is_empty(), "probe must not emit receive-pack output");
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_probe_match_is_byte_exact_and_bounded() {
+        for body in [
+            Vec::new(),
+            b"000".to_vec(),
+            b"0001".to_vec(),
+            b"00000".to_vec(),
+            b"0000pack-data".to_vec(),
+        ] {
+            assert!(
+                unauthenticated_receive_pack_probe(Body::from(body.clone()))
+                    .await
+                    .is_none(),
+                "non-probe body must retain the original auth rejection: {body:?}"
+            );
+        }
     }
 
     fn run_test_git(cwd: &Path, args: &[&str], extra_env: &[(&str, String)]) -> Output {
