@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 
@@ -379,12 +379,10 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
-/// Spawn an agent process without holding any locks on records or runtimes.
-/// Returns the child process and log path on success. The caller is responsible
+/// Spawn without holding record/runtime locks. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
 ///
-/// `owner_hex`: the workspace owner's pubkey, used as a fallback for legacy
-/// records that have no NIP-OA `auth_tag`. See `build_respond_to_env`.
+/// `owner_hex` is the workspace-owner fallback for legacy records without auth tags.
 pub fn spawn_agent_child(
     app: &AppHandle,
     record: &ManagedAgentRecord,
@@ -392,6 +390,8 @@ pub fn spawn_agent_child(
     lazy: bool,
     owner_hex: Option<&str>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
+    let state = app.state::<crate::app_state::AppState>();
+    crate::managed_agents::require_fleet_host(&state)?;
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }

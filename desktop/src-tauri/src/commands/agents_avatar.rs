@@ -195,7 +195,9 @@ pub async fn apply_managed_agent_avatar_request(
     authorization_event: String,
     app: AppHandle,
 ) -> Result<ApplyManagedAgentAvatarResult, String> {
-    let owner_keys = app.state::<AppState>().signing_keys()?;
+    let state = app.state::<AppState>();
+    crate::managed_agents::require_fleet_host(&state)?;
+    let owner_keys = state.signing_keys()?;
     let owner = owner_keys.public_key();
     let (authorization, issued_at) =
         validate_avatar_authorization(&authorization_event, &owner, &source_pubkey, Utc::now())?;

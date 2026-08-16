@@ -57,3 +57,28 @@ export function inboundResurrectionTargets(
     )
     .map((agent) => agent.pubkey);
 }
+
+const EXPECTED_WAKE_SKIPS = new Set([
+  "SkipAlreadyRunning",
+  "SkipInactive",
+  "SkipNotLocal",
+  "SkipSelfAuthored",
+  "SkipAuthorGated",
+  "unknown_agent",
+]);
+
+/** Keep policy/race skips quiet; surface every actionable spawn refusal. */
+export function inboundWakeRefusalMessage(reason: string): string | null {
+  const normalized = reason.trim();
+  if (
+    !normalized ||
+    normalized === "spawned" ||
+    EXPECTED_WAKE_SKIPS.has(normalized)
+  ) {
+    return null;
+  }
+  if (normalized === "SkipCrashBackoff") {
+    return "This agent stopped waking automatically after repeated startup failures. Start it manually from Agents.";
+  }
+  return normalized;
+}

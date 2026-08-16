@@ -291,6 +291,14 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    /** Device-local Fleet Visibility role returned by the native settings seam. */
+    fleetVisibilitySettings?: {
+      enabled: boolean;
+      role: "host" | "observer";
+      needsChoice: boolean;
+      hostId?: string;
+      hostName?: string;
+    };
     /** Result returned by the mocked `add_agent_to_huddle` command. */
     addAgentToHuddleResult?: {
       ephemeral_added: boolean;
@@ -7880,6 +7888,17 @@ let mockGlobalAgentConfig: {
   model: string | null;
   preferred_runtime?: string | null;
 } | null = null;
+let mockFleetVisibilitySettings: {
+  enabled: boolean;
+  role: "host" | "observer";
+  needsChoice: boolean;
+  hostId?: string;
+  hostName?: string;
+} = {
+  enabled: false,
+  role: "host",
+  needsChoice: false,
+};
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
@@ -10479,6 +10498,13 @@ export function maybeInstallE2eTauriMocks() {
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
+  mockFleetVisibilitySettings = config.mock?.fleetVisibilitySettings
+    ? { ...config.mock.fleetVisibilitySettings }
+    : {
+        enabled: false,
+        role: "host",
+        needsChoice: false,
+      };
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
@@ -11706,6 +11732,8 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.linkPreviewMetadata ?? null;
       }
       case "apply_workspace": {
+        mockFleetVisibilitySettings.enabled =
+          (payload as { fleetVisibility?: boolean }).fleetVisibility ?? false;
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
           return new Promise((resolve) =>
@@ -11714,6 +11742,21 @@ export function maybeInstallE2eTauriMocks() {
         }
         return;
       }
+      case "get_fleet_visibility_settings":
+        return { ...mockFleetVisibilitySettings };
+      case "list_keyed_managed_agent_pubkeys":
+        return mockManagedAgents.map((agent) => agent.pubkey);
+      case "set_fleet_visibility_enabled":
+        mockFleetVisibilitySettings.enabled = Boolean(
+          (payload as { enabled?: boolean }).enabled,
+        );
+        return { ...mockFleetVisibilitySettings };
+      case "set_fleet_visibility_role":
+        mockFleetVisibilitySettings.role = (
+          payload as { role: "host" | "observer" }
+        ).role;
+        mockFleetVisibilitySettings.needsChoice = false;
+        return { ...mockFleetVisibilitySettings };
       case "update_tray_agent_activity":
       case "clear_tray_agent_activity":
       case "requeue_tray_actions":

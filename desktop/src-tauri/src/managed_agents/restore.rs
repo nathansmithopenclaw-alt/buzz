@@ -95,11 +95,14 @@ pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if let Err(reason) = crate::managed_agents::require_fleet_host(&state) {
+        eprintln!("buzz-desktop: launch restore skipped: {reason}");
+        return Ok(());
+    }
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
     }
-
-    let state = app.state::<AppState>();
 
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
     let mut agents_to_start: Vec<super::ManagedAgentRecord>;

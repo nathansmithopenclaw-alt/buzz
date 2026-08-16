@@ -449,15 +449,9 @@ pub(super) async fn start_local_agent_with_preflight(
     )
 }
 
-/// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
-/// spawn_blocking, and persists the result (backend_agent_id or last_error).
-///
-/// Idempotency: calling deploy on an already-deployed agent sends the same payload
-/// again. Providers are expected to handle this as an update-in-place or no-op —
-/// the protocol does not include an explicit `undeploy` operation (deferred to v2).
-///
-/// Returns Ok(()) on success, Err(message) on failure. Either way the record is
-/// updated and saved before returning.
+/// Resolve a provider binary, deploy idempotently, and persist success or error.
+/// The protocol has no explicit undeploy operation (deferred to v2).
+/// The record is saved before either `Ok(())` or `Err(message)` returns.
 async fn deploy_to_provider(
     app: &AppHandle,
     state: &AppState,
@@ -467,6 +461,7 @@ async fn deploy_to_provider(
     agent_json: serde_json::Value,
     cached_binary_path: Option<&str>,
 ) -> Result<(), String> {
+    crate::managed_agents::require_fleet_host(state)?;
     // Resolve via discovered candidates only. Cached path must match BOTH
     // "is a discovered candidate" AND "belongs to this provider_id". A tampered
     // record cannot redirect deploys to a different provider's binary.
@@ -569,6 +564,7 @@ pub async fn create_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CreateManagedAgentResponse, String> {
+    crate::managed_agents::require_fleet_host(&state)?;
     let name = input.name.trim().to_string();
     let requested_persona_id = input
         .persona_id
@@ -1080,6 +1076,7 @@ pub async fn start_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
+    crate::managed_agents::require_fleet_host(&state)?;
     // Owner-initiated start: forget automatic crash-loop state so a human
     // can recover a flapping agent. Automatic resurrection must call
     // `start_managed_agent_inner` instead — clearing here would reset the
@@ -1097,6 +1094,7 @@ pub(super) async fn start_managed_agent_inner(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
+    crate::managed_agents::require_fleet_host(&state)?;
     // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
     // Read outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
@@ -1249,6 +1247,7 @@ pub async fn stop_managed_agent(
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        crate::managed_agents::require_fleet_host(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -1310,6 +1309,7 @@ pub async fn delete_managed_agent(
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        crate::managed_agents::require_fleet_host(&state)?;
         {
             let _store_guard = state
                 .managed_agents_store_lock

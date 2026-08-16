@@ -244,6 +244,7 @@ fn start_pair(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
+    super::require_fleet_host(&state)?;
     let _transition = state
         .managed_agent_runtime_transition
         .lock()
@@ -319,6 +320,7 @@ pub fn stop_managed_agent_runtime(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
+    super::require_fleet_host(&state)?;
     let _transition = state
         .managed_agent_runtime_transition
         .lock()

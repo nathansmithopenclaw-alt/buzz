@@ -497,7 +497,11 @@ fn write_agent_store(
     // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
     // keyring-backed case (it is the user's own agent store) and closes the
     // umask window a post-write `chmod` would leave open.
-    atomic_write_json_restricted(&path, &payload)
+    atomic_write_json_restricted(&path, &payload)?;
+
+    // Central lifecycle seam; disabled/Observer devices are true no-ops.
+    super::fleet_visibility::retain_after_agent_store_write(app, &all);
+    Ok(())
 }
 
 /// Write each record's in-memory key to the keyring and blank the inline copy

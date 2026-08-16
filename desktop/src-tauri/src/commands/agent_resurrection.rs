@@ -62,6 +62,14 @@ pub async fn ensure_managed_agent_for_inbound(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<InboundRespawnResult, String> {
+    if let Err(reason) = crate::managed_agents::require_fleet_host(&state) {
+        eprintln!("buzz-desktop: inbound agent resurrection skipped for {pubkey}: {reason}");
+        return Ok(InboundRespawnResult {
+            pubkey,
+            spawned: false,
+            reason,
+        });
+    }
     let owner_hex = workspace_owner_hex(&state).ok();
     let (decision, spawn_pubkey) = {
         let _store = state
@@ -139,6 +147,13 @@ pub async fn resurrect_stopped_active_instances(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ApplyRestartResult, String> {
+    if let Err(reason) = crate::managed_agents::require_fleet_host(&state) {
+        eprintln!("buzz-desktop: apply-update resurrection skipped: {reason}");
+        return Ok(ApplyRestartResult {
+            started: Vec::new(),
+            failed: vec![reason],
+        });
+    }
     let candidates = {
         let _store = state
             .managed_agents_store_lock

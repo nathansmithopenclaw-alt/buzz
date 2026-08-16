@@ -1,11 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { inboundResurrectionTargets } from "./inboundAgentResurrection.ts";
+import {
+  inboundResurrectionTargets,
+  inboundWakeRefusalMessage,
+} from "./inboundAgentResurrection.ts";
 
 const AGENT = "aa".repeat(32);
 const OWNER = "bb".repeat(32);
 const OTHER = "cc".repeat(32);
+
+test("surfaces actionable wake refusals without noisy policy skips", () => {
+  assert.equal(inboundWakeRefusalMessage("SkipAlreadyRunning"), null);
+  assert.equal(inboundWakeRefusalMessage("SkipAuthorGated"), null);
+  assert.match(
+    inboundWakeRefusalMessage("SkipCrashBackoff"),
+    /repeated startup failures/,
+  );
+  assert.equal(
+    inboundWakeRefusalMessage("Observer device cannot control agents"),
+    "Observer device cannot control agents",
+  );
+});
 
 function event(overrides = {}) {
   return {

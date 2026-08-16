@@ -114,6 +114,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        crate::managed_agents::require_fleet_host(&state)?;
 
         {
             // Store lock held across all three phases.
@@ -261,6 +262,7 @@ pub async fn set_persona_active(
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        crate::managed_agents::require_fleet_host(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()

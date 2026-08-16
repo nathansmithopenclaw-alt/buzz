@@ -573,20 +573,16 @@ pub fn run() {
                 }
             });
 
-            // Drain events the retention store flagged `pending_sync` (UI
-            // create/edit, delete tombstones, launch reconcile) to the relay.
-            // One loop is the sole publisher for persona, team, and managed-
-            // agent writers; a relay-unreachable tick leaves rows pending for
-            // the next sweep.
-            // Skipped in recovery mode — flushing under an ephemeral key would
-            // publish events attributed to an identity the user doesn't own.
+            // Sole publisher; failures remain pending. Recovery mode cannot publish.
             if !recovery_mode {
                 let flush_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
+                    use managed_agents::fleet_visibility::retain_host_heartbeat_tick;
                     use std::time::Duration;
                     use tauri::Manager;
                     loop {
                         let state = flush_handle.state::<AppState>();
+                        retain_host_heartbeat_tick(&flush_handle, &state);
                         if let Err(e) = managed_agents::persona_events::flush_active_pending_events(
                             &flush_handle,
                             &state,
@@ -756,6 +752,10 @@ pub fn run() {
             unarchive_identity,
             list_archived_identities,
             get_relay_self,
+            get_fleet_visibility_settings,
+            list_keyed_managed_agent_pubkeys,
+            set_fleet_visibility_enabled,
+            set_fleet_visibility_role,
             resolve_oa_owner,
             list_relay_agents,
             list_managed_agents,

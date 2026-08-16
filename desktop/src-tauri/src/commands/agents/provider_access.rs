@@ -62,6 +62,10 @@ pub(crate) async fn reconcile_on_workspace_apply(
     if !crate::managed_agents::owner_only_access_build() {
         return Ok(());
     }
+    if let Err(reason) = crate::managed_agents::require_fleet_host(state) {
+        eprintln!("buzz-desktop: provider access reconciliation skipped: {reason}");
+        return Ok(());
+    }
 
     let targets = {
         let _store_guard = state

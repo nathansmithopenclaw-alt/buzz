@@ -43,6 +43,8 @@ import { hasMention } from "./hasMention";
 import { extractMentionPubkeys } from "./extractMentionPubkeys";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
+import { useFleetVisibilitySettings } from "@/features/agents/lib/useFleetVisibilitySettings";
+import { useFeatureEnabled } from "@/shared/features";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
   buildTeamMentionCandidates,
@@ -101,6 +103,13 @@ export function useMentions(
   const mentionSearchQuery = mentionQuery?.trim() ?? "";
   const canSearchGlobalPeople = mentionSearchQuery.length > 0;
   const identityQuery = useIdentityQuery();
+  const fleetVisibilityEnabled = useFeatureEnabled("fleetVisibility");
+  const fleetVisibility = useFleetVisibilitySettings();
+  const blockPersonaCreation =
+    fleetVisibilityEnabled &&
+    (!fleetVisibility?.enabled ||
+      fleetVisibility.needsChoice ||
+      fleetVisibility.role === "observer");
   const currentPubkey = identityQuery.data?.pubkey
     ? normalizePubkey(identityQuery.data.pubkey)
     : null;
@@ -397,17 +406,19 @@ export function useMentions(
       }
     }
 
-    const personaCandidates: MentionCandidate[] = activePersonas
-      .filter((persona) => !managedAgentPersonaIds.has(persona.id))
-      .map((persona) => ({
-        kind: "persona" as const,
-        personaId: persona.id,
-        displayName: persona.displayName,
-        avatarUrl: persona.avatarUrl,
-        isMember: false,
-        isAgent: true,
-      }))
-      .filter((candidate) => candidate.displayName.trim().length > 0);
+    const personaCandidates: MentionCandidate[] = blockPersonaCreation
+      ? []
+      : activePersonas
+          .filter((persona) => !managedAgentPersonaIds.has(persona.id))
+          .map((persona) => ({
+            kind: "persona" as const,
+            personaId: persona.id,
+            displayName: persona.displayName,
+            avatarUrl: persona.avatarUrl,
+            isMember: false,
+            isAgent: true,
+          }))
+          .filter((candidate) => candidate.displayName.trim().length > 0);
 
     return coalesceAgentAutocompleteCandidates(
       coalesceAutocompleteCandidatesByKey(
@@ -428,6 +439,7 @@ export function useMentions(
     currentPubkey,
     directoryAgentPubkeys,
     isArchivedDiscovery,
+    blockPersonaCreation,
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,

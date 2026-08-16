@@ -458,9 +458,9 @@ pub async fn confirm_agent_snapshot_import(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentSnapshotImportResult, String> {
+    crate::managed_agents::require_fleet_host(&state)?;
     // ── Phase 1: validate (no writes) ────────────────────────────────────────
-    // Locked cards unlock only via this machine's exact key endpoints;
-    // anything else fails closed here, before key generation.
+    // Locked cards require this machine's exact key endpoints before key generation.
     let snapshot = {
         let owner_keys = state.signing_keys().ok();
         let records = {

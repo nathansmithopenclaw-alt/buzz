@@ -504,11 +504,7 @@ async fn restart_setup_mode_agents_after_install(
     (restarted_count, failed_restart_count)
 }
 
-/// Stop-then-start a single setup-mode agent after a successful adapter install.
-///
-/// Mirrors `restart_local_agent_on_config_change` from `global_agent_config.rs`:
-/// eligibility is re-verified under the store lock before the stop, then the
-/// agent is restarted via `start_local_agent_with_preflight`.
+/// Reverify, stop, and start one setup-mode agent after adapter installation.
 async fn restart_single_agent_after_install(
     app: &tauri::AppHandle,
     pubkey: &str,
@@ -524,6 +520,11 @@ async fn restart_single_agent_after_install(
         },
     };
     use tauri::Manager;
+    let state = app.state::<AppState>();
+    if let Err(reason) = crate::managed_agents::require_fleet_host(&state) {
+        eprintln!("buzz-desktop: post-install agent restart skipped: {reason}");
+        return InstallRestartOutcome::Skipped;
+    }
 
     let app_for_stop = app.clone();
     let pubkey_owned = pubkey.to_string();
@@ -543,7 +544,6 @@ async fn restart_single_agent_after_install(
             .lock()
             .map_err(|e| format!("failed to acquire runtimes lock: {e}"))?;
 
-        // Sync process state so PID liveness reflects current reality.
         let (sync_changed, _) = sync_managed_agent_processes(
             &mut records,
             &mut runtimes,

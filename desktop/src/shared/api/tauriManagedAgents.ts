@@ -181,6 +181,36 @@ export async function ensureManagedAgentForInbound(input: {
   return invokeTauri("ensure_managed_agent_for_inbound", input);
 }
 
+export type FleetVisibilityRole = "host" | "observer";
+
+export type FleetVisibilitySettings = {
+  enabled: boolean;
+  role: FleetVisibilityRole;
+  needsChoice: boolean;
+  hostId?: string;
+  hostName?: string;
+};
+
+export function getFleetVisibilitySettings(): Promise<FleetVisibilitySettings> {
+  return invokeTauri("get_fleet_visibility_settings");
+}
+
+export function listKeyedManagedAgentPubkeys(): Promise<string[]> {
+  return invokeTauri("list_keyed_managed_agent_pubkeys");
+}
+
+export function setFleetVisibilityEnabled(
+  enabled: boolean,
+): Promise<FleetVisibilitySettings> {
+  return invokeTauri("set_fleet_visibility_enabled", { enabled });
+}
+
+export function setFleetVisibilityRole(
+  role: FleetVisibilityRole,
+): Promise<FleetVisibilitySettings> {
+  return invokeTauri("set_fleet_visibility_role", { role });
+}
+
 export async function resurrectStoppedActiveInstances(input: {
   personaId?: string;
   pubkey?: string;
