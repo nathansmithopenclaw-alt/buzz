@@ -10,33 +10,34 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use buzz_auth::Scope;
+use buzz_core::host_liveness::{parse_host_declaration, parse_host_id, parse_host_status};
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_TRACKER_COMMENT, KIND_TRACKER_DISPATCH_ACTION,
-    KIND_TRACKER_ISSUE, KIND_TRACKER_PROJECT_ACTIVITY, KIND_TRACKER_REVISION,
-    KIND_TRACKER_SERVICE_HEARTBEAT, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_HOST, KIND_AGENT_HOST_STATUS,
+    KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH,
+    KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION,
+    KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET,
+    KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE,
+    KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_TRACKER_COMMENT,
+    KIND_TRACKER_DISPATCH_ACTION, KIND_TRACKER_ISSUE, KIND_TRACKER_PROJECT_ACTIVITY,
+    KIND_TRACKER_REVISION, KIND_TRACKER_SERVICE_HEARTBEAT, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
+    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -360,10 +361,9 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
-        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
-        | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
-            Ok(Scope::UsersWrite)
-        }
+        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT | KIND_AGENT_HOST
+        | KIND_AGENT_HOST_STATUS | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG
+        | super::push_lease::KIND_PUSH_LEASE => Ok(Scope::UsersWrite),
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
         // NIP-56 reports are ordinary member writes into the mod-only queue.
@@ -580,6 +580,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
             | KIND_TEAM
             | KIND_MANAGED_AGENT
+            | KIND_AGENT_HOST
+            | KIND_AGENT_HOST_STATUS
             | KIND_PRIVATE_MANAGED_AGENT
             | KIND_TEAM_CATALOG
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
@@ -1324,6 +1326,30 @@ fn validate_team_catalog_envelope(event: &Event) -> Result<(), String> {
     const LABEL: &str = "team-catalog event";
     validate_shared_tag(event, LABEL)?;
     single_bounded_d_tag(event, LABEL)?;
+    Ok(())
+}
+
+/// Validate a NIP-AH event's canonical host coordinate.
+fn validate_agent_host_d_tag(event: &Event, label: &str) -> Result<(), String> {
+    let d = single_bounded_d_tag(event, label)?;
+    parse_host_id(d).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Validate a kind:30180 host declaration before NIP-33 replacement.
+fn validate_agent_host_envelope(event: &Event, relay_now: u64) -> Result<(), String> {
+    const LABEL: &str = "agent-host declaration event";
+    validate_agent_host_d_tag(event, LABEL)?;
+    parse_host_declaration(&event.content, relay_now).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Validate a kind:30181 host status before NIP-33 replacement.
+fn validate_agent_host_status_envelope(event: &Event) -> Result<(), String> {
+    const LABEL: &str = "agent-host status event";
+    validate_agent_host_d_tag(event, LABEL)?;
+    parse_host_status(&event.content, event.created_at.as_secs())
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2586,6 +2612,16 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    if kind_u32 == KIND_AGENT_HOST {
+        validate_agent_host_envelope(&event, now as u64)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_AGENT_HOST_STATUS {
+        validate_agent_host_status_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     if kind_u32 == KIND_PROJECT {
         validate_project_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -3608,7 +3644,7 @@ mod tests {
     }
 
     #[test]
-    fn private_managed_agent_kind_is_owner_scoped_global_user_data() {
+    fn private_managed_agent_generic_storage_is_accepted_author_only() {
         let event = make_dummy_event();
         assert_eq!(
             required_scope_for_kind(KIND_PRIVATE_MANAGED_AGENT, &event),
@@ -3616,6 +3652,14 @@ mod tests {
         );
         assert!(is_global_only_kind(KIND_PRIVATE_MANAGED_AGENT));
         assert!(!requires_h_channel_scope(KIND_PRIVATE_MANAGED_AGENT));
+        assert!(buzz_core::kind::is_parameterized_replaceable(
+            KIND_PRIVATE_MANAGED_AGENT
+        ));
+        assert!(buzz_core::kind::ALL_KINDS.contains(&KIND_PRIVATE_MANAGED_AGENT));
+        assert!(buzz_core::kind::AUTHOR_ONLY_KINDS.contains(&KIND_PRIVATE_MANAGED_AGENT));
+        assert!(!buzz_core::kind::is_relay_only_kind(
+            KIND_PRIVATE_MANAGED_AGENT
+        ));
     }
 
     #[test]
@@ -4742,6 +4786,99 @@ mod tests {
     fn team_catalog_is_global_only() {
         assert!(is_global_only_kind(KIND_TEAM_CATALOG));
         assert!(!requires_h_channel_scope(KIND_TEAM_CATALOG));
+    }
+
+    // ─── agent host + liveness (30180/30181) tests ──────────────────────────
+
+    const HOST_ID: &str = "018f42c2-9bc2-7dc1-a41e-2f77769f0142";
+
+    fn make_agent_host_event(kind: u32, content: &str, tags: &[&[&str]]) -> Event {
+        make_event_with_tags(kind, content, tags)
+    }
+
+    #[test]
+    fn agent_host_declaration_accepts_locked_schema() {
+        let now = Utc::now().timestamp() as u64;
+        let content =
+            format!(r#"{{"v":1,"name":"Mac mini","platform":"macos","created_at":{now}}}"#);
+        let event = make_agent_host_event(KIND_AGENT_HOST, &content, &[&["d", HOST_ID]]);
+        assert!(validate_agent_host_envelope(&event, now).is_ok());
+    }
+
+    #[test]
+    fn agent_host_declaration_rejects_noncanonical_or_ambiguous_coordinate() {
+        let now = Utc::now().timestamp() as u64;
+        let content =
+            format!(r#"{{"v":1,"name":"Mac mini","platform":"macos","created_at":{now}}}"#);
+        for tags in [
+            vec![],
+            vec![vec!["d", ""]],
+            vec![vec!["d", "018F42C2-9BC2-7DC1-A41E-2F77769F0142"]],
+            vec![vec!["d", HOST_ID], vec!["d", HOST_ID]],
+        ] {
+            let refs: Vec<&[&str]> = tags.iter().map(Vec::as_slice).collect();
+            let event = make_agent_host_event(KIND_AGENT_HOST, &content, &refs);
+            assert!(
+                validate_agent_host_envelope(&event, now).is_err(),
+                "accepted tags {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_host_declaration_rejects_private_hitchhiker_field() {
+        let now = Utc::now().timestamp() as u64;
+        let content = format!(
+            r#"{{"v":1,"name":"Mac mini","platform":"macos","created_at":{now},"env":{{"TOKEN":"secret"}}}}"#
+        );
+        let event = make_agent_host_event(KIND_AGENT_HOST, &content, &[&["d", HOST_ID]]);
+        let error = validate_agent_host_envelope(&event, now).unwrap_err();
+        assert!(error.contains("unknown field"), "got: {error}");
+    }
+
+    #[test]
+    fn agent_host_status_accepts_locked_schema() {
+        let now = Utc::now().timestamp() as u64;
+        let pubkey = nostr::Keys::generate().public_key().to_hex();
+        let content = format!(
+            r#"{{"v":1,"seq":42,"ts":{now},"agents":[{{"pubkey":"{pubkey}","state":"running","since":{now}}}]}}"#
+        );
+        let event = make_agent_host_event(KIND_AGENT_HOST_STATUS, &content, &[&["d", HOST_ID]]);
+        assert!(validate_agent_host_status_envelope(&event).is_ok());
+    }
+
+    #[test]
+    fn agent_host_status_rejects_task_detail_and_bad_lifecycle_data() {
+        let now = Utc::now().timestamp() as u64;
+        let pubkey = nostr::Keys::generate().public_key().to_hex();
+        let task_detail = format!(
+            r#"{{"v":1,"seq":1,"ts":{now},"agents":[{{"pubkey":"{pubkey}","state":"running","since":{now},"channel":"engineering"}}]}}"#
+        );
+        let event = make_agent_host_event(KIND_AGENT_HOST_STATUS, &task_detail, &[&["d", HOST_ID]]);
+        assert!(validate_agent_host_status_envelope(&event).is_err());
+
+        let future_since = format!(
+            r#"{{"v":1,"seq":1,"ts":{now},"agents":[{{"pubkey":"{pubkey}","state":"error","since":{}}}]}}"#,
+            now + 1
+        );
+        let event =
+            make_agent_host_event(KIND_AGENT_HOST_STATUS, &future_since, &[&["d", HOST_ID]]);
+        assert!(validate_agent_host_status_envelope(&event).is_err());
+    }
+
+    #[test]
+    fn agent_host_kinds_are_global_users_write_and_durable() {
+        let dummy = make_dummy_event();
+        for kind in [KIND_AGENT_HOST, KIND_AGENT_HOST_STATUS] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).unwrap(),
+                Scope::UsersWrite
+            );
+            assert!(is_global_only_kind(kind));
+            assert!(!requires_h_channel_scope(kind));
+            assert!(buzz_core::kind::is_parameterized_replaceable(kind));
+            assert!(!buzz_core::kind::is_ephemeral(kind));
+        }
     }
 
     // ─── project (NIP-MP kind:30621) envelope tests ──────────────────────────

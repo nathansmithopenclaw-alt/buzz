@@ -303,6 +303,20 @@ pub const KIND_TEAM: u32 = 30176;
 /// since these events are world-readable on the relay.
 pub const KIND_MANAGED_AGENT: u32 = 30177;
 
+/// NIP-AH: Agent host declaration (parameterized replaceable, owner-authored).
+///
+/// Declares one device that hosts an owner's agents. Addressed by
+/// `(pubkey, kind, host UUID)` and intentionally community-readable so clients
+/// can label the public kind:30177 roster without receiving device-local data.
+pub const KIND_AGENT_HOST: u32 = 30180;
+
+/// NIP-AH: Agent host liveness status (parameterized replaceable, owner-authored).
+///
+/// Stores the latest heartbeat and lifecycle-only agent states for one host.
+/// This is durable replaceable state, not an ephemeral event: observers need
+/// the stored head to render honest last-seen state after they restart.
+pub const KIND_AGENT_HOST_STATUS: u32 = 30181;
+
 /// NIP-AP: Team Catalog projection (parameterized replaceable, owner-authored).
 ///
 /// The shareable projection of a team, addressed by `(pubkey, kind, d_tag)`
@@ -676,6 +690,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MANAGED_AGENT,
     KIND_TEAM_CATALOG,
     KIND_PRIVATE_MANAGED_AGENT,
+    KIND_AGENT_HOST,
+    KIND_AGENT_HOST_STATUS,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
@@ -877,6 +893,8 @@ const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 300
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM_CATALOG)); // 30178 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PRIVATE_MANAGED_AGENT)); // 30179 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_AGENT_HOST)); // 30180 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_AGENT_HOST_STATUS)); // 30181 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
@@ -1100,5 +1118,11 @@ mod tests {
         // from its own delegated readers.
         assert!(!is_shared_gated_kind(KIND_TEAM));
         assert!(!is_shared_gated_kind(KIND_MANAGED_AGENT));
+        // NIP-AH host projections deliberately match 30177's
+        // community-readable access class.
+        assert!(!is_shared_gated_kind(KIND_AGENT_HOST));
+        assert!(!is_shared_gated_kind(KIND_AGENT_HOST_STATUS));
+        assert!(!AUTHOR_ONLY_KINDS.contains(&KIND_AGENT_HOST));
+        assert!(!AUTHOR_ONLY_KINDS.contains(&KIND_AGENT_HOST_STATUS));
     }
 }

@@ -1,8 +1,10 @@
 # NIP-PMA: Private Managed-Agent Aggregate
 
-`draft` — protocol/codec reservation only. Relays MUST reject this kind until
-privacy, transactional CAS, backup/restore, revocation, and capability gates are
-deployed.
+`draft` — protocol/codec reservation only. Relays currently accept this kind as
+generic author-only NIP-33 storage. PMA payload validation, transactional CAS,
+backup/restore, revocation, and capability gates are not yet enforced. Clients
+MUST NOT rely on kind `30179` for migration or runnable authority until those
+deployment steps are complete.
 
 ## Purpose and kind
 
@@ -98,7 +100,8 @@ CAS/revision head; browsing must never require decrypting kind `30179`.
 
 ## Required deployment order
 
-1. this inert codec/kind reservation while ingest still rejects `30179`;
+1. this inert codec/kind reservation with generic author-only storage accepted,
+   but no PMA validation or CAS semantics;
 2. author-only privacy gates, SQL visibility before `LIMIT`, and verification
    that the positive FTS allowlist continues to exclude `30179`;
 3. dark CAS schema/transaction;
