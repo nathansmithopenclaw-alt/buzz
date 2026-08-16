@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   inboundResurrectionTargets,
   inboundWakeRefusalMessage,
+  shouldShowInboundWakeRefusal,
 } from "./inboundAgentResurrection.ts";
 
 const AGENT = "aa".repeat(32);
@@ -18,9 +19,25 @@ test("surfaces actionable wake refusals without noisy policy skips", () => {
     /repeated startup failures/,
   );
   assert.equal(
-    inboundWakeRefusalMessage("Observer device cannot control agents"),
-    "Observer device cannot control agents",
+    inboundWakeRefusalMessage(
+      "Observer device cannot control agents; switch this device to Host in Settings",
+    ),
+    "This device is an Observer, so it cannot wake agents. Switch to Host in Settings to run agents here.",
   );
+  assert.equal(
+    inboundWakeRefusalMessage("FutureDebugVariant"),
+    "This agent did not wake automatically. Start it manually from Agents.",
+  );
+});
+
+test("rate limits the same wake refusal per agent and reason for one hour", () => {
+  assert.equal(shouldShowInboundWakeRefusal(AGENT, "observer", 1_000), true);
+  assert.equal(shouldShowInboundWakeRefusal(AGENT, "observer", 2_000), false);
+  assert.equal(
+    shouldShowInboundWakeRefusal(AGENT, "observer", 3_601_000),
+    true,
+  );
+  assert.equal(shouldShowInboundWakeRefusal(AGENT, "different", 2_000), true);
 });
 
 function event(overrides = {}) {

@@ -44,6 +44,7 @@ import { extractMentionPubkeys } from "./extractMentionPubkeys";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { useFleetVisibilitySettings } from "@/features/agents/lib/useFleetVisibilitySettings";
+import { shouldBlockPersonaCreation } from "@/features/agents/lib/fleetVisibility";
 import { useFeatureEnabled } from "@/shared/features";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
@@ -105,11 +106,10 @@ export function useMentions(
   const identityQuery = useIdentityQuery();
   const fleetVisibilityEnabled = useFeatureEnabled("fleetVisibility");
   const fleetVisibility = useFleetVisibilitySettings();
-  const blockPersonaCreation =
-    fleetVisibilityEnabled &&
-    (!fleetVisibility?.enabled ||
-      fleetVisibility.needsChoice ||
-      fleetVisibility.role === "observer");
+  const blockPersonaCreation = shouldBlockPersonaCreation(
+    fleetVisibilityEnabled,
+    fleetVisibility,
+  );
   const currentPubkey = identityQuery.data?.pubkey
     ? normalizePubkey(identityQuery.data.pubkey)
     : null;

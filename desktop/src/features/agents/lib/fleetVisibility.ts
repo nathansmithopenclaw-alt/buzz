@@ -1,3 +1,4 @@
+import type { FleetVisibilitySettings } from "@/shared/api/tauriManagedAgents";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_HOST_DECLARATION,
@@ -40,6 +41,7 @@ export type FleetVisibilityBootstrap = {
 export function deriveFleetVisibilityBootstrap(
   events: readonly RelayEvent[],
   localAgentPubkeys: readonly string[],
+  localHostId?: string | null,
 ): FleetVisibilityBootstrap {
   const local = new Set(localAgentPubkeys.map(normalizePubkey));
   const unmatchedAgentPubkeys = Array.from(
@@ -56,9 +58,22 @@ export function deriveFleetVisibilityBootstrap(
   const hostName =
     [...events]
       .filter((event) => event.kind === KIND_HOST_DECLARATION)
+      .filter((event) => dTag(event) !== localHostId)
       .sort((left, right) => right.created_at - left.created_at)
       .map(parseHostName)
       .find((name): name is string => Boolean(name)) ?? null;
 
   return { unmatchedAgentPubkeys, hostName };
+}
+
+/** UI-only defense; unknown backend state must not hide creation candidates. */
+export function shouldBlockPersonaCreation(
+  experimentEnabled: boolean,
+  settings: FleetVisibilitySettings | null,
+): boolean {
+  return (
+    experimentEnabled &&
+    settings?.enabled === true &&
+    (settings.needsChoice || settings.role === "observer")
+  );
 }

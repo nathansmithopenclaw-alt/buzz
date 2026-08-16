@@ -4,6 +4,7 @@ import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import {
   inboundWakeRefusalMessage,
   inboundResurrectionTargets,
+  shouldShowInboundWakeRefusal,
   subscribeInboundLiveEvents,
 } from "@/features/agents/lib/inboundAgentResurrection";
 import { channelsQueryKey } from "@/features/channels/hooks";
@@ -66,7 +67,12 @@ export function useInboundAgentResurrection() {
         .then((result) => {
           if (result.spawned) return;
           const message = inboundWakeRefusalMessage(result.reason);
-          if (!message) return;
+          if (
+            !message ||
+            !shouldShowInboundWakeRefusal(pubkey, result.reason)
+          ) {
+            return;
+          }
           toast.warning("Agent did not wake", {
             description: message,
             id: `agent-wake-refusal:${pubkey}:${result.reason}`,

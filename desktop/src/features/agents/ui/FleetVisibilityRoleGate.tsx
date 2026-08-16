@@ -66,7 +66,11 @@ export function FleetVisibilityRoleGate({ ownerPubkey, relayUrl }: Props) {
     ])
       .then(async ([agents, events]) => {
         if (cancelled) return;
-        const bootstrap = deriveFleetVisibilityBootstrap(events, agents);
+        const bootstrap = deriveFleetVisibilityBootstrap(
+          events,
+          agents,
+          settings.hostId,
+        );
         if (bootstrap.unmatchedAgentPubkeys.length === 0) {
           await updateFleetVisibilityRole("host");
           return;
@@ -87,6 +91,7 @@ export function FleetVisibilityRoleGate({ ownerPubkey, relayUrl }: Props) {
           "[FleetVisibility] first-run detection failed:",
           bootstrapError,
         );
+        if (cancelled) return;
         try {
           await updateFleetVisibilityRole("host");
         } catch (saveError) {
@@ -112,6 +117,7 @@ export function FleetVisibilityRoleGate({ ownerPubkey, relayUrl }: Props) {
     ownerPubkey,
     relayUrl,
     settings?.enabled,
+    settings?.hostId,
     settings?.needsChoice,
   ]);
 

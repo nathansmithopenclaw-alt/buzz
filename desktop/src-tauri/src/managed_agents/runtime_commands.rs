@@ -468,6 +468,11 @@ pub async fn reconcile_managed_agent_runtimes(
 ) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
     use futures_util::{stream, StreamExt};
 
+    if let Err(reason) = super::require_fleet_host(&app.state::<AppState>()) {
+        eprintln!("buzz-desktop: managed-agent runtime reconcile skipped: {reason}");
+        return Ok(Vec::new());
+    }
+
     let records = load_managed_agents(&app)?;
     let mut jobs = Vec::new();
     for community in communities {

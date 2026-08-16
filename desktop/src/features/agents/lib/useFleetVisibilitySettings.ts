@@ -10,19 +10,19 @@ import {
 
 const CHANGE_EVENT = "buzz:fleet-visibility-settings-changed";
 
-function notifyChange() {
+export function notifyFleetVisibilitySettingsChanged() {
   window.dispatchEvent(new Event(CHANGE_EVENT));
 }
 
 export async function updateFleetVisibilityEnabled(enabled: boolean) {
   const settings = await setFleetVisibilityEnabled(enabled);
-  notifyChange();
+  notifyFleetVisibilitySettingsChanged();
   return settings;
 }
 
 export async function updateFleetVisibilityRole(role: FleetVisibilityRole) {
   const settings = await setFleetVisibilityRole(role);
-  notifyChange();
+  notifyFleetVisibilitySettingsChanged();
   return settings;
 }
 
