@@ -200,7 +200,9 @@ pub fn parse_host_status(
                 .pubkey
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            || PublicKey::from_hex(&agent.pubkey).is_err()
+            || PublicKey::from_hex(&agent.pubkey)
+                .and_then(|pubkey| pubkey.xonly())
+                .is_err()
         {
             return Err(HostLivenessError::InvalidContent(
                 "host status agent `pubkey` must be a curve-valid 64-character lowercase hex key"
@@ -228,6 +230,8 @@ mod tests {
 
     const NOW: u64 = 1_786_910_000;
     const PUBKEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const NON_CURVE_PUBKEY: &str =
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
     #[test]
     fn host_id_requires_canonical_uuid() {
@@ -295,6 +299,24 @@ mod tests {
             NOW + 1
         );
         assert!(parse_host_status(&future_since, NOW).is_err());
+    }
+
+    #[test]
+    fn status_rejects_lowercase_hex_pubkey_that_is_not_on_curve() {
+        let parsed = PublicKey::from_hex(NON_CURVE_PUBKEY)
+            .expect("nostr PublicKey parsing checks byte shape, not curve validity");
+        assert!(parsed.xonly().is_err());
+
+        let status = format!(
+            r#"{{"v":1,"seq":1,"ts":{NOW},"agents":[{{"pubkey":"{NON_CURVE_PUBKEY}","state":"running","since":{NOW}}}]}}"#
+        );
+        assert_eq!(
+            parse_host_status(&status, NOW),
+            Err(HostLivenessError::InvalidContent(
+                "host status agent `pubkey` must be a curve-valid 64-character lowercase hex key"
+                    .into()
+            ))
+        );
     }
 
     #[test]
