@@ -1,8 +1,10 @@
 //! NIP-PMA private managed-agent wire codec.
 //!
-//! This module defines and validates the inert wire format only. Relays must
-//! not accept [`KIND_PRIVATE_MANAGED_AGENT`](crate::kind::KIND_PRIVATE_MANAGED_AGENT)
-//! until the dedicated privacy and aggregate-CAS transactions are deployed.
+//! This module defines and validates the inert wire format only. Relays accept
+//! [`KIND_PRIVATE_MANAGED_AGENT`](crate::kind::KIND_PRIVATE_MANAGED_AGENT) as
+//! generic author-only NIP-33 storage, but do not yet enforce this codec or the
+//! aggregate CAS contract. Clients must not rely on kind:30179 until those
+//! deployment steps land.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
