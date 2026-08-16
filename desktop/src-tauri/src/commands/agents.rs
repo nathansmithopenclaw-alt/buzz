@@ -629,6 +629,13 @@ pub async fn create_managed_agent(
             let personas = load_personas(&app)?;
             ensure_persona_is_active(&personas, persona_id)?;
         }
+        // Every create mints fresh keys, so the pubkey guard below can never
+        // catch a re-creation of an existing agent — the name is the identity
+        // an operator (or delegated request) repeats.
+        crate::managed_agents::ensure_unique_agent_name(
+            records.iter().map(|record| record.name.as_str()),
+            &name,
+        )?;
         let keys = Keys::generate();
         let pubkey = keys.public_key().to_hex();
         if records.iter().any(|record| record.pubkey == pubkey) {
@@ -702,6 +709,12 @@ pub async fn create_managed_agent(
         if records.iter().any(|record| record.pubkey == pubkey) {
             return Err(format!("agent {pubkey} already exists"));
         }
+        // Re-check name uniqueness under the phase-3 lock: a racing create for
+        // the same name may have committed between the phases.
+        crate::managed_agents::ensure_unique_agent_name(
+            records.iter().map(|record| record.name.as_str()),
+            &name,
+        )?;
         // Provider config was already validated in Pre-Phase 2; cache the discovered binary path for deploy_to_provider.
         let provider_binary_path = if let BackendKind::Provider { ref id, .. } = input.backend {
             // Use resolve_provider_binary (discovered candidates only).
