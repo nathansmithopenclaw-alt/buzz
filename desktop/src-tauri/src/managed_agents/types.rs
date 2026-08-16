@@ -806,7 +806,11 @@ pub struct UpdateTeamRequest {
 pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
 /// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
-pub const DEFAULT_AGENT_PARALLELISM: u32 = 10;
+/// One worker per agent by default: parallel turn capacity is opt-in per
+/// agent, never ambient. The old default of 10 meant every roster entry
+/// eagerly spawned 10 runtime subprocesses at launch (D20260816 operator
+/// decision: scale out with named colleagues, not silent worker pools).
+pub const DEFAULT_AGENT_PARALLELISM: u32 = 1;
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM
