@@ -12,7 +12,7 @@ type AgentIdentityCardProps = {
   dataTestId: string;
   label: string;
   modelLabel?: string | null;
-  onClick: () => void;
+  onClick?: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
   statusBadge?: ReactNode;
 };
@@ -34,15 +34,18 @@ export function AgentIdentityCard({
     <div
       className={cn(
         "group relative aspect-[4/5] w-full min-w-0 overflow-hidden rounded-2xl border border-border/70 bg-muted/50 text-left shadow-xs transition-colors hover:border-border hover:bg-muted/65",
+        !onClick && "cursor-default hover:border-border/70 hover:bg-muted/50",
       )}
       data-testid={dataTestId}
     >
-      <button
-        aria-label={ariaLabel}
-        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-        onClick={onClick}
-        type="button"
-      />
+      {onClick ? (
+        <button
+          aria-label={ariaLabel}
+          className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={onClick}
+          type="button"
+        />
+      ) : null}
 
       <div className="pointer-events-none relative z-20 flex h-full w-full min-w-0 flex-col items-center justify-center gap-5 px-4 pb-12 text-center">
         <div className="flex h-24 w-24 items-center justify-center">

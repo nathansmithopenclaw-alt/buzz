@@ -53,6 +53,7 @@ export function globalSearchIdentityKey(candidate: MentionCandidate) {
 function findTeamMemberTarget(
   persona: AgentPersona,
   candidates: readonly MentionCandidate[],
+  allowPersonaTargets: boolean,
 ): TeamMentionMember | null {
   const linked = candidates
     .filter(
@@ -78,7 +79,7 @@ function findTeamMemberTarget(
     };
   }
 
-  return persona.isActive
+  return allowPersonaTargets && persona.isActive
     ? {
         displayName: persona.displayName,
         kind: "persona",
@@ -92,7 +93,9 @@ export function buildTeamMentionCandidates(
   teams: readonly AgentTeam[],
   personas: AgentPersona[],
   candidates: readonly MentionCandidate[],
+  options?: { allowPersonaTargets?: boolean },
 ): MentionCandidate[] {
+  const allowPersonaTargets = options?.allowPersonaTargets ?? true;
   return teams.flatMap((team) => {
     if (team.isBuiltin || !team.name.trim()) return [];
 
@@ -100,7 +103,9 @@ export function buildTeamMentionCandidates(
     if (!resolution.isUsable) return [];
 
     const teamMembers = resolution.resolvedPersonas
-      .map((persona) => findTeamMemberTarget(persona, candidates))
+      .map((persona) =>
+        findTeamMemberTarget(persona, candidates, allowPersonaTargets),
+      )
       .filter((member): member is TeamMentionMember => member !== null);
     if (teamMembers.length !== resolution.resolvedPersonas.length) return [];
 
