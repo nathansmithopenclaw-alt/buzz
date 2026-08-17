@@ -112,6 +112,18 @@ pub fn set_fleet_visibility_role(
             eprintln!(
                 "buzz-desktop: Fleet Visibility Observer role selected; local restore skipped"
             );
+            let flush_app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = flush_app.state::<AppState>();
+                if let Err(error) =
+                    crate::managed_agents::persona_events::flush_active_pending_events(
+                        &flush_app, &state,
+                    )
+                    .await
+                {
+                    eprintln!("buzz-desktop: Host retraction flush failed: {error}");
+                }
+            });
             Ok(settings)
         }
         DeviceRole::Host => {

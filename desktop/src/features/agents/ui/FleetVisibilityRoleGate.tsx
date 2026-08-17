@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { deriveFleetVisibilityBootstrap } from "@/features/agents/lib/fleetVisibility";
+import { classifyFleetVisibilityBootstrapRead } from "@/features/agents/lib/fleetVisibility";
 import {
   updateFleetVisibilityRole,
   useFleetVisibilitySettings,
@@ -32,6 +32,7 @@ type Props = {
 type ChoiceState = {
   hostName: string | null;
   unmatchedCount: number;
+  fleetRecordCount: number;
   detectionFailed?: boolean;
 };
 
@@ -56,6 +57,39 @@ export function FleetVisibilityRoleGate({ ownerPubkey, relayUrl }: Props) {
       return;
     }
     let cancelled = false;
+
+    const showChoice = (
+      agents: readonly string[],
+      events: Parameters<typeof classifyFleetVisibilityBootstrapRead>[2],
+      startedConnectionState: ReturnType<typeof relayClient.getConnectionState>,
+    ) => {
+      if (cancelled) return false;
+      const decision = classifyFleetVisibilityBootstrapRead(
+        startedConnectionState,
+        relayClient.getConnectionState(),
+        events,
+        agents,
+        settings.hostId,
+      );
+      if (decision.kind === "auto-host") return true;
+      setSelectedRole("observer");
+      setChoice({
+        hostName: decision.bootstrap.hostName,
+        unmatchedCount: decision.bootstrap.unmatchedAgentPubkeys.length,
+        fleetRecordCount: decision.fleetRecordCount,
+        detectionFailed: decision.detectionFailed,
+      });
+      return false;
+    };
+
+    const startedConnectionState = relayClient.getConnectionState();
+    if (startedConnectionState !== "connected") {
+      showChoice([], null, startedConnectionState);
+      return () => {
+        cancelled = true;
+      };
+    }
+
     void Promise.all([
       listKeyedManagedAgentPubkeys(),
       relayClient.fetchEvents({
@@ -66,48 +100,16 @@ export function FleetVisibilityRoleGate({ ownerPubkey, relayUrl }: Props) {
     ])
       .then(async ([agents, events]) => {
         if (cancelled) return;
-        const bootstrap = deriveFleetVisibilityBootstrap(
-          events,
-          agents,
-          settings.hostId,
-        );
-        if (bootstrap.unmatchedAgentPubkeys.length === 0) {
+        if (showChoice(agents, events, startedConnectionState)) {
           await updateFleetVisibilityRole("host");
-          return;
-        }
-        if (!cancelled) {
-          setSelectedRole("observer");
-          setChoice({
-            hostName: bootstrap.hostName,
-            unmatchedCount: bootstrap.unmatchedAgentPubkeys.length,
-          });
         }
       })
-      .catch(async (bootstrapError) => {
-        // No positive evidence of a remote fleet: preserve the documented
-        // Host default instead of holding today's local behavior hostage to
-        // an unavailable relay.
+      .catch((bootstrapError) => {
         console.warn(
           "[FleetVisibility] first-run detection failed:",
           bootstrapError,
         );
-        if (cancelled) return;
-        try {
-          await updateFleetVisibilityRole("host");
-        } catch (saveError) {
-          if (cancelled) return;
-          setSelectedRole("host");
-          setError(
-            saveError instanceof Error
-              ? saveError.message
-              : "Could not save this device role.",
-          );
-          setChoice({
-            hostName: null,
-            unmatchedCount: 0,
-            detectionFailed: true,
-          });
-        }
+        showChoice([], null, startedConnectionState);
       });
     return () => {
       cancelled = true;
@@ -151,6 +153,13 @@ export function FleetVisibilityRoleGate({ ownerPubkey, relayUrl }: Props) {
           <DialogDescription>
             {choice?.detectionFailed ? (
               <>Choose a role to finish enabling Fleet Visibility.</>
+            ) : (choice?.unmatchedCount ?? 0) === 0 ? (
+              <>
+                We found {choice?.fleetRecordCount ?? 0} existing fleet record
+                {(choice?.fleetRecordCount ?? 0) === 1 ? "" : "s"} for this
+                account. Choose whether this device should host agents or only
+                observe them.
+              </>
             ) : (
               <>
                 We found {choice?.unmatchedCount ?? 0} agent
