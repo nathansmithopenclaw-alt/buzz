@@ -2,13 +2,16 @@ import * as React from "react";
 
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import {
+  inboundWakeRefusalMessage,
   inboundResurrectionTargets,
+  shouldShowInboundWakeRefusal,
   subscribeInboundLiveEvents,
 } from "@/features/agents/lib/inboundAgentResurrection";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { ensureManagedAgentForInbound } from "@/shared/api/tauriManagedAgents";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 const SEEN_LIMIT = 2_000;
 
@@ -60,9 +63,33 @@ export function useInboundAgentResurrection() {
         pubkey,
         authorPubkey: event.pubkey,
         isDm,
-      }).finally(() => {
-        inFlightRef.current.delete(key);
-      });
+      })
+        .then((result) => {
+          if (result.spawned) return;
+          const message = inboundWakeRefusalMessage(result.reason);
+          if (
+            !message ||
+            !shouldShowInboundWakeRefusal(pubkey, result.reason)
+          ) {
+            return;
+          }
+          toast.warning("Agent did not wake", {
+            description: message,
+            id: `agent-wake-refusal:${pubkey}:${result.reason}`,
+          });
+        })
+        .catch((error) => {
+          toast.warning("Agent wake check failed", {
+            description:
+              error instanceof Error
+                ? error.message
+                : "The agent could not be started.",
+            id: `agent-wake-error:${pubkey}`,
+          });
+        })
+        .finally(() => {
+          inFlightRef.current.delete(key);
+        });
     }
   });
 

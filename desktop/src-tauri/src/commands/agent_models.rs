@@ -731,6 +731,7 @@ pub async fn update_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
+    crate::managed_agents::require_fleet_host(&state)?;
     // Phase 1: local save (synchronous, under lock)
     let (summary, sync_params, rollback) = {
         let _store_guard = state

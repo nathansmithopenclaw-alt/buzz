@@ -35,14 +35,12 @@ pub struct AppState {
     /// Workspace-provided relay URL override. Set by `apply_workspace` on app
     /// init and takes priority over env vars and compile-time defaults.
     pub relay_url_override: Mutex<Option<String>>,
-    /// Set during backend setup when managed agents are eligible for launch
-    /// restore. `apply_workspace` consumes it after installing the workspace
-    /// relay and identity, so agents never start against the fallback relay.
+    /// Launch restore, consumed only after workspace relay and identity apply.
     pub managed_agent_restore_pending: AtomicBool,
-    /// Whether desktop may repair managed-agent kind:0 profiles from its local
-    /// records. Disabled by the agent-managed profiles experiment so an agent's
-    /// own profile updates are not overwritten on start or restore.
+    /// Local kind:0 repair authority; disabled by agent-managed profiles.
     pub managed_agent_profile_reconcile_enabled: AtomicBool,
+    /// Device-local Fleet Visibility role and Rust authority.
+    pub fleet_visibility: Mutex<crate::managed_agents::fleet_visibility::FleetVisibilityRuntime>,
     /// Shared shutdown signal checked by launch-time agent restoration.
     pub shutdown_started: AtomicBool,
     /// Serializes every managed-runtime transition that changes the protected
@@ -209,6 +207,7 @@ pub fn build_app_state() -> AppState {
         relay_url_override: Mutex::new(None),
         managed_agent_restore_pending: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
+        fleet_visibility: Mutex::new(Default::default()),
         shutdown_started: AtomicBool::new(false),
         managed_agent_runtime_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),

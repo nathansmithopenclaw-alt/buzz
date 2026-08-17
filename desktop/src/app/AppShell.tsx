@@ -48,6 +48,7 @@ import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
 import { AgentManagementDialogs } from "@/features/agents/ui/AgentManagementDialogs";
 import { RequestedAgentCreateDialogs } from "@/features/agents/ui/RequestedAgentCreateDialogs";
+import { FleetVisibilityRoleGate } from "@/features/agents/ui/FleetVisibilityRoleGate";
 import {
   usePresenceSession,
   usePresenceSubscription,
@@ -916,6 +917,10 @@ export function AppShell() {
                 )}
                 <RequestedAgentCreateDialogs />
                 <AgentManagementDialogs />
+                <FleetVisibilityRoleGate
+                  ownerPubkey={identityQuery.data?.pubkey}
+                  relayUrl={communitiesHook.activeCommunity?.relayUrl}
+                />
                 <AppShellOverlays
                   activeChannel={managedChannel}
                   browseDialogType={browseDialogType}

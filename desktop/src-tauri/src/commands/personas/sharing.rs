@@ -33,6 +33,7 @@ pub async fn set_persona_shared(
     shared: bool,
     app: AppHandle,
 ) -> Result<SetPersonaSharedResult, String> {
+    crate::managed_agents::require_fleet_host(&app.state::<AppState>())?;
     let prepared = tokio::task::spawn_blocking({
         let app = app.clone();
         move || {
@@ -77,6 +78,7 @@ pub async fn update_persona_and_publish(
     input: crate::managed_agents::UpdatePersonaRequest,
     app: AppHandle,
 ) -> Result<SetPersonaSharedResult, String> {
+    crate::managed_agents::require_fleet_host(&app.state::<AppState>())?;
     let (_, prepared) =
         super::update::update_persona_with(input, app.clone(), |app, state, persona| {
             // Strict path: this command's contract is to report the publication

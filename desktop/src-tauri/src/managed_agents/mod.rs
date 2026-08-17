@@ -17,6 +17,7 @@ mod definition_validation;
 mod discovery;
 pub(crate) mod effective_config;
 mod env_vars;
+pub(crate) mod fleet_visibility;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod managed_node_paths;
@@ -66,6 +67,7 @@ pub(crate) use definition_validation::{
 };
 pub use discovery::*;
 pub use env_vars::*;
+pub(crate) use fleet_visibility::{require_host as require_fleet_host, DeviceRole};
 #[cfg(windows)]
 pub(crate) use git_bash::git_bash_available;
 pub(crate) use git_bash::{discover_git_bash, GitBashPrerequisite};

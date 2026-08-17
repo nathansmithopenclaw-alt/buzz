@@ -122,7 +122,9 @@ async fn write_global_agent_config(
     write: GlobalConfigWrite,
     app: AppHandle,
 ) -> Result<GlobalAgentConfigSaveResult, String> {
-    let owner_keys = app.state::<AppState>().signing_keys()?;
+    let state = app.state::<AppState>();
+    crate::managed_agents::require_fleet_host(&state)?;
+    let owner_keys = state.signing_keys()?;
     // ── Phase 1: disk write (sync, spawn_blocking) ────────────────────────
     //
     // Validate, snapshot old config, write new config, collect pre-filter

@@ -23,6 +23,7 @@ pub async fn create_persona(
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        crate::managed_agents::require_fleet_host(&state)?;
         let display_name = trim_required(&input.display_name, "Display name")?;
         // System prompt optional: core memory is auto-injected. Empty is valid.
         // Preserve it byte-for-byte: shared/import review surfaces show this

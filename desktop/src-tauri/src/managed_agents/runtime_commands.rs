@@ -244,6 +244,7 @@ fn start_pair(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
+    super::require_fleet_host(&state)?;
     let _transition = state
         .managed_agent_runtime_transition
         .lock()
@@ -319,6 +320,7 @@ pub fn stop_managed_agent_runtime(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
+    super::require_fleet_host(&state)?;
     let _transition = state
         .managed_agent_runtime_transition
         .lock()
@@ -465,6 +467,11 @@ pub async fn reconcile_managed_agent_runtimes(
     app: AppHandle,
 ) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
     use futures_util::{stream, StreamExt};
+
+    if let Err(reason) = super::require_fleet_host(&app.state::<AppState>()) {
+        eprintln!("buzz-desktop: managed-agent runtime reconcile skipped: {reason}");
+        return Ok(Vec::new());
+    }
 
     let records = load_managed_agents(&app)?;
     let mut jobs = Vec::new();

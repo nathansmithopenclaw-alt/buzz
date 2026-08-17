@@ -26,6 +26,7 @@ pub async fn set_managed_agent_start_on_app_launch(
 ) -> Result<ManagedAgentSummary, String> {
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        crate::managed_agents::require_fleet_host(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -77,6 +78,7 @@ pub async fn set_managed_agent_auto_restart(
 ) -> Result<ManagedAgentSummary, String> {
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        crate::managed_agents::require_fleet_host(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()

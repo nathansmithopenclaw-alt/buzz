@@ -503,6 +503,7 @@ pub async fn confirm_team_snapshot_import(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TeamSnapshotImportResult, String> {
+    crate::managed_agents::require_fleet_host(&state)?;
     // ── Phase 1: validate (no I/O) ───────────────────────────────────────────
     let snapshot = decode_team_snapshot_from_bytes(&input.file_bytes)?;
     let now = now_iso();

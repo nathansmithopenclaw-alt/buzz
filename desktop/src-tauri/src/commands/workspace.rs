@@ -129,6 +129,7 @@ pub async fn apply_workspace(
     nsec: Option<String>,
     repos_dir: Option<String>,
     agent_managed_profiles: Option<bool>,
+    fleet_visibility: Option<bool>,
     app: AppHandle,
 ) -> Result<(), String> {
     let restore_app = app.clone();
@@ -183,6 +184,11 @@ pub async fn apply_workspace(
         state
             .managed_agent_profile_reconcile_enabled
             .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
+        crate::managed_agents::fleet_visibility::configure_runtime(
+            &app,
+            &state.fleet_visibility,
+            fleet_visibility.unwrap_or(false),
+        )?;
 
         // ── Filesystem side-effect (non-fatal) ────────────────────────────────
         // Persist the *effective* repos_dir (None when the candidate failed
@@ -235,9 +241,49 @@ pub async fn apply_workspace(
         }
     }
 
-    let restore_pending = state
-        .managed_agent_restore_pending
-        .swap(false, Ordering::AcqRel);
+    if crate::managed_agents::fleet_visibility::is_host(&state) {
+        match crate::managed_agents::load_managed_agents(&restore_app) {
+            Ok(records) => {
+                if let Err(error) =
+                    crate::managed_agents::fleet_visibility::retain_host_heartbeat_with_runtime_snapshot(
+                        &restore_app,
+                        &state,
+                        &records,
+                    )
+                {
+                    eprintln!("buzz-desktop: initial host heartbeat retain failed: {error}");
+                }
+            }
+            Err(error) => {
+                eprintln!("buzz-desktop: initial host heartbeat load failed: {error}");
+            }
+        }
+        let flush_app = restore_app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = flush_app.state::<AppState>();
+            if let Err(error) = crate::managed_agents::persona_events::flush_active_pending_events(
+                &flush_app, &state,
+            )
+            .await
+            {
+                eprintln!("buzz-desktop: initial host heartbeat flush failed: {error}");
+            }
+        });
+    }
+
+    let restore_pending = if crate::managed_agents::fleet_visibility::is_pending_choice(&state) {
+        eprintln!(
+            "buzz-desktop: managed-agent launch restore deferred until Fleet Visibility role choice"
+        );
+        false
+    } else if crate::managed_agents::fleet_visibility::is_observer(&state) {
+        eprintln!("buzz-desktop: managed-agent launch restore skipped in Observer role");
+        false
+    } else {
+        state
+            .managed_agent_restore_pending
+            .swap(false, Ordering::AcqRel)
+    };
 
     // The coordinator starts before React applies the selected workspace, so
     // its startup publication may have used the fallback relay and placeholder

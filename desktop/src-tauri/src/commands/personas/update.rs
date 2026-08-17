@@ -209,6 +209,7 @@ pub async fn update_persona(
     input: UpdatePersonaRequest,
     app: AppHandle,
 ) -> Result<UpdatePersonaResult, String> {
+    crate::managed_agents::require_fleet_host(&app.state::<AppState>())?;
     let (persona, ()) = update_persona_with(input, app, |app, state, persona| {
         retain_persona_pending(app, state, persona);
         Ok(())
@@ -230,6 +231,7 @@ pub async fn apply_delegated_persona_env_vars(
     patch: DelegatedPersonaEnvVarsPatch,
     app: AppHandle,
 ) -> Result<DelegatedPersonaEnvVarsResult, String> {
+    crate::managed_agents::require_fleet_host(&app.state::<AppState>())?;
     let owner_hex = super::super::agents::workspace_owner_hex(&app.state::<AppState>())?;
     let app_for_write = app.clone();
     let (persona, old_personas, candidates) = tokio::task::spawn_blocking(move || {

@@ -28,6 +28,7 @@ import {
 } from "@/features/agents/activeAgentTurnsStore";
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
+import { notifyFleetVisibilitySettingsChanged } from "@/features/agents/lib/useFleetVisibilitySettings";
 import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -231,7 +232,9 @@ export function useCommunityInit(
           activeCommunity.token,
           activeCommunity.reposDir,
           getOverrides().agentManagedProfiles === true,
+          getOverrides().fleetVisibility === true,
         );
+        notifyFleetVisibilitySettingsChanged();
       } catch (error) {
         // A bad `repos_dir` no longer reaches here — `apply_workspace` treats
         // it as non-fatal (relay/keys apply, bad value not persisted, REPOS

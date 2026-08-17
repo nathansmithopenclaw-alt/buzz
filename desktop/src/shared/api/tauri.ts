@@ -1128,6 +1128,7 @@ export async function applyCommunity(
   token?: string,
   reposDir?: string,
   agentManagedProfiles?: boolean,
+  fleetVisibility?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
@@ -1135,11 +1136,10 @@ export async function applyCommunity(
     token: token ?? null,
     reposDir: reposDir ?? null,
     agentManagedProfiles: agentManagedProfiles ?? false,
+    fleetVisibility: fleetVisibility ?? false,
   });
 }
-
-// Validate a candidate repos dir without mutating the filesystem. Rejects
-// with a human-readable reason; resolves for a valid or empty path.
+// Validate a repos dir without mutation; resolve for valid/empty, otherwise reject.
 export async function validateReposDir(dir: string): Promise<void> {
   await invokeTauri("validate_repos_dir", { dir });
 }

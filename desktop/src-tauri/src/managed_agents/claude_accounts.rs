@@ -546,6 +546,7 @@ pub async fn switch_agent_claude_account(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ClaudeAccountSwitchResult, String> {
+    crate::managed_agents::require_fleet_host(&state)?;
     let credentials_file_selected = account_id.as_deref() == Some(CREDENTIALS_FILE_ACCOUNT_ID);
     let effective_account_id = if credentials_file_selected {
         None
