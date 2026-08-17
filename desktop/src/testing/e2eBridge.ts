@@ -299,6 +299,8 @@ type E2eConfig = {
       hostId?: string;
       hostName?: string;
     };
+    /** Relay heads consumed by the Fleet Visibility projection cache. */
+    fleetProjectionEvents?: RelayEvent[];
     /** Result returned by the mocked `add_agent_to_huddle` command. */
     addAgentToHuddleResult?: {
       ephemeral_added: boolean;
@@ -10174,6 +10176,23 @@ function sendToMockSocket(args: {
     if (filter.kinds?.includes(KIND_EVENT_REMINDER)) {
       const authors = filter.authors?.map((a) => a.toLowerCase());
       for (const event of mockReminderEvents) {
+        if (authors && !authors.includes(event.pubkey.toLowerCase())) continue;
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
+    const fleetProjectionEvents = getConfig()?.mock?.fleetProjectionEvents;
+    if (
+      fleetProjectionEvents &&
+      filter.kinds?.some((kind) =>
+        [5, KIND_PERSONA, 30177, 30180, 30181].includes(kind),
+      )
+    ) {
+      const authors = filter.authors?.map((author) => author.toLowerCase());
+      for (const event of fleetProjectionEvents) {
+        if (filter.kinds && !filter.kinds.includes(event.kind)) continue;
         if (authors && !authors.includes(event.pubkey.toLowerCase())) continue;
         sendWsText(socket.handler, ["EVENT", subId, event]);
       }

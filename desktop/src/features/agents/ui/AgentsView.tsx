@@ -36,8 +36,78 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
+import {
+  FleetTeamSection,
+  ObserverFleetSections,
+} from "./FleetProjectionSections";
+import { useFleetVisibilitySettings } from "@/features/agents/lib/useFleetVisibilitySettings";
+import { useFeatureEnabled } from "@/shared/features";
+import { useIdentityQuery } from "@/shared/api/hooks";
 
 export function AgentsView() {
+  const fleetVisibilityEnabled = useFeatureEnabled("fleetVisibility");
+  const fleetVisibility = useFleetVisibilitySettings();
+  const identityQuery = useIdentityQuery();
+  const fleetProjectionEnabled =
+    fleetVisibilityEnabled && fleetVisibility?.enabled === true;
+  const observerMode =
+    fleetProjectionEnabled && fleetVisibility?.role === "observer";
+
+  if (fleetVisibilityEnabled && fleetVisibility === null) {
+    return (
+      <div className="flex-1 overflow-y-auto px-4 py-7 sm:px-6 sm:py-8">
+        <div className="mx-auto w-full max-w-6xl space-y-8">
+          <PageHeader
+            description="Set up and manage your agents."
+            title="Agents"
+          />
+          <p className="text-sm text-muted-foreground">
+            Loading fleet settings…
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (observerMode) {
+    const currentOwnerPubkey = identityQuery.data?.pubkey;
+    return (
+      <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8">
+        <div
+          className="mx-auto w-full max-w-6xl space-y-8 [container-type:inline-size]"
+          data-testid="agents-page-content"
+        >
+          <PageHeader
+            description="View and message the fleet hosted on your other device."
+            title="Agents"
+          />
+          {currentOwnerPubkey ? (
+            <ObserverFleetSections currentOwnerPubkey={currentOwnerPubkey} />
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Loading fleet identity…
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <HostAgentsView
+      currentOwnerPubkey={identityQuery.data?.pubkey}
+      showFleetTeam={fleetProjectionEnabled}
+    />
+  );
+}
+
+function HostAgentsView({
+  currentOwnerPubkey,
+  showFleetTeam,
+}: {
+  currentOwnerPubkey?: string;
+  showFleetTeam: boolean;
+}) {
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const { globalConfig } = useGlobalAgentConfig();
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
@@ -291,6 +361,9 @@ export function AgentsView() {
               personas={personas.libraryPersonas}
               teams={teamActions.teams}
             />
+            {showFleetTeam && currentOwnerPubkey ? (
+              <FleetTeamSection currentOwnerPubkey={currentOwnerPubkey} />
+            ) : null}
           </div>
         </div>
       </div>

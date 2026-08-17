@@ -127,6 +127,34 @@ test("only complete, owned teams with mentionable members are suggested", () => 
   );
 });
 
+test("persona creation blocks teams unless every member resolves to an identity", () => {
+  const personas = [
+    persona("planner", "Planner"),
+    persona("builder", "Builder"),
+  ];
+  const teams = [team("launch", ["planner", "builder"])];
+
+  assert.deepEqual(
+    buildTeamMentionCandidates(teams, personas, [], {
+      allowPersonaTargets: false,
+    }),
+    [],
+  );
+
+  assert.deepEqual(
+    buildTeamMentionCandidates(
+      teams,
+      personas,
+      [
+        identity("planner", "Plan Bot", { pubkey: "1".repeat(64) }),
+        identity("builder", "Build Bot", { pubkey: "2".repeat(64) }),
+      ],
+      { allowPersonaTargets: false },
+    ).map((candidate) => candidate.teamMembers?.map((member) => member.kind)),
+    [["identity", "identity"]],
+  );
+});
+
 test("teams with duplicate identity display names are not suggested", () => {
   const personas = [
     persona("builder-one", "First"),

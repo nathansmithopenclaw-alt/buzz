@@ -49,6 +49,7 @@ import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIng
 import { AgentManagementDialogs } from "@/features/agents/ui/AgentManagementDialogs";
 import { RequestedAgentCreateDialogs } from "@/features/agents/ui/RequestedAgentCreateDialogs";
 import { FleetVisibilityRoleGate } from "@/features/agents/ui/FleetVisibilityRoleGate";
+import { useFleetProjectionSync } from "@/features/agents/fleetProjection/sync";
 import {
   usePresenceSession,
   usePresenceSubscription,
@@ -229,6 +230,11 @@ export function AppShell() {
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
+  useFleetProjectionSync({
+    channels,
+    ownerPubkey: identityQuery.data?.pubkey,
+    relayUrl: communitiesHook.activeCommunity?.relayUrl,
+  });
   useReminderNotifications(
     identityQuery.data?.pubkey,
     notificationSettings.settings,

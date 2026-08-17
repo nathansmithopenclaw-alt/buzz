@@ -170,6 +170,16 @@ type MockBridgeOptions = {
   relaySelf?: string | null;
   /** Native-like huddle state seeded from authoritative role-bearing membership. */
   huddle?: MockHuddleSeed;
+  /** Device-local Fleet Visibility role returned by the native settings seam. */
+  fleetVisibilitySettings?: {
+    enabled: boolean;
+    role: "host" | "observer";
+    needsChoice: boolean;
+    hostId?: string;
+    hostName?: string;
+  };
+  /** Relay heads consumed by the Fleet Visibility projection cache. */
+  fleetProjectionEvents?: RelayEvent[];
   /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
   builderlabAuth?: { email?: string; name?: string; expiresAt: string } | null;
   /** Optional policy returned by the native join-policy discovery command. */
