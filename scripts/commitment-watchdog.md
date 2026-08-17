@@ -10,20 +10,32 @@ directories or task age.
    configured `watch_root` and add `.buzz-commitment.json` using
    `commitment-marker.example.json` as the schema. Write a temporary file and
    rename it into place so the timer never observes a partially written marker.
+   Set `owner_mention` to the pubkey of the agent arming the commitment (normally
+   the arming agent itself), and set `reply_to` to the event whose thread contains
+   the work context.
 2. Put every file whose modification proves forward progress in
    `heartbeat_paths`. The worker must touch at least one declared path more
    often than `stale_after_seconds`. Long-running builds remain healthy as long
    as their wrapper updates a declared heartbeat.
 3. Remove the marker when the commitment is delivered, explicitly released, or
-   cancelled. Use a new `epoch` when reopening the same logical commitment.
-4. Run `check` from a timer. A stale marker produces at most one escalation for
-   each `commitment_id` plus `epoch` pair.
+   cancelled. This disarms the recovery episode. To explicitly re-arm after a
+   watchdog notice, atomically write a marker with a new `epoch` and refresh a
+   declared heartbeat; both updates are required to reset recovery to phase 0.
+   A wakeup that only touches a heartbeat proves pickup but does not reset the
+   one allowed automatic-resume attempt.
+4. Run `check` from a timer. The first stale recovery epoch mentions only
+   `owner_mention` in the `reply_to` thread. If no heartbeat arrives for another
+   full threshold, or the woken owner heartbeats and then stalls, the second
+   recovery epoch mentions `delegator_pubkey` plus `fallback_mentions` and says
+   automatic resume already failed. Each recovery epoch has its own deterministic
+   action token and emits at most one loud notice.
 
 Only explicitly marked commitments are eligible. Malformed markers fail closed
 and are logged; they do not produce an escalation.
 
-For drills, leave `fallback_mentions` empty: a simulated failure must notify
-only the delegator participating in the proof, never a human fallback.
+For drills, leave `fallback_mentions` empty: a simulated second-epoch failure
+must notify only the delegator participating in the proof, never a human
+fallback.
 
 ## Signing and delivery
 
@@ -31,18 +43,18 @@ The production path reads a dedicated private key from macOS Keychain and
 verifies its relay pubkey against `expected_signer_pubkey` before every send.
 The signer should be an independently owner-attested watchdog identity, not the
 identity whose work is being monitored. The marker validator also rejects any
-delegator or fallback mention equal to the configured signer, because a
+owner, delegator, or fallback mention equal to the configured signer, because a
 self-authored mention cannot wake that identity. A dedicated attested watchdog
 identity is preferred; deployments reusing an agent identity must guarantee
-that identity can never be an escalation target.
+that identity can never be a recovery target.
 
 Before publishing, the watcher searches the relay for its deterministic action
 token. This closes the crash window between relay acceptance and local state
 persistence. A failed lookup is treated as ambiguous and blocks the send until
 lookup health returns.
 
-Dry-run receipts do not suppress a later production send for the same epoch.
-They suppress only repeated dry runs.
+Dry-run receipts and recovery state do not suppress a later production send for
+the same recovery epoch. They suppress only repeated dry runs.
 
 ## Operations
 

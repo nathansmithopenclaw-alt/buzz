@@ -1,10 +1,11 @@
 {
-  "version": 1,
+  "version": 2,
   "commitment_id": "release-build",
   "epoch": "2026-08-12T23-30Z",
   "description": "Release build and installed-build acceptance",
   "channel_id": "00000000-0000-0000-0000-000000000000",
-  "reply_to": "",
+  "reply_to": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "owner_mention": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
   "delegator_display": "Project Orchestrator",
   "delegator_pubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "fallback_mentions": [],
