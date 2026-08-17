@@ -17,12 +17,16 @@ import type {
   FleetProjectionSnapshot,
 } from "./types";
 
-export const FLEET_PROJECTION_EVENT_KINDS = [
-  KIND_DELETION,
+export const FLEET_PROJECTION_HEAD_KINDS = [
   KIND_PERSONA,
   KIND_MANAGED_AGENT,
   KIND_HOST_DECLARATION,
   KIND_HOST_STATUS,
+] as const;
+
+export const FLEET_PROJECTION_EVENT_KINDS = [
+  KIND_DELETION,
+  ...FLEET_PROJECTION_HEAD_KINDS,
 ] as const;
 
 const EMPTY_SNAPSHOT: FleetProjectionSnapshot = {
@@ -548,3 +552,7 @@ export function createFleetProjectionCache() {
 }
 
 export const fleetProjectionCache = createFleetProjectionCache();
+
+export function resetFleetProjectionCache(): void {
+  fleetProjectionCache.reset([], false);
+}

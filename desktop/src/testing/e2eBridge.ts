@@ -6011,6 +6011,7 @@ async function handleGetChannels(
         topic: getTag("topic") ?? null,
         purpose: getTag("purpose") ?? null,
         member_count: pTags.length,
+        member_pubkeys: pTags,
         last_message_at: null,
         archived_at: isArchived ? new Date().toISOString() : null,
         participants: pTags,

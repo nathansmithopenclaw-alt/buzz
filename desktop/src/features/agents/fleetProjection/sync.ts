@@ -2,13 +2,18 @@ import * as React from "react";
 
 import { useFleetVisibilitySettings } from "@/features/agents/lib/useFleetVisibilitySettings";
 import { relayClient } from "@/shared/api/relayClient";
+import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { useFeatureEnabled } from "@/shared/features";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { FLEET_PROJECTION_EVENT_KINDS, fleetProjectionCache } from "./store";
+import {
+  FLEET_PROJECTION_EVENT_KINDS,
+  FLEET_PROJECTION_HEAD_KINDS,
+  fleetProjectionCache,
+} from "./store";
 
 const AUTHOR_CHUNK_SIZE = 100;
-const BACKFILL_LIMIT = 2_000;
+const HEAD_BACKFILL_LIMIT = 1_000;
 
 export function membershipScopedFleetOwners(
   currentPubkey: string,
@@ -31,6 +36,16 @@ function chunks<T>(items: readonly T[], size: number): T[][] {
     output.push(items.slice(index, index + size));
   }
   return output;
+}
+
+export function fleetProjectionHeadBackfillFilter(
+  authors: readonly string[],
+): RelaySubscriptionFilter {
+  return {
+    kinds: [...FLEET_PROJECTION_HEAD_KINDS],
+    authors: [...authors],
+    limit: HEAD_BACKFILL_LIMIT,
+  };
 }
 
 export function useFleetProjectionSync({
@@ -88,11 +103,12 @@ export function useFleetProjectionSync({
         );
         const pages = await Promise.all(
           authorChunks.map((authors) =>
-            relayClient.fetchEvents({
-              kinds: [...FLEET_PROJECTION_EVENT_KINDS],
-              authors,
-              limit: BACKFILL_LIMIT,
-            }),
+            // Deletions stay on the live subscription only. The relay removes
+            // deleted replaceable heads from historical results, while mixing
+            // retained kind-5 events into this capped request can starve old,
+            // still-current definitions. Subscribing before this fetch keeps
+            // delete-vs-backfill ordering safe for in-session races.
+            relayClient.fetchEvents(fleetProjectionHeadBackfillFilter(authors)),
           ),
         );
         if (!cancelled) {
