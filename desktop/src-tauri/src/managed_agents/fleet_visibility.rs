@@ -12,7 +12,10 @@ use tauri::{AppHandle, Manager};
 
 use super::{
     persona_events::monotonic_created_at,
-    retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
+    retention::{
+        delete_retained_event, get_retained_event, open_retention_db, retain_event,
+        tombstone_retention_d_tag, RetainedEvent,
+    },
     BackendKind, ManagedAgentRecord,
 };
 use crate::app_state::AppState;
@@ -409,6 +412,84 @@ fn retain_host_event(
     )
 }
 
+/// Build one coordinate deletion for one Host projection kind.
+///
+/// The relay's NIP-09 path requires exactly one `a` tag per event, so 30180
+/// and 30181 deliberately use separate signed events.
+fn build_host_delete(
+    target_kind: u32,
+    host_id: &str,
+    owner_pubkey_hex: &str,
+) -> Result<EventBuilder, String> {
+    let coord = format!("{target_kind}:{owner_pubkey_hex}:{host_id}");
+    let tag = Tag::parse(["a", coord.as_str()])
+        .map_err(|error| format!("invalid host deletion a-tag: {error}"))?;
+    Ok(EventBuilder::new(Kind::Custom(5), "").tags([tag]))
+}
+
+/// Replace both retained Host projections with durable pending tombstones.
+/// Offline publication is safe: the normal pending-event loop retries these
+/// rows after reconnect and always orders kind:5 before replacement events.
+fn retain_host_retractions(app: &AppHandle, state: &AppState, host_id: &str) -> Result<(), String> {
+    let scope = super::retention::active_retention_scope(app, state)?;
+    let mut conn = open_retention_db(&scope.db_path)?;
+    retain_host_retractions_in_db(&mut conn, &scope.owner_keys, host_id)
+}
+
+fn retain_host_retractions_in_db(
+    conn: &mut rusqlite::Connection,
+    owner_keys: &nostr::Keys,
+    host_id: &str,
+) -> Result<(), String> {
+    let owner = owner_keys.public_key().to_hex();
+    let mut tombstones = Vec::with_capacity(2);
+
+    for target_kind in [KIND_HOST_DECLARATION, KIND_HOST_STATUS] {
+        let target = get_retained_event(&conn, target_kind, &owner, host_id)?;
+        let tombstone_d_tag = tombstone_retention_d_tag(target_kind, host_id);
+        let previous_tombstone = get_retained_event(&conn, 5, &owner, &tombstone_d_tag)?;
+        let previous_created_at = target
+            .as_ref()
+            .map(|row| row.created_at)
+            .into_iter()
+            .chain(previous_tombstone.as_ref().map(|row| row.created_at))
+            .max();
+        let event = build_host_delete(target_kind, host_id, &owner)?
+            .custom_created_at(monotonic_created_at(previous_created_at))
+            .sign_with_keys(owner_keys)
+            .map_err(|error| format!("failed to sign host deletion: {error}"))?;
+        tombstones.push((target_kind, tombstone_d_tag, event));
+    }
+
+    let transaction = conn
+        .transaction()
+        .map_err(|error| format!("failed to begin host retraction transaction: {error}"))?;
+    for (target_kind, tombstone_d_tag, event) in tombstones {
+        delete_retained_event(&transaction, target_kind, &owner, host_id)?;
+        retain_event(
+            &transaction,
+            &RetainedEvent {
+                kind: 5,
+                pubkey: owner.clone(),
+                d_tag: tombstone_d_tag,
+                content: event.content.clone(),
+                created_at: event.created_at.as_secs() as i64,
+                raw_event: event.as_json(),
+                pending_sync: true,
+            },
+        )?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit host retractions: {error}"))
+}
+
+fn host_id_to_retract(config: &FleetVisibilityConfig, role: DeviceRole) -> Option<&str> {
+    (config.role_selected && config.role == DeviceRole::Host && role == DeviceRole::Observer)
+        .then(|| config.host_id.as_deref())
+        .flatten()
+}
+
 /// Queue a Host declaration and a fresh status heartbeat in the existing
 /// pending-sync store. Call before each 30-second flush and after lifecycle
 /// writes; Observer/disabled devices are true no-ops.
@@ -471,46 +552,46 @@ fn retain_host_heartbeat_with_running(
     records: &[ManagedAgentRecord],
     local_running_pubkeys: Option<&HashSet<String>>,
 ) -> Result<bool, String> {
-    if !is_host(state) {
+    let now = unix_now();
+    // Keep the role mutex through both retained writes. A Host->Observer
+    // transition waits here, then atomically replaces these rows with
+    // tombstones; an in-flight heartbeat can never land after retraction.
+    let mut guard = state
+        .fleet_visibility
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if !guard.enabled || !guard.config.role_selected || guard.config.role != DeviceRole::Host {
         return Ok(false);
     }
-    let now = unix_now();
-    let (config, declaration, status) = {
-        let mut guard = state
-            .fleet_visibility
-            .lock()
-            .map_err(|error| error.to_string())?;
-        if guard.config.host_id.is_none() {
-            guard.config.host_id = Some(uuid::Uuid::new_v4().to_string());
-        }
-        if guard.config.host_name.is_none() {
-            guard.config.host_name = Some(default_host_name());
-        }
-        if guard.config.host_created_at.is_none() {
-            guard.config.host_created_at = Some(now);
-        }
-        guard.config.last_seq = guard.config.last_seq.saturating_add(1).max(1);
-        save_config(app, &guard.config)?;
-        let host_id = guard.config.host_id.clone().unwrap_or_default();
-        let declaration = HostDeclarationContent {
-            v: 1,
-            name: guard.config.host_name.clone().unwrap_or_default(),
-            platform: platform_name(),
-            created_at: guard.config.host_created_at.unwrap_or(now),
-        };
-        let status = HostStatusContent {
-            v: 1,
-            seq: guard.config.last_seq,
-            ts: now,
-            agents: project_agent_statuses(records, local_running_pubkeys, now),
-        };
-        (host_id, declaration, status)
+    if guard.config.host_id.is_none() {
+        guard.config.host_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+    if guard.config.host_name.is_none() {
+        guard.config.host_name = Some(default_host_name());
+    }
+    if guard.config.host_created_at.is_none() {
+        guard.config.host_created_at = Some(now);
+    }
+    guard.config.last_seq = guard.config.last_seq.saturating_add(1).max(1);
+    save_config(app, &guard.config)?;
+    let host_id = guard.config.host_id.clone().unwrap_or_default();
+    let declaration = HostDeclarationContent {
+        v: 1,
+        name: guard.config.host_name.clone().unwrap_or_default(),
+        platform: platform_name(),
+        created_at: guard.config.host_created_at.unwrap_or(now),
+    };
+    let status = HostStatusContent {
+        v: 1,
+        seq: guard.config.last_seq,
+        ts: now,
+        agents: project_agent_statuses(records, local_running_pubkeys, now),
     };
     retain_host_event(
         app,
         state,
         KIND_HOST_DECLARATION,
-        &config,
+        &host_id,
         serde_json::to_string(&declaration)
             .map_err(|error| format!("failed to serialize host declaration: {error}"))?,
     )?;
@@ -518,7 +599,7 @@ fn retain_host_heartbeat_with_running(
         app,
         state,
         KIND_HOST_STATUS,
-        &config,
+        &host_id,
         serde_json::to_string(&status)
             .map_err(|error| format!("failed to serialize host status: {error}"))?,
     )?;
@@ -534,13 +615,14 @@ pub fn set_role(
     state: &AppState,
     role: DeviceRole,
 ) -> Result<FleetVisibilitySettings, String> {
-    let mut config = {
-        let guard = state
-            .fleet_visibility
-            .lock()
-            .map_err(|error| error.to_string())?;
-        guard.config.clone()
-    };
+    let mut guard = state
+        .fleet_visibility
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut config = guard.config.clone();
+    if let Some(host_id) = host_id_to_retract(&config, role) {
+        retain_host_retractions(app, state, host_id)?;
+    }
     config.role = role;
     config.role_selected = true;
     if role == DeviceRole::Host {
@@ -551,13 +633,8 @@ pub fn set_role(
         config.host_created_at.get_or_insert_with(unix_now);
     }
     save_config(app, &config)?;
-    {
-        let mut guard = state
-            .fleet_visibility
-            .lock()
-            .map_err(|error| error.to_string())?;
-        guard.config = config;
-    }
+    guard.config = config;
+    drop(guard);
     settings(&state.fleet_visibility)
 }
 
@@ -720,5 +797,95 @@ mod tests {
         let projected = project_agent_statuses(&records, None, 1_776_000_000);
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].pubkey, valid);
+    }
+
+    #[test]
+    fn host_deletes_are_two_single_coordinate_events() {
+        const OWNER: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let keys = nostr::Keys::generate();
+        for target_kind in [KIND_HOST_DECLARATION, KIND_HOST_STATUS] {
+            let event = build_host_delete(target_kind, "host-a", OWNER)
+                .unwrap()
+                .sign_with_keys(&keys)
+                .unwrap();
+            assert_eq!(event.kind, Kind::Custom(5));
+            let a_tags = event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("a"))
+                .collect::<Vec<_>>();
+            assert_eq!(a_tags.len(), 1);
+            assert_eq!(
+                a_tags[0].as_slice()[1],
+                format!("{target_kind}:{OWNER}:host-a")
+            );
+            assert!(event
+                .tags
+                .iter()
+                .all(|tag| tag.as_slice().first().map(String::as_str) != Some("e")));
+        }
+    }
+
+    #[test]
+    fn only_a_selected_host_to_observer_transition_retracts() {
+        let mut config = FleetVisibilityConfig::default();
+        config.host_id = Some("host-a".into());
+        assert_eq!(host_id_to_retract(&config, DeviceRole::Observer), None);
+
+        config.role_selected = true;
+        assert_eq!(
+            host_id_to_retract(&config, DeviceRole::Observer),
+            Some("host-a")
+        );
+        assert_eq!(host_id_to_retract(&config, DeviceRole::Host), None);
+
+        config.role = DeviceRole::Observer;
+        assert_eq!(host_id_to_retract(&config, DeviceRole::Observer), None);
+    }
+
+    #[test]
+    fn host_retractions_replace_both_heads_with_pending_tombstones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = open_retention_db(&tmp.path().join("retention.db")).unwrap();
+        let keys = nostr::Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let host_id = "host-a";
+
+        for kind in [KIND_HOST_DECLARATION, KIND_HOST_STATUS] {
+            retain_event(
+                &conn,
+                &RetainedEvent {
+                    kind,
+                    pubkey: owner.clone(),
+                    d_tag: host_id.into(),
+                    content: "{}".into(),
+                    created_at: 1,
+                    raw_event: "{}".into(),
+                    pending_sync: false,
+                },
+            )
+            .unwrap();
+        }
+
+        retain_host_retractions_in_db(&mut conn, &keys, host_id).unwrap();
+
+        for kind in [KIND_HOST_DECLARATION, KIND_HOST_STATUS] {
+            assert!(get_retained_event(&conn, kind, &owner, host_id)
+                .unwrap()
+                .is_none());
+            let tombstone =
+                get_retained_event(&conn, 5, &owner, &tombstone_retention_d_tag(kind, host_id))
+                    .unwrap()
+                    .unwrap();
+            assert!(tombstone.pending_sync);
+            let event = nostr::Event::from_json(&tombstone.raw_event).unwrap();
+            let a_tags = event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("a"))
+                .collect::<Vec<_>>();
+            assert_eq!(a_tags.len(), 1);
+            assert_eq!(a_tags[0].as_slice()[1], format!("{kind}:{owner}:{host_id}"));
+        }
     }
 }

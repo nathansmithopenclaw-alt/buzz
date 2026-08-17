@@ -1,5 +1,6 @@
 import type { FleetVisibilitySettings } from "@/shared/api/tauriManagedAgents";
 import type { RelayEvent } from "@/shared/api/types";
+import type { ConnectionState } from "@/shared/api/relayClientShared";
 import {
   KIND_HOST_DECLARATION,
   KIND_MANAGED_AGENT,
@@ -33,6 +34,15 @@ export type FleetVisibilityBootstrap = {
   hostName: string | null;
 };
 
+export type FleetVisibilityBootstrapRead =
+  | { kind: "auto-host" }
+  | {
+      kind: "needs-choice";
+      detectionFailed: boolean;
+      bootstrap: FleetVisibilityBootstrap;
+      fleetRecordCount: number;
+    };
+
 /**
  * Detect owner projections that cannot be backed by a keyed local record.
  * This is only the first-run role chooser seam; FV-B2 owns the durable
@@ -64,6 +74,40 @@ export function deriveFleetVisibilityBootstrap(
       .find((name): name is string => Boolean(name)) ?? null;
 
   return { unmatchedAgentPubkeys, hostName };
+}
+
+/**
+ * First-run role detection may auto-select Host only across a relay read that
+ * started and finished on an authenticated connection and returned no fleet
+ * records. A not-ready/error result is deliberately represented by `null` so
+ * callers cannot confuse it with a successful empty EOSE.
+ */
+export function classifyFleetVisibilityBootstrapRead(
+  startedConnectionState: ConnectionState,
+  finishedConnectionState: ConnectionState,
+  events: readonly RelayEvent[] | null,
+  localAgentPubkeys: readonly string[],
+  localHostId?: string | null,
+): FleetVisibilityBootstrapRead {
+  const authenticatedRead =
+    startedConnectionState === "connected" &&
+    finishedConnectionState === "connected" &&
+    events !== null;
+
+  if (authenticatedRead && events.length === 0) {
+    return { kind: "auto-host" };
+  }
+
+  return {
+    kind: "needs-choice",
+    detectionFailed: !authenticatedRead,
+    bootstrap: deriveFleetVisibilityBootstrap(
+      events ?? [],
+      localAgentPubkeys,
+      localHostId,
+    ),
+    fleetRecordCount: events?.length ?? 0,
+  };
 }
 
 /** UI-only defense; unknown backend state must not hide creation candidates. */
