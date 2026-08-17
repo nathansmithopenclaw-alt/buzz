@@ -1,6 +1,7 @@
 import * as React from "react";
 import {
   AlertCircle,
+  Bot,
   BookUser,
   Check,
   ChevronRight,
@@ -21,6 +22,7 @@ import { buildSnapshotClipboardHtml } from "@/features/messages/lib/agentSnapsho
 import { uploadMediaBytes, type BlobDescriptor } from "@/shared/api/tauri";
 import { copyTextToSystemClipboard } from "@/shared/api/tauriMedia";
 import type { SnapshotMemoryLevel } from "@/shared/api/tauriPersonas";
+import { getUserProfile } from "@/shared/api/tauriProfiles";
 import type { AgentPersona, UserSearchResult } from "@/shared/api/types";
 import {
   AlertDialog,
@@ -56,10 +58,11 @@ import { useSnapshotSendController } from "./useSnapshotSendController";
 type PersonaShareDialogProps = {
   catalogShareLevel: CatalogPersonaShareLevel;
   isPending: boolean;
-  linkedAgentPubkey: string | null;
+  linkedAgentPubkey?: string | null;
+  memorySources?: readonly { name: string; pubkey: string }[];
   effectiveAvatarUrl: string | null;
   onCatalogShareLevelChange: (shareLevel: CatalogPersonaShareLevel) => void;
-  onExport: () => void;
+  onExport: (memorySourcePubkey: string | null) => void;
   onOpenChange: (open: boolean) => void;
   open: boolean;
   persona: AgentPersona;
@@ -67,6 +70,7 @@ type PersonaShareDialogProps = {
 
 type SnapshotShareDialogProps = {
   beforeExport?: React.ReactNode;
+  contentKey?: string;
   displayName: string;
   encodeSnapshot: (
     memoryLevel: SnapshotMemoryLevel,
@@ -227,6 +231,7 @@ function ShareLevelControl({
 
 export function SnapshotShareDialog({
   beforeExport,
+  contentKey = "",
   displayName,
   encodeSnapshot,
   hasMemoryOptions,
@@ -253,6 +258,7 @@ export function SnapshotShareDialog({
   const encodedSnapshotCacheRef = React.useRef(
     new Map<SnapshotMemoryLevel, Promise<EncodedSnapshot>>(),
   );
+  const previousContentKeyRef = React.useRef(contentKey);
 
   const isSending = ["preparing", "uploading", "sending"].includes(
     snapshotSendController.state.phase,
@@ -324,6 +330,17 @@ export function SnapshotShareDialog({
       snapshotSendController.reset();
     }
   }, [open, onReset, snapshotSendController.reset]);
+
+  React.useEffect(() => {
+    if (previousContentKeyRef.current === contentKey) return;
+    previousContentKeyRef.current = contentKey;
+    encodedSnapshotCacheRef.current.clear();
+    setCopyStatus("idle");
+    setPendingMemoryShare(null);
+    setShareLevel("none");
+    onReset?.();
+    snapshotSendController.reset();
+  }, [contentKey, onReset, snapshotSendController.reset]);
 
   React.useEffect(() => {
     if (copyStatus !== "copied") return;
@@ -676,7 +693,8 @@ export function SnapshotShareDialog({
 export function PersonaShareDialog({
   catalogShareLevel,
   isPending,
-  linkedAgentPubkey,
+  linkedAgentPubkey = null,
+  memorySources,
   effectiveAvatarUrl,
   onCatalogShareLevelChange,
   onExport,
@@ -685,19 +703,45 @@ export function PersonaShareDialog({
   persona,
 }: PersonaShareDialogProps) {
   const encodeSnapshotMutation = useEncodeAgentSnapshotForSendMutation();
+  const availableMemorySources = React.useMemo(
+    () =>
+      memorySources ??
+      (linkedAgentPubkey
+        ? [{ name: "Current agent", pubkey: linkedAgentPubkey }]
+        : []),
+    [linkedAgentPubkey, memorySources],
+  );
+  const [memorySourcePubkey, setMemorySourcePubkey] = React.useState("");
+
+  React.useEffect(() => {
+    if (!open) return;
+    setMemorySourcePubkey(
+      availableMemorySources.length === 1
+        ? (availableMemorySources[0]?.pubkey ?? "")
+        : "",
+    );
+  }, [availableMemorySources, open]);
+
   const encodeSnapshot = React.useCallback(
-    async (memoryLevel: SnapshotMemoryLevel) =>
-      encodeSnapshotMutation.mutateAsync({
+    async (memoryLevel: SnapshotMemoryLevel) => {
+      const memorySourceProfile = memorySourcePubkey
+        ? await getUserProfile(memorySourcePubkey).catch(() => null)
+        : null;
+      const snapshotAvatarUrl = memorySourceProfile?.hasProfileEvent
+        ? (memorySourceProfile.avatarUrl ?? effectiveAvatarUrl)
+        : effectiveAvatarUrl;
+      return encodeSnapshotMutation.mutateAsync({
         id: persona.id,
-        memoryLevel: linkedAgentPubkey ? memoryLevel : "none",
+        memoryLevel: memorySourcePubkey ? memoryLevel : "none",
         format: "png",
-        memorySourcePubkey: linkedAgentPubkey,
-        avatarPngDataUrl: await resolveSnapshotAvatarPng(effectiveAvatarUrl),
-      }),
+        memorySourcePubkey: memorySourcePubkey || null,
+        avatarPngDataUrl: await resolveSnapshotAvatarPng(snapshotAvatarUrl),
+      });
+    },
     [
       encodeSnapshotMutation.mutateAsync,
       effectiveAvatarUrl,
-      linkedAgentPubkey,
+      memorySourcePubkey,
       persona.id,
     ],
   );
@@ -705,38 +749,69 @@ export function PersonaShareDialog({
   return (
     <SnapshotShareDialog
       beforeExport={
-        persona.isBuiltIn ? null : (
-          <section
-            className="relative flex min-h-16 w-full items-center gap-3 rounded-2xl bg-background px-5 py-4 shadow-2xl"
-            data-testid="persona-share-catalog"
-          >
-            <BookUser className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <div className="min-w-0 flex-1">
-              <h3 className="text-sm font-medium">Share to catalog</h3>
-              <p className="text-xs text-secondary-foreground/75">
-                Anyone in this community can find and use a copy. Your agent
-                instruction is shared as plaintext. Memories and secrets aren’t
-                included.
-              </p>
-            </div>
-            <Switch
-              aria-label="Share to catalog"
-              checked={catalogShareLevel !== "not-shared"}
-              data-testid="persona-share-catalog-access"
-              disabled={isPending}
-              onCheckedChange={(checked) =>
-                onCatalogShareLevelChange(checked ? "none" : "not-shared")
-              }
-              style={{ cursor: "default" }}
-            />
-          </section>
-        )
+        <>
+          {availableMemorySources.length > 0 ? (
+            <section
+              className="relative flex min-h-14 w-full items-center gap-3 rounded-2xl bg-background px-5 py-4 shadow-2xl"
+              data-testid="persona-share-memory-source"
+            >
+              <Bot className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 flex-1">
+                <h3 className="text-sm font-medium">Memory source</h3>
+                <p className="text-xs text-secondary-foreground/75">
+                  Choose a deployed instance only when sharing memories.
+                </p>
+              </div>
+              <SnapshotOptionMenu
+                ariaLabel="Memory source"
+                disabled={isPending}
+                onValueChange={setMemorySourcePubkey}
+                options={[
+                  { label: "Definition only", value: "" },
+                  ...availableMemorySources.map((source) => ({
+                    label: source.name,
+                    value: source.pubkey,
+                  })),
+                ]}
+                testId="persona-share-memory-source-trigger"
+                value={memorySourcePubkey}
+              />
+            </section>
+          ) : null}
+          {persona.isBuiltIn ? null : (
+            <section
+              className="relative flex min-h-16 w-full items-center gap-3 rounded-2xl bg-background px-5 py-4 shadow-2xl"
+              data-testid="persona-share-catalog"
+            >
+              <BookUser className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 flex-1">
+                <h3 className="text-sm font-medium">Share to catalog</h3>
+                <p className="text-xs text-secondary-foreground/75">
+                  Anyone in this community can find and use a copy. Your agent
+                  instruction is shared as plaintext. Memories and secrets
+                  aren’t included.
+                </p>
+              </div>
+              <Switch
+                aria-label="Share to catalog"
+                checked={catalogShareLevel !== "not-shared"}
+                data-testid="persona-share-catalog-access"
+                disabled={isPending}
+                onCheckedChange={(checked) =>
+                  onCatalogShareLevelChange(checked ? "none" : "not-shared")
+                }
+                style={{ cursor: "default" }}
+              />
+            </section>
+          )}
+        </>
       }
+      contentKey={memorySourcePubkey}
       displayName={persona.displayName}
       encodeSnapshot={encodeSnapshot}
-      hasMemoryOptions={linkedAgentPubkey !== null}
+      hasMemoryOptions={memorySourcePubkey.length > 0}
       isPending={isPending}
-      onExport={onExport}
+      onExport={() => onExport(memorySourcePubkey || null)}
       onOpenChange={onOpenChange}
       onReset={encodeSnapshotMutation.reset}
       open={open}

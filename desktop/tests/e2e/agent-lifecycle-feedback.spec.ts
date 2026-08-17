@@ -26,12 +26,12 @@ const CASCADE_AGENT_A_PUBKEY = "aa".repeat(32);
 const CASCADE_AGENT_B_PUBKEY = "bb".repeat(32);
 
 /**
- * Navigate to the Agents view and wait for its unified list to mount.
+ * Navigate to the Agents view and wait for the Fleet roster to mount.
  */
 async function openAgentsView(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId("unified-agents-groups")).toBeVisible({
+  await expect(page.getByTestId("agents-fleet")).toBeVisible({
     timeout: 10_000,
   });
 }
@@ -107,13 +107,16 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await openAgentsView(page);
 
     // The custom persona card appears in the library.
-    await expect(
-      page.getByText("Cascade Test Agent", { exact: true }),
-    ).toBeVisible({ timeout: 10_000 });
+    const personaCard = page.getByTestId(
+      `persona-agent-row-${CASCADE_PERSONA_ID}`,
+    );
+    await expect(personaCard).toContainText("Cascade Test Agent", {
+      timeout: 10_000,
+    });
 
     // Open the actions menu for the custom persona. The trigger button carries
     // an aria-label derived from the persona displayName.
-    await page
+    await personaCard
       .getByRole("button", { name: "Open actions for Cascade Test Agent" })
       .click();
 
@@ -239,11 +242,14 @@ test.describe("agent lifecycle feedback screenshots", () => {
 
     await openAgentsView(page);
 
-    await expect(
-      page.getByText("Cascade Test Agent", { exact: true }),
-    ).toBeVisible({ timeout: 10_000 });
+    const personaCard = page.getByTestId(
+      `persona-agent-row-${CASCADE_PERSONA_ID}`,
+    );
+    await expect(personaCard).toContainText("Cascade Test Agent", {
+      timeout: 10_000,
+    });
 
-    await page
+    await personaCard
       .getByRole("button", { name: "Open actions for Cascade Test Agent" })
       .click();
     await page.getByRole("menuitem", { name: "Delete" }).click();
@@ -284,6 +290,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     ).toBeVisible({ timeout: 10_000 });
 
     await page
+      .getByTestId(`persona-agent-row-${CASCADE_PERSONA_ID}`)
       .getByRole("button", { name: "Open actions for Cascade Test Agent" })
       .click();
     await page.getByRole("menuitem", { name: "Delete" }).click();

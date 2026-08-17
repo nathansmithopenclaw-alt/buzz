@@ -46,9 +46,9 @@ import type {
   AgentPersona,
   Channel,
   CreatePersonaInput,
-  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import type { AgentDeployment } from "./agentDeployments";
 import {
   duplicatePersonaDialogState,
   editPersonaDialogState,
@@ -98,13 +98,14 @@ export function usePersonaActions() {
     React.useState<AgentPersona | null>(null);
   const [personaToShare, setPersonaToShare] = React.useState<{
     persona: AgentPersona;
-    linkedAgentPubkey: string | null;
+    deployments: AgentDeployment[];
     effectiveAvatarUrl: string | null;
   } | null>(null);
   const [personaToExportSnapshot, setPersonaToExportSnapshot] = React.useState<{
     persona: AgentPersona;
-    linkedAgentPubkey: string | null;
+    deployments: AgentDeployment[];
     effectiveAvatarUrl: string | null;
+    preferredMemorySourcePubkey?: string | null;
   } | null>(null);
   const [snapshotImportState, setSnapshotImportState] = React.useState<{
     fileBytes: number[];
@@ -452,13 +453,26 @@ export function usePersonaActions() {
 
   function openShare(
     persona: AgentPersona,
-    linkedAgent: ManagedAgent | undefined,
+    deployments: AgentDeployment[],
     effectiveAvatarUrl: string | null,
   ) {
     clearFeedback("library");
     setPersonaToShare({
       persona,
-      linkedAgentPubkey: linkedAgent?.pubkey ?? null,
+      deployments,
+      effectiveAvatarUrl,
+    });
+  }
+
+  function openExportSnapshot(
+    persona: AgentPersona,
+    deployments: AgentDeployment[],
+    effectiveAvatarUrl: string | null,
+  ) {
+    clearFeedback("library");
+    setPersonaToExportSnapshot({
+      persona,
+      deployments,
       effectiveAvatarUrl,
     });
   }
@@ -600,6 +614,7 @@ export function usePersonaActions() {
     openCatalog,
     openDelete,
     openShare,
+    openExportSnapshot,
     personaToExportSnapshot,
     setPersonaToExportSnapshot,
     handleExportSnapshot,

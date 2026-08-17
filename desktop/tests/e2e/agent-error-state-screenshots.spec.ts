@@ -5,12 +5,7 @@
  *   - Agent card avatar badge (CircleAlert icon + tooltip) for stopped agents
  *     with a lastError / lastErrorCode.
  *
- * ManagedAgentRow (StatusBlock text) is also exercised here even though it is
- * not yet wired into a reachable route in the main app — it will be connected
- * in the follow-up config-bridge PR.  We render it in isolation by navigating
- * to the agents view and letting the mock bridge expose the row through the
- * unified section once that wiring lands; for now we capture the card badges
- * which ARE reachable in the current build.
+ * The Fleet card error state is exercised in the reachable Agents view.
  */
 
 import { expect, test } from "@playwright/test";
@@ -44,7 +39,7 @@ async function gotoAgentsView(page: import("@playwright/test").Page) {
     timeout: 10_000,
   });
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId("agents-library-personas")).toBeVisible({
+  await expect(page.getByTestId("agents-fleet")).toBeVisible({
     timeout: 10_000,
   });
 }
@@ -132,7 +127,7 @@ test.describe("agent error state screenshots", () => {
     await waitForAnimations(page);
 
     // Capture the full agents section (scroll-bounded crop to the section).
-    const section = page.getByTestId("agents-library-personas");
+    const section = page.getByTestId("agents-fleet");
     await section.screenshot({
       path: `${SHOTS}/03-agents-section-both-errors.png`,
     });

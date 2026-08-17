@@ -1,12 +1,13 @@
 import {
   CopyPlus,
+  Download,
   EllipsisVertical,
   Pencil,
   Share2,
   Trash2,
 } from "lucide-react";
 
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type { AgentPersona } from "@/shared/api/types";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,24 +20,20 @@ export function PersonaActionsMenu({
   isActionPending,
   isPending,
   persona,
-  linkedAgent,
   onDuplicate,
   onEdit,
   onShare,
+  onSnapshot,
   onDeactivate,
   onDelete,
 }: {
   isActionPending: boolean;
   isPending: boolean;
   persona: AgentPersona;
-  /** Profile agent instance linked to this definition, if one exists. */
-  linkedAgent: ManagedAgent | undefined;
   onDuplicate: (persona: AgentPersona) => void;
   onEdit: (persona: AgentPersona) => void;
-  onShare: (
-    persona: AgentPersona,
-    linkedAgent: ManagedAgent | undefined,
-  ) => void;
+  onShare: (persona: AgentPersona) => void;
+  onSnapshot: (persona: AgentPersona) => void;
   onDeactivate: (persona: AgentPersona) => void;
   onDelete: (persona: AgentPersona) => void;
 }) {
@@ -71,12 +68,16 @@ export function PersonaActionsMenu({
           <CopyPlus className="h-4 w-4" />
           Duplicate
         </DropdownMenuItem>
-        <DropdownMenuItem
-          disabled={disabled}
-          onClick={() => onShare(persona, linkedAgent)}
-        >
+        <DropdownMenuItem disabled={disabled} onClick={() => onShare(persona)}>
           <Share2 className="h-4 w-4" />
           Share
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={disabled}
+          onClick={() => onSnapshot(persona)}
+        >
+          <Download className="h-4 w-4" />
+          Export snapshot
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         {persona.sourceTeam ? (

@@ -267,7 +267,7 @@ test("create agent supports parallelism and system prompt overrides", async ({
   // Open the new agent's card to reveal the profile panel, then read the
   // harness log from the diagnostics view.
   await page
-    .getByRole("button", { name: `${agentName} agent profile` })
+    .getByRole("button", { exact: true, name: `${agentName} agent profile` })
     .click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 

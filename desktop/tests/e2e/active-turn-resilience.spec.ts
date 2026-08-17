@@ -38,7 +38,7 @@ async function openAgentsView(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await waitForBridge(page);
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId("unified-agents-groups")).toBeVisible({
+  await expect(page.getByTestId("agents-fleet")).toBeVisible({
     timeout: 10_000,
   });
 }
