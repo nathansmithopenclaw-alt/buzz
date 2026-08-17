@@ -2405,6 +2405,7 @@ test("changing a multi-deployment share source keeps recipients and resets memor
       name: `Shared Director · ${firstPubkey.slice(0, 6)}…${firstPubkey.slice(-6)}`,
     })
     .click();
+  await expect(page.getByRole("menuitemradio")).toHaveCount(0);
   await selectCharlieRecipient(page);
   const charlieChip = page.getByTestId(
     `persona-share-recipient-chip-${TEST_IDENTITIES.charlie.pubkey}`,
