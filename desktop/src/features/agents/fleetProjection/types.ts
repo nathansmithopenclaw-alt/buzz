@@ -15,8 +15,19 @@ export type FleetProjectionAgent = {
   personaId: string | null;
   personaDisplayName: string | null;
   personaAvatarUrl: string | null;
+  personaRuntime: string | null;
+  personaModel: string | null;
   respondTo: FleetProjectionRespondTo;
   respondToAllowlist: readonly string[];
+};
+
+export type FleetProjectionPersona = {
+  ownerPubkey: string;
+  personaId: string;
+  displayName: string;
+  avatarUrl: string | null;
+  runtime: string | null;
+  model: string | null;
 };
 
 export type FleetProjectionAgentStatus = {
@@ -43,6 +54,7 @@ export type FleetProjectionHost = {
 export type FleetProjectionOwner = {
   ownerPubkey: string;
   agents: readonly FleetProjectionAgent[];
+  personas: readonly FleetProjectionPersona[];
   hosts: readonly FleetProjectionHost[];
 };
 

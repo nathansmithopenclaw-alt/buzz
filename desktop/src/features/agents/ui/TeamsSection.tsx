@@ -8,7 +8,9 @@ import {
 } from "lucide-react";
 
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
+import type { FleetProjectionOwnerPresentation } from "@/features/agents/fleetProjection/useFleetProjectionPresentation";
 import type { AgentPersona, AgentTeam } from "@/shared/api/types";
+import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,10 +23,23 @@ import { SectionHeader } from "@/shared/ui/PageHeader";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { TeamIdentityCard } from "./TeamIdentityCard";
 import { IDENTITY_CARD_GRID_CLASS } from "./agentCardLayout";
+import { ProjectedFleetAgentCard } from "./ProjectedFleetAgentCard";
 
 const TEAM_CARD_COLUMN_CLASS = "w-full";
 
-type TeamsSectionProps = {
+type ProjectedTeamProps = {
+  isMessagePending: boolean;
+  now: number;
+  projectedOwners: readonly FleetProjectionOwnerPresentation[];
+  onMessageAgent: (pubkey: string) => void;
+  onOpenAgentProfile: (
+    pubkey: string,
+    options?: ProfilePanelOpenOptions,
+  ) => void;
+};
+
+type HostTeamsSectionProps = ProjectedTeamProps & {
+  mode: "host";
   teams: AgentTeam[];
   personas: AgentPersona[];
   error: Error | null;
@@ -39,20 +54,35 @@ type TeamsSectionProps = {
   onImport: () => void;
 };
 
-export function TeamsSection({
-  teams,
-  personas,
-  error,
-  isLoading,
-  isPending,
-  onCreate,
-  onDuplicate,
-  onEdit,
-  onDelete,
-  onAddToChannel,
-  onShare,
-  onImport,
-}: TeamsSectionProps) {
+type ObserverTeamsSectionProps = ProjectedTeamProps & {
+  mode: "observer";
+  error: Error | null;
+  isLoading: boolean;
+};
+
+type TeamsSectionProps = HostTeamsSectionProps | ObserverTeamsSectionProps;
+
+export function TeamsSection(props: TeamsSectionProps) {
+  if (props.mode === "observer") return <ObserverTeamsSection {...props} />;
+  const {
+    teams,
+    personas,
+    error,
+    isLoading,
+    isPending,
+    projectedOwners,
+    now,
+    isMessagePending,
+    onCreate,
+    onDuplicate,
+    onEdit,
+    onDelete,
+    onAddToChannel,
+    onShare,
+    onImport,
+    onMessageAgent,
+    onOpenAgentProfile,
+  } = props;
   return (
     <section className="relative space-y-4" data-testid="agents-library-teams">
       <div className={TEAM_CARD_COLUMN_CLASS}>
@@ -177,6 +207,14 @@ export function TeamsSection({
         </div>
       ) : null}
 
+      <ProjectedTeamRosters
+        isMessagePending={isMessagePending}
+        now={now}
+        owners={projectedOwners}
+        onMessageAgent={onMessageAgent}
+        onOpenAgentProfile={onOpenAgentProfile}
+      />
+
       {error ? (
         <p
           className={`${TEAM_CARD_COLUMN_CLASS} rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive`}
@@ -185,6 +223,102 @@ export function TeamsSection({
         </p>
       ) : null}
     </section>
+  );
+}
+
+function ObserverTeamsSection({
+  error,
+  isLoading,
+  isMessagePending,
+  now,
+  projectedOwners,
+  onMessageAgent,
+  onOpenAgentProfile,
+}: ObserverTeamsSectionProps) {
+  return (
+    <section className="relative space-y-4" data-testid="agents-library-teams">
+      <SectionHeader
+        description="Read-only fleets from people who share a channel with you."
+        title="Teams"
+      />
+      {isLoading ? (
+        <div className={IDENTITY_CARD_GRID_CLASS}>
+          <IdentityCardSkeleton
+            footerSubtitleWidthClass="w-20"
+            footerTitleWidthClass="w-28"
+          />
+        </div>
+      ) : null}
+      {!isLoading && projectedOwners.length === 0 && !error ? (
+        <div className="rounded-2xl border border-dashed border-border/80 px-5 py-6">
+          <p className="font-medium">No shared fleet teams yet</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Fleets from channel members appear here when their hosts publish
+            them.
+          </p>
+        </div>
+      ) : null}
+      {!isLoading ? (
+        <ProjectedTeamRosters
+          isMessagePending={isMessagePending}
+          now={now}
+          owners={projectedOwners}
+          onMessageAgent={onMessageAgent}
+          onOpenAgentProfile={onOpenAgentProfile}
+        />
+      ) : null}
+      {error ? (
+        <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {error.message}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function ProjectedTeamRosters({
+  isMessagePending,
+  now,
+  owners,
+  onMessageAgent,
+  onOpenAgentProfile,
+}: Omit<ProjectedTeamProps, "projectedOwners"> & {
+  owners: readonly FleetProjectionOwnerPresentation[];
+}) {
+  if (owners.length === 0) return null;
+  return (
+    <div className="space-y-5" data-testid="fleet-team-rosters">
+      {owners.map((owner) => (
+        <div className="space-y-3" key={owner.ownerPubkey}>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-medium">{owner.displayName}</h3>
+              <p className="text-xs text-muted-foreground">
+                {owner.agents.length} agent
+                {owner.agents.length === 1 ? "" : "s"}
+              </p>
+            </div>
+            <span className="rounded-full border border-border/70 px-2 py-1 text-2xs font-medium text-muted-foreground">
+              Read-only
+            </span>
+          </div>
+          <div className={IDENTITY_CARD_GRID_CLASS}>
+            {owner.agents.map((agent) => (
+              <ProjectedFleetAgentCard
+                agent={agent}
+                isMessagePending={isMessagePending}
+                key={agent.agentPubkey}
+                now={now}
+                owner={owner}
+                showHost={owner.hosts.length > 1}
+                onMessageAgent={onMessageAgent}
+                onOpenAgentProfile={onOpenAgentProfile}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 

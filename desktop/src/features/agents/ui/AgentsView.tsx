@@ -10,6 +10,9 @@ import {
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
 import { indexAgentDeployments } from "@/features/agents/ui/agentDeployments";
+import { primaryFleetHost } from "@/features/agents/fleetProjection/selectors";
+import { useCurrentUnixSeconds } from "@/features/agents/fleetProjection/useCurrentUnixSeconds";
+import { useFleetProjectionPresentation } from "@/features/agents/fleetProjection/useFleetProjectionPresentation";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useFleetVisibilitySettings } from "@/features/agents/lib/useFleetVisibilitySettings";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
@@ -18,6 +21,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useFeatureEnabled } from "@/shared/features";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -29,11 +33,8 @@ import {
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { AgentLibrarySection } from "./AgentLibrarySection";
 import { AgentsDialogs } from "./AgentsDialogs";
+import { FleetHostStatus } from "./FleetHostStatus";
 import { FleetSection } from "./FleetSection";
-import {
-  FleetTeamSection,
-  ObserverFleetSections,
-} from "./FleetProjectionSections";
 import { TeamsSection } from "./TeamsSection";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 import { useManagedAgentActions } from "./useManagedAgentActions";
@@ -48,6 +49,8 @@ export function AgentsView() {
     fleetVisibilityEnabled && fleetVisibility?.enabled === true;
   const observerMode =
     fleetProjectionEnabled && fleetVisibility?.role === "observer";
+  const needsRoleChoice =
+    fleetProjectionEnabled && fleetVisibility?.needsChoice === true;
 
   if (fleetVisibilityEnabled && fleetVisibility === null) {
     return (
@@ -65,44 +68,26 @@ export function AgentsView() {
     );
   }
 
-  if (observerMode) {
-    const currentOwnerPubkey = identityQuery.data?.pubkey;
-    return (
-      <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8">
-        <div
-          className="mx-auto w-full max-w-6xl space-y-8 [container-type:inline-size]"
-          data-testid="agents-page-content"
-        >
-          <PageHeader
-            description="View and message the fleet hosted on your other device."
-            title="Agents"
-          />
-          {currentOwnerPubkey ? (
-            <ObserverFleetSections currentOwnerPubkey={currentOwnerPubkey} />
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              Loading fleet identity…
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <HostAgentsView
+    <UnifiedAgentsView
       currentOwnerPubkey={identityQuery.data?.pubkey}
-      showFleetTeam={fleetProjectionEnabled}
+      fleetProjectionEnabled={fleetProjectionEnabled}
+      needsRoleChoice={needsRoleChoice}
+      observerMode={observerMode}
     />
   );
 }
 
-function HostAgentsView({
+function UnifiedAgentsView({
   currentOwnerPubkey,
-  showFleetTeam,
+  fleetProjectionEnabled,
+  needsRoleChoice,
+  observerMode,
 }: {
   currentOwnerPubkey?: string;
-  showFleetTeam: boolean;
+  fleetProjectionEnabled: boolean;
+  needsRoleChoice: boolean;
+  observerMode: boolean;
 }) {
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const { goChannel } = useAppNavigation();
@@ -116,6 +101,8 @@ function HostAgentsView({
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const actionsMenuTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [isAiDefaultsOpen, setIsAiDefaultsOpen] = React.useState(false);
+  const projection = useFleetProjectionPresentation(fleetProjectionEnabled);
+  const now = useCurrentUnixSeconds(fleetProjectionEnabled);
 
   const teamActions = useTeamActions(
     {
@@ -174,11 +161,32 @@ function HostAgentsView({
   const isAgentDataLoading =
     agents.managedAgentsQuery.isLoading || personas.personasQuery.isLoading;
   const showOnboarding =
+    !observerMode &&
+    !needsRoleChoice &&
     !isAgentDataLoading &&
     !agentsError &&
     !personasError &&
     agents.managedAgents.length === 0 &&
     personas.libraryPersonas.length === 0;
+  const normalizedOwnerPubkey = currentOwnerPubkey
+    ? normalizePubkey(currentOwnerPubkey)
+    : null;
+  const currentFleetOwner =
+    projection.owners.find(
+      (owner) => owner.ownerPubkey === normalizedOwnerPubkey,
+    ) ?? null;
+  const projectedTeamOwners = fleetProjectionEnabled
+    ? projection.owners.filter(
+        (owner) =>
+          owner.ownerPubkey !== normalizedOwnerPubkey &&
+          owner.agents.length > 0,
+      )
+    : [];
+  const projectionError = projection.errorMessage
+    ? new Error(projection.errorMessage)
+    : null;
+  const primaryHost = primaryFleetHost(currentFleetOwner);
+  const canMutate = !observerMode && !needsRoleChoice;
 
   useFeedbackToasts(agents.actionNoticeMessage, agents.actionErrorMessage);
   useFeedbackToasts(
@@ -222,173 +230,255 @@ function HostAgentsView({
         >
           <PageHeader
             action={
-              <div className="flex items-center gap-2">
-                <Button
-                  data-testid="new-agent-card"
-                  disabled={personas.isPending}
-                  onClick={openUnifiedCatalog}
-                  size="sm"
-                  type="button"
-                >
-                  <Plus className="h-4 w-4" />
-                  New agent
-                </Button>
-                <DropdownMenu modal={false}>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      aria-label="Agent actions"
-                      data-testid="agent-actions-menu-trigger"
-                      ref={actionsMenuTriggerRef}
-                      size="icon"
-                      type="button"
-                      variant="outline"
-                    >
-                      <EllipsisVertical />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem
-                      onSelect={() =>
-                        openAiDefaults(actionsMenuTriggerRef.current)
-                      }
-                    >
-                      <Settings2 />
-                      {hasSavedAgentDefaults
-                        ? "Agent defaults"
-                        : "Set agent defaults"}
-                    </DropdownMenuItem>
-                    {runningAgentCount > 0 ? (
+              canMutate ? (
+                <div className="flex items-center gap-2">
+                  <Button
+                    data-testid="new-agent-card"
+                    disabled={personas.isPending}
+                    onClick={openUnifiedCatalog}
+                    size="sm"
+                    type="button"
+                  >
+                    <Plus className="h-4 w-4" />
+                    New agent
+                  </Button>
+                  <DropdownMenu modal={false}>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        aria-label="Agent actions"
+                        data-testid="agent-actions-menu-trigger"
+                        ref={actionsMenuTriggerRef}
+                        size="icon"
+                        type="button"
+                        variant="outline"
+                      >
+                        <EllipsisVertical />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        onSelect={() =>
+                          openAiDefaults(actionsMenuTriggerRef.current)
+                        }
+                      >
+                        <Settings2 />
+                        {hasSavedAgentDefaults
+                          ? "Agent defaults"
+                          : "Set agent defaults"}
+                      </DropdownMenuItem>
+                      {runningAgentCount > 0 ? (
+                        <DropdownMenuItem
+                          disabled={isActionPending}
+                          onSelect={() => {
+                            void agents.handleBulkStopRunning();
+                          }}
+                        >
+                          <OctagonX />
+                          Stop running agents
+                        </DropdownMenuItem>
+                      ) : null}
+                      <DropdownMenuSeparator />
                       <DropdownMenuItem
                         disabled={isActionPending}
-                        onSelect={() => {
-                          void agents.handleBulkStopRunning();
-                        }}
+                        onSelect={() => snapshotImportInputRef.current?.click()}
                       >
-                        <OctagonX />
-                        Stop running agents
+                        <Upload />
+                        Import snapshot
                       </DropdownMenuItem>
-                    ) : null}
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      disabled={isActionPending}
-                      onSelect={() => snapshotImportInputRef.current?.click()}
-                    >
-                      <Upload />
-                      Import snapshot
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              ) : null
             }
-            description="Agents run on this device."
+            description={
+              needsRoleChoice
+                ? "Choose this device's fleet role before viewing agents."
+                : observerMode
+                  ? primaryHost?.name?.trim()
+                    ? `Your fleet runs on ${primaryHost.name.trim()} — you can view and message it from here.`
+                    : "View and message your relay-published fleet from this device."
+                  : "Agents run on this device."
+            }
             title="Agents"
           />
 
-          {showOnboarding ? (
+          {fleetProjectionEnabled && !needsRoleChoice ? (
+            currentOwnerPubkey ? (
+              <FleetHostStatus
+                hosts={currentFleetOwner?.hosts ?? []}
+                now={now}
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Loading fleet identity…
+              </p>
+            )
+          ) : null}
+
+          {needsRoleChoice ? (
+            <FleetRoleChoiceBanner />
+          ) : showOnboarding ? (
             <AgentsOnboardingState onCreate={openUnifiedCatalog} />
           ) : (
             <div className="flex flex-col gap-8">
-              <FleetSection
-                agents={agents.managedAgents}
-                defaultModel={inheritedDefaults.model.value}
-                error={agentsError}
-                isActionPending={isActionPending}
-                isLoading={agents.managedAgentsQuery.isLoading}
-                isMessagePending={openDmMutation.isPending}
-                personasById={personasById}
-                restartingAgentPubkey={agents.restartingAgentPubkey}
-                startingAgentPubkey={agents.startingAgentPubkey}
-                onMessageAgent={(pubkey) => {
-                  void handleMessageAgent(pubkey);
-                }}
-                onOpenAgentProfile={(pubkey, options) =>
-                  openProfilePanel?.(pubkey, options)
-                }
-                onRestartAgent={(pubkey) => {
-                  void agents.handleRestart(pubkey);
-                }}
-                onStartAgent={(pubkey) => {
-                  void agents.handleStart(pubkey);
-                }}
-                onStopAgent={(pubkey) => {
-                  void agents.handleStop(pubkey);
-                }}
-              />
+              {observerMode ? (
+                <FleetSection
+                  error={projectionError}
+                  isLoading={projection.loading || !currentOwnerPubkey}
+                  isMessagePending={openDmMutation.isPending}
+                  mode="observer"
+                  now={now}
+                  owner={currentFleetOwner}
+                  onMessageAgent={(pubkey) => {
+                    void handleMessageAgent(pubkey);
+                  }}
+                  onOpenAgentProfile={(pubkey, options) =>
+                    openProfilePanel?.(pubkey, options)
+                  }
+                />
+              ) : (
+                <FleetSection
+                  agents={agents.managedAgents}
+                  defaultModel={inheritedDefaults.model.value}
+                  error={agentsError}
+                  isActionPending={isActionPending}
+                  isLoading={agents.managedAgentsQuery.isLoading}
+                  isMessagePending={openDmMutation.isPending}
+                  mode="host"
+                  personasById={personasById}
+                  restartingAgentPubkey={agents.restartingAgentPubkey}
+                  startingAgentPubkey={agents.startingAgentPubkey}
+                  onMessageAgent={(pubkey) => {
+                    void handleMessageAgent(pubkey);
+                  }}
+                  onOpenAgentProfile={(pubkey, options) =>
+                    openProfilePanel?.(pubkey, options)
+                  }
+                  onRestartAgent={(pubkey) => {
+                    void agents.handleRestart(pubkey);
+                  }}
+                  onStartAgent={(pubkey) => {
+                    void agents.handleStart(pubkey);
+                  }}
+                  onStopAgent={(pubkey) => {
+                    void agents.handleStop(pubkey);
+                  }}
+                />
+              )}
 
-              <AgentLibrarySection
-                defaultModel={inheritedDefaults.model.value}
-                deploymentsByPersonaId={deploymentsByPersonaId}
-                error={personasError}
-                isActionPending={isActionPending}
-                isLoading={personas.personasQuery.isLoading}
-                isPending={personas.isPending}
-                personas={personas.libraryPersonas}
-                startingPersonaIds={agents.startingPersonaIds}
-                onBrowseCatalog={openUnifiedCatalog}
-                onDeactivatePersona={(persona) => {
-                  void personas.handleSetActive(persona, false, "library");
-                }}
-                onDeletePersona={personas.openDelete}
-                onDeployPersona={(persona) => {
-                  void agents.handleStartPersona(persona);
-                }}
-                onDuplicatePersona={personas.openDuplicate}
-                onEditPersona={personas.openEdit}
-                onOpenAgentProfile={(pubkey, options) =>
-                  openProfilePanel?.(pubkey, options)
-                }
-                onOpenPersonaProfile={(persona) =>
-                  openPersonaProfilePanel?.(persona)
-                }
-                onSharePersona={(persona, deployments) =>
-                  personas.openShare(persona, deployments, persona.avatarUrl)
-                }
-                onSnapshotPersona={(persona, deployments) =>
-                  personas.openExportSnapshot(
-                    persona,
-                    deployments,
-                    persona.avatarUrl,
-                  )
-                }
-              />
+              {observerMode ? (
+                <AgentLibrarySection
+                  agents={currentFleetOwner?.agents ?? []}
+                  error={projectionError}
+                  isLoading={projection.loading || !currentOwnerPubkey}
+                  mode="observer"
+                  personas={currentFleetOwner?.personas ?? []}
+                  onOpenAgentProfile={(pubkey, options) =>
+                    openProfilePanel?.(pubkey, options)
+                  }
+                />
+              ) : (
+                <AgentLibrarySection
+                  defaultModel={inheritedDefaults.model.value}
+                  deploymentsByPersonaId={deploymentsByPersonaId}
+                  error={personasError}
+                  isActionPending={isActionPending}
+                  isLoading={personas.personasQuery.isLoading}
+                  isPending={personas.isPending}
+                  mode="host"
+                  personas={personas.libraryPersonas}
+                  startingPersonaIds={agents.startingPersonaIds}
+                  onBrowseCatalog={openUnifiedCatalog}
+                  onDeactivatePersona={(persona) => {
+                    void personas.handleSetActive(persona, false, "library");
+                  }}
+                  onDeletePersona={personas.openDelete}
+                  onDeployPersona={(persona) => {
+                    void agents.handleStartPersona(persona);
+                  }}
+                  onDuplicatePersona={personas.openDuplicate}
+                  onEditPersona={personas.openEdit}
+                  onOpenAgentProfile={(pubkey, options) =>
+                    openProfilePanel?.(pubkey, options)
+                  }
+                  onOpenPersonaProfile={(persona) =>
+                    openPersonaProfilePanel?.(persona)
+                  }
+                  onSharePersona={(persona, deployments) =>
+                    personas.openShare(persona, deployments, persona.avatarUrl)
+                  }
+                  onSnapshotPersona={(persona, deployments) =>
+                    personas.openExportSnapshot(
+                      persona,
+                      deployments,
+                      persona.avatarUrl,
+                    )
+                  }
+                />
+              )}
 
-              <TeamsSection
-                error={teamsError}
-                isLoading={teamActions.teamsQuery.isLoading}
-                isPending={
-                  teamActions.createTeamMutation.isPending ||
-                  teamActions.updateTeamMutation.isPending ||
-                  teamActions.deleteTeamMutation.isPending
-                }
-                onAddToChannel={teamActions.setTeamToAddToChannel}
-                onCreate={teamActions.openCreateDialog}
-                onDelete={teamActions.setTeamToDelete}
-                onDuplicate={teamActions.openDuplicateDialog}
-                onEdit={teamActions.openEditDialog}
-                onImport={() => snapshotImportInputRef.current?.click()}
-                onShare={teamActions.openShare}
-                personas={personas.libraryPersonas}
-                teams={teamActions.teams}
-              />
-
-              {showFleetTeam && currentOwnerPubkey ? (
-                <FleetTeamSection currentOwnerPubkey={currentOwnerPubkey} />
-              ) : null}
+              {observerMode ? (
+                <TeamsSection
+                  error={projectionError}
+                  isLoading={projection.loading || !currentOwnerPubkey}
+                  isMessagePending={openDmMutation.isPending}
+                  mode="observer"
+                  now={now}
+                  projectedOwners={projectedTeamOwners}
+                  onMessageAgent={(pubkey) => {
+                    void handleMessageAgent(pubkey);
+                  }}
+                  onOpenAgentProfile={(pubkey, options) =>
+                    openProfilePanel?.(pubkey, options)
+                  }
+                />
+              ) : (
+                <TeamsSection
+                  error={teamsError}
+                  isLoading={teamActions.teamsQuery.isLoading}
+                  isMessagePending={openDmMutation.isPending}
+                  isPending={
+                    teamActions.createTeamMutation.isPending ||
+                    teamActions.updateTeamMutation.isPending ||
+                    teamActions.deleteTeamMutation.isPending
+                  }
+                  mode="host"
+                  now={now}
+                  projectedOwners={projectedTeamOwners}
+                  onAddToChannel={teamActions.setTeamToAddToChannel}
+                  onCreate={teamActions.openCreateDialog}
+                  onDelete={teamActions.setTeamToDelete}
+                  onDuplicate={teamActions.openDuplicateDialog}
+                  onEdit={teamActions.openEditDialog}
+                  onImport={() => snapshotImportInputRef.current?.click()}
+                  onMessageAgent={(pubkey) => {
+                    void handleMessageAgent(pubkey);
+                  }}
+                  onOpenAgentProfile={(pubkey, options) =>
+                    openProfilePanel?.(pubkey, options)
+                  }
+                  onShare={teamActions.openShare}
+                  personas={personas.libraryPersonas}
+                  teams={teamActions.teams}
+                />
+              )}
             </div>
           )}
         </div>
       </div>
 
-      <AgentsDialogs
-        agents={agents}
-        aiDefaultsOpen={isAiDefaultsOpen}
-        aiDefaultsReturnFocusRef={aiDefaultsTriggerRef}
-        onAiDefaultsOpenChange={setAiDefaultsDialogOpen}
-        onOpenPersonaProfile={(persona) => openPersonaProfilePanel?.(persona)}
-        personas={personas}
-        snapshotImportInputRef={snapshotImportInputRef}
-        teamActions={teamActions}
-      />
+      {canMutate ? (
+        <AgentsDialogs
+          agents={agents}
+          aiDefaultsOpen={isAiDefaultsOpen}
+          aiDefaultsReturnFocusRef={aiDefaultsTriggerRef}
+          onAiDefaultsOpenChange={setAiDefaultsDialogOpen}
+          onOpenPersonaProfile={(persona) => openPersonaProfilePanel?.(persona)}
+          personas={personas}
+          snapshotImportInputRef={snapshotImportInputRef}
+          teamActions={teamActions}
+        />
+      ) : null}
     </>
   );
 }
@@ -409,6 +499,22 @@ function AgentsOnboardingState({ onCreate }: { onCreate: () => void }) {
           New agent
         </Button>
       </div>
+    </section>
+  );
+}
+
+function FleetRoleChoiceBanner() {
+  return (
+    <section
+      className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-5 py-5"
+      data-testid="fleet-role-choice-banner"
+    >
+      <h2 className="font-semibold">Choose this device's fleet role</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        This device has existing local agent data. Choose Host or Observer in
+        the role chooser before the roster is shown, so stale local agents are
+        never presented as the current fleet.
+      </p>
     </section>
   );
 }

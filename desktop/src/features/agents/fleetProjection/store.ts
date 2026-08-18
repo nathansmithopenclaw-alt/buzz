@@ -13,6 +13,7 @@ import type {
   FleetProjectionHost,
   FleetProjectionLifecycleState,
   FleetProjectionOwner,
+  FleetProjectionPersona,
   FleetProjectionRespondTo,
   FleetProjectionSnapshot,
 } from "./types";
@@ -61,6 +62,8 @@ type PersonaHead = Version & {
   personaId: string;
   displayName: string;
   avatarUrl: string | null;
+  runtime: string | null;
+  model: string | null;
 };
 
 type HostDeclarationHead = Version & {
@@ -184,12 +187,22 @@ function parsePersonaHead(event: RelayEvent): PersonaHead | null {
     typeof content.avatar_url === "string" && content.avatar_url.trim()
       ? content.avatar_url.trim()
       : null;
+  const runtime =
+    typeof content.runtime === "string" && content.runtime.trim()
+      ? content.runtime.trim()
+      : null;
+  const model =
+    typeof content.model === "string" && content.model.trim()
+      ? content.model.trim()
+      : null;
   if (!displayName) return null;
   return {
     ownerPubkey: normalizePubkey(event.pubkey),
     personaId,
     displayName,
     avatarUrl,
+    runtime,
+    model,
     createdAt: event.created_at,
     eventId: event.id,
   };
@@ -386,6 +399,8 @@ function buildSnapshot(
 
   const ownerPubkeys = new Set<string>();
   for (const owner of agentsByOwner.keys()) ownerPubkeys.add(owner);
+  for (const persona of personas.values())
+    ownerPubkeys.add(persona.ownerPubkey);
   for (const declaration of declarations.values())
     ownerPubkeys.add(declaration.ownerPubkey);
   for (const status of statuses.values()) ownerPubkeys.add(status.ownerPubkey);
@@ -414,10 +429,28 @@ function buildSnapshot(
             personaId: agent.personaId,
             personaDisplayName: persona?.displayName ?? null,
             personaAvatarUrl: persona?.avatarUrl ?? null,
+            personaRuntime: persona?.runtime ?? null,
+            personaModel: persona?.model ?? null,
             respondTo: agent.respondTo,
             respondToAllowlist: agent.respondToAllowlist,
           };
         });
+
+      const ownerPersonas: FleetProjectionPersona[] = [...personas.values()]
+        .filter((persona) => persona.ownerPubkey === ownerPubkey)
+        .sort((left, right) =>
+          left.displayName.localeCompare(right.displayName, undefined, {
+            sensitivity: "base",
+          }),
+        )
+        .map((persona) => ({
+          ownerPubkey,
+          personaId: persona.personaId,
+          displayName: persona.displayName,
+          avatarUrl: persona.avatarUrl,
+          runtime: persona.runtime,
+          model: persona.model,
+        }));
 
       const hostIds = new Set<string>();
       for (const declaration of declarations.values()) {
@@ -456,7 +489,7 @@ function buildSnapshot(
           return time !== 0 ? time : left.hostId.localeCompare(right.hostId);
         });
 
-      return { ownerPubkey, agents, hosts };
+      return { ownerPubkey, agents, personas: ownerPersonas, hosts };
     });
 
   return { owners, loading, errorMessage };

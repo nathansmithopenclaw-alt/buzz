@@ -51,6 +51,10 @@ test("projection cache joins definitions and host liveness without runnable fiel
       content: {
         display_name: "Review Agent",
         avatar_url: "https://example.test/reviewer.png",
+        runtime: "codex",
+        model: "gpt-5",
+        system_prompt: "must-not-survive-persona",
+        env_vars: { SECRET: "must-not-survive-persona" },
       },
     }),
     event({
@@ -79,6 +83,18 @@ test("projection cache joins definitions and host liveness without runnable fiel
   const snapshot = cache.getSnapshot();
   assert.equal(snapshot.loading, false);
   assert.equal(snapshot.owners[0].agents[0].personaDisplayName, "Review Agent");
+  assert.equal(snapshot.owners[0].agents[0].personaRuntime, "codex");
+  assert.equal(snapshot.owners[0].agents[0].personaModel, "gpt-5");
+  assert.deepEqual(snapshot.owners[0].personas, [
+    {
+      ownerPubkey: OWNER,
+      personaId: PERSONA,
+      displayName: "Review Agent",
+      avatarUrl: "https://example.test/reviewer.png",
+      runtime: "codex",
+      model: "gpt-5",
+    },
+  ]);
   assert.equal(snapshot.owners[0].hosts[0].status.agents[0].state, "running");
   const serialized = JSON.stringify(snapshot);
   for (const forbidden of [
@@ -91,6 +107,26 @@ test("projection cache joins definitions and host liveness without runnable fiel
   ]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
+});
+
+test("standalone 30175 definitions remain visible without a 30177 instance", () => {
+  const cache = createFleetProjectionCache();
+  cache.reset([OWNER], false);
+  cache.ingest(
+    event({
+      kind: 30175,
+      tags: [["d", "standalone"]],
+      content: {
+        display_name: "Standalone definition",
+        avatar_url: null,
+        runtime: "claude",
+        model: "claude-sonnet",
+      },
+    }),
+  );
+  const owner = cache.getSnapshot().owners[0];
+  assert.equal(owner.agents.length, 0);
+  assert.equal(owner.personas[0].displayName, "Standalone definition");
 });
 
 test("coordinate tombstones remove heads and only a later event recreates them", () => {

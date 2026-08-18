@@ -7,6 +7,8 @@ import {
 } from "lucide-react";
 
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import { fleetAgentHost } from "@/features/agents/fleetProjection/selectors";
+import type { FleetProjectionOwnerPresentation } from "@/features/agents/fleetProjection/useFleetProjectionPresentation";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useUserProfileQuery } from "@/features/profile/hooks";
@@ -25,12 +27,15 @@ import { SectionHeader } from "@/shared/ui/PageHeader";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { IDENTITY_CARD_GRID_CLASS } from "./agentCardLayout";
+import { fleetHostLabel } from "./fleetProjectionUi";
+import { ProjectedFleetAgentCard } from "./ProjectedFleetAgentCard";
 import {
   resolveFleetAgentIdentity,
   resolveFleetAgentRuntimeLabel,
 } from "./agentFleetIdentity";
 
-type FleetSectionProps = {
+type HostFleetSectionProps = {
+  mode: "host";
   agents: ManagedAgent[];
   defaultModel: string;
   error: Error | null;
@@ -50,22 +55,40 @@ type FleetSectionProps = {
   onStopAgent: (pubkey: string) => void;
 };
 
-export function FleetSection({
-  agents,
-  defaultModel,
-  error,
-  isActionPending,
-  isLoading,
-  isMessagePending,
-  personasById,
-  restartingAgentPubkey,
-  startingAgentPubkey,
-  onMessageAgent,
-  onOpenAgentProfile,
-  onRestartAgent,
-  onStartAgent,
-  onStopAgent,
-}: FleetSectionProps) {
+type ObserverFleetSectionProps = {
+  mode: "observer";
+  error: Error | null;
+  isLoading: boolean;
+  isMessagePending: boolean;
+  now: number;
+  owner: FleetProjectionOwnerPresentation | null;
+  onMessageAgent: (pubkey: string) => void;
+  onOpenAgentProfile: (
+    pubkey: string,
+    options?: ProfilePanelOpenOptions,
+  ) => void;
+};
+
+type FleetSectionProps = HostFleetSectionProps | ObserverFleetSectionProps;
+
+export function FleetSection(props: FleetSectionProps) {
+  if (props.mode === "observer") return <ObserverFleetSection {...props} />;
+  const {
+    agents,
+    defaultModel,
+    error,
+    isActionPending,
+    isLoading,
+    isMessagePending,
+    personasById,
+    restartingAgentPubkey,
+    startingAgentPubkey,
+    onMessageAgent,
+    onOpenAgentProfile,
+    onRestartAgent,
+    onStartAgent,
+    onStopAgent,
+  } = props;
   return (
     <section className="relative space-y-4" data-testid="agents-fleet">
       <SectionHeader
@@ -107,6 +130,92 @@ export function FleetSection({
           ))}
         </div>
       ) : null}
+
+      {error ? (
+        <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {error.message}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function ObserverFleetSection({
+  error,
+  isLoading,
+  isMessagePending,
+  now,
+  owner,
+  onMessageAgent,
+  onOpenAgentProfile,
+}: ObserverFleetSectionProps) {
+  const agents = owner?.agents ?? [];
+  const showHostGrouping = (owner?.hosts.length ?? 0) > 1;
+  const groups = new Map<
+    string,
+    {
+      label: string;
+      agents: FleetProjectionOwnerPresentation["agents"][number][];
+    }
+  >();
+  for (const agent of agents) {
+    const host = owner ? fleetAgentHost(owner, agent.agentPubkey) : null;
+    const key = showHostGrouping ? (host?.hostId ?? "unreported") : "fleet";
+    const group = groups.get(key) ?? {
+      label: host ? fleetHostLabel(host) : "Host not reported",
+      agents: [],
+    };
+    group.agents.push(agent);
+    groups.set(key, group);
+  }
+
+  return (
+    <section className="relative space-y-4" data-testid="agents-fleet">
+      <SectionHeader
+        description="Relay-published agent instances across your fleet."
+        title="Fleet"
+      />
+
+      {isLoading ? <FleetLoadingSkeleton /> : null}
+
+      {!isLoading && !error && agents.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-border/80 px-5 py-6">
+          <p className="font-medium">No agent instances are being published</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Agent instances appear here when a fleet host publishes them.
+          </p>
+        </div>
+      ) : null}
+
+      {!isLoading && owner && agents.length > 0
+        ? [...groups.entries()].map(([key, group]) => (
+            <div className="space-y-3" key={key}>
+              {showHostGrouping ? (
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-medium">{group.label}</h3>
+                  <span className="text-xs text-muted-foreground">
+                    {group.agents.length} agent
+                    {group.agents.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+              ) : null}
+              <div className={IDENTITY_CARD_GRID_CLASS}>
+                {group.agents.map((agent) => (
+                  <ProjectedFleetAgentCard
+                    agent={agent}
+                    isMessagePending={isMessagePending}
+                    key={agent.agentPubkey}
+                    now={now}
+                    owner={owner}
+                    showHost={showHostGrouping}
+                    onMessageAgent={onMessageAgent}
+                    onOpenAgentProfile={onOpenAgentProfile}
+                  />
+                ))}
+              </div>
+            </div>
+          ))
+        : null}
 
       {error ? (
         <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">

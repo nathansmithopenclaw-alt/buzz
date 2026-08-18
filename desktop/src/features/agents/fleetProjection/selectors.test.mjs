@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   fleetAgentLiveness,
+  fleetAgentHost,
+  fleetAgentObserverStatus,
   fleetHostIsFresh,
   presentFleetProjectionAgent,
 } from "./selectors.ts";
@@ -17,6 +19,8 @@ const agent = {
   personaId: "reviewer",
   personaDisplayName: "Persona name",
   personaAvatarUrl: "https://example.test/persona.png",
+  personaRuntime: "codex",
+  personaModel: "gpt-5",
   respondTo: "owner-only",
   respondToAllowlist: [],
 };
@@ -60,6 +64,7 @@ test("90 seconds is fresh; 91 seconds greys agent state as unknown", () => {
   const owner = {
     ownerPubkey: OWNER,
     agents: [agent],
+    personas: [],
     hosts: [
       {
         ownerPubkey: OWNER,
@@ -87,4 +92,46 @@ test("90 seconds is fresh; 91 seconds greys agent state as unknown", () => {
     since: null,
     stale: true,
   });
+});
+
+test("Observer vocabulary derives live, quiet, and host-unreachable without inventing a host", () => {
+  const host = {
+    ownerPubkey: OWNER,
+    hostId: "018f42c2-9bc2-7dc1-a41e-2f77769f0142",
+    name: "Build host",
+    platform: "macos",
+    declaredAt: 1,
+    status: {
+      seq: 1,
+      timestamp: 1_000,
+      agents: [{ pubkey: AGENT, state: "running", since: 950 }],
+    },
+  };
+  const owner = {
+    ownerPubkey: OWNER,
+    agents: [agent],
+    personas: [],
+    hosts: [host],
+  };
+  assert.equal(fleetAgentHost(owner, AGENT), host);
+  assert.deepEqual(fleetAgentObserverStatus(owner, AGENT, 1_090), {
+    state: "live",
+    lastSeen: 1_000,
+    host,
+  });
+  host.status.agents[0].state = "stopped";
+  assert.deepEqual(fleetAgentObserverStatus(owner, AGENT, 1_090), {
+    state: "quiet",
+    lastSeen: 1_000,
+    host,
+  });
+  assert.deepEqual(fleetAgentObserverStatus(owner, AGENT, 1_091), {
+    state: "host-unreachable",
+    lastSeen: 1_000,
+    host,
+  });
+  assert.deepEqual(
+    fleetAgentObserverStatus({ ...owner, hosts: [] }, AGENT, 1_090),
+    { state: "quiet", lastSeen: null, host: null },
+  );
 });
