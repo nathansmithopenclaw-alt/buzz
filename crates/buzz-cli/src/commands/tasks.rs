@@ -11,6 +11,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::client::{normalize_write_response, BuzzClient};
+use crate::commands::messages::{event_mention_pubkeys, prepare_message_mentions};
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin};
 use crate::TasksCmd;
@@ -180,13 +181,31 @@ pub(crate) async fn resolve_assignee(
     }
 }
 
-fn print_write_with_task(resp: &str, task_id: Uuid, status: TaskStatus) {
+fn write_with_task_output(
+    resp: &str,
+    task_id: Uuid,
+    status: TaskStatus,
+    mention_pubkeys: &[String],
+) -> serde_json::Value {
     let normalized = normalize_write_response(resp);
     let mut value = serde_json::from_str::<serde_json::Value>(&normalized)
         .unwrap_or_else(|_| json!({ "response": resp }));
     value["task_id"] = json!(task_id);
     value["status"] = json!(status);
-    println!("{value}");
+    value["mention_pubkeys"] = json!(mention_pubkeys);
+    value
+}
+
+fn print_write_with_task(
+    resp: &str,
+    task_id: Uuid,
+    status: TaskStatus,
+    mention_pubkeys: &[String],
+) {
+    println!(
+        "{}",
+        write_with_task_output(resp, task_id, status, mention_pubkeys)
+    );
 }
 
 fn upgrade_task_envelope_for_write(envelope: &mut TaskEnvelope) {
@@ -204,6 +223,7 @@ async fn assign(
     tracker_issue_id: Option<String>,
     dispatch_request_id: Option<String>,
     content: String,
+    mentions: Vec<String>,
 ) -> Result<(), CliError> {
     let channel = parse_uuid(&channel)?;
     let assignee = resolve_assignee(client, channel, &assignee).await?;
@@ -240,17 +260,27 @@ async fn assign(
     }
     .validate()
     .map_err(|error| sdk_error("invalid task envelope", error))?;
+    let mention_pubkeys = prepare_message_mentions(
+        client,
+        &channel.to_string(),
+        &content,
+        &mentions,
+        std::slice::from_ref(&assignee),
+    )
+    .await?;
+    let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
     let builder = buzz_sdk::task_envelope::build_task_message(
         channel,
         &content,
         &envelope,
         None,
-        &[assignee.as_str()],
+        &mention_refs,
     )
     .map_err(|error| sdk_error("build task assignment", error))?;
     let event = client.sign_event(builder)?;
+    let emitted_mentions = event_mention_pubkeys(&event);
     let resp = client.submit_event(event).await?;
-    print_write_with_task(&resp, envelope.task_id, envelope.status);
+    print_write_with_task(&resp, envelope.task_id, envelope.status, &emitted_mentions);
     Ok(())
 }
 
@@ -262,6 +292,24 @@ struct TaskUpdateInput {
     evidence: Option<String>,
     note: Option<String>,
     content: Option<String>,
+    mentions: Vec<String>,
+}
+
+fn counterparty_mentions(author: &str, assigner: &str, assignee: &str) -> Vec<String> {
+    let counterparties = if author == assigner {
+        [Some(assignee), None]
+    } else if author == assignee {
+        [Some(assigner), None]
+    } else {
+        [Some(assigner), Some(assignee)]
+    };
+    let mut mentions = Vec::new();
+    for pubkey in counterparties.into_iter().flatten() {
+        if !mentions.iter().any(|existing| existing == pubkey) {
+            mentions.push(pubkey.to_string());
+        }
+    }
+    mentions
 }
 
 async fn update(client: &BuzzClient, input: TaskUpdateInput) -> Result<(), CliError> {
@@ -273,6 +321,7 @@ async fn update(client: &BuzzClient, input: TaskUpdateInput) -> Result<(), CliEr
         evidence,
         note,
         content,
+        mentions,
     } = input;
     let task_id = Uuid::parse_str(&task)
         .map_err(|_| CliError::Usage(format!("invalid task UUID: {task}")))?;
@@ -322,12 +371,28 @@ async fn update(client: &BuzzClient, input: TaskUpdateInput) -> Result<(), CliEr
         Some(content) => read_or_stdin(&content)?,
         None => format!("Task {}: {}.", envelope.title, envelope.status),
     };
-    let builder =
-        buzz_sdk::task_envelope::build_task_message(channel, &human, &envelope, None, &[])
-            .map_err(|error| sdk_error("build task update", error))?;
+    let counterparties = counterparty_mentions(&author, &envelope.assigner, &envelope.assignee);
+    let mention_pubkeys = prepare_message_mentions(
+        client,
+        &channel.to_string(),
+        &human,
+        &mentions,
+        &counterparties,
+    )
+    .await?;
+    let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
+    let builder = buzz_sdk::task_envelope::build_task_message(
+        channel,
+        &human,
+        &envelope,
+        None,
+        &mention_refs,
+    )
+    .map_err(|error| sdk_error("build task update", error))?;
     let event = client.sign_event(builder)?;
+    let emitted_mentions = event_mention_pubkeys(&event);
     let resp = client.submit_event(event).await?;
-    print_write_with_task(&resp, task_id, status);
+    print_write_with_task(&resp, task_id, status, &emitted_mentions);
     Ok(())
 }
 
@@ -400,6 +465,7 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
             tracker_issue_id,
             dispatch_request_id,
             content,
+            mentions,
         } => {
             assign(
                 client,
@@ -411,6 +477,7 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
                 tracker_issue_id,
                 dispatch_request_id,
                 content,
+                mentions,
             )
             .await
         }
@@ -422,6 +489,7 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
             evidence,
             note,
             content,
+            mentions,
         } => {
             update(
                 client,
@@ -433,6 +501,7 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
                     evidence,
                     note,
                     content,
+                    mentions,
                 },
             )
             .await
@@ -448,9 +517,11 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
 
 #[cfg(test)]
 mod tests {
+    use buzz_sdk::mentions::MENTION_CAP;
     use nostr::Keys;
 
     use super::*;
+    use crate::commands::messages::merge_message_mentions;
 
     fn task_envelope(version: u8) -> TaskEnvelope {
         TaskEnvelope {
@@ -492,6 +563,76 @@ mod tests {
         assert!(parse_status("assigned", false).is_err());
         assert!(parse_status("complete", false).is_err());
         assert_eq!(parse_status("done", false).unwrap(), TaskStatus::Done);
+    }
+
+    #[test]
+    fn update_counterparty_matrix_notifies_the_other_task_party() {
+        let assigner = "assigner";
+        let assignee = "assignee";
+
+        assert_eq!(
+            counterparty_mentions(assigner, assigner, assignee),
+            vec![assignee]
+        );
+        assert_eq!(
+            counterparty_mentions(assignee, assigner, assignee),
+            vec![assigner]
+        );
+        assert_eq!(
+            counterparty_mentions("reviewer", assigner, assignee),
+            vec![assigner, assignee]
+        );
+    }
+
+    #[test]
+    fn task_counterparties_are_first_deduplicated_and_count_toward_mention_cap() {
+        let counterparties = vec!["assigner".to_string(), "assignee".to_string()];
+        let explicit = vec!["assignee".to_string(), "explicit".to_string()];
+        let resolved = vec!["resolved".to_string()];
+        assert_eq!(
+            merge_message_mentions(&counterparties, &explicit, &[], &resolved).unwrap(),
+            vec!["assigner", "assignee", "explicit", "resolved"]
+        );
+
+        let too_many_resolved: Vec<String> = (0..MENTION_CAP)
+            .map(|index| format!("resolved-{index}"))
+            .collect();
+        assert!(merge_message_mentions(&counterparties, &[], &[], &too_many_resolved,).is_err());
+    }
+
+    #[test]
+    fn task_success_json_reports_mentions_from_the_signed_event() {
+        let task_id = Uuid::parse_str("806e3534-99d8-4664-90a4-303ab1f28aea").unwrap();
+        let mentions = vec!["assignee".to_string(), "assigner".to_string()];
+        let output = write_with_task_output(
+            r#"{"accepted":true,"event_id":"event","message":""}"#,
+            task_id,
+            TaskStatus::Done,
+            &mentions,
+        );
+
+        assert_eq!(output["task_id"], json!(task_id));
+        assert_eq!(output["status"], json!(TaskStatus::Done));
+        assert_eq!(output["mention_pubkeys"], json!(mentions));
+    }
+
+    #[test]
+    fn task_builder_emits_deduplicated_mentions_as_p_tags() {
+        let first = Keys::generate().public_key().to_hex();
+        let second = Keys::generate().public_key().to_hex();
+        let refs = [first.as_str(), second.as_str()];
+        let event = buzz_sdk::task_envelope::build_task_message(
+            Uuid::nil(),
+            "Task lifecycle update",
+            &task_envelope(TASK_ENVELOPE_VERSION),
+            None,
+            &refs,
+        )
+        .unwrap()
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+
+        assert_eq!(event_mention_pubkeys(&event), vec![first, second]);
     }
 
     #[test]
