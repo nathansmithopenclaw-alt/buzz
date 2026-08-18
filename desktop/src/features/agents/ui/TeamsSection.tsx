@@ -20,7 +20,7 @@ import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { SectionHeader } from "@/shared/ui/PageHeader";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { TeamIdentityCard } from "./TeamIdentityCard";
-import { IDENTITY_CARD_GRID_CLASS } from "./UnifiedAgentsSection";
+import { IDENTITY_CARD_GRID_CLASS } from "./agentCardLayout";
 
 const TEAM_CARD_COLUMN_CLASS = "w-full";
 
@@ -57,8 +57,8 @@ export function TeamsSection({
     <section className="relative space-y-4" data-testid="agents-library-teams">
       <div className={TEAM_CARD_COLUMN_CLASS}>
         <SectionHeader
-          title="Agent teams"
-          description="Group agents that you can add to a channel together."
+          title="Teams"
+          description="Deploy groups of agents to a channel together."
         />
       </div>
 

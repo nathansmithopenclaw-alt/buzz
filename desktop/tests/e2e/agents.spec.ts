@@ -391,7 +391,7 @@ test("agent avatar emoji picker scrolls inside its popover", async ({
     .toBeGreaterThan(before);
 });
 
-test("the new agent card opens unified create, catalog, and import flows", async ({
+test("the host page orders Fleet, Library, and Teams and keeps create in the header", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -413,41 +413,33 @@ test("the new agent card opens unified create, catalog, and import flows", async
   await page.getByTestId("open-agents-view").click();
 
   const newAgentCard = page.getByTestId("new-agent-card");
-  await expect(newAgentCard).toHaveText("");
+  await expect(newAgentCard).toHaveText("New agent");
   await expect(newAgentCard.locator(".lucide-plus")).toBeVisible();
 
-  const agentCards = page.locator(
-    '[data-testid^="persona-agent-row-"], [data-testid="new-agent-card"]',
+  const orderedSections = await page
+    .getByTestId("agents-page-content")
+    .locator("section[data-testid]")
+    .evaluateAll((sections) =>
+      sections
+        .map((section) => section.getAttribute("data-testid"))
+        .filter((testId) =>
+          [
+            "agents-fleet",
+            "agents-library-personas",
+            "agents-library-teams",
+          ].includes(testId ?? ""),
+        ),
+    );
+  expect(orderedSections).toEqual([
+    "agents-fleet",
+    "agents-library-personas",
+    "agents-library-teams",
+  ]);
+  await expect(page.getByTestId("agents-fleet")).toContainText(
+    "No agent instances yet",
   );
-  await expect(agentCards.first()).toBeVisible();
-  const headerBox = await page
-    .getByRole("heading", { level: 1, name: "Agents" })
-    .locator("../..")
-    .boundingBox();
-  const cardBoxes = await agentCards.evaluateAll((cards) =>
-    cards.map((card) => {
-      const box = card.getBoundingClientRect();
-      return { left: box.left, right: box.right, top: box.top };
-    }),
-  );
-  const firstRowTop = Math.min(...cardBoxes.map(({ top }) => top));
-  expect(
-    cardBoxes.filter(({ top }) => Math.abs(top - firstRowTop) < 1),
-  ).toHaveLength(5);
-  const rightmostFirstRowCard = Math.max(
-    ...cardBoxes
-      .filter(({ top }) => Math.abs(top - firstRowTop) < 1)
-      .map(({ right }) => right),
-  );
-  const leftmostFirstRowCard = Math.min(
-    ...cardBoxes
-      .filter(({ top }) => Math.abs(top - firstRowTop) < 1)
-      .map(({ left }) => left),
-  );
-  expect(headerBox).not.toBeNull();
-  expect(Math.abs((headerBox?.x ?? 0) - leftmostFirstRowCard)).toBeLessThan(1);
-  expect(rightmostFirstRowCard).toBeLessThanOrEqual(
-    (headerBox?.x ?? 0) + (headerBox?.width ?? 0) + 1,
+  await expect(page.locator('[data-testid^="persona-agent-row-"]')).toHaveCount(
+    5,
   );
 
   await newAgentCard.click();
@@ -478,6 +470,60 @@ test("the new agent card opens unified create, catalog, and import flows", async
   await expect(page.getByTestId("agent-snapshot-import-dialog")).toBeVisible();
 });
 
+test("the Host IA stays local when Fleet Visibility is enabled", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    fleetVisibilitySettings: {
+      enabled: true,
+      hostId: "host-a1",
+      hostName: "A1 proof host",
+      needsChoice: false,
+      role: "host",
+    },
+    personas: [
+      {
+        id: "custom:fv-host-proof",
+        displayName: "Host proof agent",
+        systemPrompt: "Prove the Host IA remains local.",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  await expect(page.getByTestId("agents-fleet")).toBeVisible();
+  await expect(page.getByTestId("agents-library-personas")).toContainText(
+    "Host proof agent",
+  );
+  await expect(page.getByTestId("agents-library-teams")).toBeVisible();
+  await expect(
+    page.getByText("View and message the fleet hosted on your other device."),
+  ).toHaveCount(0);
+});
+
+test("a fresh host shows one intentional onboarding state", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    activePersonaIds: [],
+    managedAgents: [],
+    personas: [],
+    teams: [],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const onboarding = page.getByTestId("agents-empty-state");
+  await expect(onboarding).toContainText("Create your first agent");
+  await expect(
+    onboarding.getByRole("button", { name: "New agent" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("agents-fleet")).toHaveCount(0);
+  await expect(page.getByTestId("agents-library-personas")).toHaveCount(0);
+  await expect(page.getByTestId("agents-library-teams")).toHaveCount(0);
+});
+
 test("embedded create keeps its draft when discard is cancelled", async ({
   page,
 }) => {
@@ -504,6 +550,15 @@ test("embedded create keeps its draft when discard is cancelled", async ({
 });
 
 test("the new team card offers create and import", async ({ page }) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:team-builder",
+        displayName: "Team builder",
+        systemPrompt: "Build teams.",
+      },
+    ],
+  });
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
@@ -520,7 +575,7 @@ test("the new team card offers create and import", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("team cards follow the agents grid alignment at compact widths", async ({
+test("library cards use a denser shelf grammar at compact widths", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -546,35 +601,21 @@ test("team cards follow the agents grid alignment at compact widths", async ({
   const firstAgentCard = page.getByTestId(
     "persona-agent-row-custom:team-layout",
   );
-  const firstTeamCard = page.getByTestId("team-card-team-layout");
   const agentGrid = firstAgentCard.locator("xpath=..");
-  const teamGrid = firstTeamCard.locator("xpath=..");
   const firstAgentGridCard = agentGrid.locator(":scope > *").first();
-  const firstTeamGridCard = teamGrid.locator(":scope > *").first();
 
   await agentsContent.evaluate((element) => {
     (element as HTMLElement).style.width = "650px";
   });
   const wideAgentBox = await firstAgentGridCard.boundingBox();
-  const wideTeamBox = await firstTeamGridCard.boundingBox();
   expect(wideAgentBox).not.toBeNull();
-  expect(wideTeamBox).not.toBeNull();
-  expect(Math.abs((wideAgentBox?.x ?? 0) - (wideTeamBox?.x ?? 0))).toBeLessThan(
-    1,
-  );
+  await expect(agentGrid.locator(":scope > *")).toHaveCount(1);
 
   await agentsContent.evaluate((element) => {
     (element as HTMLElement).style.width = "600px";
   });
   const compactAgentBox = await firstAgentGridCard.boundingBox();
-  const compactTeamBox = await firstTeamGridCard.boundingBox();
-  expect(compactAgentBox?.width ?? 0).toBeLessThan(wideAgentBox?.width ?? 0);
-  expect(
-    Math.abs((compactAgentBox?.width ?? 0) - (compactTeamBox?.width ?? 0)),
-  ).toBeLessThan(1);
-  expect(
-    Math.abs((compactAgentBox?.x ?? 0) - (compactTeamBox?.x ?? 0)),
-  ).toBeLessThan(1);
+  expect(compactAgentBox?.width ?? 0).toBeGreaterThan(wideAgentBox?.width ?? 0);
 });
 
 test("team cards use the thread-style overlapping avatar stack", async ({
@@ -651,7 +692,7 @@ test("team cards use the thread-style overlapping avatar stack", async ({
   ]);
 });
 
-test("agent defaults stays in the header without an actions menu", async ({
+test("agent defaults stays in the labeled header overflow", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -684,14 +725,15 @@ test("agent defaults stays in the header without an actions menu", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
-  await expect(page.getByTestId("agent-header-actions-button")).toHaveCount(0);
+  const actionsMenu = page.getByTestId("agent-actions-menu-trigger");
+  await actionsMenu.click();
   await expect(
-    page.getByRole("menuitem", { name: "Import agent" }),
-  ).toHaveCount(0);
-
-  const defaultsButton = page.getByTestId("agent-defaults-button");
-  await expect(defaultsButton).toHaveText("Agent defaults");
-  await defaultsButton.click();
+    page.getByRole("menuitem", { name: "Agent defaults" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Import snapshot" }),
+  ).toBeVisible();
+  await page.getByRole("menuitem", { name: "Agent defaults" }).click();
   const defaultsDialog = page.getByTestId("agent-ai-defaults-dialog");
   await expect(defaultsDialog).toBeVisible();
   await expect(
@@ -708,20 +750,20 @@ test("agent defaults stays in the header without an actions menu", async ({
   );
   await page.keyboard.press("Escape");
   await expect(defaultsDialog).toHaveCount(0);
+  await expect(actionsMenu).toBeFocused();
 });
 
 test("unconfigured agent defaults use the setup label", async ({ page }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
-  await expect(page.getByTestId("agent-defaults-button")).toHaveText(
-    "Set agent defaults",
-  );
+  await page.getByTestId("agent-actions-menu-trigger").click();
+  await expect(
+    page.getByRole("menuitem", { name: "Set agent defaults" }),
+  ).toBeVisible();
 });
 
-test("moves agent actions into an overflow menu in a narrow view", async ({
-  page,
-}) => {
+test("keeps agent actions in one overflow at every width", async ({ page }) => {
   await installMockBridge(page, {
     personas: [
       {
@@ -746,33 +788,33 @@ test("moves agent actions into an overflow menu in a narrow view", async ({
     (element as HTMLElement).style.width = "650px";
   });
 
-  await expect(page.getByTestId("agent-defaults-button")).toBeVisible();
+  const actionsMenu = page.getByTestId("agent-actions-menu-trigger");
+  await expect(actionsMenu).toBeVisible();
   await expect(
-    page.getByText("Set up and manage your agents.", { exact: true }),
+    page.getByText("Agents run on this device.", { exact: true }),
   ).toHaveJSProperty("scrollHeight", 24);
 
   await page.getByTestId("agents-page-content").evaluate((element) => {
     (element as HTMLElement).style.width = "600px";
   });
-  await expect(page.getByTestId("agent-defaults-button")).toBeHidden();
-  await page.getByTestId("agent-actions-menu-trigger").click();
+  await expect(actionsMenu).toBeVisible();
+  await actionsMenu.click();
   await expect(
     page.getByRole("menuitem", { name: "Set agent defaults" }),
   ).toBeVisible();
   await expect(
     page.getByRole("menuitem", { name: "Stop running agents" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Import snapshot" }),
+  ).toBeVisible();
 
   await page.getByRole("menuitem", { name: "Set agent defaults" }).click();
   await expect(page.getByTestId("agent-ai-defaults-dialog")).toBeVisible();
 
-  await page.getByTestId("agents-page-content").evaluate((element) => {
-    (element as HTMLElement).style.width = "650px";
-  });
-  await expect(page.getByTestId("agent-defaults-button")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("agent-ai-defaults-dialog")).toHaveCount(0);
-  await expect(page.getByTestId("agent-defaults-button")).toBeFocused();
+  await expect(actionsMenu).toBeFocused();
 });
 
 test("agent catalog chooser order stays stable when selection changes", async ({
@@ -972,6 +1014,7 @@ test("custom personas share with people and keep export separate", async ({
     "Edit",
     "Duplicate",
     "Share",
+    "Export snapshot",
     "Delete",
   ]);
   await page.getByRole("menuitem", { name: "Share" }).click();
@@ -2002,7 +2045,10 @@ test("one share level selector drives both the link and send paths", async ({
   await gotoApp(page);
 
   await page.getByTestId("open-agents-view").click();
-  await page.getByLabel("Open actions for Animation Auditor").click();
+  await page
+    .getByTestId("persona-agent-row-custom:animation-auditor")
+    .getByLabel("Open actions for Animation Auditor")
+    .click();
   await page.getByRole("menuitem", { name: "Share" }).click();
 
   const shareDialog = page.getByTestId("persona-share-dialog");
@@ -2244,6 +2290,145 @@ test("one share level selector drives both the link and send paths", async ({
   );
 });
 
+test("multi-deployment snapshot export requires an explicit memory source", async ({
+  page,
+}) => {
+  const personaId = "custom:multi-snapshot";
+  const firstPubkey = TEST_IDENTITIES.alice.pubkey;
+  const secondPubkey = TEST_IDENTITIES.charlie.pubkey;
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: personaId,
+        displayName: "Snapshot Director",
+        systemPrompt: "You direct snapshots.",
+      },
+    ],
+    managedAgents: [
+      {
+        name: "Snapshot Director",
+        personaId,
+        pubkey: firstPubkey,
+        status: "stopped",
+      },
+      {
+        name: "Snapshot Director",
+        personaId,
+        pubkey: secondPubkey,
+        status: "stopped",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByTestId(`persona-agent-row-${personaId}`)
+    .getByLabel("Open actions for Snapshot Director")
+    .click();
+  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+
+  const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
+  const source = exportDialog.getByTestId(
+    "agent-snapshot-memory-source-trigger",
+  );
+  await expect(source).toHaveText("Definition only");
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-memory-value"),
+  ).toHaveText("Agent only");
+
+  await source.click();
+  await expect(page.getByRole("menuitemradio")).toHaveText([
+    "Definition only",
+    `Snapshot Director · ${firstPubkey.slice(0, 6)}…${firstPubkey.slice(-6)}`,
+    `Snapshot Director · ${secondPubkey.slice(0, 6)}…${secondPubkey.slice(-6)}`,
+  ]);
+  await page
+    .getByRole("menuitemradio", {
+      name: `Snapshot Director · ${secondPubkey.slice(0, 6)}…${secondPubkey.slice(-6)}`,
+    })
+    .click();
+  await expect(source).toHaveText(
+    `Snapshot Director · ${secondPubkey.slice(0, 6)}…${secondPubkey.slice(-6)}`,
+  );
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-memory-trigger"),
+  ).toBeVisible();
+});
+
+test("changing a multi-deployment share source keeps recipients and resets memory level", async ({
+  page,
+}) => {
+  const personaId = "custom:multi-share";
+  const firstPubkey = TEST_IDENTITIES.alice.pubkey;
+  const secondPubkey = TEST_IDENTITIES.bob.pubkey;
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: personaId,
+        displayName: "Shared Director",
+        systemPrompt: "You direct shared work.",
+      },
+    ],
+    managedAgents: [
+      {
+        name: "Shared Director",
+        personaId,
+        pubkey: firstPubkey,
+        status: "stopped",
+      },
+      {
+        name: "Shared Director",
+        personaId,
+        pubkey: secondPubkey,
+        status: "stopped",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        displayName: "Charlie",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByTestId(`persona-agent-row-${personaId}`)
+    .getByLabel("Open actions for Shared Director")
+    .click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+
+  const source = page.getByTestId("persona-share-memory-source-trigger");
+  await source.click();
+  await page
+    .getByRole("menuitemradio", {
+      name: `Shared Director · ${firstPubkey.slice(0, 6)}…${firstPubkey.slice(-6)}`,
+    })
+    .click();
+  await expect(page.getByRole("menuitemradio")).toHaveCount(0);
+  await selectCharlieRecipient(page);
+  const charlieChip = page.getByTestId(
+    `persona-share-recipient-chip-${TEST_IDENTITIES.charlie.pubkey}`,
+  );
+  await expect(charlieChip).toBeVisible();
+
+  const shareLevel = page.getByLabel("What to include", { exact: true });
+  await shareLevel.click();
+  await page
+    .getByRole("menuitemradio", { name: "Agent + core memory" })
+    .click();
+  await expect(shareLevel).toHaveText("Agent + core memory");
+
+  await source.click();
+  await page
+    .getByRole("menuitemradio", {
+      name: `Shared Director · ${secondPubkey.slice(0, 6)}…${secondPubkey.slice(-6)}`,
+    })
+    .click();
+  await expect(charlieChip).toBeVisible();
+  await expect(shareLevel).toHaveText("Agent only");
+});
+
 test("people sharing excludes the moderation recipient", async ({ page }) => {
   await openSafetyShareDialog(page, {
     relaySelf: TEST_IDENTITIES.charlie.pubkey,
@@ -2417,7 +2602,10 @@ test("export from share aligns selections and animates memory details", async ({
   await gotoApp(page);
 
   await page.getByTestId("open-agents-view").click();
-  await page.getByLabel("Open actions for Animation Auditor").click();
+  await page
+    .getByTestId("persona-agent-row-custom:animation-auditor")
+    .getByLabel("Open actions for Animation Auditor")
+    .click();
   await page.getByRole("menuitem", { name: "Share" }).click();
   await page.getByTestId("persona-share-export").click();
 
@@ -2484,6 +2672,7 @@ test("team-managed personas do not expose editable actions", async ({
   await expect(page.getByRole("menuitem")).toHaveText([
     "Duplicate",
     "Share",
+    "Export snapshot",
     "Managed by team",
   ]);
   await expect(page.getByRole("menuitem", { name: "Edit" })).toHaveCount(0);
@@ -2647,7 +2836,7 @@ test("start pill morphs into the running dot without remounting the avatar", asy
   ).toBe(true);
 });
 
-test("duplicate instances move from the agents gallery into the agent profile", async ({
+test("every instance stays in Fleet and every deployment is linked from Library", async ({
   page,
 }) => {
   const personaId = "custom:duplicate-auditor";
@@ -2679,26 +2868,97 @@ test("duplicate instances move from the agents gallery into the agent profile", 
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
-  await expect(page.getByText("Additional running agents")).toHaveCount(0);
+  await expect(page.getByText("Unknown agents")).toHaveCount(0);
+  await expect(page.getByText("Custom agents")).toHaveCount(0);
+  await expect(
+    page.getByTestId(`managed-agent-${primaryPubkey}`),
+  ).toBeVisible();
   await expect(
     page.getByTestId(`managed-agent-${additionalPubkey}`),
-  ).toHaveCount(0);
-
-  await page.getByTestId(`persona-agent-row-${personaId}`).click();
-  await page.getByTestId("user-profile-tab-runtime").click();
-  await page.getByTestId("user-profile-instances").click();
-  await page.getByTestId(`user-profile-instance-${additionalPubkey}`).click();
-
-  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
-  await expect(page.getByTestId("user-profile-delete-agent-row")).toBeVisible();
-  await expect(
-    page.getByTestId("user-profile-settings-menu-trigger"),
-  ).toHaveCount(0);
-  await expect(
-    page.getByTestId("user-profile-duplicate-agent-row"),
   ).toBeVisible();
-  await expect(page.getByTestId("user-profile-export-agent-row")).toBeVisible();
+  const template = page.getByTestId(`persona-agent-row-${personaId}`);
+  await expect(template).toContainText("Deployed as →");
   await expect(
-    page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
-  ).toHaveCount(0);
+    template.locator('[data-testid^="persona-deployment-"]'),
+  ).toHaveCount(2);
+  await page
+    .getByTestId(`persona-deployment-${personaId}-${additionalPubkey}`)
+    .click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+});
+
+test("unlinked and missing-definition instances render honestly in Fleet", async ({
+  page,
+}) => {
+  const unlinkedPubkey = "ef".repeat(32);
+  const missingDefinitionPubkey = "fe".repeat(32);
+  await installMockBridge(page, {
+    activePersonaIds: [],
+    personas: [],
+    managedAgents: [
+      {
+        name: "Standalone operator",
+        personaId: null,
+        personaOrphaned: false,
+        pubkey: unlinkedPubkey,
+        status: "stopped",
+      },
+      {
+        name: "Remote definition copy",
+        personaId: "missing-definition",
+        personaOrphaned: true,
+        pubkey: missingDefinitionPubkey,
+        status: "stopped",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  await expect(
+    page.getByTestId(`managed-agent-${unlinkedPubkey}`),
+  ).toBeVisible();
+  const orphan = page.getByTestId(`managed-agent-${missingDefinitionPubkey}`);
+  await expect(orphan).toBeVisible();
+  await expect(orphan).toContainText("No definition on this device");
+  await expect(page.getByText("Unknown agents")).toHaveCount(0);
+  await expect(page.getByText("Custom agents")).toHaveCount(0);
+});
+
+test("inactive definitions still provide Fleet identity without appearing in Library", async ({
+  page,
+}) => {
+  const personaId = "builtin:inactive-fleet-identity";
+  const pubkey = "fd".repeat(32);
+  await installMockBridge(page, {
+    activePersonaIds: [],
+    personas: [
+      {
+        avatarUrl: "https://example.com/inactive.png",
+        displayName: "Inactive definition identity",
+        id: personaId,
+        isActive: false,
+        systemPrompt: "Remain available as identity fallback.",
+      },
+    ],
+    managedAgents: [
+      {
+        avatarUrl: null,
+        name: "Pinned instance name",
+        personaId,
+        personaOrphaned: false,
+        pubkey,
+        status: "stopped",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const card = page.getByTestId(`managed-agent-${pubkey}`);
+  await expect(card).toContainText("Inactive definition identity");
+  await expect(card).not.toContainText("No definition on this device");
+  await expect(page.getByTestId(`persona-agent-row-${personaId}`)).toHaveCount(
+    0,
+  );
 });

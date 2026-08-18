@@ -23,7 +23,7 @@ import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
-import { IDENTITY_CARD_GRID_CLASS } from "./UnifiedAgentsSection";
+import { IDENTITY_CARD_GRID_CLASS } from "./agentCardLayout";
 
 function useFleetProjectionPresentation() {
   const snapshot = useFleetProjectionSnapshot();

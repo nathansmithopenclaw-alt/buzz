@@ -4,20 +4,19 @@ import test from "node:test";
 
 const read = (name) => readFile(new URL(name, import.meta.url), "utf8");
 
-test("Claude account selector moves off both agents-grid card implementations", async () => {
-  const [editDialog, editField, managedRow, unifiedSection] = await Promise.all(
-    [
+test("Claude account selector stays in the instance edit surface", async () => {
+  const [editDialog, editField, fleetSection, librarySection] =
+    await Promise.all([
       read("./AgentInstanceEditDialog.tsx"),
       read("./EditAgentClaudeAccountField.tsx"),
-      read("./ManagedAgentRow.tsx"),
-      read("./UnifiedAgentsSection.tsx"),
-    ],
-  );
+      read("./FleetSection.tsx"),
+      read("./AgentLibrarySection.tsx"),
+    ]);
 
   assert.match(editDialog, /<EditAgentClaudeAccountField agent=\{agent\} \/>/);
   assert.match(editField, /<ClaudeAccountPill agent=\{agent\} \/>/);
-  assert.doesNotMatch(managedRow, /ClaudeAccountPill/);
-  assert.doesNotMatch(unifiedSection, /ClaudeAccountPill/);
+  assert.doesNotMatch(fleetSection, /ClaudeAccountPill/);
+  assert.doesNotMatch(librarySection, /ClaudeAccountPill/);
 });
 
 test("account selector does not promise unavailable usage metering", async () => {

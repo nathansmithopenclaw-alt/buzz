@@ -156,6 +156,7 @@ export default defineConfig({
       name: "integration",
       testMatch: [
         "**/agents.spec.ts",
+        "**/agents-ia-screenshots.spec.ts",
         "**/fleet-visibility-observer.spec.ts",
         "**/agent-snapshot-recipient.spec.ts",
         "**/onboarding.spec.ts",

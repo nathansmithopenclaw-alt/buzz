@@ -1,7 +1,8 @@
 import * as React from "react";
-import { AlertCircle, Brain, Download, FileType2 } from "lucide-react";
+import { AlertCircle, Bot, Brain, Download, FileType2 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import { useUserProfileQuery } from "@/features/profile/hooks";
 import type {
   SnapshotFormat,
   SnapshotMemoryLevel,
@@ -18,15 +19,20 @@ import { SnapshotOptionMenu } from "./SnapshotOptionMenu";
 
 type AgentSnapshotExportDialogProps = {
   agentName: string;
+  effectiveAvatarUrl?: string | null;
   isSavePending: boolean;
   open: boolean;
   /** Pubkey of the linked agent instance to use as the memory source.
    *  When null, memory levels are disabled — the definition has no agent
    *  instance with a keypair to read memory from. */
-  linkedAgentPubkey: string | null;
+  linkedAgentPubkey?: string | null;
+  memorySources?: readonly { name: string; pubkey: string }[];
+  preferredMemorySourcePubkey?: string | null;
   onSaveFile: (
     memoryLevel: SnapshotMemoryLevel,
     format: SnapshotFormat,
+    memorySourcePubkey: string | null,
+    snapshotAvatarUrl: string | null,
   ) => void;
   onOpenChange: (open: boolean) => void;
 };
@@ -61,18 +67,36 @@ const MODAL_RESIZE_TRANSITION = {
 
 export function AgentSnapshotExportDialog({
   agentName,
+  effectiveAvatarUrl = null,
   isSavePending,
   open,
-  linkedAgentPubkey,
+  linkedAgentPubkey = null,
+  memorySources,
+  preferredMemorySourcePubkey = null,
   onSaveFile,
   onOpenChange,
 }: AgentSnapshotExportDialogProps) {
   const [memoryLevel, setMemoryLevel] =
     React.useState<SnapshotMemoryLevel>("none");
   const [format, setFormat] = React.useState<SnapshotFormat>("png");
+  const availableMemorySources = React.useMemo(
+    () =>
+      memorySources ??
+      (linkedAgentPubkey
+        ? [{ name: "Current agent", pubkey: linkedAgentPubkey }]
+        : []),
+    [linkedAgentPubkey, memorySources],
+  );
+  const [memorySourcePubkey, setMemorySourcePubkey] = React.useState("");
+  const memorySourceProfileQuery = useUserProfileQuery(
+    memorySourcePubkey || undefined,
+  );
+  const snapshotAvatarUrl = memorySourceProfileQuery.data?.hasProfileEvent
+    ? (memorySourceProfileQuery.data.avatarUrl ?? effectiveAvatarUrl)
+    : effectiveAvatarUrl;
   const shouldReduceMotion = useReducedMotion();
 
-  const hasLinkedAgent = linkedAgentPubkey !== null;
+  const hasLinkedAgent = memorySourcePubkey.length > 0;
   const showMemoryWarning = memoryLevel !== "none";
   const modalResizeTransition = shouldReduceMotion
     ? { duration: 0 }
@@ -83,10 +107,22 @@ export function AgentSnapshotExportDialog({
     if (open) {
       setMemoryLevel("none");
       setFormat("png");
+      setMemorySourcePubkey(
+        preferredMemorySourcePubkey &&
+          availableMemorySources.some(
+            (source) => source.pubkey === preferredMemorySourcePubkey,
+          )
+          ? preferredMemorySourcePubkey
+          : availableMemorySources.length === 1
+            ? (availableMemorySources[0]?.pubkey ?? "")
+            : "",
+      );
     }
-  }, [open]);
+  }, [availableMemorySources, open, preferredMemorySourcePubkey]);
 
-  const isPending = isSavePending;
+  const isPending =
+    isSavePending ||
+    (memorySourcePubkey.length > 0 && memorySourceProfileQuery.isPending);
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -102,6 +138,32 @@ export function AgentSnapshotExportDialog({
 
         <div className="space-y-4 pt-2">
           <div className="space-y-1">
+            {availableMemorySources.length > 0 ? (
+              <div className="flex min-h-8 items-center justify-between gap-4">
+                <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
+                  <Bot className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  Memory source
+                </span>
+                <SnapshotOptionMenu
+                  ariaLabel="Memory source"
+                  className="font-medium text-foreground"
+                  disabled={isPending}
+                  onValueChange={(value) => {
+                    setMemorySourcePubkey(value);
+                    if (!value) setMemoryLevel("none");
+                  }}
+                  options={[
+                    { label: "Definition only", value: "" },
+                    ...availableMemorySources.map((source) => ({
+                      label: source.name,
+                      value: source.pubkey,
+                    })),
+                  ]}
+                  testId="agent-snapshot-memory-source-trigger"
+                  value={memorySourcePubkey}
+                />
+              </div>
+            ) : null}
             <div className="flex min-h-8 items-center justify-between gap-4">
               <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
                 <Brain className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -188,7 +250,14 @@ export function AgentSnapshotExportDialog({
             <Button
               data-testid="agent-snapshot-export-confirm"
               disabled={isPending}
-              onClick={() => onSaveFile(memoryLevel, format)}
+              onClick={() =>
+                onSaveFile(
+                  memoryLevel,
+                  format,
+                  memorySourcePubkey || null,
+                  snapshotAvatarUrl,
+                )
+              }
               size="sm"
               type="button"
             >
