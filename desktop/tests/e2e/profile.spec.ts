@@ -1540,8 +1540,13 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   ).toHaveAttribute("data-transition-direction", "backward");
   await expectHashSearchParam(page, "profileTab", null);
   await page.getByTestId(`user-profile-view-activity-${agentPubkey}`).click();
-  await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
-  await page.getByTestId("agent-session-back").click();
+  await expectHashSearchParam(page, "profileView", "activity");
+  await expect(page.getByTestId("user-profile-activity-view")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Activity" }),
+  ).toBeVisible();
+  await page.getByTestId("user-profile-panel-back").click();
+  await expectHashSearchParam(page, "profileView", null);
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
   await expect(
     page.getByRole("heading", { level: 2, name: "Profile" }),
@@ -1598,7 +1603,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
 });
 
-test("restored Inbox deep link hides the back arrow", async ({ page }) => {
+test("restored profile Activity deep link preserves in-panel back", async ({
+  page,
+}) => {
   // Charlie is a `bot` member of #agents and authors a seeded message there;
   // seeding a managed agent with the same pubkey makes that message's avatar
   // open a managed-agent profile panel with the Inbox ingress. Unlike an
@@ -1627,21 +1634,23 @@ test("restored Inbox deep link hides the back arrow", async ({ page }) => {
   await messageRow.locator("button").first().click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 
-  // Opened from the profile panel: a return target was captured, so the
-  // header shows the back arrow.
+  // Activity remains within the profile panel and records a restorable view.
   await page.getByTestId(`user-profile-view-activity-${agentPubkey}`).click();
-  await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
-  await expect(page.getByTestId("agent-session-back")).toBeVisible();
+  await expectHashSearchParam(page, "profileView", "activity");
+  await expect(page.getByTestId("user-profile-activity-view")).toBeVisible();
+  await expect(page.getByTestId("user-profile-panel-back")).toBeVisible();
 
-  // A reload keeps the `agentSession` URL param but drops the in-memory
-  // return target, so the restored panel hides the back arrow and close is
-  // the only affordance — never a blind history pop.
+  // Reloading restores the focused view from the URL and keeps deterministic
+  // in-panel back navigation rather than relying on an in-memory return target.
   await page.reload();
-  await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
-  await expect(page.getByTestId("agent-session-back")).toHaveCount(0);
+  await expect(page.getByTestId("user-profile-activity-view")).toBeVisible();
+  await expect(page.getByTestId("user-profile-panel-back")).toBeVisible();
   await expect(page.getByTestId("auxiliary-panel-close")).toBeVisible();
-  await page.getByTestId("auxiliary-panel-close").click();
-  await expect(page.getByTestId("agent-session-thread-panel")).toHaveCount(0);
+  await page.getByTestId("user-profile-panel-back").click();
+  await expectHashSearchParam(page, "profileView", null);
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Profile" }),
+  ).toBeVisible();
 });
 
 test("declared owner sees runtime tab for a remote relay agent", async ({

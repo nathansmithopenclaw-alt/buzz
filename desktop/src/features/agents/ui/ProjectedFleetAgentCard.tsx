@@ -1,4 +1,4 @@
-import { EllipsisVertical, MessageSquare } from "lucide-react";
+import { Activity, EllipsisVertical, MessageSquare } from "lucide-react";
 
 import {
   fleetAgentObserverStatus,
@@ -14,22 +14,8 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { AgentIdentityCard } from "./AgentIdentityCard";
-import { fleetHostLabel, formatFleetRelativeTime } from "./fleetProjectionUi";
-
-function observerStatusLabel(
-  status: ReturnType<typeof fleetAgentObserverStatus>,
-  now: number,
-) {
-  if (status.state === "live") return "live";
-  if (status.state === "host-unreachable") {
-    return status.lastSeen
-      ? `host unreachable · last seen ${formatFleetRelativeTime(status.lastSeen, now)}`
-      : "host unreachable";
-  }
-  return status.lastSeen
-    ? `quiet · last seen ${formatFleetRelativeTime(status.lastSeen, now)}`
-    : "quiet · last seen not reported";
-}
+import { FleetAgentStatusChip } from "./FleetAgentStatusChip";
+import { fleetHostLabel } from "./fleetProjectionUi";
 
 export function ProjectedFleetAgentCard({
   agent,
@@ -52,7 +38,6 @@ export function ProjectedFleetAgentCard({
   ) => void;
 }) {
   const status = fleetAgentObserverStatus(owner, agent.agentPubkey, now);
-  const statusLabel = observerStatusLabel(status, now);
   const runtimeLabel = agent.personaRuntime?.trim() || "Runtime not reported";
   const modelLabel = agent.personaModel?.trim() || "Model not reported";
 
@@ -69,16 +54,24 @@ export function ProjectedFleetAgentCard({
               <EllipsisVertical className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            onCloseAutoFocus={(event) => event.preventDefault()}
-          >
+          <DropdownMenuContent align="end">
             <DropdownMenuItem
               disabled={isMessagePending}
               onSelect={() => onMessageAgent(agent.agentPubkey)}
             >
               <MessageSquare className="h-4 w-4" />
               Message
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                onOpenAgentProfile(agent.agentPubkey, {
+                  source: "relay",
+                  view: "activity",
+                })
+              }
+            >
+              <Activity className="h-4 w-4" />
+              View activity
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -91,16 +84,18 @@ export function ProjectedFleetAgentCard({
       dataTestId={`fleet-agent-${agent.agentPubkey}`}
       label={agent.displayName}
       modelLabel={`${runtimeLabel} · ${modelLabel}`}
-      onClick={() => onOpenAgentProfile(agent.agentPubkey)}
+      onClick={() => onOpenAgentProfile(agent.agentPubkey, { source: "relay" })}
       statusBadge={
         <div className="flex flex-wrap gap-1.5">
-          <Badge
-            className="normal-case tracking-normal"
-            data-testid={`fleet-agent-status-${agent.agentPubkey}`}
-            variant={status.state === "live" ? "success" : "secondary"}
-          >
-            {statusLabel}
-          </Badge>
+          <FleetAgentStatusChip
+            status={{
+              source: "observer",
+              state: status.state,
+              lastSeen: status.lastSeen,
+              now,
+            }}
+            testId={`fleet-agent-status-${agent.agentPubkey}`}
+          />
           {showHost ? (
             <Badge className="normal-case tracking-normal" variant="outline">
               {status.host ? fleetHostLabel(status.host) : "Host not reported"}

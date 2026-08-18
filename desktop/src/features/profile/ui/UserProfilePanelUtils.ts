@@ -19,6 +19,7 @@ export type ProfileChannelLink = {
 
 export type ProfilePanelView =
   | "summary"
+  | "activity"
   | "instructions"
   | "info"
   | "configuration"
@@ -31,6 +32,7 @@ export type ProfilePanelTab = "info" | "runtime" | "channels" | "memories";
 
 export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
   summary: "Profile",
+  activity: "Activity",
   instructions: "Agent instructions",
   info: "Agent info",
   configuration: "Runtime",
@@ -89,6 +91,7 @@ export function profilePanelTabFromSearch(value: unknown): ProfilePanelTab {
 }
 
 export type UserProfilePanelProps = {
+  agentDataSource?: "local-or-relay" | "relay-only";
   callerChannelId?: string | null;
   canResetWidth?: boolean;
   currentPubkey?: string;

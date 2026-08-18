@@ -280,6 +280,10 @@ test("Observer renders relay fleet liveness and mentions the existing agent", as
     "codex · gpt-5",
   );
   await expect(page.getByTestId(`fleet-agent-${AGENT}`)).toContainText("live");
+  await expect(page.getByTestId(`fleet-agent-status-${AGENT}`)).toHaveAttribute(
+    "aria-label",
+    "Agent status: live",
+  );
   await expect(page.getByTestId(`fleet-agent-${SECOND_AGENT}`)).toContainText(
     "quiet · last seen",
   );
@@ -313,15 +317,20 @@ test("Observer renders relay fleet liveness and mentions the existing agent", as
     0,
   );
 
-  await page
+  const projectedMenuTrigger = page
     .getByTestId(`fleet-agent-${AGENT}`)
-    .getByRole("button", { name: "Open actions for Review Agent" })
-    .click();
+    .getByRole("button", { name: "Open actions for Review Agent" });
+  await projectedMenuTrigger.focus();
+  await page.keyboard.press("Enter");
   await expect(page.getByRole("menuitem", { name: "Message" })).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "View activity" }),
+  ).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Start" })).toHaveCount(0);
   await expect(page.getByRole("menuitem", { name: "Stop" })).toHaveCount(0);
   await expect(page.getByRole("menuitem", { name: "Restart" })).toHaveCount(0);
   await page.keyboard.press("Escape");
+  await expect(projectedMenuTrigger).toBeFocused();
 
   await page.getByTestId("channel-general").click();
   const composer = page.getByTestId("message-input");
@@ -352,6 +361,102 @@ test("Observer renders relay fleet liveness and mentions the existing agent", as
   await expect(page.getByTestId("fleet-host-status")).toContainText(
     "Mini host",
   );
+});
+
+test("Observer profile depth ignores a matching stale local agent", async ({
+  page,
+}) => {
+  const now = Math.floor(Date.now() / 1_000);
+  await installMockBridge(page, {
+    fleetVisibilitySettings: {
+      enabled: true,
+      role: "observer",
+      needsChoice: false,
+    },
+    managedAgents: [
+      {
+        pubkey: AGENT,
+        name: "Stale Local Agent",
+        agentCommand: "goose",
+        logPath: "/tmp/stale-local-agent.log",
+        status: "stopped",
+      },
+    ],
+    fleetProjectionEvents: [
+      projectionEvent(
+        30177,
+        {
+          name: "Projected Agent",
+          persona_id: null,
+          parallelism: 1,
+          respond_to: "owner-only",
+          respond_to_allowlist: [],
+        },
+        AGENT,
+        now - 10,
+        "1",
+      ),
+      projectionEvent(
+        30180,
+        {
+          v: 1,
+          name: "Fleet host",
+          platform: "macos",
+          created_at: now - 30,
+        },
+        HOST,
+        now - 9,
+        "2",
+      ),
+      projectionEvent(
+        30181,
+        {
+          v: 1,
+          seq: 1,
+          ts: now - 2,
+          agents: [{ pubkey: AGENT, state: "running", since: now - 20 }],
+        },
+        HOST,
+        now - 2,
+        "3",
+      ),
+    ],
+  });
+
+  await page.goto("/");
+  await page.getByTestId("open-agents-view").click();
+  const projectedMenuTrigger = page
+    .getByTestId(`fleet-agent-${AGENT}`)
+    .getByRole("button", { name: "Open actions for Stale Local Agent" });
+  await projectedMenuTrigger.click();
+  await page.getByRole("menuitem", { name: "View activity" }).click();
+
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await expect(
+    page.getByTestId("user-profile-panel").getByRole("heading", {
+      level: 2,
+      name: "Activity",
+    }),
+  ).toBeVisible();
+  await expect
+    .poll(() => new URL(page.url()).hash)
+    .toContain("profileSource=relay");
+  await expect
+    .poll(() => new URL(page.url()).hash)
+    .toContain("profileView=activity");
+  await expect(page.getByTestId("user-profile-header-edit-agent")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("managed-agent-log-content")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Back to profile" }).click();
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await expect(
+    page.getByTestId("user-profile-remote-runtime-notice"),
+  ).toContainText("Published by the fleet host");
+  await expect(
+    page.getByTestId("user-profile-remote-runtime-notice"),
+  ).toContainText("harness logs are not available on this device");
 });
 
 test("Observer greys liveness after the 90-second freshness boundary", async ({

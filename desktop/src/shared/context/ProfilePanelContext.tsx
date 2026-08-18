@@ -3,7 +3,9 @@ import * as React from "react";
 import type { AgentPersona } from "@/shared/api/types";
 
 export type ProfilePanelOpenOptions = {
+  source?: "local" | "relay";
   tab?: "info" | "runtime" | "channels" | "memories";
+  view?: "activity" | "logs";
 };
 
 type ProfilePanelContextValue = {

@@ -155,6 +155,7 @@ test("personaManagedAgentUpdate leaves runtime fields alone when runtime is unch
 test("parseProfilePanelView accepts all profile panel subviews", () => {
   for (const view of [
     "summary",
+    "activity",
     "info",
     "configuration",
     "diagnostics",

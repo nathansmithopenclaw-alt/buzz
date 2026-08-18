@@ -9,7 +9,8 @@ import {
   UserRound,
 } from "lucide-react";
 import * as React from "react";
-import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
+import { FleetAgentStatusChip } from "@/features/agents/ui/FleetAgentStatusChip";
+import { hostFleetAgentStatus } from "@/features/agents/ui/fleetAgentStatus";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import {
   HoverCopyIndicator,
@@ -88,8 +89,6 @@ export function useProfileFieldBuckets({
   ownerProfilePubkey,
   ownerPubkey,
   persona,
-  presenceLoaded,
-  presenceStatus,
   profile,
   pubkey,
   relayAgent,
@@ -103,8 +102,6 @@ export function useProfileFieldBuckets({
   ownerProfilePubkey: string | null;
   ownerPubkey: string | null;
   persona: AgentPersona | undefined;
-  presenceLoaded: boolean;
-  presenceStatus: "online" | "away" | "offline" | undefined;
   profile: Profile | undefined;
   pubkey: string | null;
   relayAgent: RelayAgent | undefined;
@@ -122,8 +119,6 @@ export function useProfileFieldBuckets({
             ownerProfilePubkey,
             ownerPubkey,
             persona,
-            presenceLoaded,
-            presenceStatus,
             relayAgent,
           })
         : []),
@@ -139,8 +134,6 @@ export function useProfileFieldBuckets({
     ownerProfilePubkey,
     ownerPubkey,
     persona,
-    presenceLoaded,
-    presenceStatus,
     profile,
     pubkey,
     relayAgent,
@@ -229,8 +222,6 @@ export function buildOwnerFields({
   ownerProfilePubkey,
   ownerPubkey,
   persona,
-  presenceLoaded,
-  presenceStatus,
   relayAgent,
 }: {
   includeOperationalFields: boolean;
@@ -241,8 +232,6 @@ export function buildOwnerFields({
   ownerProfilePubkey: string | null;
   ownerPubkey: string | null;
   persona?: AgentPersona;
-  presenceLoaded: boolean;
-  presenceStatus: "online" | "away" | "offline" | undefined;
   relayAgent: RelayAgent | undefined;
 }): ProfileField[] {
   const fields: ProfileField[] = [];
@@ -319,12 +308,9 @@ export function buildOwnerFields({
         .replace(/_/g, " ")
         .replace(/\b\w/g, (char: string) => char.toUpperCase()),
       displayNode: (
-        <AgentStatusBadge
+        <FleetAgentStatusChip
           className="normal-case tracking-normal"
-          presenceLoaded={presenceLoaded}
-          presenceStatus={presenceStatus}
-          sentenceCase
-          status={managedAgent.status}
+          status={hostFleetAgentStatus(managedAgent)}
         />
       ),
       icon: Activity,

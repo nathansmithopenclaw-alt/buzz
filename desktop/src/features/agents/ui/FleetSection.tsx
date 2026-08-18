@@ -1,9 +1,12 @@
 import {
+  Activity,
   EllipsisVertical,
   MessageSquare,
   Play,
   RotateCw,
+  Settings2,
   Square,
+  TerminalSquare,
 } from "lucide-react";
 
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
@@ -29,6 +32,8 @@ import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { IDENTITY_CARD_GRID_CLASS } from "./agentCardLayout";
 import { fleetHostLabel } from "./fleetProjectionUi";
 import { ProjectedFleetAgentCard } from "./ProjectedFleetAgentCard";
+import { FleetAgentStatusChip } from "./FleetAgentStatusChip";
+import { hostFleetAgentStatus } from "./fleetAgentStatus";
 import {
   resolveFleetAgentIdentity,
   resolveFleetAgentRuntimeLabel,
@@ -270,7 +275,7 @@ function FleetAgentCard({
   const isRestarting = restartingAgentPubkey === agent.pubkey;
   const isStarting = startingAgentPubkey === agent.pubkey;
   const opensRuntimeTab = Boolean(friendlyError && !isActive);
-  const status = isActive ? "running" : friendlyError ? "error" : "stopped";
+  const status = hostFleetAgentStatus(agent);
   const runtimeLabel = resolveFleetAgentRuntimeLabel({ agent, persona });
   const modelLabel = resolveAgentCardModelLabel({
     agent,
@@ -291,10 +296,7 @@ function FleetAgentCard({
               <EllipsisVertical className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            onCloseAutoFocus={(event) => event.preventDefault()}
-          >
+          <DropdownMenuContent align="end">
             <DropdownMenuItem
               disabled={isMessagePending}
               onSelect={() => onMessageAgent(agent.pubkey)}
@@ -302,6 +304,32 @@ function FleetAgentCard({
               <MessageSquare className="h-4 w-4" />
               Message
             </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                onOpenAgentProfile(agent.pubkey, { view: "activity" })
+              }
+            >
+              <Activity className="h-4 w-4" />
+              View activity
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                onOpenAgentProfile(agent.pubkey, { tab: "runtime" })
+              }
+            >
+              <Settings2 className="h-4 w-4" />
+              View runtime
+            </DropdownMenuItem>
+            {agent.backend.type === "local" ? (
+              <DropdownMenuItem
+                onSelect={() =>
+                  onOpenAgentProfile(agent.pubkey, { view: "logs" })
+                }
+              >
+                <TerminalSquare className="h-4 w-4" />
+                View harness log
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuSeparator />
             {isActive ? (
               <>
@@ -375,18 +403,10 @@ function FleetAgentCard({
       }}
       statusBadge={
         <div className="flex flex-wrap gap-1.5">
-          <Badge
-            className="normal-case tracking-normal"
-            variant={
-              status === "running"
-                ? "success"
-                : status === "error"
-                  ? "destructive"
-                  : "secondary"
-            }
-          >
-            {status}
-          </Badge>
+          <FleetAgentStatusChip
+            status={status}
+            testId={`managed-agent-status-${agent.pubkey}`}
+          />
           {agent.personaOrphaned || (agent.personaId && !persona) ? (
             <Badge className="normal-case tracking-normal" variant="warning">
               No definition on this device

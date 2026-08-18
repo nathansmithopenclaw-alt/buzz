@@ -374,7 +374,10 @@ function UnifiedAgentsView({
                   mode="observer"
                   personas={currentFleetOwner?.personas ?? []}
                   onOpenAgentProfile={(pubkey, options) =>
-                    openProfilePanel?.(pubkey, options)
+                    openProfilePanel?.(pubkey, {
+                      ...options,
+                      source: "relay",
+                    })
                   }
                 />
               ) : (
