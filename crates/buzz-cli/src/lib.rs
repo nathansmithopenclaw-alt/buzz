@@ -762,6 +762,9 @@ pub enum TasksCmd {
         /// Human-readable message text; use '-' for stdin
         #[arg(long)]
         content: String,
+        /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
+        #[arg(long = "mention")]
+        mentions: Vec<String>,
     },
     /// Append a lifecycle update for an existing task
     Update {
@@ -786,6 +789,9 @@ pub enum TasksCmd {
         /// Optional human-readable message text; use '-' for stdin
         #[arg(long)]
         content: Option<String>,
+        /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
+        #[arg(long = "mention")]
+        mentions: Vec<String>,
     },
     /// List current task state folded from append-only history
     List {
@@ -2781,6 +2787,62 @@ mod tests {
             "--emoji alone must not imply a status"
         );
         assert!(Cli::try_parse_from(["buzz", "users", "set-status", "--clear"]).is_ok());
+    }
+
+    #[test]
+    fn task_mutations_accept_repeatable_explicit_mentions() {
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let channel = "53f97470-aab9-43f7-87c0-8506c7208d73";
+        let task = "806e3534-99d8-4664-90a4-303ab1f28aea";
+
+        let assign = Cli::try_parse_from(vec![
+            "buzz".to_string(),
+            "tasks".into(),
+            "assign".into(),
+            "--channel".into(),
+            channel.into(),
+            "--assignee".into(),
+            first.clone(),
+            "--title".into(),
+            "Mention delivery".into(),
+            "--content".into(),
+            "Assigned".into(),
+            "--mention".into(),
+            first.clone(),
+            "--mention".into(),
+            second.clone(),
+        ])
+        .unwrap();
+        match assign.command {
+            Cmd::Tasks(TasksCmd::Assign { mentions, .. }) => {
+                assert_eq!(mentions, vec![first.clone(), second.clone()]);
+            }
+            _ => panic!("expected tasks assign"),
+        }
+
+        let update = Cli::try_parse_from(vec![
+            "buzz".to_string(),
+            "tasks".into(),
+            "update".into(),
+            "--task".into(),
+            task.into(),
+            "--status".into(),
+            "done".into(),
+            "--channel".into(),
+            channel.into(),
+            "--mention".into(),
+            first.clone(),
+            "--mention".into(),
+            second.clone(),
+        ])
+        .unwrap();
+        match update.command {
+            Cmd::Tasks(TasksCmd::Update { mentions, .. }) => {
+                assert_eq!(mentions, vec![first, second]);
+            }
+            _ => panic!("expected tasks update"),
+        }
     }
 
     #[test]

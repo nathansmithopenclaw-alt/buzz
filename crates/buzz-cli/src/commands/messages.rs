@@ -243,14 +243,16 @@ fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliErro
     Ok(normalized)
 }
 
-fn merge_message_mentions(
+pub(crate) fn merge_message_mentions(
+    required_first: &[String],
     explicit: &[String],
     uri_pubkeys: &[String],
     auto_resolved: &[String],
 ) -> Result<Vec<String>, CliError> {
     let mut mentions = Vec::new();
-    for pubkey in explicit
+    for pubkey in required_first
         .iter()
+        .chain(explicit.iter())
         .chain(uri_pubkeys.iter())
         .chain(auto_resolved.iter())
     {
@@ -275,7 +277,53 @@ fn missing_members(mentions: &[String], members: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn event_mention_pubkeys(event: &nostr::Event) -> Vec<String> {
+/// Run the same channel-member mention preflight used by every human-content
+/// publisher in the CLI.
+///
+/// `required_first` is reserved for protocol-critical recipients such as task
+/// counterparties. They are ordered before caller-supplied identities and
+/// content-resolved names, but the combined set still fails rather than
+/// truncating when it exceeds [`MENTION_CAP`]. Required recipients come from
+/// already-validated protocol state and are therefore not rechecked against
+/// the current channel snapshot; explicit identities and content-derived
+/// identities retain `messages send`'s current-member requirement.
+pub(crate) async fn prepare_message_mentions(
+    client: &BuzzClient,
+    channel_id: &str,
+    content: &str,
+    explicit_values: &[String],
+    required_first: &[String],
+) -> Result<Vec<String>, CliError> {
+    let explicit_mentions = normalize_explicit_mentions(explicit_values)?;
+    let stripped = strip_code_regions(content);
+    let uri_pubkeys = extract_nostr_uris(&stripped);
+    let has_explicit_mentions = !explicit_mentions.is_empty() || !uri_pubkeys.is_empty();
+    let (member_pubkeys, auto_resolved) =
+        resolve_content_mentions(client, channel_id, content, has_explicit_mentions).await?;
+
+    let user_mentions =
+        merge_message_mentions(&[], &explicit_mentions, &uri_pubkeys, &auto_resolved)?;
+    let missing = missing_members(&user_mentions, &member_pubkeys);
+    if !missing.is_empty() {
+        return Err(CliError::Usage(
+            serde_json::json!({
+                "message": "mentioned pubkeys are not channel members; add them explicitly before retrying",
+                "missing_member_pubkeys": missing,
+                "add_member_command": format!("buzz channels add-member --channel {channel_id} --pubkey <pubkey> --role <member|bot>"),
+            })
+            .to_string(),
+        ));
+    }
+
+    merge_message_mentions(
+        required_first,
+        &explicit_mentions,
+        &uri_pubkeys,
+        &auto_resolved,
+    )
+}
+
+pub(crate) fn event_mention_pubkeys(event: &nostr::Event) -> Vec<String> {
     event
         .tags
         .iter()
@@ -597,29 +645,12 @@ pub async fn cmd_send_message(
     }
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
-    let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
-    let stripped = strip_code_regions(&p.content);
-    let uri_pubkeys = extract_nostr_uris(&stripped);
     // Supplying any identity explicitly authorizes unresolved or ambiguous @Name text
     // as presentation-only, matching Desktop's separate visible-label and p-tag model.
     // Uniquely resolvable member names still add their own p-tags; callers must supply
     // every intended identity whose visible label cannot be resolved uniquely.
-    let has_explicit_mentions = !explicit_mentions.is_empty() || !uri_pubkeys.is_empty();
-    let (member_pubkeys, auto_resolved) =
-        resolve_content_mentions(client, &p.channel_id, &p.content, has_explicit_mentions).await?;
-    let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
-
-    let missing = missing_members(&mention_pubkeys, &member_pubkeys);
-    if !missing.is_empty() {
-        return Err(CliError::Usage(
-            serde_json::json!({
-                "message": "mentioned pubkeys are not channel members; add them explicitly before retrying",
-                "missing_member_pubkeys": missing,
-                "add_member_command": format!("buzz channels add-member --channel {} --pubkey <pubkey> --role <member|bot>", p.channel_id),
-            })
-            .to_string(),
-        ));
-    }
+    let mention_pubkeys =
+        prepare_message_mentions(client, &p.channel_id, &p.content, &p.mentions, &[]).await?;
 
     // Upload files and build imeta tags
     let mut media_tags: Vec<Vec<String>> = Vec::new();
@@ -1261,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_mentions_authorize_presentation_text_without_name_resolution() {
+    fn unresolved_content_mentions_are_fatal_without_explicit_identity() {
         let names = vec!["renamed user".into()];
         let profiles = std::collections::HashMap::new();
         assert_eq!(
@@ -1301,12 +1332,12 @@ mod tests {
     #[test]
     fn combined_mention_union_errors_instead_of_truncating() {
         let explicit: Vec<String> = (0..50).map(|i| format!("explicit-{i}")).collect();
-        assert!(merge_message_mentions(&explicit, &[], &["resolved-bob".into()]).is_err());
+        assert!(merge_message_mentions(&[], &explicit, &[], &["resolved-bob".into()]).is_err());
 
         let mut with_duplicate = explicit.clone();
         with_duplicate.push(explicit[0].clone());
         assert_eq!(
-            merge_message_mentions(&with_duplicate, &[explicit[1].clone()], &[])
+            merge_message_mentions(&[], &with_duplicate, &[explicit[1].clone()], &[])
                 .unwrap()
                 .len(),
             50
