@@ -14,6 +14,12 @@ export type FleetProjectionAgentPresentation = FleetProjectionAgent & {
   avatarUrl: string | null;
 };
 
+export type FleetAgentObserverStatus = {
+  state: "live" | "quiet" | "host-unreachable";
+  lastSeen: number | null;
+  host: FleetProjectionHost | null;
+};
+
 export type FleetAgentLiveness = {
   state: FleetProjectionLifecycleState | "unknown";
   since: number | null;
@@ -80,4 +86,40 @@ export function fleetAgentLiveness(
   return status
     ? { state: status.state, since: status.since, stale: false }
     : { state: "unknown", since: null, stale: false };
+}
+
+export function fleetAgentHost(
+  owner: FleetProjectionOwner,
+  agentPubkey: string,
+): FleetProjectionHost | null {
+  const normalized = normalizePubkey(agentPubkey);
+  return (
+    owner.hosts.find((host) =>
+      host.status?.agents.some((agent) => agent.pubkey === normalized),
+    ) ?? null
+  );
+}
+
+export function fleetAgentObserverStatus(
+  owner: FleetProjectionOwner,
+  agentPubkey: string,
+  nowSeconds: number,
+): FleetAgentObserverStatus {
+  const host = fleetAgentHost(owner, agentPubkey);
+  if (!host?.status) return { state: "quiet", lastSeen: null, host };
+  if (!fleetHostIsFresh(host, nowSeconds)) {
+    return {
+      state: "host-unreachable",
+      lastSeen: host.status.timestamp,
+      host,
+    };
+  }
+  const normalized = normalizePubkey(agentPubkey);
+  const report = host.status.agents.find(
+    (agent) => agent.pubkey === normalized,
+  );
+  if (report?.state === "running") {
+    return { state: "live", lastSeen: host.status.timestamp, host };
+  }
+  return { state: "quiet", lastSeen: host.status.timestamp, host };
 }

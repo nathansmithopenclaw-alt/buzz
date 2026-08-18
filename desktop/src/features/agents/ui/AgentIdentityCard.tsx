@@ -9,6 +9,7 @@ type AgentIdentityCardProps = {
   ariaLabel: string;
   avatar?: ReactNode;
   avatarUrl?: string | null;
+  className?: string;
   dataTestId: string;
   label: string;
   modelLabel?: string | null;
@@ -22,6 +23,7 @@ export function AgentIdentityCard({
   ariaLabel,
   avatar,
   avatarUrl,
+  className,
   dataTestId,
   label,
   modelLabel,
@@ -35,6 +37,7 @@ export function AgentIdentityCard({
       className={cn(
         "group relative aspect-[4/5] w-full min-w-0 overflow-hidden rounded-2xl border border-border/70 bg-muted/50 text-left shadow-xs transition-colors hover:border-border hover:bg-muted/65",
         !onClick && "cursor-default hover:border-border/70 hover:bg-muted/50",
+        className,
       )}
       data-testid={dataTestId}
     >
