@@ -114,6 +114,7 @@ export type ProfileSummaryViewProps = {
   profile: ReturnType<typeof useUserProfileQuery>["data"];
   pubkey: string | null;
   relayAgent: RelayAgent | undefined;
+  readOnlyRemote: boolean;
   tab: ProfilePanelTab;
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
   userStatus: { text: string; emoji: string } | null | undefined;
@@ -189,6 +190,7 @@ export function ProfileSummaryView({
   profile,
   pubkey,
   relayAgent,
+  readOnlyRemote,
   tab,
   unfollowMutation,
   userStatus,
@@ -243,6 +245,7 @@ export function ProfileSummaryView({
       diagnosticsFields.length > 0 ||
       canOpenAgentLogs ||
       showRuntimePreview);
+  const showResolvedRuntimeTab = showRuntimeTab || (readOnlyRemote && isBot);
   const displayedRuntimeFields = showRuntimePreview
     ? fillRuntimePreviewFields([
         ...runtimeConfigurationFields,
@@ -264,7 +267,7 @@ export function ProfileSummaryView({
     showInstructionBlock ||
     managedAgent !== undefined ||
     showRuntimePreview ||
-    !showRuntimeTab;
+    !showResolvedRuntimeTab;
 
   const diagnosticsErrorField = diagnosticsFields.find(
     (field) => field.label === "Last error",
@@ -288,7 +291,7 @@ export function ProfileSummaryView({
     if (showInfoTab) {
       items.push({ id: "info", label: "Info" });
     }
-    if (showRuntimeTab) {
+    if (showResolvedRuntimeTab) {
       items.push({ id: "runtime", label: "Runtime" });
     }
     if (showChannelsTab) {
@@ -301,7 +304,7 @@ export function ProfileSummaryView({
       });
     }
     return items;
-  }, [showChannelsTab, showInfoTab, showMemoriesTab, showRuntimeTab]);
+  }, [showChannelsTab, showInfoTab, showMemoriesTab, showResolvedRuntimeTab]);
 
   const showTabSection = tabs.length > 0;
   const showTabBar = !(tabs.length === 1 && tabs[0]?.id === "info");
@@ -586,6 +589,7 @@ export function ProfileSummaryView({
                   showPreviewHarnessLog={
                     showRuntimePreview && !showDiagnosticsIngress
                   }
+                  remoteDetails={readOnlyRemote}
                 />
                 {isOwner === true && managedAgent !== undefined ? (
                   <AgentConfigPanel

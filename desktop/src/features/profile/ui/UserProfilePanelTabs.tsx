@@ -766,6 +766,7 @@ export function ProfileRuntimeTabContent({
   onOpenDiagnostics,
   onOpenInstance,
   onToggleStartOnLaunch,
+  remoteDetails = false,
   showDiagnosticsIngress,
   showPreviewHarnessLog = false,
 }: {
@@ -786,6 +787,7 @@ export function ProfileRuntimeTabContent({
   onOpenDiagnostics: () => void;
   onOpenInstance: (pubkey: string) => void;
   onToggleStartOnLaunch?: () => void;
+  remoteDetails?: boolean;
   showDiagnosticsIngress: boolean;
   showPreviewHarnessLog?: boolean;
 }) {
@@ -833,13 +835,26 @@ export function ProfileRuntimeTabContent({
     !hasConfigurationRows &&
     !modelSettings &&
     !hasInstances &&
-    !needsRestart
+    !needsRestart &&
+    !remoteDetails
   ) {
     return null;
   }
 
   return (
     <div className="space-y-4" data-testid="user-profile-runtime-sections">
+      {remoteDetails ? (
+        <div
+          className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3"
+          data-testid="user-profile-remote-runtime-notice"
+        >
+          <p className="text-sm font-medium">Published by the fleet host</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Local configuration, environment variables, and harness logs are not
+            available on this device.
+          </p>
+        </div>
+      ) : null}
       {needsRestart ? (
         <div
           className="flex items-start gap-3 rounded-2xl bg-amber-500/10 px-4 py-3"

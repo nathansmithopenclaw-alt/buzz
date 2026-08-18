@@ -36,6 +36,7 @@ const AGENTS_PROFILE_SEARCH_KEYS = [
   "profilePersona",
   "profileTab",
   "profileView",
+  "profileSource",
 ] as const;
 
 export function AgentsScreen() {
@@ -72,7 +73,8 @@ export function AgentsScreen() {
         profile: pubkey,
         profilePersona: null,
         profileTab: options?.tab === "info" ? null : (options?.tab ?? null),
-        profileView: null,
+        profileView: options?.view ?? null,
+        profileSource: options?.source === "relay" ? "relay" : null,
       });
     },
     [applyPatch],
@@ -85,6 +87,7 @@ export function AgentsScreen() {
         profilePersona: persona.id,
         profileTab: null,
         profileView: null,
+        profileSource: null,
       });
     },
     [applyPatch],
@@ -95,6 +98,7 @@ export function AgentsScreen() {
       profilePersona: null,
       profileTab: null,
       profileView: null,
+      profileSource: null,
     });
   }, [applyPatch]);
   const handleProfilePanelViewChange = React.useCallback(
@@ -128,6 +132,11 @@ export function AgentsScreen() {
           </React.Suspense>
           {profilePanelTarget ? (
             <UserProfilePanel
+              agentDataSource={
+                values.profileSource === "relay"
+                  ? "relay-only"
+                  : "local-or-relay"
+              }
               canResetWidth={threadPanelWidth.canReset}
               currentPubkey={identityQuery.data?.pubkey}
               onClose={handleCloseProfilePanel}

@@ -1,7 +1,15 @@
-import { ArrowUpRight, CircleAlert, UserPlus } from "lucide-react";
+import {
+  Activity,
+  ArrowUpRight,
+  CircleAlert,
+  TerminalSquare,
+  UserPlus,
+} from "lucide-react";
 
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
+import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
 import {
   type ProfileField,
   ProfileFieldGroup,
@@ -12,6 +20,44 @@ import type { ProfileChannelLink } from "@/features/profile/ui/UserProfilePanelU
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
+
+export function ActivityFocusedView({
+  activityAgent,
+  channelId,
+}: {
+  activityAgent: ProfileActivityAgent | null;
+  channelId: string | null;
+}) {
+  if (!activityAgent) {
+    return (
+      <FocusedEmptyState
+        description="Activity appears here when this agent publishes an owner-visible session."
+        icon={Activity}
+        testId="user-profile-activity-empty"
+        title="No session activity yet"
+      />
+    );
+  }
+
+  return (
+    <div
+      className="flex min-h-0 flex-1 pt-4"
+      data-testid="user-profile-activity-view"
+    >
+      <ManagedAgentSessionPanel
+        agent={activityAgent}
+        autoTail
+        channelId={channelId}
+        className="min-h-0 flex-1 border-0 bg-transparent shadow-none"
+        emptyDescription="Session activity will appear here."
+        emptyState="idle"
+        panelPadding={false}
+        showRaw={false}
+        transcriptContentClassName="py-4"
+      />
+    </div>
+  );
+}
 
 export function MemoryFocusedView({
   agentPubkey,
@@ -148,6 +194,7 @@ export function DiagnosticsFocusedView({
   logError,
   logLoading,
   managedAgent,
+  unavailableOnThisDevice = false,
 }: {
   canOpenAgentLogs: boolean;
   fields: ProfileField[];
@@ -155,6 +202,7 @@ export function DiagnosticsFocusedView({
   logError: Error | null;
   logLoading: boolean;
   managedAgent: ManagedAgent | undefined;
+  unavailableOnThisDevice?: boolean;
 }) {
   const hasLog = canOpenAgentLogs && managedAgent !== undefined;
   const lastErrorField = fields.find((field) => field.label === "Last error");
@@ -163,7 +211,22 @@ export function DiagnosticsFocusedView({
   );
 
   if (!lastErrorField && detailFields.length === 0 && !hasLog) {
-    return null;
+    return (
+      <FocusedEmptyState
+        description={
+          unavailableOnThisDevice
+            ? "Harness logs stay on the device hosting this agent."
+            : "Diagnostics will appear here when this agent reports them."
+        }
+        icon={TerminalSquare}
+        testId="user-profile-diagnostics-empty"
+        title={
+          unavailableOnThisDevice
+            ? "Logs unavailable on this device"
+            : "No diagnostics reported"
+        }
+      />
+    );
   }
 
   return (
@@ -198,6 +261,31 @@ export function DiagnosticsFocusedView({
           />
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function FocusedEmptyState({
+  description,
+  icon: Icon,
+  testId,
+  title,
+}: {
+  description: string;
+  icon: typeof Activity;
+  testId: string;
+  title: string;
+}) {
+  return (
+    <div
+      className="flex min-h-56 flex-col items-center justify-center px-6 py-10 text-center"
+      data-testid={testId}
+    >
+      <Icon className="h-5 w-5 text-muted-foreground" />
+      <p className="mt-3 text-sm font-medium">{title}</p>
+      <p className="mt-1 max-w-72 text-sm text-muted-foreground">
+        {description}
+      </p>
     </div>
   );
 }

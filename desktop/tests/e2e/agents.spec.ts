@@ -2962,3 +2962,72 @@ test("inactive definitions still provide Fleet identity without appearing in Lib
     0,
   );
 });
+
+test("Fleet status and inspection depth stay consistent in the profile panel", async ({
+  page,
+}) => {
+  const pubkey = "ab".repeat(32);
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        name: "Panel Inspector",
+        pubkey,
+        status: "running",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const card = page.getByTestId(`managed-agent-${pubkey}`);
+  const statusChip = page.getByTestId(`managed-agent-status-${pubkey}`);
+  await expect(statusChip).toHaveText("running");
+  await expect(statusChip).toHaveAttribute(
+    "aria-label",
+    "Agent status: running",
+  );
+
+  const menuTrigger = card.getByRole("button", {
+    name: "Open actions for Panel Inspector",
+  });
+  await menuTrigger.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Escape");
+  await expect(menuTrigger).toBeFocused();
+
+  await menuTrigger.click();
+  await page.getByRole("menuitem", { name: "View runtime" }).click();
+  await expect(page.getByTestId("user-profile-tab-runtime")).toHaveAttribute(
+    "data-state",
+    "active",
+  );
+  await expect
+    .poll(() => new URL(page.url()).hash)
+    .toContain("profileTab=runtime");
+  await expect(
+    page
+      .getByTestId("user-profile-agent-status")
+      .getByLabel("Agent status: running"),
+  ).toBeVisible();
+  await page.getByTestId("auxiliary-panel-close").click();
+
+  await menuTrigger.click();
+  await page.getByRole("menuitem", { name: "View activity" }).click();
+  await expect(page.getByTestId("user-profile-activity-view")).toBeVisible();
+  await expect
+    .poll(() => new URL(page.url()).hash)
+    .toContain("profileView=activity");
+  await page.getByTestId("user-profile-panel-back").click();
+  await expect(page.getByTestId("user-profile-tab-info")).toHaveAttribute(
+    "data-state",
+    "active",
+  );
+  await page.getByTestId("auxiliary-panel-close").click();
+
+  await menuTrigger.click();
+  await page.getByRole("menuitem", { name: "View harness log" }).click();
+  await expect(page.getByTestId("managed-agent-log-content")).toBeVisible();
+  await expect
+    .poll(() => new URL(page.url()).hash)
+    .toContain("profileView=logs");
+});
