@@ -234,7 +234,7 @@ export function useCommunityInit(
           activeCommunity.token,
           activeCommunity.reposDir,
           getOverrides().agentManagedProfiles === true,
-          getOverrides().fleetVisibility === true,
+          getOverrides().remoteControl === true,
         );
         notifyFleetVisibilitySettingsChanged();
       } catch (error) {

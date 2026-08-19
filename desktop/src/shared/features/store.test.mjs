@@ -51,3 +51,15 @@ test("getOverrides drops non-boolean values", () => {
 
   assert.deepEqual(getOverrides(), { projects: false });
 });
+
+test("getOverrides maps retired fleetVisibility onto remoteControl", () => {
+  installStorage({ fleetVisibility: true });
+
+  assert.deepEqual(getOverrides(), { remoteControl: true });
+});
+
+test("getOverrides prefers an explicit remoteControl override over the alias", () => {
+  installStorage({ fleetVisibility: true, remoteControl: false });
+
+  assert.deepEqual(getOverrides(), { remoteControl: false });
+});

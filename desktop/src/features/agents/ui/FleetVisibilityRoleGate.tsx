@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { classifyFleetVisibilityBootstrapRead } from "@/features/agents/lib/fleetVisibility";
+import { REMOTE_CONTROL_FEATURE_ID } from "@/features/agents/lib/remoteControlFeature";
 import {
   updateFleetVisibilityRole,
   useFleetVisibilitySettings,
@@ -37,7 +38,7 @@ type ChoiceState = {
 };
 
 export function FleetVisibilityRoleGate({ ownerPubkey, relayUrl }: Props) {
-  const enabled = useFeatureEnabled("fleetVisibility");
+  const enabled = useFeatureEnabled(REMOTE_CONTROL_FEATURE_ID);
   const settings = useFleetVisibilitySettings();
   const [choice, setChoice] = React.useState<ChoiceState | null>(null);
   const [selectedRole, setSelectedRole] =
@@ -152,7 +153,7 @@ export function FleetVisibilityRoleGate({ ownerPubkey, relayUrl }: Props) {
           <DialogTitle>How should this device use your agents?</DialogTitle>
           <DialogDescription>
             {choice?.detectionFailed ? (
-              <>Choose a role to finish enabling Fleet Visibility.</>
+              <>Choose a role to finish enabling Remote Control.</>
             ) : (choice?.unmatchedCount ?? 0) === 0 ? (
               <>
                 We found {choice?.fleetRecordCount ?? 0} existing fleet record

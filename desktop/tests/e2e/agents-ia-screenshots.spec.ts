@@ -90,8 +90,9 @@ test.describe("Agents Host IA screenshots", () => {
       "codex · Default model",
     );
     await expect(page.getByTestId("agents-library-personas")).toContainText(
-      "Deployed as →",
+      "Release Guide",
     );
+    await expect(page.getByText("Deployed as →")).toHaveCount(0);
     await expect(page.getByTestId("fleet-host-status")).toHaveCount(0);
     await expect(
       page.getByText("Must Not Render", { exact: true }),
@@ -181,7 +182,7 @@ test.describe("Agents Host IA screenshots", () => {
     });
   });
 
-  test("Observer uses the same Fleet, Library, and Teams IA", async ({
+  test("Observer uses the same agents and Teams IA", async ({
     page,
   }) => {
     const now = Math.floor(Date.now() / 1_000);

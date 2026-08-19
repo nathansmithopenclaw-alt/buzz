@@ -2,16 +2,17 @@
  * Persistence layer for feature flag overrides.
  *
  * The localStorage key is derived from `manifest.version` so a schema bump
- * naturally orphans the old key — clean reset, no migration logic.
+ * naturally orphans the old key. Retired ids are mapped in FEATURE_ID_ALIASES.
  *
  *   buzz-feature-overrides-v${manifest.version}
  *     → JSON object of { [featureId]: boolean }
  */
+import { canonicalizeOverrides, type FeatureOverrides } from "./featureAliases";
 import { manifest } from "./manifest";
 
 export const OVERRIDES_KEY = `buzz-feature-overrides-v${manifest.version}`;
-
-export type FeatureOverrides = Record<string, boolean>;
+export type { FeatureOverrides };
+export { FEATURE_ID_ALIASES, canonicalizeOverrides } from "./featureAliases";
 
 /** Read all user overrides from localStorage */
 export function getOverrides(): FeatureOverrides {
@@ -22,12 +23,7 @@ export function getOverrides(): FeatureOverrides {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       return {};
     const featureIds = new Set(manifest.features.map((feature) => feature.id));
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-        (entry): entry is [string, boolean] =>
-          featureIds.has(entry[0]) && typeof entry[1] === "boolean",
-      ),
-    );
+    return canonicalizeOverrides(parsed as Record<string, unknown>, featureIds);
   } catch {
     return {};
   }

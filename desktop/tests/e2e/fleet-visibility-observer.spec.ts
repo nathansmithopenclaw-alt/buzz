@@ -255,18 +255,10 @@ test("Observer renders relay fleet liveness and mentions the existing agent", as
       sections
         .map((section) => section.getAttribute("data-testid"))
         .filter((testId) =>
-          [
-            "agents-fleet",
-            "agents-library-personas",
-            "agents-library-teams",
-          ].includes(testId ?? ""),
+          ["agents-fleet", "agents-library-teams"].includes(testId ?? ""),
         ),
     );
-  expect(orderedSections).toEqual([
-    "agents-fleet",
-    "agents-library-personas",
-    "agents-library-teams",
-  ]);
+  expect(orderedSections).toEqual(["agents-fleet", "agents-library-teams"]);
   await expect(page.getByTestId("fleet-host-status")).toContainText(
     "Mini host",
   );

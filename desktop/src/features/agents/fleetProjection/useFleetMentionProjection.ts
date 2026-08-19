@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { shouldBlockPersonaCreation } from "@/features/agents/lib/fleetVisibility";
+import { REMOTE_CONTROL_FEATURE_ID } from "@/features/agents/lib/remoteControlFeature";
 import { useFleetVisibilitySettings } from "@/features/agents/lib/useFleetVisibilitySettings";
 import type {
   AgentPersona,
@@ -26,7 +27,7 @@ export function useFleetMentionProjection({
   members: readonly ChannelMember[];
   personas: readonly AgentPersona[];
 }) {
-  const experimentEnabled = useFeatureEnabled("fleetVisibility");
+  const experimentEnabled = useFeatureEnabled(REMOTE_CONTROL_FEATURE_ID);
   const settings = useFleetVisibilitySettings();
   const fleetProjection = useFleetProjectionSnapshot();
   const enabled = experimentEnabled && settings?.enabled === true;

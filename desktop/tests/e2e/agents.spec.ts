@@ -391,7 +391,7 @@ test("agent avatar emoji picker scrolls inside its popover", async ({
     .toBeGreaterThan(before);
 });
 
-test("the host page orders Fleet, Library, and Teams and keeps create in the header", async ({
+test("the host page orders agents then Teams and keeps create in the header", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -423,21 +423,11 @@ test("the host page orders Fleet, Library, and Teams and keeps create in the hea
       sections
         .map((section) => section.getAttribute("data-testid"))
         .filter((testId) =>
-          [
-            "agents-fleet",
-            "agents-library-personas",
-            "agents-library-teams",
-          ].includes(testId ?? ""),
+          ["agents-fleet", "agents-library-teams"].includes(testId ?? ""),
         ),
     );
-  expect(orderedSections).toEqual([
-    "agents-fleet",
-    "agents-library-personas",
-    "agents-library-teams",
-  ]);
-  await expect(page.getByTestId("agents-fleet")).toContainText(
-    "No agent instances yet",
-  );
+  expect(orderedSections).toEqual(["agents-fleet", "agents-library-teams"]);
+  await expect(page.getByTestId("agents-library-personas")).toBeVisible();
   await expect(page.locator('[data-testid^="persona-agent-row-"]')).toHaveCount(
     5,
   );
@@ -575,7 +565,7 @@ test("the new team card offers create and import", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("library cards use a denser shelf grammar at compact widths", async ({
+test("undeployed agent cards stay visible in the identity grid at compact widths", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -602,20 +592,17 @@ test("library cards use a denser shelf grammar at compact widths", async ({
     "persona-agent-row-custom:team-layout",
   );
   const agentGrid = firstAgentCard.locator("xpath=..");
-  const firstAgentGridCard = agentGrid.locator(":scope > *").first();
 
   await agentsContent.evaluate((element) => {
     (element as HTMLElement).style.width = "650px";
   });
-  const wideAgentBox = await firstAgentGridCard.boundingBox();
-  expect(wideAgentBox).not.toBeNull();
+  await expect(firstAgentCard).toBeVisible();
   await expect(agentGrid.locator(":scope > *")).toHaveCount(1);
 
   await agentsContent.evaluate((element) => {
     (element as HTMLElement).style.width = "600px";
   });
-  const compactAgentBox = await firstAgentGridCard.boundingBox();
-  expect(compactAgentBox?.width ?? 0).toBeGreaterThan(wideAgentBox?.width ?? 0);
+  await expect(firstAgentCard).toBeVisible();
 });
 
 test("team cards use the thread-style overlapping avatar stack", async ({
@@ -791,7 +778,7 @@ test("keeps agent actions in one overflow at every width", async ({ page }) => {
   const actionsMenu = page.getByTestId("agent-actions-menu-trigger");
   await expect(actionsMenu).toBeVisible();
   await expect(
-    page.getByText("Agents run on this device.", { exact: true }),
+    page.getByText("Agents run on this Mac.", { exact: true }),
   ).toHaveJSProperty("scrollHeight", 24);
 
   await page.getByTestId("agents-page-content").evaluate((element) => {
@@ -2045,10 +2032,7 @@ test("one share level selector drives both the link and send paths", async ({
   await gotoApp(page);
 
   await page.getByTestId("open-agents-view").click();
-  await page
-    .getByTestId("persona-agent-row-custom:animation-auditor")
-    .getByLabel("Open actions for Animation Auditor")
-    .click();
+  await page.getByLabel("Open actions for Animation Auditor").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
 
   const shareDialog = page.getByTestId("persona-share-dialog");
@@ -2322,7 +2306,7 @@ test("multi-deployment snapshot export requires an explicit memory source", asyn
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page
-    .getByTestId(`persona-agent-row-${personaId}`)
+    .getByTestId(`managed-agent-${firstPubkey}`)
     .getByLabel("Open actions for Snapshot Director")
     .click();
   await page.getByRole("menuitem", { name: "Export snapshot" }).click();
@@ -2393,7 +2377,7 @@ test("changing a multi-deployment share source keeps recipients and resets memor
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page
-    .getByTestId(`persona-agent-row-${personaId}`)
+    .getByTestId(`managed-agent-${firstPubkey}`)
     .getByLabel("Open actions for Shared Director")
     .click();
   await page.getByRole("menuitem", { name: "Share" }).click();
@@ -2602,10 +2586,7 @@ test("export from share aligns selections and animates memory details", async ({
   await gotoApp(page);
 
   await page.getByTestId("open-agents-view").click();
-  await page
-    .getByTestId("persona-agent-row-custom:animation-auditor")
-    .getByLabel("Open actions for Animation Auditor")
-    .click();
+  await page.getByLabel("Open actions for Animation Auditor").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
   await page.getByTestId("persona-share-export").click();
 
@@ -2770,7 +2751,7 @@ test("start pill morphs into the running dot without remounting the avatar", asy
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
-  const card = page.getByTestId(`persona-agent-row-${personaId}`);
+  const card = page.getByTestId(`managed-agent-${pubkey}`);
   const startButton = page.getByTestId(`agent-runtime-start-${pubkey}`);
   const badge = startButton.locator("xpath=../..");
   const initialAvatar = await card
@@ -2876,14 +2857,10 @@ test("every instance stays in Fleet and every deployment is linked from Library"
   await expect(
     page.getByTestId(`managed-agent-${additionalPubkey}`),
   ).toBeVisible();
-  const template = page.getByTestId(`persona-agent-row-${personaId}`);
-  await expect(template).toContainText("Deployed as →");
-  await expect(
-    template.locator('[data-testid^="persona-deployment-"]'),
-  ).toHaveCount(2);
-  await page
-    .getByTestId(`persona-deployment-${personaId}-${additionalPubkey}`)
-    .click();
+  await expect(page.getByTestId(`persona-agent-row-${personaId}`)).toHaveCount(
+    0,
+  );
+  await page.getByTestId(`managed-agent-${additionalPubkey}`).click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 });
 
