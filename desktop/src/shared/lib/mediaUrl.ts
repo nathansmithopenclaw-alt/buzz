@@ -53,6 +53,31 @@ function canonicalOrigin(url: string): string | null {
 }
 
 /**
+ * Our relay can answer on more than one origin (LAN vs tailnet, http vs
+ * https, different ports). Media is content-addressed by sha, so any of
+ * those origins should use the authenticated local proxy. A first-label
+ * match covers `host` vs `host.tailnet.ts.net` without treating a third-
+ * party Blossom host as ours.
+ */
+export function isKnownRelayOrigin(
+  urlOrigin: string | null,
+  cachedOrigin: string | null,
+): boolean {
+  if (!urlOrigin || !cachedOrigin) return false;
+  if (urlOrigin === cachedOrigin) return true;
+  try {
+    const urlHost = new URL(urlOrigin).hostname;
+    const cachedHost = new URL(cachedOrigin).hostname;
+    if (urlHost === cachedHost) return true;
+    const urlHead = urlHost.split(".")[0] ?? "";
+    const cachedHead = cachedHost.split(".")[0] ?? "";
+    return urlHead.length > 0 && urlHead === cachedHead;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Monotonic cache generation, bumped on every `resetMediaCaches` (i.e.
  * workspace switch). Async lookups capture the current generation and may
  * only publish results while it is still current, so a lookup started for the
@@ -322,7 +347,7 @@ export function rewriteRelayUrl(url: string): string {
   // was typed with uppercase (e.g. wss://PENDING-SEED.communities.buzz.xyz).
   if (cachedRelayOrigin) {
     const urlOrigin = canonicalOrigin(url);
-    if (urlOrigin !== cachedRelayOrigin) {
+    if (!isKnownRelayOrigin(urlOrigin, cachedRelayOrigin)) {
       return url;
     }
   }

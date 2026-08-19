@@ -373,3 +373,32 @@ test("rewriteRelayUrl: still passes external Blossom URLs through unchanged", as
     globalThis.window = previousWindow;
   }
 });
+
+test("rewriteRelayUrl: proxies the same relay on a LAN vs tailnet origin", async () => {
+  const previousWindow = globalThis.window;
+
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_media_proxy_port") return Promise.resolve(54321);
+        if (command === "get_relay_http_url") {
+          return Promise.resolve("http://tituss-mac-mini:3000");
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+
+  try {
+    const mediaUrl = await import(`./mediaUrl.ts?alias=${Date.now()}`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const tailnetUrl = `https://tituss-mac-mini.tail561ede.ts.net:8443/media/${HASH}.png`;
+    assert.equal(
+      mediaUrl.rewriteRelayUrl(tailnetUrl),
+      `http://127.0.0.1:54321/media/${HASH}.png`,
+    );
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
