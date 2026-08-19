@@ -150,6 +150,37 @@ test("coordinate tombstones remove heads and only a later event recreates them",
   assert.equal(cache.getSnapshot().owners[0].agents.length, 1);
 });
 
+test("projection cache retains 30176 team heads without install-only fields", () => {
+  const cache = createFleetProjectionCache();
+  cache.reset([OWNER], false);
+  cache.ingest(
+    event({
+      kind: 30176,
+      tags: [["d", "game-studio"]],
+      content: {
+        name: "Game Studio",
+        description: "Build the game",
+        persona_ids: ["reviewer", "builder"],
+        source_dir: "must-not-survive",
+        is_builtin: true,
+      },
+    }),
+  );
+  const owner = cache.getSnapshot().owners[0];
+  assert.deepEqual(owner.teams, [
+    {
+      ownerPubkey: OWNER,
+      teamId: "game-studio",
+      name: "Game Studio",
+      description: "Build the game",
+      personaIds: ["reviewer", "builder"],
+    },
+  ]);
+  const serialized = JSON.stringify(owner.teams);
+  assert.equal(serialized.includes("source_dir"), false);
+  assert.equal(serialized.includes("is_builtin"), false);
+});
+
 test("events from authors outside the membership scope are ignored", () => {
   const cache = createFleetProjectionCache();
   cache.reset(["3".repeat(64)], false);

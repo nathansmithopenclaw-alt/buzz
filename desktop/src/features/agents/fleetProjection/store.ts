@@ -5,6 +5,7 @@ import {
   KIND_HOST_STATUS,
   KIND_MANAGED_AGENT,
   KIND_PERSONA,
+  KIND_TEAM,
 } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type {
@@ -16,10 +17,12 @@ import type {
   FleetProjectionPersona,
   FleetProjectionRespondTo,
   FleetProjectionSnapshot,
+  FleetProjectionTeam,
 } from "./types";
 
 export const FLEET_PROJECTION_HEAD_KINDS = [
   KIND_PERSONA,
+  KIND_TEAM,
   KIND_MANAGED_AGENT,
   KIND_HOST_DECLARATION,
   KIND_HOST_STATUS,
@@ -82,9 +85,19 @@ type HostStatusHead = Version & {
   agents: readonly FleetProjectionAgentStatus[];
 };
 
+type TeamHead = Version & {
+  kind: "team";
+  ownerPubkey: string;
+  teamId: string;
+  name: string;
+  description: string | null;
+  personaIds: readonly string[];
+};
+
 type ProjectionHead =
   | AgentHead
   | PersonaHead
+  | TeamHead
   | HostDeclarationHead
   | HostStatusHead;
 
@@ -208,6 +221,33 @@ function parsePersonaHead(event: RelayEvent): PersonaHead | null {
   };
 }
 
+function parseTeamHead(event: RelayEvent): TeamHead | null {
+  const teamId = eventDTag(event);
+  const content = parseObject(event.content);
+  if (!teamId || !content) return null;
+  const name = typeof content.name === "string" ? content.name.trim() : "";
+  if (!name) return null;
+  const description =
+    typeof content.description === "string" && content.description.trim()
+      ? content.description.trim()
+      : null;
+  const personaIds = Array.isArray(content.persona_ids)
+    ? content.persona_ids.filter(
+        (id): id is string => typeof id === "string" && id.trim().length > 0,
+      )
+    : [];
+  return {
+    kind: "team",
+    ownerPubkey: normalizePubkey(event.pubkey),
+    teamId,
+    name,
+    description,
+    personaIds,
+    createdAt: event.created_at,
+    eventId: event.id,
+  };
+}
+
 function parseHostDeclarationHead(
   event: RelayEvent,
 ): HostDeclarationHead | null {
@@ -324,6 +364,8 @@ function parseProjectionHead(event: RelayEvent): ProjectionHead | null {
       return parseAgentHead(event);
     case KIND_PERSONA:
       return parsePersonaHead(event);
+    case KIND_TEAM:
+      return parseTeamHead(event);
     case KIND_HOST_DECLARATION:
       return parseHostDeclarationHead(event);
     case KIND_HOST_STATUS:
@@ -345,6 +387,7 @@ function parseDeletionCoordinates(event: RelayEvent): ParsedCoordinate[] {
       normalizePubkey(ownerPubkey ?? "") !== author ||
       ![
         KIND_PERSONA,
+        KIND_TEAM,
         KIND_MANAGED_AGENT,
         KIND_HOST_DECLARATION,
         KIND_HOST_STATUS,
@@ -371,6 +414,7 @@ function buildSnapshot(
 ): FleetProjectionSnapshot {
   const agentsByOwner = new Map<string, AgentHead[]>();
   const personas = new Map<string, PersonaHead>();
+  const teams = new Map<string, TeamHead>();
   const declarations = new Map<string, HostDeclarationHead>();
   const statuses = new Map<string, HostStatusHead>();
 
@@ -379,6 +423,8 @@ function buildSnapshot(
       const current = agentsByOwner.get(head.ownerPubkey) ?? [];
       current.push(head);
       agentsByOwner.set(head.ownerPubkey, current);
+    } else if ("teamId" in head) {
+      teams.set(coordinate(KIND_TEAM, head.ownerPubkey, head.teamId), head);
     } else if ("personaId" in head) {
       personas.set(
         coordinate(KIND_PERSONA, head.ownerPubkey, head.personaId),
@@ -401,6 +447,7 @@ function buildSnapshot(
   for (const owner of agentsByOwner.keys()) ownerPubkeys.add(owner);
   for (const persona of personas.values())
     ownerPubkeys.add(persona.ownerPubkey);
+  for (const team of teams.values()) ownerPubkeys.add(team.ownerPubkey);
   for (const declaration of declarations.values())
     ownerPubkeys.add(declaration.ownerPubkey);
   for (const status of statuses.values()) ownerPubkeys.add(status.ownerPubkey);
@@ -452,6 +499,21 @@ function buildSnapshot(
           model: persona.model,
         }));
 
+      const ownerTeams: FleetProjectionTeam[] = [...teams.values()]
+        .filter((team) => team.ownerPubkey === ownerPubkey)
+        .sort((left, right) =>
+          left.name.localeCompare(right.name, undefined, {
+            sensitivity: "base",
+          }),
+        )
+        .map((team) => ({
+          ownerPubkey,
+          teamId: team.teamId,
+          name: team.name,
+          description: team.description,
+          personaIds: team.personaIds,
+        }));
+
       const hostIds = new Set<string>();
       for (const declaration of declarations.values()) {
         if (declaration.ownerPubkey === ownerPubkey)
@@ -489,7 +551,13 @@ function buildSnapshot(
           return time !== 0 ? time : left.hostId.localeCompare(right.hostId);
         });
 
-      return { ownerPubkey, agents, personas: ownerPersonas, hosts };
+      return {
+        ownerPubkey,
+        agents,
+        personas: ownerPersonas,
+        teams: ownerTeams,
+        hosts,
+      };
     });
 
   return { owners, loading, errorMessage };

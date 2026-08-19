@@ -500,6 +500,9 @@ function UnifiedAgentsView({
                   projectedOwners={
                     showObserverLocalEmpty ? [] : projectedTeamOwners
                   }
+                  projectedTeams={
+                    showObserverLocalEmpty ? [] : (scopedOwner?.teams ?? [])
+                  }
                   onMessageAgent={(pubkey) => {
                     void handleMessageAgent(pubkey);
                   }}
