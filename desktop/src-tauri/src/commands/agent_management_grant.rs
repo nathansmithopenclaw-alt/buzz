@@ -80,10 +80,13 @@ async fn ensure_agent_management_audit_channel(
     if channel_metadata(state, &channel_id).await?.is_none() {
         create_audit_channel(state, owner_keys, &creator_pubkey, &channel_id).await?;
         let mut found = false;
-        for _ in 0..3 {
+        for attempt in 0..3 {
             if channel_metadata(state, &channel_id).await?.is_some() {
                 found = true;
                 break;
+            }
+            if attempt + 1 < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
         }
         if !found {

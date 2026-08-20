@@ -2,9 +2,8 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const HELM = "d590bcf4633a5d10f3d2c845d3a1716e752993dc0b83e0c77642affc41dd4701";
-const ANVIL =
-  "7ec029480c03a52c22c517a40c97dd831b607849bd43192b22e9488c592f70fd";
+const FIRST = "11".repeat(32);
+const SECOND = "22".repeat(32);
 
 async function openAgentDefaults(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -36,8 +35,8 @@ async function invokeMock<T>(
 test("hides pubkey and audit UUID fields", async ({ page }) => {
   await installMockBridge(page, {
     managedAgents: [
-      { pubkey: HELM, name: "Helm" },
-      { pubkey: ANVIL, name: "Anvil" },
+      { pubkey: FIRST, name: "Alpha" },
+      { pubkey: SECOND, name: "Beta" },
     ],
   });
   await openAgentDefaults(page);
@@ -53,8 +52,8 @@ test("grant all permissions to all agents is one write of five all scopes", asyn
 }) => {
   await installMockBridge(page, {
     managedAgents: [
-      { pubkey: HELM, name: "Helm" },
-      { pubkey: ANVIL, name: "Anvil" },
+      { pubkey: FIRST, name: "Alpha" },
+      { pubkey: SECOND, name: "Beta" },
     ],
   });
   await openAgentDefaults(page);
@@ -89,8 +88,8 @@ test("unchecking one agent while all is on leaves all and shows the notice", asy
 }) => {
   await installMockBridge(page, {
     managedAgents: [
-      { pubkey: HELM, name: "Helm" },
-      { pubkey: ANVIL, name: "Anvil" },
+      { pubkey: FIRST, name: "Alpha" },
+      { pubkey: SECOND, name: "Beta" },
     ],
     globalAgentConfig: {
       env_vars: {},
@@ -119,7 +118,7 @@ test("unchecking one agent while all is on leaves all and shows the notice", asy
     "data-state",
     "checked",
   );
-  await page.getByTestId(`agent-management-picker-agent-${ANVIL}`).click();
+  await page.getByTestId(`agent-management-picker-agent-${SECOND}`).click();
   await expect(
     page.getByTestId("agent-management-picker-left-all-notice"),
   ).toBeVisible();
@@ -127,4 +126,10 @@ test("unchecking one agent while all is on leaves all and shows the notice", asy
     "data-state",
     "unchecked",
   );
+  await page.getByTestId("agent-management-picker-confirm").click();
+  const payload = await invokeMock<{
+    agent_creation: { scope: string; grantees?: string[] };
+  }>(page, "get_agent_management_delegation_last_payload");
+  expect(payload?.agent_creation.scope).toBe("set");
+  expect(payload?.agent_creation.grantees).toEqual([FIRST]);
 });

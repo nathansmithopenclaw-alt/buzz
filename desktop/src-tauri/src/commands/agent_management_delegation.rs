@@ -319,9 +319,8 @@ pub fn register_agent_management_request(
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    let grant = load_global_agent_config(&app)
-        .ok()
-        .and_then(|config| config.agent_management_delegation)
+    let grant = load_global_agent_config(&app)?
+        .agent_management_delegation
         .filter(|grant| grant.validate(&owner).is_ok());
     let audit_channel_id = grant
         .as_ref()

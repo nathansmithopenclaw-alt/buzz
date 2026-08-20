@@ -147,7 +147,7 @@ async fn write_global_agent_config(
                 .managed_agents_store_lock
                 .lock()
                 .map_err(|error| error.to_string())?;
-            let old_global = load_global_agent_config(&app_for_write).unwrap_or_default();
+            let old_global = load_global_agent_config(&app_for_write)?;
             let config = match write {
                 GlobalConfigWrite::Replace(config) => preserve_durable_grant(config, &old_global),
                 GlobalConfigWrite::DelegatedPatch(patch) => patch.apply_to(old_global.clone()),

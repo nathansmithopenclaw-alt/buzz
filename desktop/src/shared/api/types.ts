@@ -983,6 +983,15 @@ export type ChannelMessagesPageResponse = {
 
 // ── Global agent configuration ────────────────────────────────────────────────
 
+export type {
+  AgentManagementDelegationCapabilities,
+  AgentManagementDelegationGrant,
+  AgentManagementDelegationGrantV1,
+  AgentManagementDelegationGrantV2,
+  AgentManagementDelegationSubjects,
+  CapabilitySubject,
+} from "./agentManagementDelegation";
+
 /** Global defaults. Precedence: baked floor < global < persona < per-agent. */
 export type GlobalAgentConfig = {
   /** Global env vars injected into all agents unconditionally. */
@@ -996,17 +1005,8 @@ export type GlobalAgentConfig = {
   /** Apply trusted owned-agent create drafts without opening the review dialog. */
   auto_approve_agent_drafts: boolean;
   /** Owner-signed standing delegation; null revokes it immediately. */
-  agent_management_delegation: AgentManagementDelegationGrant | null;
+  agent_management_delegation: import("./agentManagementDelegation").AgentManagementDelegationGrant | null;
 };
-
-export type {
-  AgentManagementDelegationCapabilities,
-  AgentManagementDelegationGrant,
-  AgentManagementDelegationGrantV1,
-  AgentManagementDelegationGrantV2,
-  AgentManagementDelegationSubjects,
-  CapabilitySubject,
-} from "./agentManagementDelegation";
 
 /**
  * Result returned by `set_global_agent_config`.

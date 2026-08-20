@@ -365,7 +365,7 @@ export function AgentManagementDelegationCard({
             </Button>
             <Button
               data-testid="agent-management-picker-confirm"
-              disabled={saving}
+              disabled={saving || agentsQuery.isLoading}
               onClick={() => void confirmPicker()}
               type="button"
             >

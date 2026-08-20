@@ -57,13 +57,13 @@ mod tests {
 
     #[test]
     fn canonical_relay_scope_converges_scheme_slash_port_and_case() {
-        let expected = "wss://tituss-mac-mini.tail561ede.ts.net:8443";
+        let expected = "wss://relay.example:8443";
         for input in [
-            "wss://tituss-mac-mini.tail561ede.ts.net:8443",
-            "wss://tituss-mac-mini.tail561ede.ts.net:8443/",
-            "https://tituss-mac-mini.tail561ede.ts.net:8443",
-            "https://tituss-mac-mini.tail561ede.ts.net:8443/",
-            "WSS://TitusS-Mac-Mini.tail561ede.ts.net:8443/",
+            "wss://relay.example:8443",
+            "wss://relay.example:8443/",
+            "https://relay.example:8443",
+            "https://relay.example:8443/",
+            "WSS://Relay.Example:8443/",
         ] {
             assert_eq!(canonical_relay_scope(input), expected, "{input}");
         }

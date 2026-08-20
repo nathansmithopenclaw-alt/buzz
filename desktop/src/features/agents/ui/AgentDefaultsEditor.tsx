@@ -212,9 +212,15 @@ export function AgentDefaultsEditor({
           // Mid-flight edit detected — do not overwrite newer user input.
           return current;
         }
-        configRef.current = result.config;
+        const next = {
+          ...result.config,
+          // Grant persists on its own path; a Save that started first must
+          // not clobber a grant that landed while the IPC was in flight.
+          agent_management_delegation: current.agent_management_delegation,
+        };
+        configRef.current = next;
         setDirty(false);
-        return result.config;
+        return next;
       });
       setRestartedCount(result.restarted_count);
       setFailedRestartCount(result.failed_restart_count);
@@ -222,7 +228,11 @@ export function AgentDefaultsEditor({
       // Seed the shared TanStack Query cache with the canonical saved value so
       // all open dialogs (and any that open afterward) see the new config
       // synchronously — no second IPC round-trip needed.
-      queryClient.setQueryData(globalAgentConfigQueryKey, result.config);
+      queryClient.setQueryData(globalAgentConfigQueryKey, {
+        ...result.config,
+        agent_management_delegation:
+          configRef.current.agent_management_delegation,
+      });
       if (savedCurrentDraft) onSaveSuccess?.(result);
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
       // Partial restart failures require an explicit acknowledgment in the
