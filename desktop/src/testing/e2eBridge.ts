@@ -527,6 +527,7 @@ type E2eConfig = {
       model: string | null;
       preferred_runtime?: string | null;
       auto_approve_agent_drafts?: boolean;
+      agent_management_delegation?: unknown;
     };
     /** Explicit owner-only agent-access capability; independent of baked defaults. */
     ownerOnlyAccessBuild?: boolean;
@@ -7885,11 +7886,15 @@ let installCallCount = 0;
 const installCallCountByRuntime: Record<string, number> = {};
 let addChannelMembersCallCount = 0;
 let setGlobalAgentConfigCallCount = 0;
+let setAgentManagementDelegationCallCount = 0;
+let lastAgentManagementDelegationPayload: unknown = null;
 let mockGlobalAgentConfig: {
   env_vars: Record<string, string>;
   provider: string | null;
   model: string | null;
   preferred_runtime?: string | null;
+  auto_approve_agent_drafts?: boolean;
+  agent_management_delegation?: unknown;
 } | null = null;
 let mockFleetVisibilitySettings: {
   enabled: boolean;
@@ -12953,6 +12958,7 @@ export function maybeInstallE2eTauriMocks() {
           model: null,
           preferred_runtime: null,
           auto_approve_agent_drafts: false,
+          agent_management_delegation: null,
           ...mockGlobalAgentConfig,
         };
       }
@@ -12966,10 +12972,9 @@ export function maybeInstallE2eTauriMocks() {
             Math.min(setGlobalAgentConfigCallCount - 1, saveErrors.length - 1)
           ];
         if (saveError) throw new Error(saveError);
-        // Echo back the submitted config as the saved value (mirrors the
-        // backend's strip-on-write pass in tests where all values are already
-        // non-empty). The invoke payload wraps it as { config }.
-        const savedConfig = (
+        // Overlay submitted fields onto the durable mock, then restore the
+        // grant — Agent-defaults Save must not write it (preserve_durable_grant).
+        const submitted = (
           payload as {
             config: {
               env_vars: Record<string, string>;
@@ -12977,6 +12982,7 @@ export function maybeInstallE2eTauriMocks() {
               model: string | null;
               preferred_runtime: string | null;
               auto_approve_agent_drafts: boolean;
+              agent_management_delegation?: unknown;
             };
           }
         ).config;
@@ -12991,16 +12997,55 @@ export function maybeInstallE2eTauriMocks() {
         if (saveDelayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, saveDelayMs));
         }
-        mockGlobalAgentConfig = savedConfig;
+        // Mirror preserve_durable_grant: Agent-defaults Save cannot write the grant.
+        const previousGrant =
+          mockGlobalAgentConfig?.agent_management_delegation ?? null;
+        mockGlobalAgentConfig = {
+          ...submitted,
+          agent_management_delegation: previousGrant,
+        };
         // In the E2E environment there are no running agents to restart, so
         // the counts default to 0 unless a spec drives them explicitly.
         return {
-          config: savedConfig,
+          config: mockGlobalAgentConfig,
           restarted_count: config?.mock?.globalConfigRestartedCount ?? 0,
           failed_restart_count:
             config?.mock?.globalConfigFailedRestartCount ?? 0,
         };
       }
+      case "set_agent_management_delegation": {
+        setAgentManagementDelegationCallCount += 1;
+        const capabilities = (payload as { capabilities: unknown })
+          .capabilities;
+        lastAgentManagementDelegationPayload = capabilities;
+        const grant =
+          capabilities == null
+            ? null
+            : {
+                version: 2,
+                auditChannelId: "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+                capabilities,
+                signedEvent: "mock-signed-event",
+              };
+        mockGlobalAgentConfig = {
+          env_vars: {},
+          provider: null,
+          model: null,
+          preferred_runtime: null,
+          auto_approve_agent_drafts: false,
+          ...mockGlobalAgentConfig,
+          agent_management_delegation: grant,
+        };
+        return {
+          config: mockGlobalAgentConfig,
+          restarted_count: 0,
+          failed_restart_count: 0,
+        };
+      }
+      case "get_agent_management_delegation_set_call_count":
+        return setAgentManagementDelegationCallCount;
+      case "get_agent_management_delegation_last_payload":
+        return lastAgentManagementDelegationPayload;
       case "list_claude_accounts":
         return mockClaudeAccounts;
       case "add_claude_account": {

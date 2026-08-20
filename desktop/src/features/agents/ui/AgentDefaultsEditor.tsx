@@ -37,9 +37,9 @@ import {
   AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/AgentConfigFields";
+import { AgentManagementDelegationCard } from "@/features/agents/ui/AgentManagementDelegationCard";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -212,17 +212,34 @@ export function AgentDefaultsEditor({
           // Mid-flight edit detected — do not overwrite newer user input.
           return current;
         }
-        configRef.current = result.config;
+        const next = {
+          ...result.config,
+          // Grant persists on its own path; a Save that started first must
+          // not clobber a grant that landed while the IPC was in flight.
+          agent_management_delegation: current.agent_management_delegation,
+        };
+        configRef.current = next;
         setDirty(false);
-        return result.config;
+        return next;
       });
       setRestartedCount(result.restarted_count);
       setFailedRestartCount(result.failed_restart_count);
       setSaveState("saved");
       // Seed the shared TanStack Query cache with the canonical saved value so
       // all open dialogs (and any that open afterward) see the new config
-      // synchronously — no second IPC round-trip needed.
-      queryClient.setQueryData(globalAgentConfigQueryKey, result.config);
+      // synchronously — no second IPC round-trip needed. Functional form so a
+      // grant that landed mid-Save (and already wrote the cache) is not
+      // republished stale; configRef is assigned inside the lazy setConfig
+      // updater and must not be read here.
+      queryClient.setQueryData(
+        globalAgentConfigQueryKey,
+        (current: GlobalAgentConfig | undefined) => ({
+          ...result.config,
+          agent_management_delegation:
+            current?.agent_management_delegation ??
+            result.config.agent_management_delegation,
+        }),
+      );
       if (savedCurrentDraft) onSaveSuccess?.(result);
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
       // Partial restart failures require an explicit acknowledgment in the
@@ -319,124 +336,26 @@ export function AgentDefaultsEditor({
       )}
 
       {!configSurfaceLoading && !configSurfaceError ? (
-        <div className="space-y-4 rounded-lg border border-border/70 px-4 py-4">
-          <div className="space-y-1">
-            <h3 className="text-sm font-medium text-foreground">
-              Agent management delegation
-            </h3>
-            <p className="text-sm text-muted-foreground">
-              Grant one managed colleague narrowly scoped authority to create
-              agents or manage teams. Clearing the grant revokes it immediately.
-            </p>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label
-              className="space-y-1.5 text-sm"
-              htmlFor="agent-management-grantee-pubkey"
-            >
-              <span className="font-medium">Grantee pubkey</span>
-              <Input
-                autoCorrect="off"
-                id="agent-management-grantee-pubkey"
-                placeholder="64-character hex pubkey"
-                value={config.agent_management_delegation?.granteePubkey ?? ""}
-                onChange={(event) => {
-                  const granteePubkey = event.target.value.trim();
-                  if (!granteePubkey) {
-                    handleConfigChange({
-                      ...config,
-                      agent_management_delegation: null,
-                    });
-                    return;
-                  }
-                  handleConfigChange({
-                    ...config,
-                    agent_management_delegation: {
-                      granteePubkey,
-                      auditChannelId:
-                        config.agent_management_delegation?.auditChannelId ??
-                        "",
-                      capabilities: config.agent_management_delegation
-                        ?.capabilities ?? {
-                        agent_config: false,
-                        agent_creation: false,
-                        env_vars: false,
-                        global_config: false,
-                        teams: false,
-                      },
-                    },
-                  });
-                }}
-              />
-            </label>
-            <label
-              className="space-y-1.5 text-sm"
-              htmlFor="agent-management-audit-channel"
-            >
-              <span className="font-medium">Audit channel UUID</span>
-              <Input
-                autoCorrect="off"
-                disabled={!config.agent_management_delegation}
-                id="agent-management-audit-channel"
-                placeholder="Channel UUID"
-                value={config.agent_management_delegation?.auditChannelId ?? ""}
-                onChange={(event) => {
-                  const grant = config.agent_management_delegation;
-                  if (!grant) return;
-                  handleConfigChange({
-                    ...config,
-                    agent_management_delegation: {
-                      ...grant,
-                      auditChannelId: event.target.value.trim(),
-                      signedEvent: null,
-                    },
-                  });
-                }}
-              />
-            </label>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {(
-              [
-                ["agent_config", "Update existing agents"],
-                ["agent_creation", "Create agents"],
-                ["env_vars", "Set agent environment variables"],
-                ["global_config", "Update global agent defaults"],
-                ["teams", "Create and update teams"],
-              ] as const
-            ).map(([capability, label]) => (
-              <div
-                className="flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2"
-                key={capability}
-              >
-                <span className="text-sm">{label}</span>
-                <Switch
-                  checked={
-                    config.agent_management_delegation?.capabilities[
-                      capability
-                    ] ?? false
-                  }
-                  disabled={!config.agent_management_delegation}
-                  onCheckedChange={(checked) => {
-                    const grant = config.agent_management_delegation;
-                    if (!grant) return;
-                    handleConfigChange({
-                      ...config,
-                      agent_management_delegation: {
-                        ...grant,
-                        capabilities: {
-                          ...grant.capabilities,
-                          [capability]: checked,
-                        },
-                        signedEvent: null,
-                      },
-                    });
-                  }}
-                />
-              </div>
-            ))}
-          </div>
-        </div>
+        <AgentManagementDelegationCard
+          grant={config.agent_management_delegation}
+          onPersisted={(saved) => {
+            setConfig((current) => {
+              const next = {
+                ...current,
+                agent_management_delegation: saved.agent_management_delegation,
+              };
+              configRef.current = next;
+              return next;
+            });
+            queryClient.setQueryData(
+              globalAgentConfigQueryKey,
+              (current: GlobalAgentConfig | undefined) => ({
+                ...(current ?? saved),
+                agent_management_delegation: saved.agent_management_delegation,
+              }),
+            );
+          }}
+        />
       ) : null}
 
       {!configSurfaceLoading && !configSurfaceError ? (

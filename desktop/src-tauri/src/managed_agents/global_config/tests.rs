@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use nostr::{EventBuilder, JsonUtil, Keys, Kind};
 
 use super::{
-    normalize_global_config_fields, resolve_effective_model_provider, strip_empty_env_vars,
-    validate_global_config, AgentManagementDelegationCapabilities, AgentManagementDelegationGrant,
-    AgentManagementDelegationPayload, GlobalAgentConfig,
+    normalize_global_config_fields, parse_global_agent_config, resolve_effective_model_provider,
+    strip_empty_env_vars, validate_global_config, AgentManagementDelegationCapabilities,
+    AgentManagementDelegationGrant, AgentManagementDelegationPayload,
+    AgentManagementDelegationPayloadV1, GlobalAgentConfig,
 };
 use crate::managed_agents::{AgentDefinition, BackendKind, ManagedAgentRecord, RespondTo};
 
@@ -33,7 +34,7 @@ fn auto_approve_agent_drafts_defaults_false_for_legacy_config() {
 }
 
 fn signed_delegation_grant(owner: &Keys, grantee_pubkey: String) -> AgentManagementDelegationGrant {
-    let payload = AgentManagementDelegationPayload {
+    let payload = AgentManagementDelegationPayload::V1(AgentManagementDelegationPayloadV1 {
         grantee_pubkey,
         audit_channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
         capabilities: AgentManagementDelegationCapabilities {
@@ -43,7 +44,7 @@ fn signed_delegation_grant(owner: &Keys, grantee_pubkey: String) -> AgentManagem
             agent_creation: true,
             env_vars: true,
         },
-    };
+    });
     let event = EventBuilder::new(
         Kind::Custom(30_078),
         serde_json::to_string(&payload).unwrap(),
@@ -64,9 +65,36 @@ fn delegation_grant_requires_current_owner_signature_and_exact_fields() {
     grant.validate(&owner.public_key()).unwrap();
 
     let mut tampered = grant.clone();
-    tampered.payload.capabilities.agent_creation = false;
+    if let AgentManagementDelegationPayload::V1(payload) = &mut tampered.payload {
+        payload.capabilities.agent_creation = false;
+    }
     assert!(tampered.validate(&owner.public_key()).is_err());
     assert!(grant.validate(&Keys::generate().public_key()).is_err());
+}
+
+#[test]
+fn version_3_config_file_fails_global_config_load() {
+    let json = serde_json::json!({
+        "env_vars": {},
+        "provider": null,
+        "model": null,
+        "preferred_runtime": null,
+        "auto_approve_agent_drafts": false,
+        "agent_management_delegation": {
+            "version": 3,
+            "auditChannelId": "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+            "capabilities": {}
+        }
+    });
+    let error = parse_global_agent_config(&json.to_string()).unwrap_err();
+    assert!(
+        error.contains("failed to parse global agent config"),
+        "expected load-path prefix, got: {error}"
+    );
+    assert!(
+        error.contains("unknown delegation grant version"),
+        "expected unknown-version cause, got: {error}"
+    );
 }
 
 #[test]
@@ -74,11 +102,15 @@ fn delegation_grant_rejects_noncanonical_grantee_and_invalid_audit_channel() {
     let owner = Keys::generate();
     let grantee = Keys::generate();
     let mut grant = signed_delegation_grant(&owner, grantee.public_key().to_hex());
-    grant.payload.grantee_pubkey.make_ascii_uppercase();
+    if let AgentManagementDelegationPayload::V1(payload) = &mut grant.payload {
+        payload.grantee_pubkey.make_ascii_uppercase();
+    }
     assert!(grant.validate(&owner.public_key()).is_err());
 
     let mut grant = signed_delegation_grant(&owner, grantee.public_key().to_hex());
-    grant.payload.audit_channel_id = "not-a-channel".into();
+    if let AgentManagementDelegationPayload::V1(payload) = &mut grant.payload {
+        payload.audit_channel_id = "not-a-channel".into();
+    }
     assert!(grant.validate(&owner.public_key()).is_err());
 }
 

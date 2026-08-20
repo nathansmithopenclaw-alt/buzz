@@ -24,7 +24,19 @@ creation of a new standing grant.
 
 ## Owner-signed grant
 
-Desktop stores a grant containing this canonical camel-case payload:
+Desktop stores a grant containing a canonical camel-case payload as the
+content of a `kind:30078` event signed by the current Desktop owner. Desktop
+treats that event as an opaque authorization proof: its signature, author,
+kind, content, and decoded payload must all validate against current state,
+and the decoded signed payload must exactly equal the stored payload.
+
+Changing any grant field causes Desktop to sign a new proof. Setting the grant
+to `null` revokes it immediately. Capabilities are checked independently;
+granting `agent_config` does not grant `global_config`, and vice versa.
+
+### v1 payload
+
+A grant with no `version` field is v1: one grantee and boolean bits.
 
 ```json
 {
@@ -40,21 +52,91 @@ Desktop stores a grant containing this canonical camel-case payload:
 }
 ```
 
-The payload is serialized as the content of a `kind:30078` event
-signed by the current Desktop owner. Desktop treats that event as an opaque
-authorization proof: its signature, author, kind, content, grantee, audit
-channel, and capability bits must all validate against current state, and the
-decoded signed payload must exactly equal the stored payload.
+v1 grants keep verifying. Desktop does not auto-upgrade them on read. The next
+owner save of the delegation card re-signs as v2.
 
-Changing any grant field causes Desktop to sign a new proof. Setting the grant
-to `null` revokes it immediately. Capability bits are checked independently;
-granting `agent_config` does not grant `global_config`, and vice versa.
+### Unknown versions
 
-Any request containing `request.envVars` additionally requires `env_vars`, even
-when its primary capability is `agent_config`, `global_config`, or
-`agent_creation`. Reserved Buzz identity and control variables are rejected
-before a side effect. Public receipts include key names and value hashes, never
-raw values.
+A grant whose `version` field is present and not `2` fails validation loud. It
+is not treated as "no grant" and must not fall back to owner-review. A v1 grant
+has no `version` field. Desktop refuses to load a `global-agent-config.json`
+that cannot deserialize for this reason; restoring a pre-v2 copy of that file
+is the rollback path.
+
+### v2 payload
+
+v2 replaces the single grantee with a per-capability subject.
+
+```json
+{
+  "version": 2,
+  "auditChannelId": "<channel UUID>",
+  "capabilities": {
+    "agent_creation": { "scope": "all" },
+    "agent_config": { "scope": "set", "grantees": ["<hex>"] },
+    "env_vars": { "scope": "none" },
+    "global_config": { "scope": "none" },
+    "teams": { "scope": "all" }
+  }
+}
+```
+
+`scope` is exactly one of `none`, `set`, or `all`. `all` is a wildcard in the
+signed payload: later locally-managed agents of this owner are covered without
+re-granting. It is not a public wildcard — origin classification still requires
+a locally managed agent sharing a channel with the owner.
+
+For `scope: "set"`, `grantees` is required and must be canonical lowercase
+32-byte hex pubkeys, deduplicated and sorted. An empty list is stored as
+`none`, not as `set` with zero entries. Implementations MUST reject a signed
+grant whose `set` entries are non-canonical, duplicated, or empty.
+
+Unchecking one name while `all` is on leaves `all` mode and writes `set` of the
+current roster minus that name. Future agents are then not covered until `all`
+is checked again.
+
+The audit channel is created-once as a private stream named `Agent management`
+with a deterministic UUID. The namespace is the same UUID used for starter
+channels:
+
+```
+namespace = 3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0
+name      = "agent-management-audit:v1:{owner_hex}:{relay_scope}"
+id        = uuid5(namespace, name)
+```
+
+`owner_hex` is the Desktop owner's lowercase 32-byte hex pubkey.
+`relay_scope` is the canonical websocket identity of the workspace relay:
+
+- `http` and `ws` fold to `ws`; every other scheme (`https`, `wss`, unknown)
+  folds to `wss`. A literal scheme comparison of `https://` vs `wss://` MUST
+  NOT produce two channels.
+- host is lowercased
+- default ports are omitted (`80` for `ws`, `443` for `wss`)
+- path, query, fragment, and trailing slash are dropped
+
+Two devices of the same owner on the same relay therefore converge. Existing
+v1 grants keep their current audit channel until re-saved. Grantees are not
+auto-added as members.
+
+If a `kind:39000` already exists for that UUID, Desktop reuses it only when
+`metadata.pubkey` equals the current Desktop owner. Otherwise grant persist
+fails closed and nothing is signed — the UUID inputs are public, so a
+pre-created channel on a multi-tenant relay is otherwise a squat. Desktop
+must not join that channel or post receipts into it.
+
+A v1 Desktop cannot deserialize v2. Do not write v2 until this build is
+installed on the machine that owns `global-agent-config.json`. Do not write a
+synthetic v1 `granteePubkey` alongside v2.
+
+A request that carries `request.envVars` is authorized only when the requester
+matches the `env_vars` subject (the same subject-match as the primary
+capability), even when that primary capability is `agent_config`,
+`global_config`, or `agent_creation`. Checking that `env_vars` is not `none`
+is not sufficient: `scope: "set"` must still contain this source, and
+`scope: "all"` still requires origin classification. Reserved Buzz identity
+and control variables are rejected before a side effect. Public receipts
+include key names and value hashes, never raw values.
 
 ## Request transport and identity
 

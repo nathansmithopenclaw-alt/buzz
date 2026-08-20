@@ -1,5 +1,9 @@
 use super::*;
-use crate::managed_agents::global_config::AgentManagementDelegationCapabilities;
+use crate::managed_agents::global_config::{
+    AgentManagementDelegationCapabilities, AgentManagementDelegationPayload,
+    AgentManagementDelegationPayloadV1, AgentManagementDelegationPayloadV2,
+    AgentManagementDelegationSubjects, CapabilitySubject,
+};
 use nostr::ToBech32;
 
 fn unsigned_grant(
@@ -7,11 +11,11 @@ fn unsigned_grant(
     capabilities: AgentManagementDelegationCapabilities,
 ) -> AgentManagementDelegationGrant {
     AgentManagementDelegationGrant {
-        payload: crate::managed_agents::global_config::AgentManagementDelegationPayload {
+        payload: AgentManagementDelegationPayload::V1(AgentManagementDelegationPayloadV1 {
             grantee_pubkey,
             audit_channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
             capabilities,
-        },
+        }),
         signed_event: None,
     }
 }
@@ -135,6 +139,12 @@ fn agent_and_global_config_grants_are_independent_and_env_is_conjunctive() {
         DelegatedCapability::AgentConfig,
         true,
     ));
+    assert!(!grant_authorizes_request(
+        &grant,
+        &"22".repeat(32),
+        DelegatedCapability::AgentConfig,
+        false,
+    ));
 
     let globally_scoped = unsigned_grant(
         source.clone(),
@@ -150,6 +160,235 @@ fn agent_and_global_config_grants_are_independent_and_env_is_conjunctive() {
         DelegatedCapability::GlobalConfig,
         true,
     ));
+}
+
+fn unsigned_v2(subjects: AgentManagementDelegationSubjects) -> AgentManagementDelegationGrant {
+    AgentManagementDelegationGrant {
+        payload: AgentManagementDelegationPayload::V2(AgentManagementDelegationPayloadV2 {
+            version: 2,
+            audit_channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
+            capabilities: subjects,
+        }),
+        signed_event: None,
+    }
+}
+
+#[test]
+fn v2_all_authorizes_two_agents_and_set_excludes_unlist() {
+    let first = "11".repeat(32);
+    let second = "22".repeat(32);
+    let outsider = "33".repeat(32);
+    let all = unsigned_v2(AgentManagementDelegationSubjects {
+        agent_creation: CapabilitySubject::All,
+        env_vars: CapabilitySubject::All,
+        ..Default::default()
+    });
+    assert!(grant_authorizes_request(
+        &all,
+        &first,
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+    assert!(grant_authorizes_request(
+        &all,
+        &second,
+        DelegatedCapability::AgentCreation,
+        true,
+    ));
+    // `all` is a wildcard, not a roster snapshot — a pubkey created after
+    // the signature still matches at the grant layer.
+    assert!(grant_authorizes_request(
+        &all,
+        &outsider,
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+    assert!(!grant_authorizes_request(
+        &all,
+        &first,
+        DelegatedCapability::Teams,
+        false,
+    ));
+
+    let set = unsigned_v2(AgentManagementDelegationSubjects {
+        agent_creation: CapabilitySubject::Set {
+            grantees: vec![first.clone()],
+        },
+        ..Default::default()
+    });
+    assert!(grant_authorizes_request(
+        &set,
+        &first,
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+    assert!(!grant_authorizes_request(
+        &set,
+        &outsider,
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+    assert!(!grant_authorizes_request(
+        &set,
+        &first,
+        DelegatedCapability::AgentCreation,
+        true,
+    ));
+}
+
+#[test]
+fn per_agent_revoke_routes_removed_agent_to_draft_and_retained_to_apply() {
+    let first = "11".repeat(32);
+    let second = "22".repeat(32);
+    let both = unsigned_v2(AgentManagementDelegationSubjects {
+        agent_creation: CapabilitySubject::Set {
+            grantees: vec![first.clone(), second.clone()],
+        },
+        ..Default::default()
+    });
+    assert!(grant_authorizes_request(
+        &both,
+        &first,
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+    assert!(grant_authorizes_request(
+        &both,
+        &second,
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+
+    let revoked = unsigned_v2(AgentManagementDelegationSubjects {
+        agent_creation: CapabilitySubject::Set {
+            grantees: vec![first.clone()],
+        },
+        ..Default::default()
+    });
+    let mut ledger = AgentManagementState::default();
+    let retained = register_in_ledger(
+        &mut ledger,
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+        NewLedgerRequest {
+            source_pubkey: first.clone(),
+            capability: DelegatedCapability::AgentCreation,
+            payload_sha256: "33".repeat(32),
+            payload: serde_json::json!({"action": "create", "agent": "retained"}),
+            authorized: grant_authorizes_request(
+                &revoked,
+                &first,
+                DelegatedCapability::AgentCreation,
+                false,
+            ),
+            audit_channel_id: Some("7c07e659-3610-42f4-9a5e-1e9973c09da9".into()),
+            rejection: None,
+        },
+    )
+    .unwrap();
+    let removed = register_in_ledger(
+        &mut ledger,
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+        NewLedgerRequest {
+            source_pubkey: second.clone(),
+            capability: DelegatedCapability::AgentCreation,
+            payload_sha256: "44".repeat(32),
+            payload: serde_json::json!({"action": "create", "agent": "removed"}),
+            authorized: grant_authorizes_request(
+                &revoked,
+                &second,
+                DelegatedCapability::AgentCreation,
+                false,
+            ),
+            audit_channel_id: Some("7c07e659-3610-42f4-9a5e-1e9973c09da9".into()),
+            rejection: None,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        retained.disposition,
+        ManagementRequestDisposition::Apply
+    ));
+    assert!(matches!(
+        removed.disposition,
+        ManagementRequestDisposition::Draft
+    ));
+}
+
+#[test]
+fn all_grant_receipt_p_tag_is_the_acting_agent() {
+    let owner = Keys::generate();
+    let actor = Keys::generate();
+    let outsider = Keys::generate();
+    let grant = unsigned_v2(AgentManagementDelegationSubjects {
+        agent_creation: CapabilitySubject::All,
+        ..Default::default()
+    });
+    let actor_hex = actor.public_key().to_hex();
+    assert!(grant_authorizes_request(
+        &grant,
+        &actor_hex,
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+    assert!(grant_authorizes_request(
+        &grant,
+        &outsider.public_key().to_hex(),
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+
+    let mut ledger = AgentManagementState::default();
+    let request_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    let registered = register_in_ledger(
+        &mut ledger,
+        request_id.into(),
+        NewLedgerRequest {
+            source_pubkey: actor_hex.clone(),
+            capability: DelegatedCapability::AgentCreation,
+            payload_sha256: "55".repeat(32),
+            payload: serde_json::json!({"action": "create"}),
+            authorized: grant_authorizes_request(
+                &grant,
+                &actor_hex,
+                DelegatedCapability::AgentCreation,
+                false,
+            ),
+            audit_channel_id: Some("7c07e659-3610-42f4-9a5e-1e9973c09da9".into()),
+            rejection: None,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        registered.disposition,
+        ManagementRequestDisposition::Apply
+    ));
+
+    let event = build_audit_receipt_event(
+        &owner,
+        &actor_hex,
+        "Alpha",
+        DelegatedCapability::AgentCreation,
+        "new agent",
+        true,
+        false,
+        request_id,
+        "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+        None,
+    )
+    .unwrap();
+    let tags: Vec<Vec<String>> = event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .collect();
+    let p_tags: Vec<&Vec<String>> = tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("p"))
+        .collect();
+    assert_eq!(p_tags.len(), 1, "receipt must mention exactly one agent");
+    assert_eq!(p_tags[0], &vec!["p".to_string(), actor_hex.clone()]);
+    assert_ne!(p_tags[0][1], owner.public_key().to_hex());
+    assert_ne!(p_tags[0][1], outsider.public_key().to_hex());
 }
 
 #[test]

@@ -24,84 +24,26 @@
 
 use std::collections::BTreeMap;
 
-use nostr::{Event, JsonUtil, Kind, PublicKey};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
+
+mod audit;
+mod delegation;
+pub use audit::{agent_management_audit_channel_uuid, canonical_relay_scope};
+#[cfg(test)]
+pub use delegation::{
+    AgentManagementDelegationCapabilities, AgentManagementDelegationPayloadV1, CapabilitySubject,
+};
+pub use delegation::{
+    AgentManagementDelegationGrant, AgentManagementDelegationPayload,
+    AgentManagementDelegationPayloadV2, AgentManagementDelegationSubjects,
+};
 
 use crate::managed_agents::env_vars::{
     validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_VALUE_BYTES,
 };
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
 use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
-
-/// Independently revocable capabilities carried by an owner-signed standing grant.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentManagementDelegationCapabilities {
-    #[serde(default)]
-    pub agent_config: bool,
-    #[serde(default)]
-    pub global_config: bool,
-    #[serde(default)]
-    pub teams: bool,
-    #[serde(default)]
-    pub agent_creation: bool,
-    #[serde(default)]
-    pub env_vars: bool,
-}
-
-/// Canonical content signed by the Desktop owner.
-///
-/// Grant mutation, key export, relay configuration, deletion, and lifecycle
-/// controls are deliberately absent from this vocabulary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentManagementDelegationPayload {
-    pub grantee_pubkey: String,
-    pub audit_channel_id: String,
-    pub capabilities: AgentManagementDelegationCapabilities,
-}
-
-/// Desktop-owned standing delegation. The opaque event must be signed by the
-/// current owner and its content must exactly match `payload`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentManagementDelegationGrant {
-    #[serde(flatten)]
-    pub payload: AgentManagementDelegationPayload,
-    #[serde(default)]
-    pub signed_event: Option<String>,
-}
-
-impl AgentManagementDelegationGrant {
-    pub fn validate(&self, owner: &PublicKey) -> Result<(), String> {
-        let grantee = PublicKey::parse(self.payload.grantee_pubkey.trim())
-            .map_err(|error| format!("invalid delegation grantee pubkey: {error}"))?;
-        if grantee.to_hex() != self.payload.grantee_pubkey {
-            return Err("delegation grantee pubkey is not canonical lowercase hex".into());
-        }
-        uuid::Uuid::parse_str(self.payload.audit_channel_id.trim()).map_err(|_| {
-            format!(
-                "invalid delegation audit channel UUID: {}",
-                self.payload.audit_channel_id
-            )
-        })?;
-        let raw = self
-            .signed_event
-            .as_deref()
-            .ok_or("delegation grant is not owner-signed")?;
-        let event = Event::from_json(raw)
-            .map_err(|error| format!("invalid delegation signature event: {error}"))?;
-        if event.kind != Kind::Custom(30_078) || event.pubkey != *owner || event.verify().is_err() {
-            return Err("delegation grant signature is invalid for this owner".into());
-        }
-        let signed_payload: AgentManagementDelegationPayload = serde_json::from_str(&event.content)
-            .map_err(|error| format!("invalid delegation grant content: {error}"))?;
-        if signed_payload != self.payload {
-            return Err("delegation grant fields do not match the owner signature".into());
-        }
-        Ok(())
-    }
-}
 
 /// The global agent configuration record.
 ///
@@ -275,7 +217,11 @@ pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, St
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read global agent config: {e}"))?;
-    serde_json::from_str(&content).map_err(|e| format!("failed to parse global agent config: {e}"))
+    parse_global_agent_config(&content)
+}
+
+fn parse_global_agent_config(content: &str) -> Result<GlobalAgentConfig, String> {
+    serde_json::from_str(content).map_err(|e| format!("failed to parse global agent config: {e}"))
 }
 
 /// Save the global agent config to disk.

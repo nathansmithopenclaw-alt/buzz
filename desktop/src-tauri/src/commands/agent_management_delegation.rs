@@ -21,8 +21,8 @@ mod create_secret_response;
 mod result_publication;
 use create_secret_response::retained_agent_create_secret_event;
 use result_publication::{
-    publish_agent_management_applying_result, publish_agent_management_recovery_audit_receipt,
-    publish_agent_management_result,
+    build_audit_receipt_event, publish_agent_management_applying_result,
+    publish_agent_management_recovery_audit_receipt, publish_agent_management_result,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -164,28 +164,22 @@ fn canonical_request_id(request_id: &str) -> Result<String, String> {
         .map(|request_id| request_id.to_string())
 }
 
-fn capability_enabled(
-    grant: &AgentManagementDelegationGrant,
-    capability: DelegatedCapability,
-) -> bool {
-    match capability {
-        DelegatedCapability::AgentConfig => grant.payload.capabilities.agent_config,
-        DelegatedCapability::AgentCreation => grant.payload.capabilities.agent_creation,
-        DelegatedCapability::EnvVars => grant.payload.capabilities.env_vars,
-        DelegatedCapability::GlobalConfig => grant.payload.capabilities.global_config,
-        DelegatedCapability::Teams => grant.payload.capabilities.teams,
-    }
-}
-
 fn grant_authorizes_request(
     grant: &AgentManagementDelegationGrant,
     source_pubkey: &str,
     capability: DelegatedCapability,
     request_has_env_vars: bool,
 ) -> bool {
-    grant.payload.grantee_pubkey == source_pubkey
-        && capability_enabled(grant, capability)
-        && (!request_has_env_vars || grant.payload.capabilities.env_vars)
+    let name = match capability {
+        DelegatedCapability::AgentConfig => "agent_config",
+        DelegatedCapability::AgentCreation => "agent_creation",
+        DelegatedCapability::EnvVars => "env_vars",
+        DelegatedCapability::GlobalConfig => "global_config",
+        DelegatedCapability::Teams => "teams",
+    };
+    grant
+        .payload
+        .allows_named(source_pubkey, name, request_has_env_vars)
 }
 
 struct NewLedgerRequest {
@@ -325,13 +319,12 @@ pub fn register_agent_management_request(
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    let grant = load_global_agent_config(&app)
-        .ok()
-        .and_then(|config| config.agent_management_delegation)
+    let grant = load_global_agent_config(&app)?
+        .agent_management_delegation
         .filter(|grant| grant.validate(&owner).is_ok());
     let audit_channel_id = grant
         .as_ref()
-        .map(|grant| grant.payload.audit_channel_id.clone());
+        .map(|grant| grant.payload.audit_channel_id().to_string());
     let env_vars = request_env_vars(&payload)?;
     let authorized = intent == "apply"
         && grant.as_ref().is_some_and(|grant| {
@@ -558,48 +551,21 @@ pub async fn publish_agent_management_audit_receipt(
             env_fingerprint_summary(&entry.payload),
         )
     };
-    let safe_name: String = requester_name
-        .chars()
-        .filter(|character| !character.is_control() && *character != '@')
-        .take(120)
-        .collect();
-    let safe_target: String = target
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(240)
-        .collect();
-    let capability_label = match capability {
-        DelegatedCapability::AgentConfig => "agent config",
-        DelegatedCapability::AgentCreation => "agent creation",
-        DelegatedCapability::EnvVars => "agent env vars",
-        DelegatedCapability::GlobalConfig => "global agent config",
-        DelegatedCapability::Teams => "teams",
-    };
-    let outcome = if succeeded { "applied" } else { "failed" };
-    let authority = if owner_reviewed {
-        "owner-reviewed"
-    } else {
-        "delegated"
-    };
-    let mut content = format!(
-        "@{safe_name} {authority} {capability_label} {outcome}: {safe_target}\n\nRequest: `{}`",
-        request_id
-    );
-    if let Some(summary) = env_summary {
-        content.push_str("\nEnv fingerprints: ");
-        content.push_str(&summary);
-    }
-    let h = Tag::parse(["h", channel.as_str()])
-        .map_err(|error| format!("failed to build audit channel tag: {error}"))?;
-    let p = Tag::parse(["p", source_hex.as_str()])
-        .map_err(|error| format!("failed to build audit mention tag: {error}"))?;
     let mut audit_event = match stored_audit_event {
         Some(raw) => Event::from_json(raw)
             .map_err(|error| format!("stored audit receipt is invalid: {error}"))?,
-        None => EventBuilder::new(Kind::Custom(9), content)
-            .tags([h, p])
-            .sign_with_keys(&owner_keys)
-            .map_err(|error| format!("failed to sign audit receipt: {error}"))?,
+        None => build_audit_receipt_event(
+            &owner_keys,
+            &source_hex,
+            &requester_name,
+            capability,
+            &target,
+            succeeded,
+            owner_reviewed,
+            &request_id,
+            &channel,
+            env_summary.as_deref(),
+        )?,
     };
     {
         let state_handle = app.state::<AppState>();

@@ -75,6 +75,12 @@ impl DelegatedGlobalAgentConfigPatch {
 enum GlobalConfigWrite {
     Replace(GlobalAgentConfig),
     DelegatedPatch(DelegatedGlobalAgentConfigPatch),
+    /// Owner-signed grant persist. Independent of the Agent-defaults Save bar:
+    /// unsaved provider/model edits in the same form are not part of this write.
+    Delegation {
+        subjects: Option<crate::managed_agents::global_config::AgentManagementDelegationSubjects>,
+        audit_channel_id: Option<String>,
+    },
 }
 
 /// Read the current global agent configuration.
@@ -141,13 +147,19 @@ async fn write_global_agent_config(
                 .managed_agents_store_lock
                 .lock()
                 .map_err(|error| error.to_string())?;
-            let old_global = load_global_agent_config(&app_for_write).unwrap_or_default();
+            let old_global = load_global_agent_config(&app_for_write)?;
             let config = match write {
-                GlobalConfigWrite::Replace(mut config) => {
-                    prepare_delegation_signature(&mut config, &old_global, &owner_keys)?;
-                    config
-                }
+                GlobalConfigWrite::Replace(config) => preserve_durable_grant(config, &old_global),
                 GlobalConfigWrite::DelegatedPatch(patch) => patch.apply_to(old_global.clone()),
+                GlobalConfigWrite::Delegation {
+                    subjects,
+                    audit_channel_id,
+                } => apply_delegation_subjects(
+                    old_global.clone(),
+                    subjects,
+                    audit_channel_id,
+                    &owner_keys,
+                )?,
             };
             validate_global_config(&config)?;
             save_global_agent_config(&app_for_write, &config)?;
@@ -205,6 +217,70 @@ async fn write_global_agent_config(
     })
 }
 
+fn preserve_durable_grant(
+    mut incoming: GlobalAgentConfig,
+    old: &GlobalAgentConfig,
+) -> GlobalAgentConfig {
+    incoming.agent_management_delegation = old.agent_management_delegation.clone();
+    incoming
+}
+
+/// Persist a v2 grant (or revoke) against the latest durable config.
+pub async fn write_agent_management_delegation(
+    subjects: Option<crate::managed_agents::global_config::AgentManagementDelegationSubjects>,
+    audit_channel_id: Option<String>,
+    app: AppHandle,
+) -> Result<GlobalAgentConfigSaveResult, String> {
+    write_global_agent_config(
+        GlobalConfigWrite::Delegation {
+            subjects,
+            audit_channel_id,
+        },
+        app,
+    )
+    .await
+}
+
+fn apply_delegation_subjects(
+    old_config: GlobalAgentConfig,
+    subjects: Option<crate::managed_agents::global_config::AgentManagementDelegationSubjects>,
+    audit_channel_id: Option<String>,
+    owner_keys: &nostr::Keys,
+) -> Result<GlobalAgentConfig, String> {
+    use crate::managed_agents::global_config::{
+        AgentManagementDelegationGrant, AgentManagementDelegationPayload,
+        AgentManagementDelegationPayloadV2,
+    };
+
+    let mut config = old_config.clone();
+    let Some(mut subjects) = subjects else {
+        config.agent_management_delegation = None;
+        return Ok(config);
+    };
+    subjects.canonicalize()?;
+    if subjects.is_empty() {
+        config.agent_management_delegation = None;
+        return Ok(config);
+    }
+
+    let audit_channel_id = audit_channel_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "delegation grant is missing an audit channel (ensure it before signing)".to_string()
+        })?;
+
+    config.agent_management_delegation = Some(AgentManagementDelegationGrant {
+        payload: AgentManagementDelegationPayload::V2(AgentManagementDelegationPayloadV2 {
+            version: 2,
+            audit_channel_id,
+            capabilities: subjects,
+        }),
+        signed_event: None,
+    });
+    prepare_delegation_signature(&mut config, &old_config, owner_keys)?;
+    Ok(config)
+}
+
 fn prepare_delegation_signature(
     config: &mut GlobalAgentConfig,
     old_config: &GlobalAgentConfig,
@@ -213,12 +289,7 @@ fn prepare_delegation_signature(
     let Some(grant) = config.agent_management_delegation.as_mut() else {
         return Ok(());
     };
-    grant.payload.grantee_pubkey = nostr::PublicKey::parse(grant.payload.grantee_pubkey.trim())
-        .map_err(|error| format!("invalid delegation grantee pubkey: {error}"))?
-        .to_hex();
-    grant.payload.audit_channel_id = uuid::Uuid::parse_str(grant.payload.audit_channel_id.trim())
-        .map_err(|_| "invalid delegation audit channel UUID".to_string())?
-        .to_string();
+    grant.payload.canonicalize()?;
     if let Some(old_grant) = &old_config.agent_management_delegation {
         if old_grant.payload == grant.payload
             && old_grant.validate(&owner_keys.public_key()).is_ok()
@@ -523,24 +594,29 @@ fn should_restart_on_config_change(old_ready: bool, new_ready: bool, env_changed
 
 #[cfg(test)]
 mod tests {
-    use super::{should_restart_on_config_change, DelegatedGlobalAgentConfigPatch};
+    use super::{
+        apply_delegation_subjects, preserve_durable_grant, should_restart_on_config_change,
+        DelegatedGlobalAgentConfigPatch,
+    };
     use crate::managed_agents::global_config::{
         AgentManagementDelegationCapabilities, AgentManagementDelegationGrant,
-        AgentManagementDelegationPayload,
+        AgentManagementDelegationPayload, AgentManagementDelegationPayloadV1,
+        AgentManagementDelegationSubjects, CapabilitySubject,
     };
     use crate::managed_agents::GlobalAgentConfig;
+    use nostr::{Event, JsonUtil, Keys, Kind};
 
     #[test]
     fn delegated_patch_preserves_authority_and_unrequested_defaults() {
         let grant = AgentManagementDelegationGrant {
-            payload: AgentManagementDelegationPayload {
+            payload: AgentManagementDelegationPayload::V1(AgentManagementDelegationPayloadV1 {
                 grantee_pubkey: "11".repeat(32),
                 audit_channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
                 capabilities: AgentManagementDelegationCapabilities {
                     global_config: true,
                     ..Default::default()
                 },
-            },
+            }),
             signed_event: Some("retained-owner-signature".into()),
         };
         let current = GlobalAgentConfig {
@@ -645,6 +721,93 @@ mod tests {
         assert!(
             should_restart_on_config_change(false, true, true),
             "NotReady → Ready (with env change) must be a restart candidate"
+        );
+    }
+
+    #[test]
+    fn grant_all_permissions_signs_once_covering_five_scopes() {
+        let owner = Keys::generate();
+        let audit = "7c07e659-3610-42f4-9a5e-1e9973c09da9";
+        let config = apply_delegation_subjects(
+            GlobalAgentConfig::default(),
+            Some(AgentManagementDelegationSubjects::all_agents()),
+            Some(audit.into()),
+            &owner,
+        )
+        .unwrap();
+        let grant = config
+            .agent_management_delegation
+            .expect("grant-all must persist a grant");
+        grant.validate(&owner.public_key()).unwrap();
+        let raw = grant
+            .signed_event
+            .as_ref()
+            .expect("grant-all must produce one signature");
+        let event = Event::from_json(raw).unwrap();
+        assert_eq!(event.kind, Kind::Custom(30_078));
+        let signed: AgentManagementDelegationPayload =
+            serde_json::from_str(&event.content).unwrap();
+        match signed {
+            AgentManagementDelegationPayload::V2(payload) => {
+                assert_eq!(payload.version, 2);
+                assert!(matches!(
+                    payload.capabilities.agent_config,
+                    CapabilitySubject::All
+                ));
+                assert!(matches!(
+                    payload.capabilities.global_config,
+                    CapabilitySubject::All
+                ));
+                assert!(matches!(payload.capabilities.teams, CapabilitySubject::All));
+                assert!(matches!(
+                    payload.capabilities.agent_creation,
+                    CapabilitySubject::All
+                ));
+                assert!(matches!(
+                    payload.capabilities.env_vars,
+                    CapabilitySubject::All
+                ));
+            }
+            AgentManagementDelegationPayload::V1(_) => panic!("grant-all must write v2"),
+        }
+    }
+
+    #[test]
+    fn empty_subjects_revoke_the_grant() {
+        let owner = Keys::generate();
+        let granted = apply_delegation_subjects(
+            GlobalAgentConfig::default(),
+            Some(AgentManagementDelegationSubjects::all_agents()),
+            Some("7c07e659-3610-42f4-9a5e-1e9973c09da9".into()),
+            &owner,
+        )
+        .unwrap();
+        assert!(granted.agent_management_delegation.is_some());
+        let revoked = apply_delegation_subjects(granted, None, None, &owner).unwrap();
+        assert!(revoked.agent_management_delegation.is_none());
+    }
+
+    #[test]
+    fn defaults_save_preserves_durable_grant() {
+        let owner = Keys::generate();
+        let granted = apply_delegation_subjects(
+            GlobalAgentConfig::default(),
+            Some(AgentManagementDelegationSubjects::all_agents()),
+            Some("7c07e659-3610-42f4-9a5e-1e9973c09da9".into()),
+            &owner,
+        )
+        .unwrap();
+        let mut incoming = GlobalAgentConfig {
+            provider: Some("stale-form-provider".into()),
+            agent_management_delegation: None,
+            ..Default::default()
+        };
+        incoming.provider = Some("new-provider".into());
+        let saved = preserve_durable_grant(incoming, &granted);
+        assert_eq!(saved.provider.as_deref(), Some("new-provider"));
+        assert_eq!(
+            saved.agent_management_delegation,
+            granted.agent_management_delegation
         );
     }
 }
