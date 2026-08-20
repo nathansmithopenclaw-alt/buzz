@@ -1,5 +1,9 @@
 use super::*;
-use crate::managed_agents::global_config::AgentManagementDelegationCapabilities;
+use crate::managed_agents::global_config::{
+    AgentManagementDelegationCapabilities, AgentManagementDelegationPayload,
+    AgentManagementDelegationPayloadV1, AgentManagementDelegationPayloadV2,
+    AgentManagementDelegationSubjects, CapabilitySubject,
+};
 use nostr::ToBech32;
 
 fn unsigned_grant(
@@ -7,11 +11,11 @@ fn unsigned_grant(
     capabilities: AgentManagementDelegationCapabilities,
 ) -> AgentManagementDelegationGrant {
     AgentManagementDelegationGrant {
-        payload: crate::managed_agents::global_config::AgentManagementDelegationPayload {
+        payload: AgentManagementDelegationPayload::V1(AgentManagementDelegationPayloadV1 {
             grantee_pubkey,
             audit_channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
             capabilities,
-        },
+        }),
         signed_event: None,
     }
 }
@@ -148,6 +152,72 @@ fn agent_and_global_config_grants_are_independent_and_env_is_conjunctive() {
         &globally_scoped,
         &source,
         DelegatedCapability::GlobalConfig,
+        true,
+    ));
+}
+
+fn unsigned_v2(subjects: AgentManagementDelegationSubjects) -> AgentManagementDelegationGrant {
+    AgentManagementDelegationGrant {
+        payload: AgentManagementDelegationPayload::V2(AgentManagementDelegationPayloadV2 {
+            version: 2,
+            audit_channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
+            capabilities: subjects,
+        }),
+        signed_event: None,
+    }
+}
+
+#[test]
+fn v2_all_authorizes_two_agents_and_set_excludes_unlist() {
+    let first = "11".repeat(32);
+    let second = "22".repeat(32);
+    let outsider = "33".repeat(32);
+    let all = unsigned_v2(AgentManagementDelegationSubjects {
+        agent_creation: CapabilitySubject::All,
+        env_vars: CapabilitySubject::All,
+        ..Default::default()
+    });
+    assert!(grant_authorizes_request(
+        &all,
+        &first,
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+    assert!(grant_authorizes_request(
+        &all,
+        &second,
+        DelegatedCapability::AgentCreation,
+        true,
+    ));
+    assert!(!grant_authorizes_request(
+        &all,
+        &first,
+        DelegatedCapability::Teams,
+        false,
+    ));
+
+    let set = unsigned_v2(AgentManagementDelegationSubjects {
+        agent_creation: CapabilitySubject::Set {
+            grantees: vec![first.clone()],
+        },
+        ..Default::default()
+    });
+    assert!(grant_authorizes_request(
+        &set,
+        &first,
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+    assert!(!grant_authorizes_request(
+        &set,
+        &outsider,
+        DelegatedCapability::AgentCreation,
+        false,
+    ));
+    assert!(!grant_authorizes_request(
+        &set,
+        &first,
+        DelegatedCapability::AgentCreation,
         true,
     ));
 }

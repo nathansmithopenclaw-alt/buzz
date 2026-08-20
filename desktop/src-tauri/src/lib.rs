@@ -497,7 +497,6 @@ pub fn run() {
                     }
                 }
             }
-
             try_regenerate_nest(&app_handle);
 
             if let Some(mgr) = huddle::models::global_model_manager() {
@@ -789,6 +788,7 @@ pub fn run() {
             put_agent_session_config,
             get_global_agent_config,
             set_global_agent_config,
+            set_agent_management_delegation,
             apply_delegated_global_agent_config,
             managed_agents::list_claude_accounts,
             managed_agents::add_claude_account,

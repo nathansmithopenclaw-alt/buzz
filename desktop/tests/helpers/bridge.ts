@@ -494,6 +494,7 @@ type MockBridgeOptions = {
     model: string | null;
     preferred_runtime?: string | null;
     auto_approve_agent_drafts?: boolean;
+    agent_management_delegation?: unknown;
   };
   ownerOnlyAccessBuild?: boolean;
   /** File-layer config returned by runtime id. */

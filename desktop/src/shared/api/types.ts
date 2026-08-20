@@ -999,20 +999,14 @@ export type GlobalAgentConfig = {
   agent_management_delegation: AgentManagementDelegationGrant | null;
 };
 
-export type AgentManagementDelegationCapabilities = {
-  agent_config: boolean;
-  global_config: boolean;
-  teams: boolean;
-  agent_creation: boolean;
-  env_vars: boolean;
-};
-
-export type AgentManagementDelegationGrant = {
-  granteePubkey: string;
-  auditChannelId: string;
-  capabilities: AgentManagementDelegationCapabilities;
-  signedEvent?: string | null;
-};
+export type {
+  AgentManagementDelegationCapabilities,
+  AgentManagementDelegationGrant,
+  AgentManagementDelegationGrantV1,
+  AgentManagementDelegationGrantV2,
+  AgentManagementDelegationSubjects,
+  CapabilitySubject,
+} from "./agentManagementDelegation";
 
 /**
  * Result returned by `set_global_agent_config`.

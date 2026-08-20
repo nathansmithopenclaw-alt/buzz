@@ -24,7 +24,19 @@ creation of a new standing grant.
 
 ## Owner-signed grant
 
-Desktop stores a grant containing this canonical camel-case payload:
+Desktop stores a grant containing a canonical camel-case payload as the
+content of a `kind:30078` event signed by the current Desktop owner. Desktop
+treats that event as an opaque authorization proof: its signature, author,
+kind, content, and decoded payload must all validate against current state,
+and the decoded signed payload must exactly equal the stored payload.
+
+Changing any grant field causes Desktop to sign a new proof. Setting the grant
+to `null` revokes it immediately. Capabilities are checked independently;
+granting `agent_config` does not grant `global_config`, and vice versa.
+
+### v1 payload
+
+A grant with no `version` field is v1: one grantee and boolean bits.
 
 ```json
 {
@@ -40,15 +52,50 @@ Desktop stores a grant containing this canonical camel-case payload:
 }
 ```
 
-The payload is serialized as the content of a `kind:30078` event
-signed by the current Desktop owner. Desktop treats that event as an opaque
-authorization proof: its signature, author, kind, content, grantee, audit
-channel, and capability bits must all validate against current state, and the
-decoded signed payload must exactly equal the stored payload.
+v1 grants keep verifying. Desktop does not auto-upgrade them on read. The next
+owner save of the delegation card re-signs as v2. Unknown `version` values fail
+validation loud — they are not treated as "no grant."
 
-Changing any grant field causes Desktop to sign a new proof. Setting the grant
-to `null` revokes it immediately. Capability bits are checked independently;
-granting `agent_config` does not grant `global_config`, and vice versa.
+### v2 payload
+
+v2 replaces the single grantee with a per-capability subject.
+
+```json
+{
+  "version": 2,
+  "auditChannelId": "<channel UUID>",
+  "capabilities": {
+    "agent_creation": { "scope": "all" },
+    "agent_config": { "scope": "set", "grantees": ["<hex>"] },
+    "env_vars": { "scope": "none" },
+    "global_config": { "scope": "none" },
+    "teams": { "scope": "all" }
+  }
+}
+```
+
+`scope` is exactly one of `none`, `set`, or `all`. `all` is a wildcard in the
+signed payload: later locally-managed agents of this owner are covered without
+re-granting. It is not a public wildcard — origin classification still requires
+a locally managed agent sharing a channel with the owner.
+
+Unchecking one name while `all` is on leaves `all` mode and writes `set` of the
+current roster minus that name. Future agents are then not covered until `all`
+is checked again.
+
+The audit channel is created-once as a private stream named `Agent management`
+with a deterministic UUID:
+
+`uuid5(namespace, "agent-management-audit:v1:{owner_hex}:{relay_scope}")`
+
+`relay_scope` is the canonical websocket identity of the workspace relay
+(scheme, host, non-default port; no trailing slash). Two devices of the same
+owner on the same relay therefore converge. Existing v1 grants keep their
+current audit channel until re-saved. Grantees are not auto-added as members.
+
+A v1 Desktop cannot deserialize v2. Do not write v2 until this build is
+installed on the machine that owns `global-agent-config.json`. Do not write a
+synthetic v1 `granteePubkey` alongside v2.
 
 Any request containing `request.envVars` additionally requires `env_vars`, even
 when its primary capability is `agent_config`, `global_config`, or

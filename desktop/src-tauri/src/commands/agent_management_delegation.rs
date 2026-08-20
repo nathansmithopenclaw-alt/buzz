@@ -164,28 +164,22 @@ fn canonical_request_id(request_id: &str) -> Result<String, String> {
         .map(|request_id| request_id.to_string())
 }
 
-fn capability_enabled(
-    grant: &AgentManagementDelegationGrant,
-    capability: DelegatedCapability,
-) -> bool {
-    match capability {
-        DelegatedCapability::AgentConfig => grant.payload.capabilities.agent_config,
-        DelegatedCapability::AgentCreation => grant.payload.capabilities.agent_creation,
-        DelegatedCapability::EnvVars => grant.payload.capabilities.env_vars,
-        DelegatedCapability::GlobalConfig => grant.payload.capabilities.global_config,
-        DelegatedCapability::Teams => grant.payload.capabilities.teams,
-    }
-}
-
 fn grant_authorizes_request(
     grant: &AgentManagementDelegationGrant,
     source_pubkey: &str,
     capability: DelegatedCapability,
     request_has_env_vars: bool,
 ) -> bool {
-    grant.payload.grantee_pubkey == source_pubkey
-        && capability_enabled(grant, capability)
-        && (!request_has_env_vars || grant.payload.capabilities.env_vars)
+    let name = match capability {
+        DelegatedCapability::AgentConfig => "agent_config",
+        DelegatedCapability::AgentCreation => "agent_creation",
+        DelegatedCapability::EnvVars => "env_vars",
+        DelegatedCapability::GlobalConfig => "global_config",
+        DelegatedCapability::Teams => "teams",
+    };
+    grant
+        .payload
+        .allows_named(source_pubkey, name, request_has_env_vars)
 }
 
 struct NewLedgerRequest {
@@ -331,7 +325,7 @@ pub fn register_agent_management_request(
         .filter(|grant| grant.validate(&owner).is_ok());
     let audit_channel_id = grant
         .as_ref()
-        .map(|grant| grant.payload.audit_channel_id.clone());
+        .map(|grant| grant.payload.audit_channel_id().to_string());
     let env_vars = request_env_vars(&payload)?;
     let authorized = intent == "apply"
         && grant.as_ref().is_some_and(|grant| {
