@@ -427,7 +427,9 @@ test("the host page orders agents then Teams and keeps create in the header", as
         ),
     );
   expect(orderedSections).toEqual(["agents-fleet", "agents-library-teams"]);
-  await expect(page.getByTestId("agents-library-personas")).toBeVisible();
+  await expect(
+    page.getByTestId("agents-fleet").getByTestId("agents-library-personas"),
+  ).toBeVisible();
   await expect(page.locator('[data-testid^="persona-agent-row-"]')).toHaveCount(
     5,
   );
@@ -565,7 +567,7 @@ test("the new team card offers create and import", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("undeployed agent cards stay visible in the identity grid at compact widths", async ({
+test("identity-grid cards use a denser column grammar at compact widths", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -592,17 +594,24 @@ test("undeployed agent cards stay visible in the identity grid at compact widths
     "persona-agent-row-custom:team-layout",
   );
   const agentGrid = firstAgentCard.locator("xpath=..");
+  const firstAgentGridCard = agentGrid.locator(":scope > *").first();
+
+  // Identity grid: 3 cols below 43rem (688px), 4 cols at/above it
+  // (`agentCardLayout.ts`). 720 vs 650 straddles that breakpoint; the
+  // library-shelf 650 vs 600 pair both sat in the 3-col band and could not
+  // fail for density.
+  await agentsContent.evaluate((element) => {
+    (element as HTMLElement).style.width = "720px";
+  });
+  const wideAgentBox = await firstAgentGridCard.boundingBox();
+  expect(wideAgentBox).not.toBeNull();
+  await expect(agentGrid.locator(":scope > *")).toHaveCount(1);
 
   await agentsContent.evaluate((element) => {
     (element as HTMLElement).style.width = "650px";
   });
-  await expect(firstAgentCard).toBeVisible();
-  await expect(agentGrid.locator(":scope > *")).toHaveCount(1);
-
-  await agentsContent.evaluate((element) => {
-    (element as HTMLElement).style.width = "600px";
-  });
-  await expect(firstAgentCard).toBeVisible();
+  const compactAgentBox = await firstAgentGridCard.boundingBox();
+  expect(compactAgentBox?.width ?? 0).toBeGreaterThan(wideAgentBox?.width ?? 0);
 });
 
 test("team cards use the thread-style overlapping avatar stack", async ({
@@ -2630,6 +2639,39 @@ test("export from share aligns selections and animates memory details", async ({
   expect(
     new Set(heightSamples.map((height) => Math.round(height))).size,
   ).toBeGreaterThan(2);
+});
+
+test("fleet card overflow includes Edit for a personal persona", async ({
+  page,
+}) => {
+  const agentPubkey = "cd".repeat(32);
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:fleet-edit",
+        displayName: "Fleet edit agent",
+        systemPrompt: "A deployed personal agent.",
+      },
+    ],
+    managedAgents: [
+      {
+        name: "Fleet edit instance",
+        personaId: "custom:fleet-edit",
+        pubkey: agentPubkey,
+        status: "running",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const fleetCard = page.getByTestId(`managed-agent-${agentPubkey}`);
+  await expect(fleetCard).toBeVisible();
+  await fleetCard.getByLabel("Open actions for Fleet edit agent").click();
+
+  await expect(page.getByRole("menuitem", { name: "Edit" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Duplicate" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Delete" })).toBeVisible();
 });
 
 test("team-managed personas do not expose editable actions", async ({
