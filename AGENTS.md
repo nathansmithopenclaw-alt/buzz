@@ -358,9 +358,36 @@ like a product bug rather than a build mistake, so it burns real time.
 `pnpm test:e2e:smoke` and `pnpm test:e2e:integration` run the right build for
 you; prefer them over a manual build plus `playwright test`.
 
-**Stale server:** `reuseExistingServer: true` means a previous build's server
-serves old code. Kill port 4173 and re-run `pnpm build:e2e` before re-running
+**Stale server:** `reuseExistingServer` means a previous build's server serves
+old code. Kill the preview port and re-run `pnpm build:e2e` before re-running
 tests after code changes.
+
+**Two checkouts, one port — results silently swap.** The preview server is
+`python3 -m http.server <port> -d dist`, resolved against whichever checkout
+started it. Because the server is reused rather than restarted, a second
+worktree running Playwright on the same port does not race: it tests the *other*
+checkout's `dist/` and reports the result as its own. Rebuilding your own tree
+first does not help — the build is fine, it is just not the one being served.
+Set `BUZZ_E2E_PORT` to give a lane its own preview server:
+
+```sh
+BUZZ_E2E_PORT=4319 pnpm exec playwright test --project=integration
+```
+
+The default stays 4173, so a single-checkout run and CI are unchanged. When a
+run's numbers matter — a verification pass, a merge battery — confirm the served
+build is yours **before and after**, since a concurrent lane can take the port
+back mid-run:
+
+```sh
+CHUNK=$(basename "$(ls dist/assets/index-*.js)")
+diff <(curl -fsS "http://127.0.0.1:${BUZZ_E2E_PORT:-4173}/assets/$CHUNK") \
+     "dist/assets/$CHUNK" >/dev/null \
+  && echo "PROVENANCE OK" || echo "SERVED BUILD IS NOT MINE"
+```
+
+A neighbouring checkout serves a different chunk under that name, or no chunk at
+all — either way the compare fails rather than passing quietly.
 
 **`addInitScript` before bridge:** `page.addInitScript` (localStorage seeding)
 must run BEFORE `installMockBridge(page)` — React reads state on mount, the

@@ -404,10 +404,15 @@ desktop-screenshot *ARGS:
     set -euo pipefail
     pnpm -C {{desktop_dir}} build:e2e
     cd {{desktop_dir}}
-    if ! curl -sf http://127.0.0.1:4173/ >/dev/null 2>&1; then
-        python3 -m http.server 4173 -d dist >/dev/null 2>&1 &
+    # Set BUZZ_E2E_PORT to give this checkout its own preview server. The probe
+    # below cannot tell one checkout's server from another's, so on the shared
+    # default port a neighbouring worktree's server is reused and screenshots
+    # capture that build instead of this one.
+    port="${BUZZ_E2E_PORT:-4173}"
+    if ! curl -sf "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
+        python3 -m http.server "${port}" -d dist >/dev/null 2>&1 &
         trap "kill $! 2>/dev/null || true" EXIT
-        for i in $(seq 1 20); do curl -sf http://127.0.0.1:4173/ >/dev/null && break; sleep 0.5; done
+        for i in $(seq 1 20); do curl -sf "http://127.0.0.1:${port}/" >/dev/null && break; sleep 0.5; done
     fi
     node tests/helpers/screenshot.mjs {{ARGS}}
 
