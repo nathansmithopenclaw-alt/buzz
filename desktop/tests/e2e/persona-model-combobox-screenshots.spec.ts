@@ -31,11 +31,15 @@ async function openNewPersonaDialog(page: import("@playwright/test").Page) {
   await waitForInvokeBridge(page);
 
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId("agents-fleet-grid")).toBeVisible({
-    timeout: 8_000,
-  });
+  // The default mock seeds no managed agents and no *active* personas, so the
+  // Agents view correctly lands on the onboarding empty state rather than the
+  // fleet grid. The grid is not the subject here — it was only ever a
+  // readiness gate — so gate on the "New agent" button this helper clicks
+  // next, which is present and enabled in either landing state.
+  const newAgent = page.getByTestId("new-agent-card");
+  await expect(newAgent).toBeEnabled({ timeout: 8_000 });
 
-  await page.getByTestId("new-agent-card").click();
+  await newAgent.click();
 
   const dialog = page.getByTestId("persona-dialog");
   await expect(dialog).toBeVisible({ timeout: 8_000 });

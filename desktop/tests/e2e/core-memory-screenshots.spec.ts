@@ -56,7 +56,10 @@ async function openObserverFeedPanel(
   );
   await expect(activityBtn).toBeVisible({ timeout: 5_000 });
   await activityBtn.click();
-  const feedPanel = page.getByTestId("agent-session-thread-panel");
+  // A3 moved this ingress from the standalone auxiliary thread panel into a
+  // profile-contained focused view. Both render the same transcript through
+  // ManagedAgentSessionPanel, so the feed content asserted below is unchanged.
+  const feedPanel = page.getByTestId("user-profile-activity-view");
   await expect(feedPanel).toBeVisible({ timeout: 10_000 });
   return feedPanel;
 }
