@@ -118,7 +118,10 @@ test("unchecking one agent while all is on leaves all and shows the notice", asy
     "data-state",
     "checked",
   );
-  await page.getByTestId(`agent-management-picker-agent-${SECOND}`).click();
+  await page
+    .getByTestId(`agent-management-picker-agent-${SECOND}`)
+    .getByRole("checkbox")
+    .click();
   await expect(
     page.getByTestId("agent-management-picker-left-all-notice"),
   ).toBeVisible();

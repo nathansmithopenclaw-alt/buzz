@@ -139,6 +139,12 @@ fn agent_and_global_config_grants_are_independent_and_env_is_conjunctive() {
         DelegatedCapability::AgentConfig,
         true,
     ));
+    assert!(!grant_authorizes_request(
+        &grant,
+        &"22".repeat(32),
+        DelegatedCapability::AgentConfig,
+        false,
+    ));
 
     let globally_scoped = unsigned_grant(
         source.clone(),
@@ -188,6 +194,14 @@ fn v2_all_authorizes_two_agents_and_set_excludes_unlist() {
         &second,
         DelegatedCapability::AgentCreation,
         true,
+    ));
+    // `all` is a wildcard, not a roster snapshot — a pubkey created after
+    // the signature still matches at the grant layer.
+    assert!(grant_authorizes_request(
+        &all,
+        &outsider,
+        DelegatedCapability::AgentCreation,
+        false,
     ));
     assert!(!grant_authorizes_request(
         &all,

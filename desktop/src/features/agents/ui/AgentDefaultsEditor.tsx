@@ -340,7 +340,13 @@ export function AgentDefaultsEditor({
               configRef.current = next;
               return next;
             });
-            queryClient.setQueryData(globalAgentConfigQueryKey, saved);
+            queryClient.setQueryData(
+              globalAgentConfigQueryKey,
+              (current: GlobalAgentConfig | undefined) => ({
+                ...(current ?? saved),
+                agent_management_delegation: saved.agent_management_delegation,
+              }),
+            );
           }}
         />
       ) : null}
