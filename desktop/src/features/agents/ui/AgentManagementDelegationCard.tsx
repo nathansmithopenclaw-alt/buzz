@@ -215,14 +215,11 @@ export function AgentManagementDelegationCard({
                   </span>
                 </button>
               ) : (
+                // Keep off-state single-line: an extra "Off" summary row on
+                // every capability saturates the Set-defaults dialog at its
+                // max-height cap (1280×900), hiding provider-field growth.
                 <div className="min-w-0 flex-1 text-left">
-                  <span className="block text-sm">{label}</span>
-                  <span
-                    className="block text-xs text-muted-foreground"
-                    data-testid={`agent-management-capability-${capability}-summary`}
-                  >
-                    {subjectSummary(subject)}
-                  </span>
+                  <span className="text-sm">{label}</span>
                 </div>
               )}
               <Switch
