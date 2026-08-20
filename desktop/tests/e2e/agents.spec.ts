@@ -236,9 +236,9 @@ test("catalog hides built-ins and shows the shared-agent empty state", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
-  await expect(page.getByTestId("agents-library-personas")).toBeVisible();
+  await expect(page.getByTestId("agents-fleet-grid")).toBeVisible();
   for (const personaName of ["Fizz", "Honey", "Bumble"]) {
-    await expect(page.getByTestId("agents-library-personas")).toContainText(
+    await expect(page.getByTestId("agents-fleet-grid")).toContainText(
       personaName,
     );
   }
@@ -313,7 +313,7 @@ test("built-in persona edits persist", async ({ page }) => {
   await dialog.getByRole("button", { name: "Save changes" }).click();
 
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
     "My Fizz",
   );
   const personas = await invokeTauri<
@@ -428,7 +428,7 @@ test("the host page orders agents then Teams and keeps create in the header", as
     );
   expect(orderedSections).toEqual(["agents-fleet", "agents-library-teams"]);
   await expect(
-    page.getByTestId("agents-fleet").getByTestId("agents-library-personas"),
+    page.getByTestId("agents-fleet").getByTestId("agents-fleet-grid"),
   ).toBeVisible();
   await expect(page.locator('[data-testid^="persona-agent-row-"]')).toHaveCount(
     5,
@@ -485,7 +485,7 @@ test("the Host IA stays local when Fleet Visibility is enabled", async ({
   await page.getByTestId("open-agents-view").click();
 
   await expect(page.getByTestId("agents-fleet")).toBeVisible();
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
     "Host proof agent",
   );
   await expect(page.getByTestId("agents-library-teams")).toBeVisible();
@@ -512,7 +512,7 @@ test("a fresh host shows one intentional onboarding state", async ({
     onboarding.getByRole("button", { name: "New agent" }),
   ).toBeVisible();
   await expect(page.getByTestId("agents-fleet")).toHaveCount(0);
-  await expect(page.getByTestId("agents-library-personas")).toHaveCount(0);
+  await expect(page.getByTestId("agents-fleet-grid")).toHaveCount(0);
   await expect(page.getByTestId("agents-library-teams")).toHaveCount(0);
 });
 
@@ -567,7 +567,7 @@ test("the new team card offers create and import", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("identity-grid cards use a denser column grammar at compact widths", async ({
+test("identity-grid cards widen when compact enough to drop a column", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -997,7 +997,7 @@ test("custom personas share with people and keep export separate", async ({
   await gotoApp(page);
 
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
     "Animation Auditor",
   );
 
@@ -2672,6 +2672,25 @@ test("fleet card overflow includes Edit for a personal persona", async ({
   await expect(page.getByRole("menuitem", { name: "Edit" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Duplicate" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Delete" })).toBeVisible();
+
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  const dialog = page.getByTestId("persona-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Agent name")).toHaveValue("Fleet edit agent");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await fleetCard
+    .getByRole("button", { name: "Fleet edit agent agent profile" })
+    .click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  const panelEdit = page.getByTestId("user-profile-header-edit-agent");
+  await expect(panelEdit).toBeVisible();
+  await panelEdit.click();
+  await expect(page.getByTestId("persona-dialog")).toBeVisible();
+  await expect(
+    page.getByTestId("persona-dialog").getByLabel("Agent name"),
+  ).toHaveValue("Fleet edit agent");
 });
 
 test("team-managed personas do not expose editable actions", async ({

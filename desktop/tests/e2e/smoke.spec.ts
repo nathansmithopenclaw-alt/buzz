@@ -259,7 +259,7 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(createdToast).toHaveCount(1);
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
     agentName,
   );
 

@@ -142,7 +142,7 @@ export function FleetSection(props: FleetSectionProps) {
       {!isLoading && hasCards ? (
         <div
           className={IDENTITY_CARD_GRID_CLASS}
-          data-testid="agents-library-personas"
+          data-testid="agents-fleet-grid"
         >
           {agents.map((agent) => (
             <FleetAgentCard
@@ -252,7 +252,7 @@ function ObserverFleetSection({
       {!isLoading && hasCards && groups.size === 0 ? (
         <div
           className={IDENTITY_CARD_GRID_CLASS}
-          data-testid="agents-library-personas"
+          data-testid="agents-fleet-grid"
         >
           {undeployedPersonas.map((persona) => (
             <ObserverUndeployedPersonaCard
@@ -279,7 +279,7 @@ function ObserverFleetSection({
                 className={IDENTITY_CARD_GRID_CLASS}
                 data-testid={
                   index === entries.length - 1
-                    ? "agents-library-personas"
+                    ? "agents-fleet-grid"
                     : undefined
                 }
               >
