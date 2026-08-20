@@ -124,7 +124,7 @@ async function gotoAgentsView(page: import("@playwright/test").Page) {
     timeout: 10_000,
   });
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId("agents-library-personas")).toBeVisible({
+  await expect(page.getByTestId("agents-fleet-grid")).toBeVisible({
     timeout: 10_000,
   });
 }

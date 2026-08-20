@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { REMOTE_CONTROL_FEATURE_ID } from "@/features/agents/lib/remoteControlFeature";
 import { useFleetVisibilitySettings } from "@/features/agents/lib/useFleetVisibilitySettings";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
@@ -57,7 +58,7 @@ export function useFleetProjectionSync({
   ownerPubkey?: string;
   relayUrl?: string;
 }) {
-  const experimentEnabled = useFeatureEnabled("fleetVisibility");
+  const experimentEnabled = useFeatureEnabled(REMOTE_CONTROL_FEATURE_ID);
   const settings = useFleetVisibilitySettings();
   const enabled = experimentEnabled && settings?.enabled === true;
   const ownerPubkeys = React.useMemo(

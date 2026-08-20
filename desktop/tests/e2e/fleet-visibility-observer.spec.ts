@@ -255,18 +255,10 @@ test("Observer renders relay fleet liveness and mentions the existing agent", as
       sections
         .map((section) => section.getAttribute("data-testid"))
         .filter((testId) =>
-          [
-            "agents-fleet",
-            "agents-library-personas",
-            "agents-library-teams",
-          ].includes(testId ?? ""),
+          ["agents-fleet", "agents-library-teams"].includes(testId ?? ""),
         ),
     );
-  expect(orderedSections).toEqual([
-    "agents-fleet",
-    "agents-library-personas",
-    "agents-library-teams",
-  ]);
+  expect(orderedSections).toEqual(["agents-fleet", "agents-library-teams"]);
   await expect(page.getByTestId("fleet-host-status")).toContainText(
     "Mini host",
   );
@@ -289,10 +281,10 @@ test("Observer renders relay fleet liveness and mentions the existing agent", as
   );
   await expect(page.getByTestId("agents-fleet")).toContainText("Mini host");
   await expect(page.getByTestId("agents-fleet")).toContainText("Backup host");
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
     "Standalone Definition",
   );
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
     "goose · openai/gpt-5",
   );
   await expect(page.getByTestId("fleet-team-rosters")).toContainText(
@@ -613,6 +605,6 @@ test("pending role choice hides legacy local state behind the designed banner", 
     page.getByText("Legacy Local Definition", { exact: true }),
   ).toHaveCount(0);
   await expect(page.getByTestId("agents-fleet")).toHaveCount(0);
-  await expect(page.getByTestId("agents-library-personas")).toHaveCount(0);
+  await expect(page.getByTestId("agents-fleet-grid")).toHaveCount(0);
   await expect(page.getByTestId("agents-library-teams")).toHaveCount(0);
 });

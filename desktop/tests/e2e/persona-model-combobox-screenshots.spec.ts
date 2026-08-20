@@ -31,7 +31,7 @@ async function openNewPersonaDialog(page: import("@playwright/test").Page) {
   await waitForInvokeBridge(page);
 
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId("agents-library-personas")).toBeVisible({
+  await expect(page.getByTestId("agents-fleet-grid")).toBeVisible({
     timeout: 8_000,
   });
 

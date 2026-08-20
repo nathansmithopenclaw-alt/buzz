@@ -26,7 +26,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
-import { SectionHeader } from "@/shared/ui/PageHeader";
+
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { IDENTITY_CARD_GRID_CLASS } from "./agentCardLayout";
@@ -38,6 +38,12 @@ import {
   resolveFleetAgentIdentity,
   resolveFleetAgentRuntimeLabel,
 } from "./agentFleetIdentity";
+import { PersonaActionItems } from "./PersonaActionsMenu";
+import {
+  HostUndeployedPersonaCard,
+  ObserverUndeployedPersonaCard,
+} from "./UndeployedPersonaCard";
+import type { FleetProjectionPersona } from "@/features/agents/fleetProjection/types";
 
 type HostFleetSectionProps = {
   mode: "host";
@@ -47,15 +53,26 @@ type HostFleetSectionProps = {
   isActionPending: boolean;
   isLoading: boolean;
   isMessagePending: boolean;
+  isPersonaPending: boolean;
   personasById: ReadonlyMap<string, AgentPersona>;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
+  startingPersonaIds: ReadonlySet<string>;
+  undeployedPersonas: readonly AgentPersona[];
+  onDeactivatePersona: (persona: AgentPersona) => void;
+  onDeletePersona: (persona: AgentPersona) => void;
+  onDeployPersona: (persona: AgentPersona) => void;
+  onDuplicatePersona: (persona: AgentPersona) => void;
+  onEditPersona: (persona: AgentPersona) => void;
   onMessageAgent: (pubkey: string) => void;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
   ) => void;
+  onOpenPersonaProfile: (persona: AgentPersona) => void;
   onRestartAgent: (pubkey: string) => void;
+  onSharePersona: (persona: AgentPersona) => void;
+  onSnapshotPersona: (persona: AgentPersona) => void;
   onStartAgent: (pubkey: string) => void;
   onStopAgent: (pubkey: string) => void;
 };
@@ -67,6 +84,9 @@ type ObserverFleetSectionProps = {
   isMessagePending: boolean;
   now: number;
   owner: FleetProjectionOwnerPresentation | null;
+  undeployedPersonas: readonly FleetProjectionPersona[];
+  emptyTitle?: string;
+  emptyDescription?: string;
   onMessageAgent: (pubkey: string) => void;
   onOpenAgentProfile: (
     pubkey: string,
@@ -85,35 +105,45 @@ export function FleetSection(props: FleetSectionProps) {
     isActionPending,
     isLoading,
     isMessagePending,
+    isPersonaPending,
     personasById,
     restartingAgentPubkey,
     startingAgentPubkey,
+    startingPersonaIds,
+    undeployedPersonas,
+    onDeactivatePersona,
+    onDeletePersona,
+    onDeployPersona,
+    onDuplicatePersona,
+    onEditPersona,
     onMessageAgent,
     onOpenAgentProfile,
+    onOpenPersonaProfile,
     onRestartAgent,
+    onSharePersona,
+    onSnapshotPersona,
     onStartAgent,
     onStopAgent,
   } = props;
+  const hasCards = agents.length > 0 || undeployedPersonas.length > 0;
   return (
     <section className="relative space-y-4" data-testid="agents-fleet">
-      <SectionHeader
-        description="Running and stopped agent instances on this device."
-        title="Fleet"
-      />
-
       {isLoading ? <FleetLoadingSkeleton /> : null}
 
-      {!isLoading && !error && agents.length === 0 ? (
+      {!isLoading && !error && !hasCards ? (
         <div className="rounded-2xl border border-dashed border-border/80 px-5 py-6">
-          <p className="font-medium">No agent instances yet</p>
+          <p className="font-medium">No agents yet</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Deploy a template from the Library to add it to your fleet.
+            Create an agent to run it on this Mac.
           </p>
         </div>
       ) : null}
 
-      {!isLoading && agents.length > 0 ? (
-        <div className={IDENTITY_CARD_GRID_CLASS}>
+      {!isLoading && hasCards ? (
+        <div
+          className={IDENTITY_CARD_GRID_CLASS}
+          data-testid="agents-fleet-grid"
+        >
           {agents.map((agent) => (
             <FleetAgentCard
               agent={agent}
@@ -126,11 +156,36 @@ export function FleetSection(props: FleetSectionProps) {
               }
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
+              onDeactivatePersona={onDeactivatePersona}
+              onDeletePersona={onDeletePersona}
+              onDuplicatePersona={onDuplicatePersona}
+              onEditPersona={onEditPersona}
               onMessageAgent={onMessageAgent}
               onOpenAgentProfile={onOpenAgentProfile}
               onRestartAgent={onRestartAgent}
+              onSharePersona={onSharePersona}
+              onSnapshotPersona={onSnapshotPersona}
               onStartAgent={onStartAgent}
               onStopAgent={onStopAgent}
+              isPersonaPending={isPersonaPending}
+            />
+          ))}
+          {undeployedPersonas.map((persona) => (
+            <HostUndeployedPersonaCard
+              defaultModel={defaultModel}
+              isActionPending={isActionPending}
+              isPending={isPersonaPending}
+              isStarting={startingPersonaIds.has(persona.id)}
+              key={persona.id}
+              persona={persona}
+              onDeactivatePersona={onDeactivatePersona}
+              onDeletePersona={onDeletePersona}
+              onDeployPersona={onDeployPersona}
+              onDuplicatePersona={onDuplicatePersona}
+              onEditPersona={onEditPersona}
+              onOpenPersonaProfile={onOpenPersonaProfile}
+              onSharePersona={onSharePersona}
+              onSnapshotPersona={onSnapshotPersona}
             />
           ))}
         </div>
@@ -146,16 +201,20 @@ export function FleetSection(props: FleetSectionProps) {
 }
 
 function ObserverFleetSection({
+  emptyDescription,
+  emptyTitle,
   error,
   isLoading,
   isMessagePending,
   now,
   owner,
+  undeployedPersonas,
   onMessageAgent,
   onOpenAgentProfile,
 }: ObserverFleetSectionProps) {
   const agents = owner?.agents ?? [];
   const showHostGrouping = (owner?.hosts.length ?? 0) > 1;
+  const hasCards = agents.length > 0 || undeployedPersonas.length > 0;
   const groups = new Map<
     string,
     {
@@ -176,24 +235,36 @@ function ObserverFleetSection({
 
   return (
     <section className="relative space-y-4" data-testid="agents-fleet">
-      <SectionHeader
-        description="Relay-published agent instances across your fleet."
-        title="Fleet"
-      />
-
       {isLoading ? <FleetLoadingSkeleton /> : null}
 
-      {!isLoading && !error && agents.length === 0 ? (
+      {!isLoading && !error && !hasCards ? (
         <div className="rounded-2xl border border-dashed border-border/80 px-5 py-6">
-          <p className="font-medium">No agent instances are being published</p>
+          <p className="font-medium">
+            {emptyTitle ?? "No agents are being published"}
+          </p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Agent instances appear here when a fleet host publishes them.
+            {emptyDescription ??
+              "Agents appear here when a host publishes them."}
           </p>
         </div>
       ) : null}
 
-      {!isLoading && owner && agents.length > 0
-        ? [...groups.entries()].map(([key, group]) => (
+      {!isLoading && hasCards && groups.size === 0 ? (
+        <div
+          className={IDENTITY_CARD_GRID_CLASS}
+          data-testid="agents-fleet-grid"
+        >
+          {undeployedPersonas.map((persona) => (
+            <ObserverUndeployedPersonaCard
+              key={persona.personaId}
+              persona={persona}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {!isLoading && owner && groups.size > 0
+        ? [...groups.entries()].map(([key, group], index, entries) => (
             <div className="space-y-3" key={key}>
               {showHostGrouping ? (
                 <div className="flex items-center justify-between gap-3">
@@ -204,7 +275,14 @@ function ObserverFleetSection({
                   </span>
                 </div>
               ) : null}
-              <div className={IDENTITY_CARD_GRID_CLASS}>
+              <div
+                className={IDENTITY_CARD_GRID_CLASS}
+                data-testid={
+                  index === entries.length - 1
+                    ? "agents-fleet-grid"
+                    : undefined
+                }
+              >
                 {group.agents.map((agent) => (
                   <ProjectedFleetAgentCard
                     agent={agent}
@@ -217,6 +295,14 @@ function ObserverFleetSection({
                     onOpenAgentProfile={onOpenAgentProfile}
                   />
                 ))}
+                {index === entries.length - 1
+                  ? undeployedPersonas.map((persona) => (
+                      <ObserverUndeployedPersonaCard
+                        key={persona.personaId}
+                        persona={persona}
+                      />
+                    ))
+                  : null}
               </div>
             </div>
           ))
@@ -236,12 +322,19 @@ function FleetAgentCard({
   defaultModel,
   isActionPending,
   isMessagePending,
+  isPersonaPending,
   persona,
   restartingAgentPubkey,
   startingAgentPubkey,
+  onDeactivatePersona,
+  onDeletePersona,
+  onDuplicatePersona,
+  onEditPersona,
   onMessageAgent,
   onOpenAgentProfile,
   onRestartAgent,
+  onSharePersona,
+  onSnapshotPersona,
   onStartAgent,
   onStopAgent,
 }: {
@@ -249,15 +342,22 @@ function FleetAgentCard({
   defaultModel: string;
   isActionPending: boolean;
   isMessagePending: boolean;
+  isPersonaPending: boolean;
   persona?: AgentPersona;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
+  onDeactivatePersona: (persona: AgentPersona) => void;
+  onDeletePersona: (persona: AgentPersona) => void;
+  onDuplicatePersona: (persona: AgentPersona) => void;
+  onEditPersona: (persona: AgentPersona) => void;
   onMessageAgent: (pubkey: string) => void;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
   ) => void;
   onRestartAgent: (pubkey: string) => void;
+  onSharePersona: (persona: AgentPersona) => void;
+  onSnapshotPersona: (persona: AgentPersona) => void;
   onStartAgent: (pubkey: string) => void;
   onStopAgent: (pubkey: string) => void;
 }) {
@@ -365,6 +465,22 @@ function FleetAgentCard({
                 {agent.needsRestart ? "Restart" : "Start"}
               </DropdownMenuItem>
             )}
+            {persona ? (
+              <>
+                <DropdownMenuSeparator />
+                <PersonaActionItems
+                  isActionPending={isActionPending}
+                  isPending={isPersonaPending}
+                  persona={persona}
+                  onDeactivate={onDeactivatePersona}
+                  onDelete={onDeletePersona}
+                  onDuplicate={onDuplicatePersona}
+                  onEdit={onEditPersona}
+                  onShare={onSharePersona}
+                  onSnapshot={onSnapshotPersona}
+                />
+              </>
+            ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
       }

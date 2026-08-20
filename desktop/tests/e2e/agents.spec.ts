@@ -236,9 +236,9 @@ test("catalog hides built-ins and shows the shared-agent empty state", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
-  await expect(page.getByTestId("agents-library-personas")).toBeVisible();
+  await expect(page.getByTestId("agents-fleet-grid")).toBeVisible();
   for (const personaName of ["Fizz", "Honey", "Bumble"]) {
-    await expect(page.getByTestId("agents-library-personas")).toContainText(
+    await expect(page.getByTestId("agents-fleet-grid")).toContainText(
       personaName,
     );
   }
@@ -313,7 +313,7 @@ test("built-in persona edits persist", async ({ page }) => {
   await dialog.getByRole("button", { name: "Save changes" }).click();
 
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
     "My Fizz",
   );
   const personas = await invokeTauri<
@@ -391,7 +391,7 @@ test("agent avatar emoji picker scrolls inside its popover", async ({
     .toBeGreaterThan(before);
 });
 
-test("the host page orders Fleet, Library, and Teams and keeps create in the header", async ({
+test("the host page orders agents then Teams and keeps create in the header", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -423,21 +423,13 @@ test("the host page orders Fleet, Library, and Teams and keeps create in the hea
       sections
         .map((section) => section.getAttribute("data-testid"))
         .filter((testId) =>
-          [
-            "agents-fleet",
-            "agents-library-personas",
-            "agents-library-teams",
-          ].includes(testId ?? ""),
+          ["agents-fleet", "agents-library-teams"].includes(testId ?? ""),
         ),
     );
-  expect(orderedSections).toEqual([
-    "agents-fleet",
-    "agents-library-personas",
-    "agents-library-teams",
-  ]);
-  await expect(page.getByTestId("agents-fleet")).toContainText(
-    "No agent instances yet",
-  );
+  expect(orderedSections).toEqual(["agents-fleet", "agents-library-teams"]);
+  await expect(
+    page.getByTestId("agents-fleet").getByTestId("agents-fleet-grid"),
+  ).toBeVisible();
   await expect(page.locator('[data-testid^="persona-agent-row-"]')).toHaveCount(
     5,
   );
@@ -493,7 +485,7 @@ test("the Host IA stays local when Fleet Visibility is enabled", async ({
   await page.getByTestId("open-agents-view").click();
 
   await expect(page.getByTestId("agents-fleet")).toBeVisible();
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
     "Host proof agent",
   );
   await expect(page.getByTestId("agents-library-teams")).toBeVisible();
@@ -520,7 +512,7 @@ test("a fresh host shows one intentional onboarding state", async ({
     onboarding.getByRole("button", { name: "New agent" }),
   ).toBeVisible();
   await expect(page.getByTestId("agents-fleet")).toHaveCount(0);
-  await expect(page.getByTestId("agents-library-personas")).toHaveCount(0);
+  await expect(page.getByTestId("agents-fleet-grid")).toHaveCount(0);
   await expect(page.getByTestId("agents-library-teams")).toHaveCount(0);
 });
 
@@ -575,7 +567,7 @@ test("the new team card offers create and import", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("library cards use a denser shelf grammar at compact widths", async ({
+test("identity-grid cards widen when compact enough to drop a column", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -604,15 +596,19 @@ test("library cards use a denser shelf grammar at compact widths", async ({
   const agentGrid = firstAgentCard.locator("xpath=..");
   const firstAgentGridCard = agentGrid.locator(":scope > *").first();
 
+  // Identity grid: 3 cols below 43rem (688px), 4 cols at/above it
+  // (`agentCardLayout.ts`). 720 vs 650 straddles that breakpoint; the
+  // library-shelf 650 vs 600 pair both sat in the 3-col band and could not
+  // fail for density.
   await agentsContent.evaluate((element) => {
-    (element as HTMLElement).style.width = "650px";
+    (element as HTMLElement).style.width = "720px";
   });
   const wideAgentBox = await firstAgentGridCard.boundingBox();
   expect(wideAgentBox).not.toBeNull();
   await expect(agentGrid.locator(":scope > *")).toHaveCount(1);
 
   await agentsContent.evaluate((element) => {
-    (element as HTMLElement).style.width = "600px";
+    (element as HTMLElement).style.width = "650px";
   });
   const compactAgentBox = await firstAgentGridCard.boundingBox();
   expect(compactAgentBox?.width ?? 0).toBeGreaterThan(wideAgentBox?.width ?? 0);
@@ -791,7 +787,7 @@ test("keeps agent actions in one overflow at every width", async ({ page }) => {
   const actionsMenu = page.getByTestId("agent-actions-menu-trigger");
   await expect(actionsMenu).toBeVisible();
   await expect(
-    page.getByText("Agents run on this device.", { exact: true }),
+    page.getByText("Agents run on this Mac.", { exact: true }),
   ).toHaveJSProperty("scrollHeight", 24);
 
   await page.getByTestId("agents-page-content").evaluate((element) => {
@@ -1001,7 +997,7 @@ test("custom personas share with people and keep export separate", async ({
   await gotoApp(page);
 
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
     "Animation Auditor",
   );
 
@@ -2045,10 +2041,7 @@ test("one share level selector drives both the link and send paths", async ({
   await gotoApp(page);
 
   await page.getByTestId("open-agents-view").click();
-  await page
-    .getByTestId("persona-agent-row-custom:animation-auditor")
-    .getByLabel("Open actions for Animation Auditor")
-    .click();
+  await page.getByLabel("Open actions for Animation Auditor").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
 
   const shareDialog = page.getByTestId("persona-share-dialog");
@@ -2322,7 +2315,7 @@ test("multi-deployment snapshot export requires an explicit memory source", asyn
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page
-    .getByTestId(`persona-agent-row-${personaId}`)
+    .getByTestId(`managed-agent-${firstPubkey}`)
     .getByLabel("Open actions for Snapshot Director")
     .click();
   await page.getByRole("menuitem", { name: "Export snapshot" }).click();
@@ -2393,7 +2386,7 @@ test("changing a multi-deployment share source keeps recipients and resets memor
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page
-    .getByTestId(`persona-agent-row-${personaId}`)
+    .getByTestId(`managed-agent-${firstPubkey}`)
     .getByLabel("Open actions for Shared Director")
     .click();
   await page.getByRole("menuitem", { name: "Share" }).click();
@@ -2602,10 +2595,7 @@ test("export from share aligns selections and animates memory details", async ({
   await gotoApp(page);
 
   await page.getByTestId("open-agents-view").click();
-  await page
-    .getByTestId("persona-agent-row-custom:animation-auditor")
-    .getByLabel("Open actions for Animation Auditor")
-    .click();
+  await page.getByLabel("Open actions for Animation Auditor").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
   await page.getByTestId("persona-share-export").click();
 
@@ -2649,6 +2639,58 @@ test("export from share aligns selections and animates memory details", async ({
   expect(
     new Set(heightSamples.map((height) => Math.round(height))).size,
   ).toBeGreaterThan(2);
+});
+
+test("fleet card overflow includes Edit for a personal persona", async ({
+  page,
+}) => {
+  const agentPubkey = "cd".repeat(32);
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:fleet-edit",
+        displayName: "Fleet edit agent",
+        systemPrompt: "A deployed personal agent.",
+      },
+    ],
+    managedAgents: [
+      {
+        name: "Fleet edit instance",
+        personaId: "custom:fleet-edit",
+        pubkey: agentPubkey,
+        status: "running",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const fleetCard = page.getByTestId(`managed-agent-${agentPubkey}`);
+  await expect(fleetCard).toBeVisible();
+  await fleetCard.getByLabel("Open actions for Fleet edit agent").click();
+
+  await expect(page.getByRole("menuitem", { name: "Edit" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Duplicate" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Delete" })).toBeVisible();
+
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  const dialog = page.getByTestId("persona-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Agent name")).toHaveValue("Fleet edit agent");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await fleetCard
+    .getByRole("button", { name: "Fleet edit agent agent profile" })
+    .click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  const panelEdit = page.getByTestId("user-profile-header-edit-agent");
+  await expect(panelEdit).toBeVisible();
+  await panelEdit.click();
+  await expect(page.getByTestId("persona-dialog")).toBeVisible();
+  await expect(
+    page.getByTestId("persona-dialog").getByLabel("Agent name"),
+  ).toHaveValue("Fleet edit agent");
 });
 
 test("team-managed personas do not expose editable actions", async ({
@@ -2770,7 +2812,7 @@ test("start pill morphs into the running dot without remounting the avatar", asy
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
-  const card = page.getByTestId(`persona-agent-row-${personaId}`);
+  const card = page.getByTestId(`managed-agent-${pubkey}`);
   const startButton = page.getByTestId(`agent-runtime-start-${pubkey}`);
   const badge = startButton.locator("xpath=../..");
   const initialAvatar = await card
@@ -2876,14 +2918,10 @@ test("every instance stays in Fleet and every deployment is linked from Library"
   await expect(
     page.getByTestId(`managed-agent-${additionalPubkey}`),
   ).toBeVisible();
-  const template = page.getByTestId(`persona-agent-row-${personaId}`);
-  await expect(template).toContainText("Deployed as →");
-  await expect(
-    template.locator('[data-testid^="persona-deployment-"]'),
-  ).toHaveCount(2);
-  await page
-    .getByTestId(`persona-deployment-${personaId}-${additionalPubkey}`)
-    .click();
+  await expect(page.getByTestId(`persona-agent-row-${personaId}`)).toHaveCount(
+    0,
+  );
+  await page.getByTestId(`managed-agent-${additionalPubkey}`).click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 });
 

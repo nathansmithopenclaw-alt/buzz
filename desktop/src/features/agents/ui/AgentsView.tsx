@@ -10,10 +10,12 @@ import {
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
 import { indexAgentDeployments } from "@/features/agents/ui/agentDeployments";
-import { primaryFleetHost } from "@/features/agents/fleetProjection/selectors";
+import { fleetAgentHost } from "@/features/agents/fleetProjection/selectors";
+import type { FleetProjectionOwnerPresentation } from "@/features/agents/fleetProjection/useFleetProjectionPresentation";
 import { useCurrentUnixSeconds } from "@/features/agents/fleetProjection/useCurrentUnixSeconds";
 import { useFleetProjectionPresentation } from "@/features/agents/fleetProjection/useFleetProjectionPresentation";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { REMOTE_CONTROL_FEATURE_ID } from "@/features/agents/lib/remoteControlFeature";
 import { useFleetVisibilitySettings } from "@/features/agents/lib/useFleetVisibilitySettings";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useOpenDmMutation } from "@/features/channels/hooks";
@@ -31,10 +33,11 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { PageHeader } from "@/shared/ui/PageHeader";
-import { AgentLibrarySection } from "./AgentLibrarySection";
 import { AgentsDialogs } from "./AgentsDialogs";
 import { FleetHostStatus } from "./FleetHostStatus";
 import { FleetSection } from "./FleetSection";
+import { fleetHostLabel } from "./fleetProjectionUi";
+import { RemoteControlScopeSwitcher } from "./RemoteControlScopeSwitcher";
 import { TeamsSection } from "./TeamsSection";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 import { useManagedAgentActions } from "./useManagedAgentActions";
@@ -42,7 +45,7 @@ import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 
 export function AgentsView() {
-  const fleetVisibilityEnabled = useFeatureEnabled("fleetVisibility");
+  const fleetVisibilityEnabled = useFeatureEnabled(REMOTE_CONTROL_FEATURE_ID);
   const fleetVisibility = useFleetVisibilitySettings();
   const identityQuery = useIdentityQuery();
   const fleetProjectionEnabled =
@@ -72,20 +75,26 @@ export function AgentsView() {
     <UnifiedAgentsView
       currentOwnerPubkey={identityQuery.data?.pubkey}
       fleetProjectionEnabled={fleetProjectionEnabled}
+      localHostId={fleetVisibility?.hostId ?? null}
       needsRoleChoice={needsRoleChoice}
       observerMode={observerMode}
     />
   );
 }
 
+const LOCAL_SCOPE_ID = "local";
+const ALL_HOSTS_SCOPE_ID = "all";
+
 function UnifiedAgentsView({
   currentOwnerPubkey,
   fleetProjectionEnabled,
+  localHostId,
   needsRoleChoice,
   observerMode,
 }: {
   currentOwnerPubkey?: string;
   fleetProjectionEnabled: boolean;
+  localHostId: string | null;
   needsRoleChoice: boolean;
   observerMode: boolean;
 }) {
@@ -129,6 +138,7 @@ function UnifiedAgentsView({
     () => indexAgentDeployments(agents.managedAgents),
     [agents.managedAgents],
   );
+  const [scopeId, setScopeId] = React.useState<string | null>(null);
   const isActionPending =
     agents.isPending ||
     personas.isPending ||
@@ -160,14 +170,6 @@ function UnifiedAgentsView({
       : null;
   const isAgentDataLoading =
     agents.managedAgentsQuery.isLoading || personas.personasQuery.isLoading;
-  const showOnboarding =
-    !observerMode &&
-    !needsRoleChoice &&
-    !isAgentDataLoading &&
-    !agentsError &&
-    !personasError &&
-    agents.managedAgents.length === 0 &&
-    personas.libraryPersonas.length === 0;
   const normalizedOwnerPubkey = currentOwnerPubkey
     ? normalizePubkey(currentOwnerPubkey)
     : null;
@@ -185,8 +187,67 @@ function UnifiedAgentsView({
   const projectionError = projection.errorMessage
     ? new Error(projection.errorMessage)
     : null;
-  const primaryHost = primaryFleetHost(currentFleetOwner);
-  const canMutate = !observerMode && !needsRoleChoice;
+  const remoteHosts = observerMode
+    ? (currentFleetOwner?.hosts ?? [])
+    : (currentFleetOwner?.hosts ?? []).filter(
+        (host) => host.hostId !== localHostId,
+      );
+  const scopeOptions = [
+    { id: LOCAL_SCOPE_ID, label: "This Mac" },
+    ...(remoteHosts.length > 1
+      ? [{ id: ALL_HOSTS_SCOPE_ID, label: "All hosts" }]
+      : []),
+    ...remoteHosts.map((host) => ({
+      id: host.hostId,
+      label: fleetHostLabel(host),
+    })),
+  ];
+  const defaultScopeId = observerMode
+    ? remoteHosts.length === 1
+      ? remoteHosts[0].hostId
+      : ALL_HOSTS_SCOPE_ID
+    : LOCAL_SCOPE_ID;
+  const resolvedScopeId = scopeId ?? defaultScopeId;
+  const viewingRemote =
+    fleetProjectionEnabled && resolvedScopeId !== LOCAL_SCOPE_ID;
+  const selectedRemoteHost =
+    viewingRemote && resolvedScopeId !== ALL_HOSTS_SCOPE_ID
+      ? (remoteHosts.find((host) => host.hostId === resolvedScopeId) ??
+        currentFleetOwner?.hosts.find(
+          (host) => host.hostId === resolvedScopeId,
+        ) ??
+        null)
+      : null;
+  const scopedOwner = React.useMemo(() => {
+    if (!currentFleetOwner) return null;
+    if (!viewingRemote || resolvedScopeId === ALL_HOSTS_SCOPE_ID) {
+      return currentFleetOwner;
+    }
+    return ownerForHost(currentFleetOwner, resolvedScopeId);
+  }, [currentFleetOwner, resolvedScopeId, viewingRemote]);
+  const canMutate = !observerMode && !needsRoleChoice && !viewingRemote;
+  const undeployedHostPersonas = personas.libraryPersonas.filter(
+    (persona) => (deploymentsByPersonaId.get(persona.id) ?? []).length === 0,
+  );
+  const deployedProjectedPersonaIds = new Set(
+    (scopedOwner?.agents ?? [])
+      .map((agent) => agent.personaId)
+      .filter((personaId): personaId is string => Boolean(personaId)),
+  );
+  const undeployedProjectedPersonas = (scopedOwner?.personas ?? []).filter(
+    (persona) => !deployedProjectedPersonaIds.has(persona.personaId),
+  );
+  const showLocalHostRoster = !observerMode && !viewingRemote;
+  const showObserverLocalEmpty = observerMode && !viewingRemote;
+  const showRemoteRoster = viewingRemote;
+  const showOnboarding =
+    showLocalHostRoster &&
+    !needsRoleChoice &&
+    !isAgentDataLoading &&
+    !agentsError &&
+    !personasError &&
+    agents.managedAgents.length === 0 &&
+    personas.libraryPersonas.length === 0;
 
   useFeedbackToasts(agents.actionNoticeMessage, agents.actionErrorMessage);
   useFeedbackToasts(
@@ -292,27 +353,38 @@ function UnifiedAgentsView({
             }
             description={
               needsRoleChoice
-                ? "Choose this device's fleet role before viewing agents."
-                : observerMode
-                  ? primaryHost?.name?.trim()
-                    ? `Your fleet runs on ${primaryHost.name.trim()} — you can view and message it from here.`
-                    : "View and message your relay-published fleet from this device."
-                  : "Agents run on this device."
+                ? "Choose this device's role before viewing agents."
+                : viewingRemote
+                  ? selectedRemoteHost?.name?.trim()
+                    ? `Showing agents on ${selectedRemoteHost.name.trim()}.`
+                    : "Showing agents on another Mac."
+                  : observerMode
+                    ? "No agents run on this Mac. Switch to a host to see the fleet."
+                    : "Agents run on this Mac."
             }
             title="Agents"
           />
 
           {fleetProjectionEnabled && !needsRoleChoice ? (
-            currentOwnerPubkey ? (
-              <FleetHostStatus
-                hosts={currentFleetOwner?.hosts ?? []}
-                now={now}
-              />
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                Loading fleet identity…
-              </p>
-            )
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              {currentOwnerPubkey ? (
+                <FleetHostStatus
+                  hosts={currentFleetOwner?.hosts ?? []}
+                  now={now}
+                />
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Loading fleet identity…
+                </p>
+              )}
+              {scopeOptions.length > 1 ? (
+                <RemoteControlScopeSwitcher
+                  options={scopeOptions}
+                  value={resolvedScopeId}
+                  onChange={setScopeId}
+                />
+              ) : null}
+            </div>
           ) : null}
 
           {needsRoleChoice ? (
@@ -321,77 +393,24 @@ function UnifiedAgentsView({
             <AgentsOnboardingState onCreate={openUnifiedCatalog} />
           ) : (
             <div className="flex flex-col gap-8">
-              {observerMode ? (
-                <FleetSection
-                  error={projectionError}
-                  isLoading={projection.loading || !currentOwnerPubkey}
-                  isMessagePending={openDmMutation.isPending}
-                  mode="observer"
-                  now={now}
-                  owner={currentFleetOwner}
-                  onMessageAgent={(pubkey) => {
-                    void handleMessageAgent(pubkey);
-                  }}
-                  onOpenAgentProfile={(pubkey, options) =>
-                    openProfilePanel?.(pubkey, options)
-                  }
-                />
-              ) : (
+              {showLocalHostRoster ? (
                 <FleetSection
                   agents={agents.managedAgents}
                   defaultModel={inheritedDefaults.model.value}
-                  error={agentsError}
+                  error={agentsError ?? personasError}
                   isActionPending={isActionPending}
-                  isLoading={agents.managedAgentsQuery.isLoading}
+                  isLoading={
+                    agents.managedAgentsQuery.isLoading ||
+                    personas.personasQuery.isLoading
+                  }
                   isMessagePending={openDmMutation.isPending}
+                  isPersonaPending={personas.isPending}
                   mode="host"
                   personasById={personasById}
                   restartingAgentPubkey={agents.restartingAgentPubkey}
                   startingAgentPubkey={agents.startingAgentPubkey}
-                  onMessageAgent={(pubkey) => {
-                    void handleMessageAgent(pubkey);
-                  }}
-                  onOpenAgentProfile={(pubkey, options) =>
-                    openProfilePanel?.(pubkey, options)
-                  }
-                  onRestartAgent={(pubkey) => {
-                    void agents.handleRestart(pubkey);
-                  }}
-                  onStartAgent={(pubkey) => {
-                    void agents.handleStart(pubkey);
-                  }}
-                  onStopAgent={(pubkey) => {
-                    void agents.handleStop(pubkey);
-                  }}
-                />
-              )}
-
-              {observerMode ? (
-                <AgentLibrarySection
-                  agents={currentFleetOwner?.agents ?? []}
-                  error={projectionError}
-                  isLoading={projection.loading || !currentOwnerPubkey}
-                  mode="observer"
-                  personas={currentFleetOwner?.personas ?? []}
-                  onOpenAgentProfile={(pubkey, options) =>
-                    openProfilePanel?.(pubkey, {
-                      ...options,
-                      source: "relay",
-                    })
-                  }
-                />
-              ) : (
-                <AgentLibrarySection
-                  defaultModel={inheritedDefaults.model.value}
-                  deploymentsByPersonaId={deploymentsByPersonaId}
-                  error={personasError}
-                  isActionPending={isActionPending}
-                  isLoading={personas.personasQuery.isLoading}
-                  isPending={personas.isPending}
-                  mode="host"
-                  personas={personas.libraryPersonas}
                   startingPersonaIds={agents.startingPersonaIds}
-                  onBrowseCatalog={openUnifiedCatalog}
+                  undeployedPersonas={undeployedHostPersonas}
                   onDeactivatePersona={(persona) => {
                     void personas.handleSetActive(persona, false, "library");
                   }}
@@ -401,33 +420,89 @@ function UnifiedAgentsView({
                   }}
                   onDuplicatePersona={personas.openDuplicate}
                   onEditPersona={personas.openEdit}
+                  onMessageAgent={(pubkey) => {
+                    void handleMessageAgent(pubkey);
+                  }}
                   onOpenAgentProfile={(pubkey, options) =>
                     openProfilePanel?.(pubkey, options)
                   }
                   onOpenPersonaProfile={(persona) =>
                     openPersonaProfilePanel?.(persona)
                   }
-                  onSharePersona={(persona, deployments) =>
-                    personas.openShare(persona, deployments, persona.avatarUrl)
-                  }
-                  onSnapshotPersona={(persona, deployments) =>
+                  onRestartAgent={(pubkey) => {
+                    void agents.handleRestart(pubkey);
+                  }}
+                  onSharePersona={(persona) => {
+                    const deployments =
+                      deploymentsByPersonaId.get(persona.id) ?? [];
+                    personas.openShare(persona, deployments, persona.avatarUrl);
+                  }}
+                  onSnapshotPersona={(persona) => {
+                    const deployments =
+                      deploymentsByPersonaId.get(persona.id) ?? [];
                     personas.openExportSnapshot(
                       persona,
                       deployments,
                       persona.avatarUrl,
-                    )
+                    );
+                  }}
+                  onStartAgent={(pubkey) => {
+                    void agents.handleStart(pubkey);
+                  }}
+                  onStopAgent={(pubkey) => {
+                    void agents.handleStop(pubkey);
+                  }}
+                />
+              ) : (
+                <FleetSection
+                  emptyDescription={
+                    showObserverLocalEmpty
+                      ? "This Mac is an Observer, so it does not run agents. Switch to a host to see the fleet."
+                      : undefined
+                  }
+                  emptyTitle={
+                    showObserverLocalEmpty ? "No agents on this Mac" : undefined
+                  }
+                  error={projectionError}
+                  isLoading={projection.loading || !currentOwnerPubkey}
+                  isMessagePending={openDmMutation.isPending}
+                  mode="observer"
+                  now={now}
+                  owner={
+                    showRemoteRoster
+                      ? scopedOwner
+                      : showObserverLocalEmpty
+                        ? null
+                        : currentFleetOwner
+                  }
+                  undeployedPersonas={
+                    showRemoteRoster ? undeployedProjectedPersonas : []
+                  }
+                  onMessageAgent={(pubkey) => {
+                    void handleMessageAgent(pubkey);
+                  }}
+                  onOpenAgentProfile={(pubkey, options) =>
+                    openProfilePanel?.(pubkey, {
+                      ...options,
+                      source: "relay",
+                    })
                   }
                 />
               )}
 
-              {observerMode ? (
+              {!showLocalHostRoster ? (
                 <TeamsSection
                   error={projectionError}
                   isLoading={projection.loading || !currentOwnerPubkey}
                   isMessagePending={openDmMutation.isPending}
                   mode="observer"
                   now={now}
-                  projectedOwners={projectedTeamOwners}
+                  projectedOwners={
+                    showObserverLocalEmpty ? [] : projectedTeamOwners
+                  }
+                  projectedTeams={
+                    showObserverLocalEmpty ? [] : (scopedOwner?.teams ?? [])
+                  }
                   onMessageAgent={(pubkey) => {
                     void handleMessageAgent(pubkey);
                   }}
@@ -504,6 +579,27 @@ function AgentsOnboardingState({ onCreate }: { onCreate: () => void }) {
       </div>
     </section>
   );
+}
+
+function ownerForHost(
+  owner: FleetProjectionOwnerPresentation,
+  hostId: string,
+): FleetProjectionOwnerPresentation {
+  const hosts = owner.hosts.filter((host) => host.hostId === hostId);
+  const agents = owner.agents.filter(
+    (agent) => fleetAgentHost(owner, agent.agentPubkey)?.hostId === hostId,
+  );
+  const deployedPersonaIds = new Set(
+    agents
+      .map((agent) => agent.personaId)
+      .filter((personaId): personaId is string => Boolean(personaId)),
+  );
+  const personas = owner.personas.filter(
+    (persona) =>
+      deployedPersonaIds.has(persona.personaId) ||
+      !owner.agents.some((agent) => agent.personaId === persona.personaId),
+  );
+  return { ...owner, agents, hosts, personas };
 }
 
 function FleetRoleChoiceBanner() {

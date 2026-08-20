@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
+import type { FleetProjectionTeam } from "@/features/agents/fleetProjection/types";
 import type { FleetProjectionOwnerPresentation } from "@/features/agents/fleetProjection/useFleetProjectionPresentation";
 import type { AgentPersona, AgentTeam } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
@@ -58,6 +59,7 @@ type ObserverTeamsSectionProps = ProjectedTeamProps & {
   mode: "observer";
   error: Error | null;
   isLoading: boolean;
+  projectedTeams?: readonly FleetProjectionTeam[];
 };
 
 type TeamsSectionProps = HostTeamsSectionProps | ObserverTeamsSectionProps;
@@ -232,13 +234,15 @@ function ObserverTeamsSection({
   isMessagePending,
   now,
   projectedOwners,
+  projectedTeams = [],
   onMessageAgent,
   onOpenAgentProfile,
 }: ObserverTeamsSectionProps) {
+  const hasTeams = projectedTeams.length > 0 || projectedOwners.length > 0;
   return (
     <section className="relative space-y-4" data-testid="agents-library-teams">
       <SectionHeader
-        description="Read-only fleets from people who share a channel with you."
+        description="Teams published by the host you are viewing."
         title="Teams"
       />
       {isLoading ? (
@@ -249,13 +253,31 @@ function ObserverTeamsSection({
           />
         </div>
       ) : null}
-      {!isLoading && projectedOwners.length === 0 && !error ? (
+      {!isLoading && !hasTeams && !error ? (
         <div className="rounded-2xl border border-dashed border-border/80 px-5 py-6">
-          <p className="font-medium">No shared fleet teams yet</p>
+          <p className="font-medium">No remote teams yet</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Fleets from channel members appear here when their hosts publish
-            them.
+            Teams appear here when the host publishes them.
           </p>
+        </div>
+      ) : null}
+      {!isLoading && projectedTeams.length > 0 ? (
+        <div className={IDENTITY_CARD_GRID_CLASS} data-testid="remote-teams">
+          {projectedTeams.map((team) => (
+            <TeamIdentityCard
+              actions={
+                <span className="rounded-full border border-border/70 px-2 py-1 text-2xs font-medium text-muted-foreground">
+                  Read-only
+                </span>
+              }
+              dataTestId={`team-card-${team.teamId}`}
+              description={team.description}
+              key={team.teamId}
+              memberCount={team.personaIds.length}
+              personas={[]}
+              teamName={team.name}
+            />
+          ))}
         </div>
       ) : null}
       {!isLoading ? (

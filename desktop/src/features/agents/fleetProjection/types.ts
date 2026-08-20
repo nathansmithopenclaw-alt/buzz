@@ -30,6 +30,14 @@ export type FleetProjectionPersona = {
   model: string | null;
 };
 
+export type FleetProjectionTeam = {
+  ownerPubkey: string;
+  teamId: string;
+  name: string;
+  description: string | null;
+  personaIds: readonly string[];
+};
+
 export type FleetProjectionAgentStatus = {
   pubkey: string;
   state: FleetProjectionLifecycleState;
@@ -55,6 +63,7 @@ export type FleetProjectionOwner = {
   ownerPubkey: string;
   agents: readonly FleetProjectionAgent[];
   personas: readonly FleetProjectionPersona[];
+  teams: readonly FleetProjectionTeam[];
   hosts: readonly FleetProjectionHost[];
 };
 

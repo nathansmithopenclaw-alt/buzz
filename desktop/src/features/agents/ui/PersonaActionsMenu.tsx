@@ -16,17 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 
-export function PersonaActionsMenu({
-  isActionPending,
-  isPending,
-  persona,
-  onDuplicate,
-  onEdit,
-  onShare,
-  onSnapshot,
-  onDeactivate,
-  onDelete,
-}: {
+type PersonaActionHandlers = {
   isActionPending: boolean;
   isPending: boolean;
   persona: AgentPersona;
@@ -36,15 +26,78 @@ export function PersonaActionsMenu({
   onSnapshot: (persona: AgentPersona) => void;
   onDeactivate: (persona: AgentPersona) => void;
   onDelete: (persona: AgentPersona) => void;
-}) {
+};
+
+export function PersonaActionItems({
+  isActionPending,
+  isPending,
+  persona,
+  onDuplicate,
+  onEdit,
+  onShare,
+  onSnapshot,
+  onDeactivate,
+  onDelete,
+}: PersonaActionHandlers) {
   const disabled = isActionPending || isPending;
   const canEdit = !persona.sourceTeam;
 
   return (
+    <>
+      {canEdit ? (
+        <DropdownMenuItem disabled={disabled} onClick={() => onEdit(persona)}>
+          <Pencil className="h-4 w-4" />
+          Edit
+        </DropdownMenuItem>
+      ) : null}
+      <DropdownMenuItem
+        disabled={disabled}
+        onClick={() => onDuplicate(persona)}
+      >
+        <CopyPlus className="h-4 w-4" />
+        Duplicate
+      </DropdownMenuItem>
+      <DropdownMenuItem disabled={disabled} onClick={() => onShare(persona)}>
+        <Share2 className="h-4 w-4" />
+        Share
+      </DropdownMenuItem>
+      <DropdownMenuItem disabled={disabled} onClick={() => onSnapshot(persona)}>
+        <Download className="h-4 w-4" />
+        Export snapshot
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      {persona.sourceTeam ? (
+        <DropdownMenuItem disabled>
+          <Trash2 className="h-4 w-4" />
+          Managed by team
+        </DropdownMenuItem>
+      ) : (
+        <DropdownMenuItem
+          className="text-destructive focus:text-destructive"
+          disabled={disabled}
+          onClick={() => {
+            if (persona.isBuiltIn) {
+              onDeactivate(persona);
+              return;
+            }
+
+            onDelete(persona);
+          }}
+        >
+          <Trash2 className="h-4 w-4" />
+          Delete
+        </DropdownMenuItem>
+      )}
+    </>
+  );
+}
+
+export function PersonaActionsMenu(props: PersonaActionHandlers) {
+  return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <button
-          aria-label={`Open actions for ${persona.displayName}`}
+          aria-label={`Open actions for ${props.persona.displayName}`}
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           type="button"
         >
@@ -55,53 +108,7 @@ export function PersonaActionsMenu({
         align="end"
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
-        {canEdit ? (
-          <DropdownMenuItem disabled={disabled} onClick={() => onEdit(persona)}>
-            <Pencil className="h-4 w-4" />
-            Edit
-          </DropdownMenuItem>
-        ) : null}
-        <DropdownMenuItem
-          disabled={disabled}
-          onClick={() => onDuplicate(persona)}
-        >
-          <CopyPlus className="h-4 w-4" />
-          Duplicate
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled={disabled} onClick={() => onShare(persona)}>
-          <Share2 className="h-4 w-4" />
-          Share
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          disabled={disabled}
-          onClick={() => onSnapshot(persona)}
-        >
-          <Download className="h-4 w-4" />
-          Export snapshot
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        {persona.sourceTeam ? (
-          <DropdownMenuItem disabled>
-            <Trash2 className="h-4 w-4" />
-            Managed by team
-          </DropdownMenuItem>
-        ) : (
-          <DropdownMenuItem
-            className="text-destructive focus:text-destructive"
-            disabled={disabled}
-            onClick={() => {
-              if (persona.isBuiltIn) {
-                onDeactivate(persona);
-                return;
-              }
-
-              onDelete(persona);
-            }}
-          >
-            <Trash2 className="h-4 w-4" />
-            Delete
-          </DropdownMenuItem>
-        )}
+        <PersonaActionItems {...props} />
       </DropdownMenuContent>
     </DropdownMenu>
   );

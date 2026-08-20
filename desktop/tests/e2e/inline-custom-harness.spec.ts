@@ -60,7 +60,7 @@ async function openCreateDialog(page: Page) {
 async function openDefinitionEditDialog(page: Page, name: string) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId("agents-library-personas")).toBeVisible({
+  await expect(page.getByTestId("agents-fleet-grid")).toBeVisible({
     timeout: 10_000,
   });
   await page.getByRole("button", { name: `Open actions for ${name}` }).click();

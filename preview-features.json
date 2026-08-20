@@ -38,9 +38,9 @@
       "platforms": ["desktop"]
     },
     {
-      "id": "fleetVisibility",
-      "name": "Fleet visibility",
-      "description": "Use this device as an agent Host or a read-only Observer",
+      "id": "remoteControl",
+      "name": "Remote Control",
+      "description": "See and manage agents that run on another Mac from this device",
       "platforms": ["desktop"]
     }
   ]

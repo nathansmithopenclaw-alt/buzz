@@ -77,7 +77,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
 
   // Shot 01: persona delete confirm dialog — "Also deletes 2 agent instance(s)."
   // Seeds a custom persona with two linked managed agents so instanceCount = 2.
-  // Triggers the delete confirm from the persona's "..." actions menu.
+  // Triggers the delete confirm from the Fleet card overflow.
   test("01-delete-cascade-copy", async ({ page }) => {
     await installMockBridge(page, {
       personas: [
@@ -106,21 +106,16 @@ test.describe("agent lifecycle feedback screenshots", () => {
 
     await openAgentsView(page);
 
-    // The custom persona card appears in the library.
-    const personaCard = page.getByTestId(
-      `persona-agent-row-${CASCADE_PERSONA_ID}`,
+    // Deployed personas live on the Fleet card, not a Library row. Drive
+    // cascade-delete from that card's overflow — same handler the Library
+    // used (FleetSection → personas.openDelete).
+    const fleetCard = page.getByTestId(
+      `managed-agent-${CASCADE_AGENT_A_PUBKEY}`,
     );
-    await expect(personaCard).toContainText("Cascade Test Agent", {
+    await expect(fleetCard).toContainText("Cascade Test Agent", {
       timeout: 10_000,
     });
-
-    // Open the actions menu for the custom persona. The trigger button carries
-    // an aria-label derived from the persona displayName.
-    await personaCard
-      .getByRole("button", { name: "Open actions for Cascade Test Agent" })
-      .click();
-
-    // For a custom (non-builtin) persona, Delete opens PersonaDeleteDialog.
+    await fleetCard.getByLabel("Open actions for Cascade Test Agent").click();
     await page.getByRole("menuitem", { name: "Delete" }).click();
 
     const dialog = page.getByRole("alertdialog");
@@ -242,16 +237,13 @@ test.describe("agent lifecycle feedback screenshots", () => {
 
     await openAgentsView(page);
 
-    const personaCard = page.getByTestId(
-      `persona-agent-row-${CASCADE_PERSONA_ID}`,
+    const fleetCard = page.getByTestId(
+      `managed-agent-${CASCADE_AGENT_A_PUBKEY}`,
     );
-    await expect(personaCard).toContainText("Cascade Test Agent", {
+    await expect(fleetCard).toContainText("Cascade Test Agent", {
       timeout: 10_000,
     });
-
-    await personaCard
-      .getByRole("button", { name: "Open actions for Cascade Test Agent" })
-      .click();
+    await fleetCard.getByLabel("Open actions for Cascade Test Agent").click();
     await page.getByRole("menuitem", { name: "Delete" }).click();
 
     const dialog = page.getByRole("alertdialog");
