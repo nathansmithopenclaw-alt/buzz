@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { PREVIEW_ORIGIN } from "./previewOrigin";
 
 async function openGeneral(page: Page) {
   await page.goto("/");
@@ -197,7 +198,7 @@ for (const platform of [
     await page
       .context()
       .grantPermissions(["clipboard-read", "clipboard-write"], {
-        origin: "http://127.0.0.1:4173",
+        origin: PREVIEW_ORIGIN,
       });
     await openGeneral(page);
 

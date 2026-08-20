@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
+import { PREVIEW_ORIGIN } from "./previewOrigin";
 
 const RELAY_URL = "ws://localhost:3000";
 const OWNER_PUBKEY = "deadbeef".repeat(8);
@@ -311,7 +312,7 @@ test.describe("community rail", () => {
     await page
       .context()
       .grantPermissions(["clipboard-read", "clipboard-write"], {
-        origin: "http://127.0.0.1:4173",
+        origin: PREVIEW_ORIGIN,
       });
     await installMockBridge(
       page,
