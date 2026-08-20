@@ -487,6 +487,14 @@ test.describe("global agent config screenshots", () => {
     await expect(provider).toBeVisible();
     await waitForAnimations(page);
     const providerHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
+    // DialogContent is max-h-[calc(100vh-2rem)]. If the empty (no-provider)
+    // dialog is already at that cap, the model-field growth canary below is
+    // absorbed by overflow-y-auto and reads as a false pass/fail.
+    const dialogMaxHeight = (page.viewportSize()?.height ?? 0) - 32;
+    expect(
+      providerHeight,
+      "empty Set-defaults dialog must sit below its max-height cap",
+    ).toBeLessThan(dialogMaxHeight);
 
     await provider.click();
     await page.getByTestId("global-agent-provider-option-anthropic").click();

@@ -215,14 +215,10 @@ export function AgentManagementDelegationCard({
                   </span>
                 </button>
               ) : (
+                // Off is already the switch; a second summary line on every
+                // row pushes Agent defaults onto its max-height cap.
                 <div className="min-w-0 flex-1 text-left">
-                  <span className="block text-sm">{label}</span>
-                  <span
-                    className="block text-xs text-muted-foreground"
-                    data-testid={`agent-management-capability-${capability}-summary`}
-                  >
-                    {subjectSummary(subject)}
-                  </span>
+                  <span className="text-sm">{label}</span>
                 </div>
               )}
               <Switch
