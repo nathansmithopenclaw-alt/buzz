@@ -217,7 +217,11 @@ pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, St
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read global agent config: {e}"))?;
-    serde_json::from_str(&content).map_err(|e| format!("failed to parse global agent config: {e}"))
+    parse_global_agent_config(&content)
+}
+
+fn parse_global_agent_config(content: &str) -> Result<GlobalAgentConfig, String> {
+    serde_json::from_str(content).map_err(|e| format!("failed to parse global agent config: {e}"))
 }
 
 /// Save the global agent config to disk.

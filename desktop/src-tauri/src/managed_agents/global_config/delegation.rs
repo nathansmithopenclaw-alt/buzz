@@ -318,7 +318,11 @@ impl AgentManagementDelegationGrant {
                         payload.version
                     ));
                 }
-                payload.capabilities.clone().canonicalize()?;
+                let mut canonical = payload.capabilities.clone();
+                canonical.canonicalize()?;
+                if canonical != payload.capabilities {
+                    return Err("delegation capability subjects are not canonical".into());
+                }
             }
         }
         uuid::Uuid::parse_str(self.payload.audit_channel_id().trim()).map_err(|_| {
@@ -466,6 +470,29 @@ mod tests {
             }
             AgentManagementDelegationPayload::V1(_) => panic!("expected v2"),
         }
+    }
+
+    #[test]
+    fn v2_validate_rejects_noncanonical_set_entries() {
+        let owner = Keys::generate();
+        let grantee = Keys::generate();
+        let hex = grantee.public_key().to_hex();
+        let payload = AgentManagementDelegationPayload::V2(AgentManagementDelegationPayloadV2 {
+            version: 2,
+            audit_channel_id: AUDIT.into(),
+            capabilities: AgentManagementDelegationSubjects {
+                agent_creation: CapabilitySubject::Set {
+                    grantees: vec![hex.to_ascii_uppercase(), hex.clone()],
+                },
+                ..Default::default()
+            },
+        });
+        let grant = sign(&owner, payload);
+        let error = grant.validate(&owner.public_key()).unwrap_err();
+        assert!(
+            error.contains("not canonical"),
+            "expected canonicality error, got: {error}"
+        );
     }
 
     #[test]

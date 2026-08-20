@@ -87,6 +87,12 @@ mod tests {
             canonical_relay_scope("ws://localhost:3000"),
             "ws://localhost:3000"
         );
+        assert_eq!(canonical_relay_scope("ws://localhost:80"), "ws://localhost");
+        assert_eq!(
+            canonical_relay_scope("http://localhost:80"),
+            "ws://localhost"
+        );
+        assert_eq!(canonical_relay_scope("ws://localhost"), "ws://localhost");
     }
 
     #[test]

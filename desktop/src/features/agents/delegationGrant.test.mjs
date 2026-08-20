@@ -47,6 +47,17 @@ test("unchecking one name while all is on writes set minus that name", () => {
   assert.equal(LEFT_ALL_NOTICE.includes("Future agents"), true);
 });
 
+test("unknown grant version does not throw in render", () => {
+  const subjects = grantSubjects(
+    /** @type {never} */ ({
+      version: 3,
+      auditChannelId: "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+      capabilities: {},
+    }),
+  );
+  assert.equal(subjectsAreEmpty(subjects), true);
+});
+
 test("grant-all is one subject map covering five all scopes", () => {
   const subjects = allSubjects();
   for (const name of [

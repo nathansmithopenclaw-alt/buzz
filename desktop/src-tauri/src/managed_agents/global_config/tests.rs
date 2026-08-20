@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use nostr::{EventBuilder, JsonUtil, Keys, Kind};
 
 use super::{
-    normalize_global_config_fields, resolve_effective_model_provider, strip_empty_env_vars,
-    validate_global_config, AgentManagementDelegationCapabilities, AgentManagementDelegationGrant,
-    AgentManagementDelegationPayload, AgentManagementDelegationPayloadV1, GlobalAgentConfig,
+    normalize_global_config_fields, parse_global_agent_config, resolve_effective_model_provider,
+    strip_empty_env_vars, validate_global_config, AgentManagementDelegationCapabilities,
+    AgentManagementDelegationGrant, AgentManagementDelegationPayload,
+    AgentManagementDelegationPayloadV1, GlobalAgentConfig,
 };
 use crate::managed_agents::{AgentDefinition, BackendKind, ManagedAgentRecord, RespondTo};
 
@@ -69,6 +70,31 @@ fn delegation_grant_requires_current_owner_signature_and_exact_fields() {
     }
     assert!(tampered.validate(&owner.public_key()).is_err());
     assert!(grant.validate(&Keys::generate().public_key()).is_err());
+}
+
+#[test]
+fn version_3_config_file_fails_global_config_load() {
+    let json = serde_json::json!({
+        "env_vars": {},
+        "provider": null,
+        "model": null,
+        "preferred_runtime": null,
+        "auto_approve_agent_drafts": false,
+        "agent_management_delegation": {
+            "version": 3,
+            "auditChannelId": "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+            "capabilities": {}
+        }
+    });
+    let error = parse_global_agent_config(&json.to_string()).unwrap_err();
+    assert!(
+        error.contains("failed to parse global agent config"),
+        "expected load-path prefix, got: {error}"
+    );
+    assert!(
+        error.contains("unknown delegation grant version"),
+        "expected unknown-version cause, got: {error}"
+    );
 }
 
 #[test]

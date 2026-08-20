@@ -53,6 +53,9 @@ export function grantSubjects(
 ): AgentManagementDelegationSubjects {
   if (!grant) return emptySubjects();
   if (isV2Grant(grant)) return grant.capabilities;
+  if (!("granteePubkey" in grant) || typeof grant.granteePubkey !== "string") {
+    return emptySubjects();
+  }
   const bit = (enabled: boolean): CapabilitySubject =>
     enabled
       ? { scope: "set", grantees: [grant.granteePubkey.toLowerCase()] }

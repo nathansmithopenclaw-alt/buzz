@@ -30,6 +30,58 @@ fn recovery_group_ids(
         .collect()
 }
 
+pub(super) fn build_audit_receipt_event(
+    owner_keys: &Keys,
+    source_hex: &str,
+    requester_name: &str,
+    capability: DelegatedCapability,
+    target: &str,
+    succeeded: bool,
+    owner_reviewed: bool,
+    request_id: &str,
+    channel: &str,
+    env_summary: Option<&str>,
+) -> Result<Event, String> {
+    let safe_name: String = requester_name
+        .chars()
+        .filter(|character| !character.is_control() && *character != '@')
+        .take(120)
+        .collect();
+    let safe_target: String = target
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(240)
+        .collect();
+    let capability_label = match capability {
+        DelegatedCapability::AgentConfig => "agent config",
+        DelegatedCapability::AgentCreation => "agent creation",
+        DelegatedCapability::EnvVars => "agent env vars",
+        DelegatedCapability::GlobalConfig => "global agent config",
+        DelegatedCapability::Teams => "teams",
+    };
+    let outcome = if succeeded { "applied" } else { "failed" };
+    let authority = if owner_reviewed {
+        "owner-reviewed"
+    } else {
+        "delegated"
+    };
+    let mut content = format!(
+        "@{safe_name} {authority} {capability_label} {outcome}: {safe_target}\n\nRequest: `{request_id}`"
+    );
+    if let Some(summary) = env_summary {
+        content.push_str("\nEnv fingerprints: ");
+        content.push_str(summary);
+    }
+    let h = Tag::parse(["h", channel])
+        .map_err(|error| format!("failed to build audit channel tag: {error}"))?;
+    let p = Tag::parse(["p", source_hex])
+        .map_err(|error| format!("failed to build audit mention tag: {error}"))?;
+    EventBuilder::new(Kind::Custom(9), content)
+        .tags([h, p])
+        .sign_with_keys(owner_keys)
+        .map_err(|error| format!("failed to sign audit receipt: {error}"))
+}
+
 fn build_recovery_audit_event(
     owner_keys: &Keys,
     source: &PublicKey,

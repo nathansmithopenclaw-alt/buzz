@@ -199,22 +199,32 @@ export function AgentManagementDelegationCard({
               data-testid={`agent-management-capability-${capability}`}
               key={capability}
             >
-              <button
-                className="min-w-0 flex-1 text-left"
-                disabled={saving}
-                onClick={() => {
-                  if (on) openPicker(capability, label);
-                }}
-                type="button"
-              >
-                <span className="block text-sm">{label}</span>
-                <span
-                  className="block text-xs text-muted-foreground"
-                  data-testid={`agent-management-capability-${capability}-summary`}
+              {on ? (
+                <button
+                  className="min-w-0 flex-1 text-left"
+                  disabled={saving}
+                  onClick={() => openPicker(capability, label)}
+                  type="button"
                 >
-                  {subjectSummary(subject)}
-                </span>
-              </button>
+                  <span className="block text-sm">{label}</span>
+                  <span
+                    className="block text-xs text-muted-foreground"
+                    data-testid={`agent-management-capability-${capability}-summary`}
+                  >
+                    {subjectSummary(subject)}
+                  </span>
+                </button>
+              ) : (
+                <div className="min-w-0 flex-1 text-left">
+                  <span className="block text-sm">{label}</span>
+                  <span
+                    className="block text-xs text-muted-foreground"
+                    data-testid={`agent-management-capability-${capability}-summary`}
+                  >
+                    {subjectSummary(subject)}
+                  </span>
+                </div>
+              )}
               <Switch
                 checked={on}
                 disabled={saving}
@@ -278,7 +288,7 @@ export function AgentManagementDelegationCard({
             </p>
           ) : null}
 
-          <div className="max-h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70">
+          <div className="rounded-xl border border-border/70">
             <div className="flex items-center justify-between gap-3 border-b border-border/60 px-3 py-2.5">
               <label
                 className="flex-1 cursor-pointer text-sm font-medium"
@@ -292,66 +302,80 @@ export function AgentManagementDelegationCard({
                 id="agent-management-picker-all"
                 onCheckedChange={(checked) => {
                   if (!picker) return;
+                  if (checked === true) {
+                    setPicker({
+                      ...picker,
+                      draft: allSubject(),
+                      leftAll: false,
+                    });
+                    return;
+                  }
+                  const next =
+                    roster.length === 0
+                      ? noneSubject()
+                      : { scope: "set" as const, grantees: [...roster] };
                   setPicker({
                     ...picker,
-                    draft: checked === true ? allSubject() : noneSubject(),
-                    leftAll: picker.draft.scope === "all" && checked !== true,
+                    draft: next,
+                    leftAll: picker.draft.scope === "all",
                   });
                 }}
               />
             </div>
-            {filteredAgents.length === 0 ? (
-              <p className="px-3 py-3 text-sm text-muted-foreground">
-                {agentsQuery.isLoading
-                  ? "Loading agents…"
-                  : search.trim()
-                    ? "No matching agents."
-                    : "No managed agents yet."}
-              </p>
-            ) : (
-              filteredAgents.map((agent) => {
-                const checked = picker
-                  ? agentIsGranted(picker.draft, agent.pubkey)
-                  : false;
-                const rowId = `agent-management-picker-agent-${agent.pubkey}`;
-                return (
-                  <div
-                    className="flex items-center justify-between gap-3 px-3 py-2 hover:bg-muted/40"
-                    data-testid={rowId}
-                    key={agent.pubkey}
-                  >
-                    <label
-                      className="flex min-w-0 flex-1 cursor-pointer items-center gap-2"
-                      htmlFor={rowId}
+            <div className="max-h-[min(50vh,24rem)] overflow-y-auto">
+              {filteredAgents.length === 0 ? (
+                <p className="px-3 py-3 text-sm text-muted-foreground">
+                  {agentsQuery.isLoading
+                    ? "Loading agents…"
+                    : search.trim()
+                      ? "No matching agents."
+                      : "No managed agents yet."}
+                </p>
+              ) : (
+                filteredAgents.map((agent) => {
+                  const checked = picker
+                    ? agentIsGranted(picker.draft, agent.pubkey)
+                    : false;
+                  const rowId = `agent-management-picker-agent-${agent.pubkey}`;
+                  return (
+                    <div
+                      className="flex items-center justify-between gap-3 px-3 py-2 hover:bg-muted/40"
+                      data-testid={rowId}
+                      key={agent.pubkey}
                     >
-                      <UserAvatar
-                        avatarUrl={agent.avatarUrl}
-                        displayName={agent.name}
-                        size="sm"
+                      <label
+                        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2"
+                        htmlFor={rowId}
+                      >
+                        <UserAvatar
+                          avatarUrl={agent.avatarUrl}
+                          displayName={agent.name}
+                          size="sm"
+                        />
+                        <span className="truncate text-sm">{agent.name}</span>
+                      </label>
+                      <Checkbox
+                        checked={checked}
+                        id={rowId}
+                        onCheckedChange={() => {
+                          if (!picker) return;
+                          const result = toggleGrantedAgent(
+                            picker.draft,
+                            agent.pubkey,
+                            roster,
+                          );
+                          setPicker({
+                            ...picker,
+                            draft: result.subject,
+                            leftAll: picker.leftAll || result.leftAll,
+                          });
+                        }}
                       />
-                      <span className="truncate text-sm">{agent.name}</span>
-                    </label>
-                    <Checkbox
-                      checked={checked}
-                      id={rowId}
-                      onCheckedChange={() => {
-                        if (!picker) return;
-                        const result = toggleGrantedAgent(
-                          picker.draft,
-                          agent.pubkey,
-                          roster,
-                        );
-                        setPicker({
-                          ...picker,
-                          draft: result.subject,
-                          leftAll: picker.leftAll || result.leftAll,
-                        });
-                      }}
-                    />
-                  </div>
-                );
-              })
-            )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
           </div>
 
           <DialogFooter>

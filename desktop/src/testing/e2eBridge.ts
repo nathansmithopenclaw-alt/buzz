@@ -12972,10 +12972,9 @@ export function maybeInstallE2eTauriMocks() {
             Math.min(setGlobalAgentConfigCallCount - 1, saveErrors.length - 1)
           ];
         if (saveError) throw new Error(saveError);
-        // Echo back the submitted config as the saved value (mirrors the
-        // backend's strip-on-write pass in tests where all values are already
-        // non-empty). The invoke payload wraps it as { config }.
-        const savedConfig = (
+        // Overlay submitted fields onto the durable mock, then restore the
+        // grant — Agent-defaults Save must not write it (preserve_durable_grant).
+        const submitted = (
           payload as {
             config: {
               env_vars: Record<string, string>;
@@ -12983,6 +12982,7 @@ export function maybeInstallE2eTauriMocks() {
               model: string | null;
               preferred_runtime: string | null;
               auto_approve_agent_drafts: boolean;
+              agent_management_delegation?: unknown;
             };
           }
         ).config;
@@ -12997,11 +12997,17 @@ export function maybeInstallE2eTauriMocks() {
         if (saveDelayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, saveDelayMs));
         }
-        mockGlobalAgentConfig = savedConfig;
+        // Mirror preserve_durable_grant: Agent-defaults Save cannot write the grant.
+        const previousGrant =
+          mockGlobalAgentConfig?.agent_management_delegation ?? null;
+        mockGlobalAgentConfig = {
+          ...submitted,
+          agent_management_delegation: previousGrant,
+        };
         // In the E2E environment there are no running agents to restart, so
         // the counts default to 0 unless a spec drives them explicitly.
         return {
-          config: savedConfig,
+          config: mockGlobalAgentConfig,
           restarted_count: config?.mock?.globalConfigRestartedCount ?? 0,
           failed_restart_count:
             config?.mock?.globalConfigFailedRestartCount ?? 0,

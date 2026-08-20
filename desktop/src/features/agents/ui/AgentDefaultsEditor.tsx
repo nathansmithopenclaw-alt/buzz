@@ -227,12 +227,19 @@ export function AgentDefaultsEditor({
       setSaveState("saved");
       // Seed the shared TanStack Query cache with the canonical saved value so
       // all open dialogs (and any that open afterward) see the new config
-      // synchronously — no second IPC round-trip needed.
-      queryClient.setQueryData(globalAgentConfigQueryKey, {
-        ...result.config,
-        agent_management_delegation:
-          configRef.current.agent_management_delegation,
-      });
+      // synchronously — no second IPC round-trip needed. Functional form so a
+      // grant that landed mid-Save (and already wrote the cache) is not
+      // republished stale; configRef is assigned inside the lazy setConfig
+      // updater and must not be read here.
+      queryClient.setQueryData(
+        globalAgentConfigQueryKey,
+        (current: GlobalAgentConfig | undefined) => ({
+          ...result.config,
+          agent_management_delegation:
+            current?.agent_management_delegation ??
+            result.config.agent_management_delegation,
+        }),
+      );
       if (savedCurrentDraft) onSaveSuccess?.(result);
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
       // Partial restart failures require an explicit acknowledgment in the

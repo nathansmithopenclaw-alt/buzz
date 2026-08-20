@@ -21,8 +21,8 @@ mod create_secret_response;
 mod result_publication;
 use create_secret_response::retained_agent_create_secret_event;
 use result_publication::{
-    publish_agent_management_applying_result, publish_agent_management_recovery_audit_receipt,
-    publish_agent_management_result,
+    build_audit_receipt_event, publish_agent_management_applying_result,
+    publish_agent_management_recovery_audit_receipt, publish_agent_management_result,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -551,48 +551,21 @@ pub async fn publish_agent_management_audit_receipt(
             env_fingerprint_summary(&entry.payload),
         )
     };
-    let safe_name: String = requester_name
-        .chars()
-        .filter(|character| !character.is_control() && *character != '@')
-        .take(120)
-        .collect();
-    let safe_target: String = target
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(240)
-        .collect();
-    let capability_label = match capability {
-        DelegatedCapability::AgentConfig => "agent config",
-        DelegatedCapability::AgentCreation => "agent creation",
-        DelegatedCapability::EnvVars => "agent env vars",
-        DelegatedCapability::GlobalConfig => "global agent config",
-        DelegatedCapability::Teams => "teams",
-    };
-    let outcome = if succeeded { "applied" } else { "failed" };
-    let authority = if owner_reviewed {
-        "owner-reviewed"
-    } else {
-        "delegated"
-    };
-    let mut content = format!(
-        "@{safe_name} {authority} {capability_label} {outcome}: {safe_target}\n\nRequest: `{}`",
-        request_id
-    );
-    if let Some(summary) = env_summary {
-        content.push_str("\nEnv fingerprints: ");
-        content.push_str(&summary);
-    }
-    let h = Tag::parse(["h", channel.as_str()])
-        .map_err(|error| format!("failed to build audit channel tag: {error}"))?;
-    let p = Tag::parse(["p", source_hex.as_str()])
-        .map_err(|error| format!("failed to build audit mention tag: {error}"))?;
     let mut audit_event = match stored_audit_event {
         Some(raw) => Event::from_json(raw)
             .map_err(|error| format!("stored audit receipt is invalid: {error}"))?,
-        None => EventBuilder::new(Kind::Custom(9), content)
-            .tags([h, p])
-            .sign_with_keys(&owner_keys)
-            .map_err(|error| format!("failed to sign audit receipt: {error}"))?,
+        None => build_audit_receipt_event(
+            &owner_keys,
+            &source_hex,
+            &requester_name,
+            capability,
+            &target,
+            succeeded,
+            owner_reviewed,
+            &request_id,
+            &channel,
+            env_summary.as_deref(),
+        )?,
     };
     {
         let state_handle = app.state::<AppState>();
