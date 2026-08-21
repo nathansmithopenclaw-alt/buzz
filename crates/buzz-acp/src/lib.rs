@@ -2243,7 +2243,10 @@ async fn tokio_main() -> Result<()> {
     }
 
     let mut pool = if config.lazy_pool {
-        AgentPool::from_slots((0..config.agents).map(|_| None).collect())
+        AgentPool::from_slots_with_exclusive(
+            (0..config.agents).map(|_| None).collect(),
+            config::exclusive_session(&config.agent_command),
+        )
     } else {
         initialize_agent_pool(&PoolStartup::from_config(&config, observer.clone()), None).await?
     };
@@ -3399,8 +3402,9 @@ async fn tokio_main() -> Result<()> {
                         // Return to the exact pre-wake lazy state: empty slots,
                         // Listening lifecycle. The top-of-loop wake path re-wakes
                         // on the next accepted event. No second lifecycle.
-                        pool = AgentPool::from_slots(
+                        pool = AgentPool::from_slots_with_exclusive(
                             (0..config.agents).map(|_| None).collect(),
+                            config::exclusive_session(&config.agent_command),
                         );
                         pool_ready = false;
                         pool_lifecycle = PoolLifecycle::listening();
@@ -5193,7 +5197,10 @@ async fn initialize_agent_pool(
         );
     }
     tracing::info!("agent_pool_ready agents={}", live_count);
-    Ok(AgentPool::from_slots(agent_slots))
+    Ok(AgentPool::from_slots_with_exclusive(
+        agent_slots,
+        config::exclusive_session(&startup.command),
+    ))
 }
 
 // ── spawn_and_init ────────────────────────────────────────────────────────────

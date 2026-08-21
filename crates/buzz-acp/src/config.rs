@@ -678,11 +678,7 @@ fn sanitize_session_title(raw: &str) -> Option<String> {
         .collect::<String>()
         .trim_end()
         .to_string();
-    if title.is_empty() {
-        None
-    } else {
-        Some(title)
-    }
+    if title.is_empty() { None } else { Some(title) }
 }
 
 /// Separator between the agent name and the channel in a composed title.
@@ -782,10 +778,25 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "prime-agent" | "primeagent" => Some(vec!["--mode".to_string(), "acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
+}
+
+/// Whether this harness allows only one ACP session per subprocess.
+///
+/// Prime Agent refuses a second `session/new` on the same connection
+/// (one session per process is deliberate: conversation, cwd, and the
+/// IPython kernel are process-scoped). Buzz otherwise multiplexes many
+/// channels onto one pipe — exclusive spawn pins one subprocess per
+/// channel instead.
+pub(crate) fn exclusive_session(command: &str) -> bool {
+    matches!(
+        normalize_agent_command_identity(command).as_str(),
+        "prime-agent" | "primeagent"
+    )
 }
 
 /// Per-runtime environment defaults applied when Buzz owns the agent process.
@@ -1308,8 +1319,8 @@ struct TomlConfig {
 }
 
 pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, ConfigError> {
-    use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU32;
 
     let content = std::fs::read_to_string(path)?;
     let mut config: TomlConfig =
@@ -1639,8 +1650,8 @@ mod tests {
         kinds: Vec<u32>,
         mention: bool,
     ) -> SubscriptionRule {
-        use std::sync::atomic::AtomicU32;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicU32;
         SubscriptionRule {
             name: name.into(),
             channels,
@@ -1811,6 +1822,40 @@ mod tests {
                 "non-Hermes command must have no env defaults: {command}"
             );
         }
+    }
+
+    #[test]
+    fn exclusive_session_recognizes_prime_identities() {
+        for command in [
+            "prime-agent",
+            "primeagent",
+            "/usr/local/bin/prime-agent",
+            r"C:\Users\test\AppData\Roaming\npm\prime-agent.cmd",
+            r"C:\Tools\Prime\PRIME-AGENT.EXE",
+        ] {
+            assert!(
+                exclusive_session(command),
+                "Prime command must be exclusive-session: {command}"
+            );
+        }
+        for command in ["goose", "openclaw", "hermes-acp", "buzz-agent", ""] {
+            assert!(
+                !exclusive_session(command),
+                "non-Prime command must multiplex: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_agent_args_prime_mode_acp() {
+        assert_eq!(
+            normalize_agent_args("prime-agent", vec![]),
+            vec!["--mode".to_string(), "acp".to_string()]
+        );
+        assert_eq!(
+            normalize_agent_args("prime-agent", vec!["--mode".into(), "acp".into()]),
+            vec!["--mode".to_string(), "acp".to_string()]
+        );
     }
 
     #[test]
@@ -2630,11 +2675,7 @@ channels = "ALL"
             (None, Some(turn)) => turn,
             (None, None) => DEFAULT_IDLE_TIMEOUT_SECS,
         };
-        if raw == 0 {
-            1
-        } else {
-            raw
-        }
+        if raw == 0 { 1 } else { raw }
     }
 
     #[test]

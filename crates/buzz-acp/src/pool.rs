@@ -250,6 +250,28 @@ impl SessionState {
     }
 }
 
+/// Whether an idle worker may take `channel_id` under the spawn policy.
+///
+/// Multiplex (Goose/OpenCode): any idle worker. Exclusive (Prime): only a
+/// worker with no sessions yet, or one that already holds this channel
+/// (handled by `try_claim` pass 1). Heartbeat (`None`) also requires an
+/// empty worker — Prime will not accept a second `session/new`.
+pub(crate) fn exclusive_worker_can_claim(
+    state: &SessionState,
+    channel_id: Option<Uuid>,
+    exclusive: bool,
+) -> bool {
+    if !exclusive {
+        return true;
+    }
+    if let Some(cid) = channel_id {
+        if state.sessions.contains_key(&cid) {
+            return true;
+        }
+    }
+    state.sessions.is_empty() && state.heartbeat_session.is_none()
+}
+
 fn invalidate_session_after_adapter_runtime_failure(
     state: &mut SessionState,
     source: &PromptSource,
@@ -359,6 +381,9 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    /// When true, a worker may hold at most one ACP session (Prime's contract).
+    /// `try_claim` will not hand a worker that already has channel A to channel B.
+    exclusive_session: bool,
 }
 
 /// Result returned by a completed prompt task.
@@ -722,7 +747,21 @@ impl AgentPool {
     /// index into `self.agents`. Use this instead of `new()` when the startup
     /// loop skips failed agents — `new()` would pack agents densely and break
     /// the index invariant.
+    /// Multiplex default. Tests use this; production always passes the
+    /// exclusive-session flag via [`from_slots_with_exclusive`].
+    #[cfg(test)]
     pub fn from_slots(slots: Vec<Option<OwnedAgent>>) -> Self {
+        Self::from_slots_with_exclusive(slots, false)
+    }
+
+    /// Like [`from_slots`], with the exclusive-session spawn policy.
+    ///
+    /// Exclusive workers (Prime) refuse a second `session/new` on the same
+    /// connection. The pool must not multiplex channels onto those pipes.
+    pub fn from_slots_with_exclusive(
+        slots: Vec<Option<OwnedAgent>>,
+        exclusive_session: bool,
+    ) -> Self {
         let (result_tx, result_rx) = mpsc::unbounded_channel();
         Self {
             agents: slots,
@@ -730,15 +769,17 @@ impl AgentPool {
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            exclusive_session,
         }
     }
 
     /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
     ///
     /// Pass 1: prefer an agent that already has a session for `channel_id`.
-    /// Pass 2: any idle agent.
+    /// Pass 2: any idle agent that may take this channel under the spawn policy.
     ///
-    /// Returns `None` if all agents are checked out.
+    /// Returns `None` if all agents are checked out, or (exclusive policy) if
+    /// every idle worker already holds a different channel's session.
     pub fn try_claim(&mut self, channel_id: Option<Uuid>) -> Option<OwnedAgent> {
         // Pass 1: prefer agent with existing session for this channel.
         if let Some(cid) = channel_id {
@@ -752,8 +793,13 @@ impl AgentPool {
             }
         }
 
-        // Pass 2: first idle agent.
-        let idx = self.agents.iter().position(|slot| slot.is_some());
+        // Pass 2: first idle agent allowed to take this channel.
+        let exclusive = self.exclusive_session;
+        let idx = self.agents.iter().position(|slot| {
+            slot.as_ref()
+                .map(|a| exclusive_worker_can_claim(&a.state, channel_id, exclusive))
+                .unwrap_or(false)
+        });
         idx.map(|i| self.agents[i].take().unwrap())
     }
 
@@ -5421,6 +5467,28 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    #[test]
+    fn exclusive_claim_allows_empty_worker() {
+        let state = SessionState::default();
+        let channel_a = Uuid::new_v4();
+        assert!(exclusive_worker_can_claim(&state, Some(channel_a), true));
+        assert!(exclusive_worker_can_claim(&state, None, true));
+        assert!(exclusive_worker_can_claim(&state, Some(channel_a), false));
+    }
+
+    #[test]
+    fn exclusive_claim_refuses_other_channel() {
+        let mut state = SessionState::default();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        state.sessions.insert(channel_a, "sess-a".into());
+        assert!(exclusive_worker_can_claim(&state, Some(channel_a), true));
+        assert!(!exclusive_worker_can_claim(&state, Some(channel_b), true));
+        assert!(!exclusive_worker_can_claim(&state, None, true));
+        // Multiplex still reuses the worker for B.
+        assert!(exclusive_worker_can_claim(&state, Some(channel_b), false));
     }
 
     // MINOR (#2884): the permission-mode RPC is gated on agent_supports_mode.

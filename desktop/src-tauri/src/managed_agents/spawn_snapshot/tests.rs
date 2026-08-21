@@ -966,6 +966,27 @@ fn openclaw_cap_crossing_parallelism_snapshots_differ() {
     );
 }
 
+/// Two over-cap parallelism values produce the same snapshot for Prime:
+/// both clamp to PRIME_MAX_PARALLELISM (3).
+#[test]
+fn prime_above_cap_parallelism_snapshots_equal() {
+    let mut at_10 = record();
+    at_10.runtime = Some("prime".into());
+    at_10.agent_command = "prime-agent".into();
+    at_10.parallelism = 10;
+
+    let mut at_8 = record();
+    at_8.runtime = Some("prime".into());
+    at_8.agent_command = "prime-agent".into();
+    at_8.parallelism = 8;
+
+    assert_eq!(
+        snapshot(&at_10, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&at_8, &[], &[], "wss://ws.example", &Default::default()),
+        "parallelism 10 and 8 both clamp to 3 for Prime — snapshots must be equal"
+    );
+}
+
 #[cfg(test)]
 #[path = "tests_ext.rs"]
 mod ext;

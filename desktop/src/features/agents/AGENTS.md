@@ -22,8 +22,10 @@ to the UI rather than inferred from a runtime ID in a component.
 **Second metadata source: command-keyed execution policy.**
 `harness_max_parallelism` (`managed_agents/parallelism.rs`) maps the harness's
 static command string to a spawn-time cap (`OPENCLAW_MAX_PARALLELISM = 5` for
-OpenClaw). This cap is not a `KnownAcpRuntime` field because it applies to
-preset harnesses (like OpenClaw) that are not in the builtin catalog. It is
+OpenClaw, `PRIME_MAX_PARALLELISM = 3` for Prime Agent). This cap is not a
+`KnownAcpRuntime` field because it applies to preset harnesses (like OpenClaw
+and Prime) that are not in the builtin catalog. Prime also uses exclusive
+session spawn in `buzz-acp` (one subprocess per channel). It is
 projected onto `AcpRuntimeCatalogEntry.max_parallelism` by all four
 catalog-producing constructors (builtin discovery, preset catalog, custom
 discovery, custom-save response) using the **static definition command**, not
