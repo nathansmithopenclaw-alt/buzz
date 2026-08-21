@@ -33,6 +33,7 @@ use crate::acp::{
     extract_model_config_options, extract_model_state, extract_thought_level_config_id,
     model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
     ModelSwitchMethod, StopReason, SystemPromptTransport, TurnDeliveryEvidence,
+    CLAUDE_AGENT_ACP_NAME,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -307,13 +308,6 @@ pub struct OwnedAgent {
     /// Protocol version reported by the agent in its initialize response.
     pub protocol_version: u32,
 }
-
-/// Package name reported by `claude-agent-acp` in its `initialize` response.
-/// Any adapter reporting this name supports `_meta.systemPrompt: {append: ...}`
-/// on `session/new` — the feature landed in v0.6.0 (Oct 2025), before the
-/// `@zed-industries/claude-code-acp` → `@agentclientprotocol/claude-agent-acp`
-/// rename, so the new name is a reliable capability gate.
-const CLAUDE_AGENT_ACP_NAME: &str = "@agentclientprotocol/claude-agent-acp";
 
 fn has_system_prompt_support(
     protocol_version: u32,

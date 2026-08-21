@@ -8,7 +8,7 @@
 //! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use std::collections::{HashMap, HashSet};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -28,6 +28,34 @@ const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 /// This is deliberately small because the text may be surfaced in a failure notice.
 /// Tool inputs and outputs are never retained here.
 const FINAL_ANSWER_SNIPPET_CHARS: usize = 160;
+
+/// Package name reported by the Claude ACP adapter. The adapter supports a
+/// filtered raw-SDK-message stream through `_meta.claudeCode.emitRawSDKMessages`.
+pub(crate) const CLAUDE_AGENT_ACP_NAME: &str = "@agentclientprotocol/claude-agent-acp";
+
+const MAX_BACKGROUND_TASK_SESSIONS: usize = 256;
+const MAX_BACKGROUND_TASKS_PER_SESSION: usize = 64;
+const MAX_BACKGROUND_TASK_FIELD_CHARS: usize = 240;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BackgroundTask {
+    pub task_id: String,
+    pub task_type: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug)]
+struct SessionBackgroundTasks {
+    first_observed_at: tokio::time::Instant,
+    tasks: Vec<BackgroundTask>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingBackgroundTasks {
+    pub session_id: String,
+    pub first_observed_at: tokio::time::Instant,
+    pub tasks: Vec<BackgroundTask>,
+}
 
 /// Prefix goose uses when the adapter, rather than the model, synthesizes a
 /// terminal provider/runtime failure as an `agent_message_chunk`.
@@ -114,6 +142,18 @@ fn normalized_snippet(text: &str, max_chars: usize) -> Option<String> {
     } else {
         snippet
     })
+}
+
+fn bounded_background_field(value: Option<&serde_json::Value>, fallback: &str) -> String {
+    let value = value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback);
+    value
+        .chars()
+        .take(MAX_BACKGROUND_TASK_FIELD_CHARS)
+        .collect()
 }
 
 fn value_contains_buzz_message_send(value: Option<&serde_json::Value>) -> bool {
@@ -373,6 +413,12 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// True when initialize identified claude-agent-acp, whose session/new
+    /// metadata can request filtered raw SDK lifecycle events.
+    claude_background_task_tracking: bool,
+    /// Latest pending task set for each Claude session. Entries are removed on
+    /// an empty `background_tasks_changed` update and bounded defensively.
+    background_tasks: HashMap<String, SessionBackgroundTasks>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -764,6 +810,8 @@ impl AcpClient {
             turn_delivery_evidence: TurnDeliveryEvidence::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            claude_background_task_tracking: false,
+            background_tasks: HashMap::new(),
         })
     }
 
@@ -819,6 +867,12 @@ impl AcpClient {
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
         let params = build_initialize_params();
         let result = self.send_request("initialize", params).await?;
+        self.claude_background_task_tracking = result
+            .get("agentInfo")
+            .or_else(|| result.get("serverInfo"))
+            .and_then(|info| info.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(CLAUDE_AGENT_ACP_NAME));
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
@@ -878,6 +932,15 @@ impl AcpClient {
         if let Some(title) = session_title {
             // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
+        }
+        if self.claude_background_task_tracking {
+            // Request only the lifecycle event buzz-acp consumes. Enabling all
+            // raw SDK traffic would duplicate the normal ACP stream and create
+            // an unbounded compatibility surface.
+            params["_meta"]["claudeCode"]["emitRawSDKMessages"] = serde_json::json!([{
+                "type": "system",
+                "subtype": "background_tasks_changed"
+            }]);
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -1464,6 +1527,9 @@ impl AcpClient {
                     "_goose/unstable/session/update" => {
                         self.handle_goose_usage_update(&msg);
                     }
+                    "_claude/sdkMessage" => {
+                        self.handle_claude_sdk_message(&msg);
+                    }
                     "session/request_permission" => {
                         self.handle_permission_request(&msg).await?;
                     }
@@ -1912,6 +1978,9 @@ impl AcpClient {
                             "_goose/unstable/session/update" => {
                                 self.handle_goose_usage_update(&msg);
                             }
+                            "_claude/sdkMessage" => {
+                                self.handle_claude_sdk_message(&msg);
+                            }
                             "session/request_permission" => {
                                 self.handle_permission_request(&msg).await?;
                             }
@@ -2063,6 +2132,153 @@ impl AcpClient {
                 false
             }
         }
+    }
+
+    fn handle_claude_sdk_message(&mut self, msg: &serde_json::Value) {
+        let Some(message) = msg.pointer("/params/message") else {
+            tracing::warn!(target: "acp::background", "_claude/sdkMessage missing params.message");
+            return;
+        };
+        if message.get("type").and_then(serde_json::Value::as_str) != Some("system")
+            || message.get("subtype").and_then(serde_json::Value::as_str)
+                != Some("background_tasks_changed")
+        {
+            return;
+        }
+        let Some(session_id) = msg
+            .pointer("/params/sessionId")
+            .or_else(|| message.get("session_id"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            tracing::warn!(target: "acp::background", "background_tasks_changed missing session id");
+            return;
+        };
+        let Some(raw_tasks) = message.get("tasks").and_then(serde_json::Value::as_array) else {
+            // Malformed input must not clear a known-pending entry.
+            tracing::warn!(target: "acp::background", session_id, "background_tasks_changed missing tasks array");
+            return;
+        };
+        if raw_tasks.is_empty() {
+            self.background_tasks.remove(session_id);
+            tracing::info!(target: "acp::background", session_id, "background tasks cleared");
+            return;
+        }
+
+        let tasks = raw_tasks
+            .iter()
+            .take(MAX_BACKGROUND_TASKS_PER_SESSION)
+            .map(|task| BackgroundTask {
+                task_id: bounded_background_field(task.get("task_id"), "unknown"),
+                task_type: bounded_background_field(task.get("task_type"), "unknown"),
+                description: bounded_background_field(task.get("description"), "background task"),
+            })
+            .collect::<Vec<_>>();
+
+        if !self.background_tasks.contains_key(session_id)
+            && self.background_tasks.len() >= MAX_BACKGROUND_TASK_SESSIONS
+        {
+            if let Some(oldest) = self
+                .background_tasks
+                .iter()
+                .min_by_key(|(_, state)| state.first_observed_at)
+                .map(|(id, _)| id.clone())
+            {
+                self.background_tasks.remove(&oldest);
+                tracing::warn!(target: "acp::background", evicted_session_id = oldest, "background task session bound reached; evicted oldest entry");
+            }
+        }
+        let now = tokio::time::Instant::now();
+        self.background_tasks
+            .entry(session_id.to_owned())
+            .and_modify(|state| state.tasks.clone_from(&tasks))
+            .or_insert(SessionBackgroundTasks {
+                first_observed_at: now,
+                tasks,
+            });
+        tracing::info!(
+            target: "acp::background",
+            session_id,
+            task_count = raw_tasks.len().min(MAX_BACKGROUND_TASKS_PER_SESSION),
+            "background tasks pending"
+        );
+    }
+
+    pub(crate) fn pending_background_tasks(&self) -> Vec<PendingBackgroundTasks> {
+        self.background_tasks
+            .iter()
+            .map(|(session_id, state)| PendingBackgroundTasks {
+                session_id: session_id.clone(),
+                first_observed_at: state.first_observed_at,
+                tasks: state.tasks.clone(),
+            })
+            .collect()
+    }
+
+    /// Drain notifications emitted while no prompt request owns the ACP client.
+    /// This is intentionally non-blocking and bounded; it is called from the
+    /// lazy-pool reaper before deciding whether process teardown is safe.
+    pub(crate) async fn drain_idle_notifications(&mut self) -> Result<usize, AcpError> {
+        const MAX_DRAINED_FRAMES: usize = 512;
+        let mut drained = 0;
+        while drained < MAX_DRAINED_FRAMES {
+            let Some(read_result) = self.reader.next().now_or_never() else {
+                break;
+            };
+            let line = match read_result {
+                None => return Err(AcpError::AgentExited),
+                Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
+                    return Err(AcpError::Protocol(
+                        "agent stdout line exceeded 10MB limit".into(),
+                    ));
+                }
+                Some(Err(error)) => return Err(AcpError::Io(std::io::Error::other(error))),
+                Some(Ok(line)) => line,
+            };
+            drained += 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            tracing::debug!(target: "acp::wire", "← {trimmed}");
+            let msg: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.observe(
+                        "acp_parse_error",
+                        serde_json::json!({"line": trimmed, "error": error.to_string()}),
+                    );
+                    tracing::warn!(target: "acp::wire", "failed to parse idle line as JSON: {error} — skipping");
+                    continue;
+                }
+            };
+            self.observe("acp_read", msg.clone());
+            match msg.get("method").and_then(serde_json::Value::as_str) {
+                Some("session/update") => {
+                    let _ = self.handle_session_update(&msg);
+                }
+                Some("_goose/unstable/session/update") => self.handle_goose_usage_update(&msg),
+                Some("_claude/sdkMessage") => self.handle_claude_sdk_message(&msg),
+                Some("session/request_permission") => self.handle_permission_request(&msg).await?,
+                Some(other) => {
+                    if msg.get("id").is_some() {
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": msg["id"],
+                            "error": {"code": -32601, "message": format!("Method not found: {other}")}
+                        });
+                        self.write_ndjson(&response).await?;
+                    }
+                    tracing::debug!(target: "acp::wire", "ignoring unknown idle method: {other}");
+                }
+                None => {
+                    tracing::warn!(target: "acp::wire", "ignoring unexpected idle ACP response")
+                }
+            }
+        }
+        if drained == MAX_DRAINED_FRAMES {
+            tracing::warn!(target: "acp::wire", drained, "idle notification drain hit frame bound");
+        }
+        Ok(drained)
     }
 
     /// Record the standard ACP cumulative cost notification when emitted by
@@ -3945,6 +4161,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claude_session_requests_only_background_task_sdk_events() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"@agentclientprotocol/claude-agent-acp"}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_claude","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full("/tmp", vec![], None, Some("Claude lane"))
+            .await
+            .expect("session_new_full should succeed");
+        let filters =
+            &resp.raw["_receivedRequest"]["params"]["_meta"]["claudeCode"]["emitRawSDKMessages"];
+        assert_eq!(
+            filters,
+            &serde_json::json!([{
+                "type": "system",
+                "subtype": "background_tasks_changed"
+            }])
+        );
+        assert!(
+            resp.raw["_receivedRequest"]["params"]["_meta"]["claudeCode"]
+                .get("options")
+                .is_none(),
+            "lifecycle opt-in must not inject Claude settings/options"
+        );
+    }
+
+    #[tokio::test]
     async fn session_new_full_omits_meta_when_session_title_none() {
         let script = r#"
             read -t 2 _init
@@ -4062,6 +4314,115 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    fn background_tasks_message(session_id: &str, tasks: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "_claude/sdkMessage",
+            "params": {
+                "sessionId": session_id,
+                "message": {
+                    "type": "system",
+                    "subtype": "background_tasks_changed",
+                    "session_id": session_id,
+                    "tasks": tasks
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn background_tasks_are_tracked_per_session_and_clear_fail_closed() {
+        let mut client = spawn_inert_client().await;
+        client.handle_claude_sdk_message(&background_tasks_message(
+            "sess-a",
+            serde_json::json!([{
+                "task_id": "build-1",
+                "task_type": "local_bash",
+                "description": "Run the build"
+            }]),
+        ));
+        client.handle_claude_sdk_message(&background_tasks_message(
+            "sess-b",
+            serde_json::json!([{
+                "task_id": "sign-1",
+                "task_type": "local_bash",
+                "description": "Sign the bundle"
+            }]),
+        ));
+        assert_eq!(client.pending_background_tasks().len(), 2);
+
+        let malformed = serde_json::json!({
+            "method": "_claude/sdkMessage",
+            "params": {"sessionId": "sess-a", "message": {
+                "type": "system", "subtype": "background_tasks_changed"
+            }}
+        });
+        client.handle_claude_sdk_message(&malformed);
+        assert_eq!(
+            client.pending_background_tasks().len(),
+            2,
+            "malformed update must not clear pending work"
+        );
+
+        client
+            .handle_claude_sdk_message(&background_tasks_message("sess-a", serde_json::json!([])));
+        let pending = client.pending_background_tasks();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].session_id, "sess-b");
+    }
+
+    #[tokio::test]
+    async fn idle_notification_drain_observes_task_start_and_completion() {
+        let pending = background_tasks_message(
+            "sess-idle",
+            serde_json::json!([{
+                "task_id": "long-1",
+                "task_type": "local_bash",
+                "description": "Long background task"
+            }]),
+        );
+        let cleared = background_tasks_message("sess-idle", serde_json::json!([]));
+        let script = format!(
+            "printf '%s\\n' '{}'; read -t 2 _resume; printf '%s\\n' '{}'; sleep 1",
+            pending, cleared
+        );
+        let mut client = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+            .await
+            .expect("spawn scripted ACP");
+
+        let mut first_drain = 0;
+        for _ in 0..50 {
+            first_drain += client
+                .drain_idle_notifications()
+                .await
+                .expect("first idle drain");
+            if first_drain > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(first_drain, 1);
+        assert_eq!(client.pending_background_tasks().len(), 1);
+
+        client
+            .write_ndjson(&serde_json::json!({"resume": true}))
+            .await
+            .expect("release scripted adapter");
+        let mut second_drain = 0;
+        for _ in 0..50 {
+            second_drain += client
+                .drain_idle_notifications()
+                .await
+                .expect("second idle drain");
+            if second_drain > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(second_drain, 1);
+        assert!(client.pending_background_tasks().is_empty());
     }
 
     #[tokio::test]

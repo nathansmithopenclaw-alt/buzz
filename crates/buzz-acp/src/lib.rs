@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use acp::{AcpClient, EnvVar, McpServer};
+use acp::{AcpClient, BackgroundTask, EnvVar, McpServer};
 use anyhow::Result;
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
@@ -1691,14 +1691,144 @@ fn idle_pool_sleep_due(
     bound: Duration,
     turn_in_flight: bool,
     prompt_tasks_in_flight: bool,
+    pending_background_tasks_within_bound: bool,
     work_queued: bool,
     wake_or_respawn_in_flight: bool,
 ) -> bool {
     pool_ready
         && !work_queued
         && !prompt_tasks_in_flight
+        && !pending_background_tasks_within_bound
         && !wake_or_respawn_in_flight
         && inactivity_expired(last_activity, now, bound, turn_in_flight)
+}
+
+#[derive(Clone, Debug)]
+struct ChannelPendingBackgroundTasks {
+    channel_id: Option<Uuid>,
+    session_id: String,
+    first_observed_at: tokio::time::Instant,
+    tasks: Vec<BackgroundTask>,
+}
+
+#[derive(Clone, Copy)]
+enum BackgroundTaskTerminationReason {
+    HoldBoundExpired,
+    HarnessShutdown,
+}
+
+async fn drain_idle_agent_notifications(pool: &mut AgentPool) -> usize {
+    let mut drained = 0;
+    for agent in pool.agents_mut().iter_mut().flatten() {
+        match agent.acp.drain_idle_notifications().await {
+            Ok(count) => drained += count,
+            Err(error) => tracing::warn!(
+                agent = agent.index,
+                "idle ACP notification drain failed: {error}"
+            ),
+        }
+    }
+    drained
+}
+
+fn channel_pending_background_tasks(pool: &mut AgentPool) -> Vec<ChannelPendingBackgroundTasks> {
+    let mut pending = Vec::new();
+    for agent in pool.agents_mut().iter().flatten() {
+        for state in agent.acp.pending_background_tasks() {
+            let channel_id = agent
+                .state
+                .sessions
+                .iter()
+                .find_map(|(channel_id, session_id)| {
+                    (session_id == &state.session_id).then_some(*channel_id)
+                });
+            let live_session = channel_id.is_some()
+                || agent.state.heartbeat_session.as_deref() == Some(state.session_id.as_str());
+            if live_session {
+                pending.push(ChannelPendingBackgroundTasks {
+                    channel_id,
+                    session_id: state.session_id,
+                    first_observed_at: state.first_observed_at,
+                    tasks: state.tasks,
+                });
+            }
+        }
+    }
+    pending
+}
+
+fn pending_background_tasks_within_bound(
+    pending: &[ChannelPendingBackgroundTasks],
+    now: tokio::time::Instant,
+    hold_bound: Duration,
+) -> bool {
+    pending
+        .iter()
+        .any(|state| now.saturating_duration_since(state.first_observed_at) < hold_bound)
+}
+
+fn background_task_termination_notice(
+    pending: &[&ChannelPendingBackgroundTasks],
+    reason: BackgroundTaskTerminationReason,
+    hold_bound: Duration,
+) -> String {
+    let task_count = pending.iter().map(|state| state.tasks.len()).sum::<usize>();
+    let reason_text = match reason {
+        BackgroundTaskTerminationReason::HoldBoundExpired => format!(
+            "the bounded background-work hold expired after {} seconds",
+            hold_bound.as_secs()
+        ),
+        BackgroundTaskTerminationReason::HarnessShutdown => {
+            "the agent harness was explicitly shut down".to_string()
+        }
+    };
+    let mut descriptions = pending
+        .iter()
+        .flat_map(|state| state.tasks.iter())
+        .map(|task| format!("{} ({})", task.description, task.task_id))
+        .take(5)
+        .collect::<Vec<_>>();
+    descriptions.sort();
+    let detail = if descriptions.is_empty() {
+        String::new()
+    } else {
+        format!(" Pending: {}.", descriptions.join("; "))
+    };
+    format!(
+        "⚠️ Background work was terminated (`failure_shape: background_tasks_terminated`): \
+         {reason_text}, so the ACP process was torn down with {task_count} task(s) still pending.\
+         {detail} Inspect the local agent transcript/log and restart the commitment if needed."
+    )
+}
+
+async fn post_background_task_termination_notices(
+    ctx: &Arc<PromptContext>,
+    pending: &[ChannelPendingBackgroundTasks],
+    reason: BackgroundTaskTerminationReason,
+    hold_bound: Duration,
+) {
+    let mut by_channel: HashMap<Uuid, Vec<&ChannelPendingBackgroundTasks>> = HashMap::new();
+    for state in pending {
+        if let Some(channel_id) = state.channel_id {
+            by_channel.entry(channel_id).or_default().push(state);
+        } else {
+            tracing::warn!(
+                session_id = state.session_id,
+                task_count = state.tasks.len(),
+                "pending heartbeat background work has no channel for failure notice"
+            );
+        }
+    }
+    for (channel_id, states) in by_channel {
+        let content = background_task_termination_notice(&states, reason, hold_bound);
+        pool::post_failure_notice(
+            &ctx.rest_client,
+            channel_id,
+            &ThreadTags::default(),
+            &content,
+        )
+        .await;
+    }
 }
 
 #[cfg(test)]
@@ -1764,7 +1894,7 @@ mod idle_pool_sleep_tests {
     fn sleeps_when_ready_idle_and_quiet() {
         let (last, now, bound) = ready_after_bound();
         assert!(idle_pool_sleep_due(
-            true, last, now, bound, false, false, false, false
+            true, last, now, bound, false, false, false, false, false
         ));
     }
 
@@ -1779,6 +1909,7 @@ mod idle_pool_sleep_tests {
             false,
             false,
             false,
+            false,
             false
         ));
     }
@@ -1788,7 +1919,7 @@ mod idle_pool_sleep_tests {
         // A still-sleeping (or waking) pool must not "re-sleep".
         let (last, now, bound) = ready_after_bound();
         assert!(!idle_pool_sleep_due(
-            false, last, now, bound, false, false, false, false
+            false, last, now, bound, false, false, false, false, false
         ));
     }
 
@@ -1796,7 +1927,7 @@ mod idle_pool_sleep_tests {
     fn active_turn_defers_sleep() {
         let (last, now, bound) = ready_after_bound();
         assert!(!idle_pool_sleep_due(
-            true, last, now, bound, true, false, false, false
+            true, last, now, bound, true, false, false, false, false
         ));
     }
 
@@ -1804,8 +1935,81 @@ mod idle_pool_sleep_tests {
     fn in_flight_prompt_task_defers_sleep() {
         let (last, now, bound) = ready_after_bound();
         assert!(!idle_pool_sleep_due(
-            true, last, now, bound, false, true, false, false
+            true, last, now, bound, false, true, false, false, false
         ));
+    }
+
+    #[test]
+    fn pending_background_tasks_within_hold_defer_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, false, false, true, false, false
+        ));
+    }
+
+    #[test]
+    fn expired_background_task_hold_permits_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(idle_pool_sleep_due(
+            true, last, now, bound, false, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn background_task_hold_is_bounded_by_max_turn_duration() {
+        let started = tokio::time::Instant::now();
+        let pending = vec![ChannelPendingBackgroundTasks {
+            channel_id: Some(Uuid::nil()),
+            session_id: "sess-1".to_string(),
+            first_observed_at: started,
+            tasks: vec![BackgroundTask {
+                task_id: "task-1".to_string(),
+                task_type: "local_bash".to_string(),
+                description: "Long build".to_string(),
+            }],
+        }];
+        let bound = Duration::from_secs(120);
+        assert!(pending_background_tasks_within_bound(
+            &pending,
+            started + Duration::from_secs(119),
+            bound
+        ));
+        assert!(!pending_background_tasks_within_bound(
+            &pending,
+            started + bound,
+            bound
+        ));
+    }
+
+    #[test]
+    fn cap_and_shutdown_notices_are_loud_and_actionable() {
+        let state = ChannelPendingBackgroundTasks {
+            channel_id: Some(Uuid::nil()),
+            session_id: "sess-1".to_string(),
+            first_observed_at: tokio::time::Instant::now(),
+            tasks: vec![BackgroundTask {
+                task_id: "task-1".to_string(),
+                task_type: "local_bash".to_string(),
+                description: "Remote sign".to_string(),
+            }],
+        };
+        let states = [&state];
+        let cap = background_task_termination_notice(
+            &states,
+            BackgroundTaskTerminationReason::HoldBoundExpired,
+            Duration::from_secs(7200),
+        );
+        assert!(cap.contains("background_tasks_terminated"));
+        assert!(cap.contains("7200 seconds"));
+        assert!(cap.contains("Remote sign (task-1)"));
+
+        let shutdown = background_task_termination_notice(
+            &states,
+            BackgroundTaskTerminationReason::HarnessShutdown,
+            Duration::from_secs(7200),
+        );
+        assert!(shutdown.contains("explicitly shut down"));
+        assert!(shutdown.contains("restart the commitment"));
     }
 
     #[test]
@@ -1814,7 +2018,7 @@ mod idle_pool_sleep_tests {
         // teardown so it is never stranded — the loop dispatches it instead.
         let (last, now, bound) = ready_after_bound();
         assert!(!idle_pool_sleep_due(
-            true, last, now, bound, false, false, true, false
+            true, last, now, bound, false, false, false, true, false
         ));
     }
 
@@ -1822,7 +2026,7 @@ mod idle_pool_sleep_tests {
     fn wake_or_respawn_in_flight_defers_sleep() {
         let (last, now, bound) = ready_after_bound();
         assert!(!idle_pool_sleep_due(
-            true, last, now, bound, false, false, false, true
+            true, last, now, bound, false, false, false, false, true
         ));
     }
 
@@ -1837,6 +2041,7 @@ mod idle_pool_sleep_tests {
             recent,
             now,
             Duration::from_secs(60),
+            false,
             false,
             false,
             false,
@@ -1874,6 +2079,7 @@ mod idle_pool_sleep_tests {
             false,
             false,
             false,
+            false,
             any_respawn_in_flight(&busy),
         ));
 
@@ -1887,6 +2093,7 @@ mod idle_pool_sleep_tests {
             last,
             now,
             bound,
+            false,
             false,
             false,
             false,
@@ -3102,6 +3309,21 @@ async fn tokio_main() -> Result<()> {
                     }
                 } => {
                     let _ = result_rx; // end split borrow before touching pool
+                    let drained = drain_idle_agent_notifications(&mut pool).await;
+                    if drained > 0 {
+                        // Idle adapter output is real process activity. In
+                        // particular, an empty background-task set can precede
+                        // Claude's autonomous task-completion follow-up; renew
+                        // the quiet window so teardown cannot cut that off.
+                        last_activity = tokio::time::Instant::now();
+                    }
+                    let pending_background = channel_pending_background_tasks(&mut pool);
+                    let now = tokio::time::Instant::now();
+                    let pending_within_bound = pending_background_tasks_within_bound(
+                        &pending_background,
+                        now,
+                        ctx.max_turn_duration,
+                    );
                     // A wake in flight (pool not yet ready) is covered by the
                     // pool_ready gate; respawn tasks and in-flight prompt tasks
                     // are the remaining "busy" signals. Never sleep mid-work:
@@ -3112,14 +3334,24 @@ async fn tokio_main() -> Result<()> {
                     if idle_pool_sleep_due(
                         pool_ready,
                         last_activity,
-                        tokio::time::Instant::now(),
+                        now,
                         idle_pool_sleep_bound,
                         queue.has_in_flight() || heartbeat_in_flight,
                         !pool.join_set.is_empty(),
+                        pending_within_bound,
                         queue.has_undispatched_work(),
                         !wake_tasks.is_empty()
                             || any_respawn_in_flight(&crash_history),
                     ) {
+                        if !pending_background.is_empty() {
+                            post_background_task_termination_notices(
+                                &ctx,
+                                &pending_background,
+                                BackgroundTaskTerminationReason::HoldBoundExpired,
+                                ctx.max_turn_duration,
+                            )
+                            .await;
+                        }
                         tracing::info!(
                             idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
                             "idle pool sleep bound reached — tearing pool back to lazy state"
@@ -3486,6 +3718,21 @@ async fn tokio_main() -> Result<()> {
             }
             None => {} // relay/heartbeat/shutdown branches handled inline above
         }
+    }
+
+    // A deliberate harness shutdown is allowed to terminate background work,
+    // but never silently. Drain any final lifecycle frames first, then surface
+    // one notice per affected channel through the existing failure seam.
+    let _ = drain_idle_agent_notifications(&mut pool).await;
+    let shutdown_pending_background = channel_pending_background_tasks(&mut pool);
+    if !shutdown_pending_background.is_empty() {
+        post_background_task_termination_notices(
+            &ctx,
+            &shutdown_pending_background,
+            BackgroundTaskTerminationReason::HarnessShutdown,
+            ctx.max_turn_duration,
+        )
+        .await;
     }
 
     // Drain wake tasks gracefully rather than aborting: an in-flight
