@@ -259,9 +259,7 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(createdToast).toHaveCount(1);
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
-  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
-    agentName,
-  );
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText(agentName);
 
   // Logs now live in the profile sidebar (PR #1274), not an inline panel.
   // Open the new agent's card to reveal the profile panel, then read the
@@ -437,7 +435,7 @@ test("global search offers an optional current-channel scope", async ({
   const firstScopedResult = page
     .locator('[data-search-section="messages"] .search-result-row')
     .first();
-  await expect(page.getByText("Welcome to #general")).toBeVisible();
+  await expect(page.getByText("Welcome to general")).toBeVisible();
   await expect(page.getByText(/Searching messages in/)).toHaveCount(0);
   await expect(relevantHeader).toBeVisible();
   await expect(firstScopedResult).toBeVisible();
@@ -756,7 +754,7 @@ test("replaces the channel pane when switching channels", async ({ page }) => {
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 
   await page.getByTestId("channel-random").click();
@@ -766,7 +764,7 @@ test("replaces the channel pane when switching channels", async ({ page }) => {
     "This is the beginning of the regular channel.",
   );
   await expect(page.getByTestId("message-timeline")).not.toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
   await expect(page.getByTestId("message-timeline")).toHaveCount(1);
   await expect(page.getByTestId("message-timeline-day-divider")).toHaveCount(0);

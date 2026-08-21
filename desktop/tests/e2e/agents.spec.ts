@@ -237,14 +237,14 @@ test("catalog hides built-ins and shows the shared-agent empty state", async ({
   await page.getByTestId("open-agents-view").click();
 
   await expect(page.getByTestId("agents-fleet-grid")).toBeVisible();
-  for (const personaName of ["Fizz", "Honey", "Bumble"]) {
+  for (const personaName of ["Fizz", "Honey", "Pollen"]) {
     await expect(page.getByTestId("agents-fleet-grid")).toContainText(
       personaName,
     );
   }
 
   await openPersonaCatalog(page);
-  for (const personaName of ["Fizz", "Honey", "Bumble"]) {
+  for (const personaName of ["Fizz", "Honey", "Pollen"]) {
     await expect(page.getByTestId("persona-catalog-dialog")).not.toContainText(
       personaName,
     );
@@ -313,9 +313,7 @@ test("built-in persona edits persist", async ({ page }) => {
   await dialog.getByRole("button", { name: "Save changes" }).click();
 
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByTestId("agents-fleet-grid")).toContainText(
-    "My Fizz",
-  );
+  await expect(page.getByTestId("agents-fleet-grid")).toContainText("My Fizz");
   const personas = await invokeTauri<
     Array<{ id: string; display_name: string; system_prompt: string }>
   >(page, "list_personas");
@@ -786,6 +784,8 @@ test("keeps agent actions in one overflow at every width", async ({ page }) => {
 
   const actionsMenu = page.getByTestId("agent-actions-menu-trigger");
   await expect(actionsMenu).toBeVisible();
+  // The app-wide default renders text-base at 16px with Tailwind's 1.5
+  // line-height ratio, producing a 24px one-line scroll height.
   await expect(
     page.getByText("Agents run on this Mac.", { exact: true }),
   ).toHaveJSProperty("scrollHeight", 24);
@@ -2465,7 +2465,9 @@ test("people sharing blocks a timeout before encoding or upload", async ({
   });
 
   await page.getByTestId("persona-share-send").click();
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible();
+  await expect(
+    page.getByText("You are currently timed out and cannot send messages."),
+  ).toBeVisible();
 
   const commands = await readAgentShareCommands(page);
   expect(
@@ -2510,7 +2512,11 @@ test("people sharing rechecks destination eligibility after encoding", async ({
     return testWindow.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
   });
 
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible({
+  await expect(
+    page.getByText(
+      "The selected destination is no longer available. Please pick another.",
+    ),
+  ).toBeVisible({
     timeout: 5_000,
   });
   const commands = await readAgentShareCommands(page);
@@ -2923,6 +2929,22 @@ test("every instance stays in Fleet and every deployment is linked from Library"
   );
   await page.getByTestId(`managed-agent-${additionalPubkey}`).click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await expect(page.getByTestId("user-profile-agent-status")).toContainText(
+    "running",
+  );
+
+  await page.getByTestId("user-profile-instances").click();
+  await page.getByTestId(`user-profile-instance-${additionalPubkey}`).click();
+  await expect(page.getByTestId("user-profile-agent-status")).toContainText(
+    "stopped",
+  );
+  await expect(
+    page.getByTestId("user-profile-settings-menu-trigger"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
+  ).toHaveCount(0);
 });
 
 test("unlinked and missing-definition instances render honestly in Fleet", async ({

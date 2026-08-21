@@ -82,6 +82,50 @@ fn acp_model_normalization_reports_no_effort_for_unknown_dated_model() {
 }
 
 #[test]
+fn access_policy_change_requires_runtime_refresh_for_effective_gate_changes() {
+    use crate::managed_agents::RespondTo;
+
+    let allowlist_a = vec!["a".repeat(64)];
+    let allowlist_b = vec!["b".repeat(64)];
+
+    assert!(managed_agent_access_policy_changed(
+        RespondTo::Anyone,
+        &[],
+        RespondTo::OwnerOnly,
+        &[],
+        false,
+    ));
+    assert!(managed_agent_access_policy_changed(
+        RespondTo::Allowlist,
+        &allowlist_a,
+        RespondTo::Allowlist,
+        &allowlist_b,
+        false,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::OwnerOnly,
+        &allowlist_a,
+        RespondTo::OwnerOnly,
+        &allowlist_b,
+        false,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::Anyone,
+        &[],
+        RespondTo::OwnerOnly,
+        &[],
+        true,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::Allowlist,
+        &allowlist_a,
+        RespondTo::Allowlist,
+        &allowlist_b,
+        true,
+    ));
+}
+
+#[test]
 fn openai_model_normalization_keeps_agent_text_models() {
     let models = normalize_openai_compatible_models(
         OpenAiModelListResponse {
@@ -343,11 +387,15 @@ fn effective_discovery_provider_recovers_baked_provider_when_record_has_none() {
     }
 }
 
+/// A provider env-var name no environment sets, so this test does not depend on
+/// what the developer happens to have exported (e.g. `BUZZ_AGENT_PROVIDER`).
+const UNSET_PROVIDER_VAR: &str = "BUZZ_TEST_UNSET_DISCOVERY_PROVIDER";
+
 #[test]
 fn effective_discovery_provider_is_none_without_an_explicit_or_env_provider() {
     let env = BTreeMap::new();
     assert_eq!(
-        effective_discovery_provider(None, Some("BUZZ_AGENT_PROVIDER"), &env).as_deref(),
+        effective_discovery_provider(None, Some(UNSET_PROVIDER_VAR), &env).as_deref(),
         None
     );
     // A runtime that takes no provider env var has nothing to recover from.
@@ -355,10 +403,7 @@ fn effective_discovery_provider_is_none_without_an_explicit_or_env_provider() {
         effective_discovery_provider(
             None,
             None,
-            &BTreeMap::from([(
-                "BUZZ_AGENT_PROVIDER".to_string(),
-                "databricks_v2".to_string()
-            )])
+            &BTreeMap::from([(UNSET_PROVIDER_VAR.to_string(), "databricks_v2".to_string())])
         )
         .as_deref(),
         None
@@ -652,31 +697,6 @@ fn definition_less_instance_accepts_model_provider_prompt_writes() {
 }
 
 #[test]
-fn is_databricks_provider_matches_both_variants() {
-    assert!(is_databricks_provider(Some("databricks")));
-    assert!(is_databricks_provider(Some("databricks_v2")));
-    assert!(is_databricks_provider(Some("  DATABRICKS  ")));
-    assert!(!is_databricks_provider(Some("anthropic")));
-    assert!(!is_databricks_provider(None));
-}
-
-#[test]
-fn databricks_interactive_auth_launches_only_without_a_static_token() {
-    // Phase 2: both surfaces launch the browser flow when the token is empty;
-    // the surface distinction is now cooldown-only (asserted separately). A
-    // configured static token still short-circuits interactive auth entirely.
-    assert!(should_start_interactive_auth(""));
-    assert!(!should_start_interactive_auth("static-token"));
-}
-
-#[test]
-fn databricks_passive_auth_error_has_reachable_create_flow_guidance() {
-    let error = databricks_sign_in_required_error();
-    assert!(error.contains("save this agent, then open its model picker"));
-    assert!(error.contains("buzz-agent auth databricks"));
-}
-
-#[test]
 fn model_discovery_error_converts_dangling_sentinel_to_sentence() {
     // get_agent_models is a user-facing surface: a dangling harness must
     // render as a sentence, never as the raw DANGLING_HARNESS_ID: sentinel.
@@ -690,10 +710,6 @@ fn model_discovery_error_converts_dangling_sentinel_to_sentence() {
     let plain = model_discovery_error("agent-pk", "plain failure");
     assert_eq!(plain, "cannot discover models for agent-pk: plain failure");
 }
-
-// ---------------------------------------------------------------------------
-// OpenRouter provider
-// ---------------------------------------------------------------------------
 
 #[test]
 fn is_openrouter_provider_matches() {
@@ -980,22 +996,4 @@ fn draft_agent_model_discovery_env_layers_all_three_tiers_in_order() {
             "env key `{key}` must resolve to {want:?} after three-tier layering"
         );
     }
-}
-
-#[test]
-fn databricks_static_token_error_redacts_echoed_token() {
-    let token = "secret-databricks-token";
-    let redaction_env = BTreeMap::from([("DATABRICKS_TOKEN".to_string(), token.to_string())]);
-
-    let error = databricks_static_token_error(
-        &format!("Databricks rejected bearer {token}"),
-        &redaction_env,
-    );
-
-    assert!(error.contains("[REDACTED]"), "got: {error}");
-    assert!(!error.contains(token), "token leaked in error: {error}");
-    assert!(
-        error.contains("update it in agent settings"),
-        "error lost its remediation: {error}"
-    );
 }

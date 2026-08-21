@@ -31,7 +31,7 @@ pub fn relay_ws_url() -> String {
 
 /// Read the workspace relay URL override, if set. Returns `None` when no
 /// override is active or when the mutex is poisoned (best-effort).
-fn workspace_relay_override(state: &AppState) -> Option<String> {
+pub(crate) fn workspace_relay_override(state: &AppState) -> Option<String> {
     state
         .relay_url_override
         .lock()
@@ -56,16 +56,10 @@ pub fn relay_api_base_url_with_override(state: &AppState) -> String {
 
 /// Selects the relay a managed agent should use for a relay operation.
 ///
-/// Always the active workspace relay. The legacy per-record `relay_url` pin is
-/// deliberately IGNORED (agents-everywhere, #2122): every agent is eligible on
-/// every community, and the pair the caller is acting on is identified by the
-/// workspace relay, never by a stored pin. The record field is still parsed
-/// and persisted untouched — old records need no migration and a rollback to a
-/// pin-honoring build reads the same file — so the parameter stays in the
-/// signature as documentation of what is being ignored at the one choke point
-/// all agent relay resolution flows through. Resolving at read-time also means
-/// a stale stored value can never leak into reconcile, spawn, or profile sync.
-/// Uniform for both Local and Provider backends.
+/// Always uses the active workspace relay (agents-everywhere, #2122), for both
+/// local and provider agents. The legacy record pin remains persisted for
+/// rollback compatibility but is deliberately ignored at this choke point, so
+/// stale values cannot leak into reconcile, spawn, or profile sync.
 pub fn effective_agent_relay_url(_record_relay: &str, workspace_relay: &str) -> String {
     workspace_relay.to_string()
 }
@@ -83,6 +77,12 @@ pub fn relay_http_base_url(relay_url: &str) -> String {
 
     trimmed.to_string()
 }
+
+mod scope;
+pub use scope::{
+    assert_expected_relay_scope, assert_expected_signer, bind_expected_relay_scope,
+    bind_expected_signer, ScopedWorkspaceRelay,
+};
 
 pub fn relay_api_base_url() -> String {
     if let Some(base) = configured_env_var("BUZZ_RELAY_HTTP") {
@@ -606,13 +606,9 @@ async fn submit_managed_agent_profile_event(
 
 /// Query the relay for an agent's kind:0 profile event.
 ///
-/// Queries the relay identified by `relay_url`. Callers uniformly pass the
-/// relay resolved by `effective_agent_relay_url` for every agent regardless of
-/// backend — always the active workspace relay — so the query targets the host
-/// the profile is actually published to.
-///
-/// Returns the parsed fields, full metadata object, and event timestamp if a
-/// kind:0 event exists for the given pubkey, or `None` if no profile is published.
+/// Callers pass the active workspace relay resolved by
+/// `effective_agent_relay_url`. Returns parsed fields, full metadata, and event
+/// timestamp, or `None` when no kind:0 profile is published.
 pub async fn query_agent_profile(
     state: &AppState,
     relay_url: &str,
@@ -661,9 +657,13 @@ pub struct AgentProfileInfo {
 
 // ── Signed-event submission ─────────────────────────────────────────────────
 
+mod get;
+pub use get::get_relay_json;
+
 mod submit;
 pub use submit::{
-    submit_event, submit_event_at_with_keys, submit_signed_event_at_with_keys, SubmitEventResponse,
+    submit_event, submit_event_at_created_at, submit_event_at_with_keys,
+    submit_event_with_keys_created_at, submit_signed_event_at_with_keys, SubmitEventResponse,
 };
 
 /// Sign an event with explicit keys and POST it to `/events` with NIP-98 auth.

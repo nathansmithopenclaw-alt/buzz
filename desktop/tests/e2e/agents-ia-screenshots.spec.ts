@@ -182,9 +182,7 @@ test.describe("Agents Host IA screenshots", () => {
     });
   });
 
-  test("Observer uses the same agents and Teams IA", async ({
-    page,
-  }) => {
+  test("Observer uses the same agents and Teams IA", async ({ page }) => {
     const now = Math.floor(Date.now() / 1_000);
     const observerAgent = "7".repeat(64);
     await installMockBridge(page, {

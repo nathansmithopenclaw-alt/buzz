@@ -4,6 +4,7 @@ import {
   ArrowUpRight,
   Cpu,
   Ear,
+  Fingerprint,
   Server,
   Terminal,
   UserRound,
@@ -166,6 +167,7 @@ export function buildPublicFields({
           testId="user-profile-copy-pubkey"
         />
       ),
+      icon: Fingerprint,
       label: "Public key",
       testId: "user-profile-public-key",
     });
@@ -255,6 +257,7 @@ export function buildOwnerFields({
         : (ownerProfilePubkey ?? ownerPubkey ?? ownerHandle ?? undefined),
       displayValue: ownerDisplayName,
       displayNode: <span className="truncate">{ownerDisplayName}</span>,
+      icon: UserRound,
       label: "Managed by",
       onClick:
         ownerClickable && ownerProfilePubkey
@@ -487,7 +490,7 @@ function ProfileFieldRow({
 
   const content = (
     <>
-      {variant === "default" && Icon ? (
+      {Icon ? (
         <Icon
           className="h-4 w-4 shrink-0 text-muted-foreground"
           data-slot="profile-field-icon"

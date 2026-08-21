@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "buzz-desktop"
-version = "0.5.11"
+version = "0.5.17"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1090,6 +1090,7 @@ dependencies = [
  "buzz-sdk",
  "buzz-terminal",
  "buzz-voice",
+ "buzz-ws-client",
  "bytes",
  "bzip2 0.6.1",
  "chrono",
@@ -1246,6 +1247,20 @@ dependencies = [
  "sherpa-onnx",
  "symphonia",
  "tokenizers",
+]
+
+[[package]]
+name = "buzz-ws-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "nostr 0.44.8",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+ "url",
 ]
 
 [[package]]

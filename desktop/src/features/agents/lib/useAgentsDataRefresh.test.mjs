@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { relayAgentsQueryKey } from "@/features/agents/hooks";
 import { formatManagedAgentReapNotice } from "./useAgentsDataRefresh.ts";
+import { LOCAL_AGENT_DATA_QUERY_KEYS } from "./useAgentsDataRefresh.ts";
 
 test("dead-instance reap reports are human-readable", () => {
   assert.deepEqual(
@@ -23,5 +25,17 @@ test("dead-instance reap reports use singular process copy", () => {
       processCount: 1,
     }).title,
     "Stopped 1 agent process left by a closed Buzz app",
+  );
+});
+
+const serializedLocalKeys = LOCAL_AGENT_DATA_QUERY_KEYS.map((key) =>
+  JSON.stringify(key),
+);
+
+test("local agent refresh never invalidates the relay directory", () => {
+  assert.equal(
+    serializedLocalKeys.includes(JSON.stringify(relayAgentsQueryKey)),
+    false,
+    "local reconciliation must not trigger a relay-wide directory rebuild",
   );
 });

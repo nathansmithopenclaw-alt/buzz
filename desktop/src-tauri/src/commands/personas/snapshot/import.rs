@@ -123,12 +123,10 @@ pub struct AgentSnapshotImportResult {
 // ── Import helpers ─────────────────────────────────────────────────────────
 
 /// Resolve the behavioral defaults for an incoming agent snapshot.
-///
 /// This is the single authoritative selection path for all import-time
 /// allowlist and behavioral decisions. It is extracted as a pure, testable
 /// function so that unit tests exercise the exact production logic rather
 /// than a reconstruction of it.
-///
 /// # UI contract
 ///
 /// The Keep/Clear toggle is shown whenever `has_source_allowlist` is true
@@ -628,6 +626,7 @@ pub async fn confirm_agent_snapshot_import(
             runtime_pid: None,
             backend: crate::managed_agents::BackendKind::Local,
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,
@@ -654,6 +653,7 @@ pub async fn confirm_agent_snapshot_import(
             definition_respond_to_allowlist: minted.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
             relay_mesh: None,
+            effort_level: None,
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),
         };

@@ -3,6 +3,7 @@ import { ClaudeAccountsSettingsCard } from "./ClaudeAccountsSettingsCard";
 import { DeviceRoleSettingsCard } from "./DeviceRoleSettingsCard";
 import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
+import { SettingsOptionGroupList } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 export function AgentsSettingsPanel() {
@@ -13,13 +14,13 @@ export function AgentsSettingsPanel() {
         description="Control how agents behave in conversations and run on this machine."
       />
 
-      <div className="flex flex-col gap-4">
+      <SettingsOptionGroupList>
         <DeviceRoleSettingsCard />
         <ClaudeAccountsSettingsCard />
         <PreventSleepSettingsCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />
-      </div>
+      </SettingsOptionGroupList>
     </section>
   );
 }

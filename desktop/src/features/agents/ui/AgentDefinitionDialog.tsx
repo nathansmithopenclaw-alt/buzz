@@ -721,7 +721,6 @@ export function AgentDefinitionDialog({
       isPending={isPending}
       onCancel={() => handleOpenChange(false)}
       publishesCatalogUpdates={publishCatalogUpdatesOnSave && hasUserChanges}
-      submitBlockReason={null}
       submitLabel={submitLabel}
     />
   );

@@ -6,16 +6,21 @@ import { toast } from "sonner";
 import {
   managedAgentsQueryKey,
   personasQueryKey,
-  relayAgentsQueryKey,
   teamsQueryKey,
 } from "@/features/agents/hooks";
 import { managedAgentRuntimesQueryKey } from "@/features/agents/managedAgentRuntimeHooks";
 
-// Trailing-coalesce window: a backfill burst (up to 500 inbound events fed
-// one-by-one through reconcile) fires one `agents-data-changed` per event.
-// Collapsing them into a single invalidate after the burst settles keeps the
-// refetch off React Query's implicit in-flight dedup and avoids redundant
-// disk-read IPC.
+export const LOCAL_AGENT_DATA_QUERY_KEYS = [
+  personasQueryKey,
+  teamsQueryKey,
+  managedAgentsQueryKey,
+] as const;
+
+// Trailing-coalesce local agent-store bursts into one cache refresh. The relay
+// directory is deliberately excluded: local persona/team/agent reconciliation
+// cannot change remote directory records, and rebuilding that directory is a
+// relay-wide operation. Remote data keeps its focused poll and is revalidated
+// directly before an agent mention is sent.
 const COALESCE_MS = 200;
 
 export interface ManagedAgentReapNotice {
@@ -49,8 +54,6 @@ export function useAgentsDataRefresh(): void {
       void queryClient.invalidateQueries({
         queryKey: managedAgentRuntimesQueryKey,
       });
-      // Pair startup also changes the legacy managed-agent scalar status.
-      // Keep that cache synchronized for consumers outside pair-runtime UI.
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     });
 
@@ -65,10 +68,9 @@ export function useAgentsDataRefresh(): void {
     const unlisten = listen("agents-data-changed", () => {
       if (timer !== undefined) clearTimeout(timer);
       timer = setTimeout(() => {
-        void queryClient.invalidateQueries({ queryKey: personasQueryKey });
-        void queryClient.invalidateQueries({ queryKey: teamsQueryKey });
-        void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
-        void queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey });
+        for (const queryKey of LOCAL_AGENT_DATA_QUERY_KEYS) {
+          void queryClient.invalidateQueries({ queryKey });
+        }
       }, COALESCE_MS);
     });
 

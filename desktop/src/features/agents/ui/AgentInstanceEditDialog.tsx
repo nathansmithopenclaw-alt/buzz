@@ -27,6 +27,7 @@ import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import { AgentDialogEffortSection } from "./AgentDialogEffortField";
+import { EffortPickerField } from "./EffortPickerField";
 import {
   instanceModelDropdownOptions,
   instanceProviderDropdownOptions,
@@ -258,10 +259,10 @@ export function AgentInstanceEditDialog({
     return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
   }, [runtimes, originalAgentCommand]);
 
-  // The runtime id active after submit. Inheriting resolves from the LINKED PERSONA's runtime
-  // (that is what runs once the override is cleared, not the current override).
-  // Falls back to dual-match (command path, then id) when no persona or its runtime is unset.
-  // This single prospective id feeds BOTH the block-save gate and submit so they always agree.
+  // The runtime id active after submit — the single prospective id feeding BOTH
+  // the block-save gate and submit so they always agree. Inheriting resolves
+  // from the LINKED PERSONA's runtime (what runs once the override is cleared),
+  // falling back to dual-match (command path, then id) when no persona.
   const prospectiveRuntimeId = React.useMemo(() => {
     if (!inheritHarness) {
       return selectedRuntime?.id ?? selectedRuntimeId;
@@ -418,11 +419,10 @@ export function AgentInstanceEditDialog({
     selectedRuntime,
   });
 
-  // D2: derive advancedRequiredEnvKeys for EnvVarsEditor display.
-  // The full requiredEnvKeys/requiredEnvKeyMissing continue driving Save gating.
-  // D2/D3: the top-level API key owns display, while the readiness gate keeps
-  // the complete required-key list. The effective snapshot covers persona
-  // inheritance during an instance inherit transition.
+  // D2/D3: the top-level API key owns display while the readiness gate keeps the
+  // complete required-key list; advancedRequiredEnvKeys drives EnvVarsEditor
+  // display only. The effective snapshot covers persona inheritance during an
+  // instance inherit transition.
   const providerApiKeyEnvVar = getProviderApiKeyEnvVar(effectiveProvider);
   const personaSatisfied =
     providerApiKeyEnvVar != null &&
@@ -714,11 +714,9 @@ export function AgentInstanceEditDialog({
             : normalizedModel !== (agent.model ?? null)
               ? normalizedModel
               : undefined,
-        // Tri-state provider persistence keyed on providerRuntimeCapability:
-        //   "capable"  → persist: value if changed, omit if unchanged.
-        //   "locked"   → clear: send null if provider was set, else omit.
-        //   "unknown"  → omit always (never send null for a transient state).
-        // llmProviderFieldVisible is for UX visibility only; not used here.
+        // Tri-state provider persistence keyed on providerRuntimeCapability
+        // (see the classification comment above for the capable/locked/unknown
+        // contract). llmProviderFieldVisible is UX visibility only; not used here.
         provider:
           linkedPersona != null
             ? undefined
@@ -1129,6 +1127,7 @@ export function AgentInstanceEditDialog({
               setEnvVars={setEnvVars}
               validationError={modelValidationError ?? effortValidationError}
             />
+            <EffortPickerField agent={agent} config={configSurfaceQuery.data} />
             <AgentAiDefaultsNotice
               onEditDefaults={() => setAiDefaultsOpen(true)}
               triggerRef={aiDefaultsTriggerRef}

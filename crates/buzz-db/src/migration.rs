@@ -72,11 +72,13 @@ async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
 /// The first fold moved that already-applied row to version 29. Upstream then
 /// published community deletion as versions 29 and 30, colliding again with
 /// Smith Crafts production databases that already record community hosts at
-/// 29. The canonical fold keeps upstream's checksums at 27-30 and places the
-/// unchanged community-host migration at version 31.
+/// 29. The next local fold placed the unchanged community-host migration at
+/// version 31, but upstream independently assigned version 31 to workflow-run
+/// error codes. The canonical fold keeps every upstream checksum at 27-31 and
+/// places the unchanged community-host migration at version 32.
 ///
-/// Move a recognized community-host ledger row from either legacy version to
-/// 31 before SQLx validates checksums. The schema is neither reverted nor
+/// Move a recognized community-host ledger row from legacy version 27, 29, or
+/// 31 to 32 before SQLx validates checksums. The schema is neither reverted nor
 /// replayed. Unknown, failed, or duplicate rows fail closed.
 async fn reconcile_fold_migration_collisions(conn: &mut PgConnection) -> Result<()> {
     let migrations_table: Option<String> =
@@ -103,12 +105,20 @@ async fn reconcile_fold_migration_collisions(conn: &mut PgConnection) -> Result<
                 "migration reconciliation requires upstream migration 29".into(),
             )
         })?;
-    let community_hosts_31 = MIGRATOR
+    let canonical_31 = MIGRATOR
         .iter()
         .find(|migration| migration.version == 31)
         .ok_or_else(|| {
             crate::DbError::InvalidData(
-                "migration reconciliation requires community-host migration 31".into(),
+                "migration reconciliation requires upstream migration 31".into(),
+            )
+        })?;
+    let community_hosts_32 = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 32)
+        .ok_or_else(|| {
+            crate::DbError::InvalidData(
+                "migration reconciliation requires community-host migration 32".into(),
             )
         })?;
     let legacy_community_hosts_checksum = hex::decode(LEGACY_COMMUNITY_HOSTS_CHECKSUM_HEX)
@@ -139,11 +149,50 @@ async fn reconcile_fold_migration_collisions(conn: &mut PgConnection) -> Result<
         sqlx::query_as("SELECT checksum, success FROM _sqlx_migrations WHERE version = 31")
             .fetch_optional(&mut *transaction)
             .await?;
+    let applied_32: Option<(Vec<u8>, bool)> =
+        sqlx::query_as("SELECT checksum, success FROM _sqlx_migrations WHERE version = 32")
+            .fetch_optional(&mut *transaction)
+            .await?;
 
-    let mut community_hosts_at_31 = match applied_31 {
+    let mut community_hosts_at_32 = match applied_32 {
         None => false,
-        Some((checksum, true)) if checksum.as_slice() == community_hosts_31.checksum.as_ref() => {
+        Some((checksum, true)) if checksum.as_slice() == community_hosts_32.checksum.as_ref() => {
             true
+        }
+        Some((_checksum, false)) => {
+            return Err(crate::DbError::InvalidData(
+                "upstream fold migration reconciliation blocked: migration 32 is recorded as failed"
+                    .into(),
+            ));
+        }
+        Some((_checksum, true)) => {
+            return Err(crate::DbError::InvalidData(
+                "upstream fold migration reconciliation blocked: migration 32 has an unknown checksum"
+                    .into(),
+            ));
+        }
+    };
+
+    match applied_31 {
+        None => {}
+        Some((checksum, true)) if checksum.as_slice() == canonical_31.checksum.as_ref() => {}
+        Some((checksum, true)) if checksum.as_slice() == community_hosts_32.checksum.as_ref() => {
+            if community_hosts_at_32 {
+                return Err(crate::DbError::InvalidData(
+                    "upstream fold migration reconciliation blocked: community hosts are recorded at both versions 31 and 32"
+                        .into(),
+                ));
+            }
+
+            sqlx::query(
+                "UPDATE _sqlx_migrations \
+                 SET version = 32, description = 'community hosts', checksum = $1 \
+                 WHERE version = 31 AND success",
+            )
+            .bind(community_hosts_32.checksum.as_ref())
+            .execute(&mut *transaction)
+            .await?;
+            community_hosts_at_32 = true;
         }
         Some((_checksum, false)) => {
             return Err(crate::DbError::InvalidData(
@@ -157,28 +206,28 @@ async fn reconcile_fold_migration_collisions(conn: &mut PgConnection) -> Result<
                     .into(),
             ));
         }
-    };
+    }
 
     match applied_27 {
         None => {}
         Some((checksum, true)) if checksum.as_slice() == canonical_27.checksum.as_ref() => {}
         Some((checksum, true)) if checksum.as_slice() == legacy_community_hosts_checksum => {
-            if community_hosts_at_31 {
+            if community_hosts_at_32 {
                 return Err(crate::DbError::InvalidData(
-                    "upstream fold migration reconciliation blocked: community hosts are recorded at both versions 27 and 31"
+                    "upstream fold migration reconciliation blocked: community hosts are recorded at both versions 27 and 32"
                         .into(),
                 ));
             }
 
             sqlx::query(
                 "UPDATE _sqlx_migrations \
-                 SET version = 31, description = 'community hosts', checksum = $1 \
+                 SET version = 32, description = 'community hosts', checksum = $1 \
                  WHERE version = 27 AND success",
             )
-            .bind(community_hosts_31.checksum.as_ref())
+            .bind(community_hosts_32.checksum.as_ref())
             .execute(&mut *transaction)
             .await?;
-            community_hosts_at_31 = true;
+            community_hosts_at_32 = true;
         }
         Some((_checksum, false)) => {
             return Err(crate::DbError::InvalidData(
@@ -198,18 +247,18 @@ async fn reconcile_fold_migration_collisions(conn: &mut PgConnection) -> Result<
         None => {}
         Some((checksum, true)) if checksum.as_slice() == canonical_29.checksum.as_ref() => {}
         Some((checksum, true)) if checksum.as_slice() == legacy_community_hosts_checksum => {
-            if community_hosts_at_31 {
+            if community_hosts_at_32 {
                 return Err(crate::DbError::InvalidData(
-                    "upstream fold migration reconciliation blocked: community hosts are recorded at both versions 29 and 31"
+                    "upstream fold migration reconciliation blocked: community hosts are recorded at both versions 29 and 32"
                         .into(),
                 ));
             }
             sqlx::query(
                 "UPDATE _sqlx_migrations \
-                 SET version = 31, description = 'community hosts', checksum = $1 \
+                 SET version = 32, description = 'community hosts', checksum = $1 \
                  WHERE version = 29 AND success",
             )
-            .bind(community_hosts_31.checksum.as_ref())
+            .bind(community_hosts_32.checksum.as_ref())
             .execute(&mut *transaction)
             .await?;
         }
@@ -232,7 +281,7 @@ async fn reconcile_fold_migration_collisions(conn: &mut PgConnection) -> Result<
 }
 
 /// Repair the only schema delta that cannot be replayed when a recognized
-/// brownfield community-host ledger row is promoted directly to canonical 31.
+/// brownfield community-host ledger row is promoted directly to canonical 32.
 /// A crash after the ledger transaction but before this step is retry-safe:
 /// the next migration run observes the missing classification and installs it.
 async fn ensure_community_hosts_deletion_taxonomy(conn: &mut PgConnection) -> Result<()> {
@@ -828,7 +877,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 31);
+        assert_eq!(migrations.len(), 32);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1241,15 +1290,36 @@ mod tests {
         assert!(deletion_recovery.contains("SET LOCAL lock_timeout = '5s'"));
 
         // Community host aliases were first shipped locally as 0027, then
-        // reconciled to 0029 by the previous fold. Upstream now owns 0029/0030,
-        // so the unchanged host migration moves to 0031.
-        assert_eq!(migrations[30].version, 31);
-        let community_hosts = migrations[30].sql.as_str();
+        // reconciled to 0029 and 0031 by earlier folds. Upstream owns 0029-0031,
+        // so the unchanged host migration moves to 0032.
+        assert_eq!(migrations[31].version, 32);
+        let community_hosts = migrations[31].sql.as_str();
         assert!(community_hosts.contains("CREATE TABLE community_hosts"));
         assert!(community_hosts.contains("CREATE UNIQUE INDEX idx_community_hosts_host"));
         assert!(community_hosts.contains("SELECT host, id FROM communities"));
         assert!(community_hosts.contains("CREATE TRIGGER trg_communities_sync_canonical_host"));
         assert!(community_hosts.contains("_operator_global_tables"));
+    }
+
+    #[test]
+    fn workflow_run_error_codes_are_additive_and_backfilled_without_parsing_diagnostics() {
+        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
+        migrations.sort_by_key(|migration| migration.version);
+
+        assert_eq!(migrations[30].version, 31);
+        let sql = migrations[30].sql.as_str();
+        assert!(sql.contains("ALTER TABLE workflow_runs ADD COLUMN error_code TEXT"));
+        assert!(sql.contains("SET error_code = 'legacy_unclassified'"));
+        assert!(sql.contains("status IN ('failed', 'cancelled')"));
+        assert!(!sql.contains("error_message LIKE"));
+        assert!(!MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 1)
+            .expect("initial migration")
+            .sql
+            .as_str()
+            .contains("error_code"));
+        assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
     }
 
     #[test]
@@ -1958,7 +2028,7 @@ mod tests {
     }
 
     async fn apply_legacy_community_hosts_schema(pool: &PgPool) {
-        let canonical = include_str!("../../../migrations/0031_community_hosts.sql");
+        let canonical = include_str!("../../../migrations/0032_community_hosts.sql");
         let (legacy, _) = canonical
             .split_once("-- Migration 0030 predates this operator-global routing table")
             .expect("canonical community-host migration retains legacy prefix");
@@ -2169,6 +2239,19 @@ mod tests {
             versions
         };
         assert_eq!(applied_versions(&pool).await, expected);
+        let fold_versions: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT version, description FROM _sqlx_migrations WHERE version IN (31, 32) ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read fresh fold migration rows");
+        assert_eq!(
+            fold_versions,
+            vec![
+                (31, "workflow run error codes".to_string()),
+                (32, "community hosts".to_string()),
+            ]
+        );
         let sql = migration_sql();
         let tables = create_tables(sql.as_str());
         for table in [
@@ -2373,13 +2456,13 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn upstream_0030_upgrade_applies_renumbered_community_hosts() {
+    async fn upstream_0031_error_codes_upgrade_applies_community_hosts_at_0032() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
-            .run_to(30, &pool)
+            .run_to(31, &pool)
             .await
-            .expect("apply upstream migrations through 30");
+            .expect("apply upstream migrations through error-code version 31");
 
         let community_id = uuid::Uuid::new_v4();
         let host = format!("upstream-upgrade-{}.example", community_id.simple());
@@ -2388,12 +2471,12 @@ mod tests {
             .bind(&host)
             .execute(&pool)
             .await
-            .expect("insert pre-31 community");
+            .expect("insert pre-32 community");
 
         run_migrations(&pool)
             .await
             .expect("apply renumbered community-host migration");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(31));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(32));
         assert_t6_fold_objects(&pool).await;
         let mapped: uuid::Uuid = sqlx::query_scalar(
             "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
@@ -2402,6 +2485,74 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("community-host migration backfills existing host");
+        assert_eq!(mapped, community_id);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn smith_crafts_0031_hosts_upgrade_moves_ledger_then_applies_upstream_0031() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(30, &pool)
+            .await
+            .expect("apply common migrations through 30");
+
+        let community_id = uuid::Uuid::new_v4();
+        let host = format!("smith-0031-upgrade-{}.example", community_id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .expect("insert pre-collision community");
+
+        let community_hosts_32 = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 32)
+            .expect("community-host migration 32");
+        sqlx::raw_sql(community_hosts_32.sql.as_str())
+            .execute(&pool)
+            .await
+            .expect("apply the exact Smith community-host migration schema");
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) \
+             VALUES (31, 'community hosts', true, $1, 0)",
+        )
+        .bind(community_hosts_32.checksum.as_ref())
+        .execute(&pool)
+        .await
+        .expect("record shipped community-host migration as version 31");
+
+        run_migrations(&pool)
+            .await
+            .expect("move community hosts to 32 and apply upstream error-code version 31");
+        assert_eq!(
+            applied_versions(&pool).await,
+            (1_i64..=32).collect::<Vec<_>>()
+        );
+        let descriptions: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT version, description FROM _sqlx_migrations WHERE version IN (31, 32) ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read reconciled migration descriptions");
+        assert_eq!(
+            descriptions,
+            vec![
+                (31, "workflow run error codes".to_string()),
+                (32, "community hosts".to_string()),
+            ]
+        );
+        assert_t6_fold_objects(&pool).await;
+        let mapped: uuid::Uuid = sqlx::query_scalar(
+            "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
+        )
+        .bind(&host)
+        .fetch_one(&pool)
+        .await
+        .expect("existing community-host data remains present");
         assert_eq!(mapped, community_id);
     }
 
@@ -2437,10 +2588,10 @@ mod tests {
 
         run_migrations(&pool)
             .await
-            .expect("move community hosts to 31 and apply upstream 29/30");
+            .expect("move community hosts to 32 and apply upstream 29-31");
         assert_eq!(
             applied_versions(&pool).await,
-            (1_i64..=31).collect::<Vec<_>>()
+            (1_i64..=32).collect::<Vec<_>>()
         );
         assert_t6_fold_objects(&pool).await;
         let mapped: uuid::Uuid = sqlx::query_scalar(
@@ -2459,10 +2610,10 @@ mod tests {
         let pool = connect_test_pool().await;
         let community_hosts = MIGRATOR
             .iter()
-            .find(|migration| migration.version == 31)
+            .find(|migration| migration.version == 32)
             .expect("renumbered community-host migration");
 
-        for (label, checksum, success, duplicate_at_31, expected) in [
+        for (label, checksum, success, duplicate_at_32, expected) in [
             (
                 "unknown",
                 vec![0_u8; 32],
@@ -2482,7 +2633,7 @@ mod tests {
                 hex::decode(LEGACY_COMMUNITY_HOSTS_CHECKSUM_HEX).expect("legacy checksum"),
                 true,
                 true,
-                "community hosts are recorded at both versions 29 and 31",
+                "community hosts are recorded at both versions 29 and 32",
             ),
         ] {
             reset_public_schema(&pool).await;
@@ -2501,16 +2652,16 @@ mod tests {
             .execute(&pool)
             .await
             .expect("insert adversarial migration-29 ledger row");
-            if duplicate_at_31 {
+            if duplicate_at_32 {
                 sqlx::query(
                     "INSERT INTO _sqlx_migrations \
                      (version, description, success, checksum, execution_time) \
-                     VALUES (31, 'community hosts', true, $1, 0)",
+                     VALUES (32, 'community hosts', true, $1, 0)",
                 )
                 .bind(community_hosts.checksum.as_ref())
                 .execute(&pool)
                 .await
-                .expect("insert duplicate migration-31 ledger row");
+                .expect("insert duplicate migration-32 ledger row");
             }
 
             let mut connection = pool.acquire().await.expect("acquire test connection");
@@ -2532,6 +2683,89 @@ mod tests {
                     .fetch_one(&pool)
                     .await
                     .expect("failed reconciliation preserves migration-29 row");
+            assert_eq!(preserved, (checksum, success));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fold_reconciliation_rejects_unknown_failed_and_duplicate_v31_rows() {
+        let pool = connect_test_pool().await;
+        let community_hosts_32 = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 32)
+            .expect("renumbered community-host migration");
+
+        for (label, checksum, success, duplicate_at_32, expected) in [
+            (
+                "unknown",
+                vec![0_u8; 48],
+                true,
+                false,
+                "migration 31 has an unknown checksum",
+            ),
+            (
+                "failed-hosts",
+                community_hosts_32.checksum.as_ref().to_vec(),
+                false,
+                false,
+                "migration 31 is recorded as failed",
+            ),
+            (
+                "duplicate-hosts",
+                community_hosts_32.checksum.as_ref().to_vec(),
+                true,
+                true,
+                "community hosts are recorded at both versions 31 and 32",
+            ),
+        ] {
+            reset_public_schema(&pool).await;
+            MIGRATOR
+                .run_to(30, &pool)
+                .await
+                .expect("apply common migrations through 30");
+            if duplicate_at_32 {
+                sqlx::query(
+                    "INSERT INTO _sqlx_migrations \
+                     (version, description, success, checksum, execution_time) \
+                     VALUES (32, 'community hosts', true, $1, 0)",
+                )
+                .bind(community_hosts_32.checksum.as_ref())
+                .execute(&pool)
+                .await
+                .expect("insert duplicate migration-32 ledger row");
+            }
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations \
+                 (version, description, success, checksum, execution_time) \
+                 VALUES (31, $1, $2, $3, 0)",
+            )
+            .bind(format!("{label} migration 31"))
+            .bind(success)
+            .bind(&checksum)
+            .execute(&pool)
+            .await
+            .expect("insert adversarial migration-31 ledger row");
+
+            let mut connection = pool.acquire().await.expect("acquire test connection");
+            let error = reconcile_fold_migration_collisions(&mut connection)
+                .await
+                .expect_err("adversarial migration-31 ledger shape must fail closed");
+            assert!(
+                error.to_string().contains(expected),
+                "{label} migration-31 row returned unexpected error: {error}"
+            );
+            connection
+                .detach()
+                .close()
+                .await
+                .expect("close failed reconciliation connection");
+
+            let preserved: (Vec<u8>, bool) =
+                sqlx::query_as("SELECT checksum, success FROM _sqlx_migrations WHERE version = 31")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("failed reconciliation preserves migration-31 row");
             assert_eq!(preserved, (checksum, success));
         }
     }
@@ -2568,10 +2802,10 @@ mod tests {
 
         run_migrations(&pool)
             .await
-            .expect("move community hosts to 31 and apply upstream 27-30");
+            .expect("move community hosts to 32 and apply upstream 27-31");
         assert_eq!(
             applied_versions(&pool).await,
-            (1_i64..=31).collect::<Vec<_>>()
+            (1_i64..=32).collect::<Vec<_>>()
         );
         assert_t6_fold_objects(&pool).await;
     }

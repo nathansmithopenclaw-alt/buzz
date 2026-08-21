@@ -8,6 +8,46 @@
 use super::*;
 
 #[test]
+fn is_databricks_provider_matches_both_variants() {
+    assert!(is_databricks_provider(Some("databricks")));
+    assert!(is_databricks_provider(Some("databricks_v2")));
+    assert!(is_databricks_provider(Some("  DATABRICKS  ")));
+    assert!(!is_databricks_provider(Some("anthropic")));
+    assert!(!is_databricks_provider(None));
+}
+
+#[test]
+fn databricks_interactive_auth_launches_only_without_a_static_token() {
+    // Both surfaces launch when the token is empty; a configured static token
+    // still short-circuits interactive auth entirely.
+    assert!(should_start_interactive_auth(""));
+    assert!(!should_start_interactive_auth("static-token"));
+}
+
+#[test]
+fn databricks_passive_auth_error_has_reachable_create_flow_guidance() {
+    let error = databricks_sign_in_required_error();
+    assert!(error.contains("save this agent, then open its model picker"));
+    assert!(error.contains("buzz-agent auth databricks"));
+}
+
+#[test]
+fn databricks_static_token_error_redacts_echoed_token() {
+    let token = "secret-databricks-token";
+    let redaction_env = BTreeMap::from([("DATABRICKS_TOKEN".to_string(), token.to_string())]);
+    let error = databricks_static_token_error(
+        &format!("Databricks rejected bearer {token}"),
+        &redaction_env,
+    );
+    assert!(error.contains("[REDACTED]"), "got: {error}");
+    assert!(!error.contains(token), "token leaked in error: {error}");
+    assert!(
+        error.contains("update it in agent settings"),
+        "error lost its remediation: {error}"
+    );
+}
+
+#[test]
 fn databricks_cooldown_suppresses_passive_relaunch_but_never_the_picker() {
     let cooldowns = AuthCooldown::default();
     let host = "https://example.cloud.databricks.com";

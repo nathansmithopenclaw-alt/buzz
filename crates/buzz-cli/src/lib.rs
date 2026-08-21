@@ -690,14 +690,20 @@ pub enum MessagesCmd {
         #[arg(long)]
         kinds: Option<String>,
     },
-    /// Get a message thread (replies to a root message)
+    /// Get the containing thread for a message or Buzz message link
+    #[command(
+        after_help = "Examples:\n  buzz messages thread --channel <UUID> --event <EVENT_ID>\n  buzz messages thread --link 'buzz://message?channel=<UUID>&id=<EVENT_ID>&thread=<ROOT_ID>'"
+    )]
     Thread {
-        /// Channel UUID
-        #[arg(long)]
-        channel: String,
-        /// Root message event ID (64-char hex)
-        #[arg(long)]
-        event: String,
+        /// Channel UUID; required unless --link is supplied
+        #[arg(long, required_unless_present = "link", conflicts_with = "link")]
+        channel: Option<String>,
+        /// Message event ID (64-char hex); required unless --link is supplied
+        #[arg(long, required_unless_present = "link", conflicts_with = "link")]
+        event: Option<String>,
+        /// Canonical buzz://message deep link; uses the configured relay and identity
+        #[arg(long, conflicts_with_all = ["channel", "event"])]
+        link: Option<String>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
@@ -1207,8 +1213,9 @@ pub enum ChannelsCmd {
         /// Channel description
         #[arg(long)]
         description: Option<String>,
-        /// Make the channel ephemeral: lifetime in seconds. The relay archives
-        /// it once this many seconds pass without a new message.
+        /// Make the channel temporary/ephemeral: idle lifetime in seconds. If
+        /// omitted, the channel is permanent. The relay archives it once this
+        /// many seconds pass without a new message.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
         /// Apply a desktop-local channel template by name (case-insensitive):
@@ -2320,6 +2327,47 @@ pub enum IssuesCmd {
         #[arg(long = "to")]
         to: Vec<String>,
     },
+    /// Assign an issue to one or more people or agents. Only assignments
+    /// signed by the issue author or repo owner are trusted by clients;
+    /// anyone may assign themselves (sole assignee = your own pubkey).
+    Assign {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Assignee pubkey (64-char hex) — can be specified multiple times
+        #[arg(long = "assignee", required = true)]
+        assignee: Vec<String>,
+        /// Human-readable assignee name(s) for the note body, e.g. "Thomas".
+        /// Defaults to the truncated assignee pubkeys.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Remove one or more assignees from an issue. Issue authors and repo
+    /// owners may remove anyone; other users may remove only themselves.
+    Unassign {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Assignee pubkey to remove — can be specified multiple times
+        #[arg(long = "assignee", required = true)]
+        assignee: Vec<String>,
+        /// Human-readable assignee name(s) for the note body.
+        /// Defaults to the truncated assignee pubkeys.
+        #[arg(long)]
+        label: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2766,6 +2814,47 @@ mod tests {
     }
 
     #[test]
+    fn messages_thread_accepts_link_or_explicit_identifiers() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let link = format!("buzz://message?channel={channel}&id={event}");
+
+        assert!(
+            Cli::try_parse_from(["buzz", "messages", "thread", "--link", link.as_str(),]).is_ok()
+        );
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "thread",
+            "--channel",
+            channel,
+            "--event",
+            event.as_str(),
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn messages_thread_rejects_partial_or_mixed_targets() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let link = format!("buzz://message?channel={channel}&id={event}");
+
+        assert!(Cli::try_parse_from(["buzz", "messages", "thread"]).is_err());
+        assert!(Cli::try_parse_from(["buzz", "messages", "thread", "--channel", channel]).is_err());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "thread",
+            "--link",
+            link.as_str(),
+            "--event",
+            event.as_str(),
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn set_status_clear_rejects_text_and_emoji() {
         for extra in [["--text", "busy"], ["--emoji", "🎶"]] {
             let args = ["buzz", "users", "set-status", "--clear"]
@@ -3056,7 +3145,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "issues"),
-            vec!["create", "get", "list", "status"]
+            vec!["assign", "create", "get", "list", "status", "unassign"]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -3115,7 +3204,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 4),
+            ("issues", 6),
             ("media", 1),
             ("messages", 8),
             ("pack", 2),

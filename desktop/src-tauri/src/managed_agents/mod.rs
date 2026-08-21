@@ -10,6 +10,7 @@ pub(crate) use agent_env::{
 };
 mod backend;
 mod claude_accounts;
+pub(crate) mod claude_config;
 mod claude_model_catalog;
 pub(crate) mod config_bridge;
 pub(crate) mod custom_harnesses;
@@ -45,6 +46,7 @@ pub(crate) mod spawn_snapshot;
 pub(crate) mod storage;
 pub(crate) mod team_events;
 mod team_repair;
+pub(crate) use team_repair::team_persona_key;
 mod teams;
 mod types;
 

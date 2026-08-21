@@ -231,9 +231,20 @@ test("definition and instance dialogs place model tuning directly below model", 
     );
     const model = source.indexOf(modelMarker);
     const effort = source.indexOf("<AgentDialogEffortSection", model);
+    const effortPicker = source.indexOf("<EffortPickerField", effort);
     const advanced = source.indexOf("Advanced", effort);
     assert.ok(model >= 0, `${filename} must render Model`);
     assert.ok(effort > model, `${filename} must render Effort after Model`);
+    if (filename === "AgentInstanceEditDialog.tsx") {
+      assert.ok(
+        effortPicker > effort,
+        `${filename} must render the adapter effort picker after model tuning`,
+      );
+      assert.ok(
+        advanced > effortPicker,
+        `${filename} must render both effort controls before Advanced`,
+      );
+    }
     assert.ok(
       advanced > effort,
       `${filename} must render model tuning before Advanced`,

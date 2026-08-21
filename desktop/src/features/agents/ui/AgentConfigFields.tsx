@@ -48,6 +48,7 @@ import {
 } from "@/features/agents/ui/agentConfigControls";
 import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
+import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import {
   BUZZ_AGENT_THINKING_EFFORT,
   getProviderEffortConfig,
@@ -193,13 +194,10 @@ export type AgentConfigFieldsProps = {
   /**
    * Which disclosure preset to render (PR 2 flag cleanup — replaces eight
    * independent show* booleans):
-   * - "full" (default): the evergreen stance — every field, escape hatch
-   *   (custom model/provider), description, required indicator, and
-   *   unavailable option is visible. Settings, defaults modal, dialogs.
+   * - "full" (default): every field, escape hatch, description, required
+   *   indicator, and unavailable option is visible.
    * - "onboarding-essential": onboarding page 4's first-run stance — only
-   *   valid forward choices. No advanced section, no custom escape hatches,
-   *   no descriptions (the page copy does that job), no un-choosing via
-   *   placeholder options, no greyed-out effort levels.
+   *   valid forward choices, without advanced/custom/unavailable options.
    * - "progressive-defaults": the defaults modal's full controls, revealed in
    *   order. Provider appears after harness selection; model, effort, and
    *   Advanced appear after a provider is configured.
@@ -802,7 +800,9 @@ export function AgentConfigFields({
           <AgentModelField
             allowDefaultModel={fallbackModel !== null}
             defaultModelLabel={
-              fallbackModel ? `Default model (${fallbackModel})` : undefined
+              fallbackModel
+                ? `Default model (${resolveModelLabel(fallbackModel, undefined, effectiveProvider || undefined)})`
+                : undefined
             }
             disableSelectDuringDiscovery={disableModelSelectDuringDiscovery}
             disabled={dependentFieldsDisabled}

@@ -1,5 +1,11 @@
 # Upstream fold: production migration-ledger reconciliation
 
+> **Historical operator plan — do not use for the `cd0d33f0` fold.** This
+> document records the earlier collision that placed `community_hosts` at
+> version 31. Upstream subsequently assigned version 31 to workflow-run error
+> codes. The current v31-to-v32 production contract is
+> [`upstream-fold-0031-ledger-reconciliation.md`](upstream-fold-0031-ledger-reconciliation.md).
+
 This fold preserves upstream's published migration checksums at versions 29
 and 30 (`community_deletion` and `community_deletion_recovery`) and renumbers
 the unchanged Smith Crafts `community_hosts` migration from 29 to 31.

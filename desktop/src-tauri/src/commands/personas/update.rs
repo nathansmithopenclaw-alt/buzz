@@ -442,7 +442,12 @@ async fn activate_after_delegated_env(
         }
         ReadinessTransitionAction::Start => {
             super::super::agents::start_local_agent_with_preflight(
-                app, &state, pubkey, owner_hex, false,
+                app,
+                &state,
+                pubkey,
+                false,
+                None,
+                Some(owner_hex),
             )
             .await
         }

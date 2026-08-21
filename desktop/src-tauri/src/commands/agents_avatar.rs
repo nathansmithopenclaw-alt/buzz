@@ -239,6 +239,7 @@ pub async fn apply_managed_agent_avatar_request(
                             private_key_nsec: record.private_key_nsec.clone(),
                             name: record.name.clone(),
                             relay_url: record.relay_url.clone(),
+                            target_relay_url: None,
                             avatar_url: record.avatar_url.clone(),
                             auth_tag: record.auth_tag.clone(),
                             pubkey: record.pubkey.clone(),

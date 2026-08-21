@@ -5,6 +5,7 @@ import {
   KIND_HUDDLE_STARTED,
   KIND_TYPING_INDICATOR,
 } from "../../src/shared/constants/kinds";
+import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 import {
   TEST_IDENTITIES,
   installMockBridge,
@@ -783,33 +784,18 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
   expect(expandedOpenIndex).toBeLessThan(startIndex);
   expect(sendCommands).not.toContain("add_channel_members");
 
-  const sentMessageCommand = sendCommandPayloads.find((entry) => {
-    if (entry.command !== "plugin:websocket|send") {
-      return false;
-    }
-    const data = (entry.payload as { message?: { data?: string } } | undefined)
-      ?.message?.data;
-    if (!data) {
-      return false;
-    }
-    const frame = JSON.parse(data) as unknown[];
-    return (
-      frame[0] === "EVENT" &&
-      (frame[1] as { content?: string } | undefined)?.content.includes(
-        "for a hand",
-      )
-    );
-  });
-  const sentMessageData = (
-    sentMessageCommand?.payload as { message?: { data?: string } } | undefined
-  )?.message?.data;
-  expect(sentMessageData).toBeTruthy();
-  const sentMessageEvent = (
-    JSON.parse(sentMessageData ?? "[]") as [string, { tags?: string[][] }]
-  )[1];
-  const sentChannelId = sentMessageEvent.tags?.find(
-    (tag) => tag[0] === "h",
-  )?.[1];
+  const sentMessageCommand = sendCommandPayloads.find(
+    (entry) =>
+      entry.command === "send_channel_message" &&
+      (
+        entry.payload as { content?: string; channelId?: string } | undefined
+      )?.content?.includes("for a hand"),
+  );
+  const sentChannelId = (
+    sentMessageCommand?.payload as
+      | { content?: string; channelId?: string }
+      | undefined
+  )?.channelId;
   expect(sentChannelId).toBeTruthy();
   await expect(
     page.locator("[data-active='true'][data-channel-id]"),
@@ -1050,7 +1036,15 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   await expect(input).toContainText("Fizz");
 
   const commandsAfterFailure = await readCommandPayloadLog(page);
-  const failedSendChannelId = await readOutgoingChannelId(page, "for a hand");
+  const failedSendChannelId = (
+    commandsAfterFailure.find(
+      (entry) =>
+        entry.command === "send_channel_message" &&
+        (
+          entry.payload as { content?: string; channelId?: string } | undefined
+        )?.content?.includes("for a hand"),
+    )?.payload as { content?: string; channelId?: string } | undefined
+  )?.channelId;
   expect(failedSendChannelId).toBeTruthy();
   expect(commandsAfterFailure.map((entry) => entry.command)).not.toContain(
     "add_channel_members",
@@ -1077,29 +1071,15 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
     ),
   ).toBe(baselineOpenDmCount + 1);
   const retryCommands = allCommands.slice(retryBaseline);
-  const retrySend = retryCommands.find((entry) => {
-    if (entry.command !== "plugin:websocket|send") {
-      return false;
-    }
-    const data = (entry.payload as { message?: { data?: string } } | undefined)
-      ?.message?.data;
-    if (!data) {
-      return false;
-    }
-    const frame = JSON.parse(data) as unknown[];
-    return (
-      frame[0] === "EVENT" &&
-      (frame[1] as { content?: string } | undefined)?.content === retryMessage
-    );
-  });
-  const retrySendData = (
-    retrySend?.payload as { message?: { data?: string } } | undefined
-  )?.message?.data;
-  expect(retrySendData).toBeTruthy();
-  const retryEvent = (
-    JSON.parse(retrySendData ?? "[]") as [string, { tags?: string[][] }]
-  )[1];
-  const retryChannelId = retryEvent.tags?.find((tag) => tag[0] === "h")?.[1];
+  const retrySend = retryCommands.find(
+    (entry) =>
+      entry.command === "send_channel_message" &&
+      (entry.payload as { content?: string; channelId?: string } | undefined)
+        ?.content === retryMessage,
+  );
+  const retryChannelId = (
+    retrySend?.payload as { content?: string; channelId?: string } | undefined
+  )?.channelId;
   expect(retryChannelId).toBeTruthy();
   expect(retryChannelId).not.toBe(failedSendChannelId);
   await expect(
@@ -1233,7 +1213,7 @@ test("does not reopen a direct message after leaving the composer", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
-test("does not reopen a sent direct message after leaving during cache reseed", async ({
+test("opens a sent direct message without waiting for a channel-list refresh", async ({
   page,
 }) => {
   await page.goto("/");
@@ -1243,29 +1223,37 @@ test("does not reopen a sent direct message after leaving during cache reseed", 
   await page
     .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
     .click();
-  const staleMessage = "Stay on the channel after cache reseed";
-  await page.getByTestId("message-input").fill(staleMessage);
+  const message = "Open without a channel-list refresh";
+  await page.getByTestId("message-input").fill(message);
+  const baselineChannelsReads = commandCount(
+    await readCommandLog(page),
+    "get_channels",
+  );
+  const baselineHttpSends = commandCount(
+    await readCommandLog(page),
+    "send_channel_message",
+  );
   await page.evaluate(() => {
     const testWindow = window as Window & {
       __BUZZ_E2E__?: { mock?: { channelsReadDelayMs?: number } };
     };
     testWindow.__BUZZ_E2E__ ??= {};
     testWindow.__BUZZ_E2E__.mock ??= {};
-    testWindow.__BUZZ_E2E__.mock.channelsReadDelayMs = 1_000;
+    testWindow.__BUZZ_E2E__.mock.channelsReadDelayMs = 3_000;
   });
 
   await page.getByTestId("send-message").click();
-  await expect
-    .poll(async () => hasOutgoingEventWithContent(page, staleMessage))
-    .toBe(true);
-
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await page.waitForTimeout(1_250);
-  await expect(page).toHaveURL(
-    new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`),
+  await expect(page.getByTestId("chat-title")).toHaveText("charlie", {
+    timeout: 1_000,
+  });
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+  expect(commandCount(await readCommandLog(page), "get_channels")).toBe(
+    baselineChannelsReads,
   );
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  expect(commandCount(await readCommandLog(page), "send_channel_message")).toBe(
+    baselineHttpSends + 1,
+  );
+  await expect(page).toHaveURL(/\/channels\/[0-9a-f-]+(?:\?|$)/);
 });
 
 test("shows capped participant stack in group direct message header", async ({
@@ -1884,9 +1872,13 @@ test("channel with messages shows content", async ({ page }) => {
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
     0,
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: backdated seeds can straddle midnight UTC and render two
+  // dividers (Yesterday + Today); a bare locator fails Playwright strict mode.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 });
 
@@ -2459,7 +2451,7 @@ test("sidebar shows unread indicator for newly active channels", async ({
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Unread update for #random",
+    "Unread update for random",
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 });
@@ -2516,7 +2508,11 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
   await expect(page.getByTestId("message-dm-intro")).toContainText(
     "This is the beginning of your direct message with",
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: backdated seeds can straddle midnight UTC and render two
+  // dividers (Yesterday + Today); a bare locator fails Playwright strict mode.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Unread update for the DM",
   );
@@ -2803,24 +2799,29 @@ test("channel settings only prompt editors to add an empty description", async (
   // backing fixture; otherwise that in-flight read can race the explicit
   // invalidation and repaint its pre-mutation snapshot.
   await expect(page.getByTestId("channel-general")).toBeVisible();
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_MUTATE_CHANNEL__ === "function" &&
+      typeof window.__BUZZ_E2E_INVALIDATE_CHANNELS__ === "function",
+  );
   await page.evaluate(
     async ({ generalChannelId, randomChannelId }) => {
       const bridge = window as Window & {
-        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
-        __BUZZ_E2E_MUTATE_CHANNEL__?: (options: {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__: () => Promise<void>;
+        __BUZZ_E2E_MUTATE_CHANNEL__: (options: {
           channelId: string;
           description?: string;
         }) => void;
       };
-      bridge.__BUZZ_E2E_MUTATE_CHANNEL__?.({
+      bridge.__BUZZ_E2E_MUTATE_CHANNEL__({
         channelId: generalChannelId,
         description: "",
       });
-      bridge.__BUZZ_E2E_MUTATE_CHANNEL__?.({
+      bridge.__BUZZ_E2E_MUTATE_CHANNEL__({
         channelId: randomChannelId,
         description: "",
       });
-      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__();
     },
     {
       generalChannelId: GENERAL_CHANNEL_ID,
@@ -3016,6 +3017,140 @@ test("manage channel places canvas between channel info and actions", async ({
   expect(leaveBox).not.toBeNull();
   expect(channelIdBox?.y).toBeLessThan(canvasBox?.y);
   expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
+});
+
+test("channel settings hides workflows and skips its query when the experiment is disabled", async ({
+  page,
+}) => {
+  await page.addInitScript((key) => {
+    const overrides = JSON.parse(
+      window.localStorage.getItem(key) ?? "{}",
+    ) as Record<string, boolean>;
+    overrides.workflows = false;
+    window.localStorage.setItem(key, JSON.stringify(overrides));
+  }, FEATURE_OVERRIDES_STORAGE_KEY);
+
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+  await expect(page.getByTestId("channel-workflows-ingress")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__?.some(
+          ({ command }) => command === "get_channel_workflows",
+        ),
+      ),
+    )
+    .toBe(false);
+});
+
+test("channel settings opens and creates channel workflows over the channel", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await invokeMockCommand(page, "create_workflow", {
+    channelId: GENERAL_CHANNEL_ID,
+    yamlDefinition:
+      "name: Welcome responder\ntrigger:\n  on: message_posted\nsteps:\n  - id: reply\n    run: send_message\n    with:\n      text: Welcome\n",
+  });
+  await openChannelManagement(page, "general");
+
+  const sheet = page.getByTestId("channel-management-sheet");
+  const canvasBox = await sheet
+    .getByTestId("channel-canvas-ingress")
+    .boundingBox();
+  const workflowsBox = await sheet
+    .getByTestId("channel-workflows-ingress")
+    .boundingBox();
+  expect(canvasBox).not.toBeNull();
+  expect(workflowsBox).not.toBeNull();
+  expect(canvasBox?.y).toBeLessThan(workflowsBox?.y);
+
+  await sheet.getByTestId("channel-workflows-ingress").click();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-list")).toContainText(
+    "Welcome responder",
+  );
+
+  // Opening a workflow keeps the settings Workflows view mounted beneath the
+  // shared editor; the channel route stays put behind both layers.
+  const channelUrl = new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`);
+  await sheet.getByTestId("channel-workflow-mock-wf-1").click();
+  await expect(
+    page.getByRole("dialog", { name: "Edit workflow" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(channelUrl);
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("message-timeline")).toBeVisible();
+
+  const overlayEditor = page.getByRole("dialog", { name: "Edit workflow" });
+  await overlayEditor.getByRole("tab", { name: "YAML" }).click();
+  const overlayYaml = overlayEditor.getByRole("textbox", {
+    name: "Workflow YAML",
+  });
+  await overlayYaml.fill(
+    (await overlayYaml.inputValue()).replace(
+      "Welcome responder",
+      "Unsaved welcome responder",
+    ),
+  );
+  await overlayEditor.getByRole("button", { name: "Workflow actions" }).click();
+  await page.getByRole("menuitem", { name: "Duplicate" }).click();
+  const discardConfirmation = page.getByRole("alertdialog", {
+    name: "Discard changes?",
+  });
+  await expect(discardConfirmation).toBeVisible();
+  await discardConfirmation
+    .getByRole("button", { name: "Keep editing" })
+    .click();
+  await expect(overlayEditor).toBeVisible();
+  await expect(overlayYaml).toContainText("Unsaved welcome responder");
+  await expect(
+    page.getByRole("dialog", { name: "Duplicate workflow" }),
+  ).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Close" }).click();
+  await page
+    .getByRole("alertdialog", { name: "Discard changes?" })
+    .getByRole("button", { name: "Discard changes" })
+    .click();
+  await expect(page.getByRole("dialog", { name: "Edit workflow" })).toHaveCount(
+    0,
+  );
+  await expect(page).toHaveURL(channelUrl);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-list")).toContainText(
+    "Welcome responder",
+  );
+
+  await page.getByTestId("channel-workflows-new").click();
+
+  await expect(
+    page.getByRole("dialog", { name: "Create workflow" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(channelUrl);
+  await expect(
+    page.getByRole("combobox", { exact: true, name: "Channel" }),
+  ).toContainText("general");
+
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Create workflow" }),
+  ).toHaveCount(0);
+  await expect(page).toHaveURL(channelUrl);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-new")).toBeVisible();
 });
 
 async function seedHomeInboxMention(
