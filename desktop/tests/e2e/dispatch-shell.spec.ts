@@ -171,6 +171,121 @@ test("Dispatch merges a live revision without refetching cold history", async ({
   expect(foldCounts).toEqual({ cold: 1, incremental: 1 });
 });
 
+test("Dispatch warm start fetches only the persisted-cursor delta", async ({
+  page,
+}) => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const cursor = Math.floor(Date.now() / 1000) - 60;
+  await installMockBridge(
+    page,
+    {
+      dispatchWarmCursor: cursor,
+      dispatch: {
+        workspace: { id: workspaceId, name: "Dispatch Test" },
+        context: {
+          issues: [],
+          activity: [],
+          comments: [],
+          linkedTasks: [],
+          projects: [],
+          diagnostics: [],
+          taskDiagnostics: [],
+          viewerRole: "maintainer",
+          sectionErrors: { comments: null, projects: null, tasks: null },
+          snapshotAt: new Date().toISOString(),
+        },
+      },
+    },
+    { seedPreviewFeatures: true },
+  );
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-dispatch-view").click();
+  await expect(page.getByTestId("dispatch-new-issue")).toBeEnabled();
+
+  const proof = await page.evaluate(
+    ({ workspaceId, cursor }) => ({
+      commands: window.__BUZZ_E2E_COMMANDS__,
+      deltaFilters: window.__BUZZ_E2E_DISPATCH_HISTORY_FILTERS__?.filter(
+        (filter) =>
+          (filter["#h"]?.includes(workspaceId) ||
+            filter["#buzz-workspace"]?.includes(workspaceId)) &&
+          filter.since === cursor,
+      ),
+      resumePayload: window.__BUZZ_E2E_COMMAND_PAYLOADS__?.find(
+        ({ command }) => command === "resume_tracker_context",
+      )?.payload,
+    }),
+    { workspaceId, cursor },
+  );
+  expect(
+    proof.commands?.filter((command) => command === "fold_tracker_context"),
+  ).toHaveLength(0);
+  expect(
+    proof.commands?.filter((command) => command === "resume_tracker_context"),
+  ).toHaveLength(1);
+  expect(proof.deltaFilters).toHaveLength(4);
+  expect(proof.resumePayload).toMatchObject({ advanceCursor: true });
+});
+
+test("Dispatch warm-start timestamp gap falls back to a cold fold", async ({
+  page,
+}) => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const cursor = Math.floor(Date.now() / 1000) - 60;
+  await installMockBridge(
+    page,
+    {
+      dispatchWarmCursor: cursor,
+      dispatchHistoryGapOnce: true,
+      dispatch: {
+        workspace: { id: workspaceId, name: "Dispatch Test" },
+        context: {
+          issues: [],
+          activity: [],
+          comments: [],
+          linkedTasks: [],
+          projects: [],
+          diagnostics: [],
+          taskDiagnostics: [],
+          viewerRole: "maintainer",
+          sectionErrors: { comments: null, projects: null, tasks: null },
+          snapshotAt: new Date().toISOString(),
+        },
+      },
+    },
+    { seedPreviewFeatures: true },
+  );
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-dispatch-view").click();
+  await expect(page.getByTestId("dispatch-new-issue")).toBeEnabled();
+
+  const proof = await page.evaluate(
+    ({ workspaceId, cursor }) => {
+      const trackerFilters =
+        window.__BUZZ_E2E_DISPATCH_HISTORY_FILTERS__?.filter(
+          (filter) =>
+            filter["#h"]?.includes(workspaceId) &&
+            filter.kinds?.includes(40020) &&
+            filter.kinds?.includes(40021),
+        ) ?? [];
+      return {
+        commands: window.__BUZZ_E2E_COMMANDS__,
+        sawWarm: trackerFilters.some((filter) => filter.since === cursor),
+        sawCold: trackerFilters.some((filter) => filter.since === undefined),
+      };
+    },
+    { workspaceId, cursor },
+  );
+  expect(proof.sawWarm).toBe(true);
+  expect(proof.sawCold).toBe(true);
+  expect(
+    proof.commands?.filter((command) => command === "resume_tracker_context"),
+  ).toHaveLength(0);
+  expect(
+    proof.commands?.filter((command) => command === "fold_tracker_context"),
+  ).toHaveLength(1);
+});
+
 test("New Issue creates a revision-zero issue visible in Board, List, and Triage", async ({
   page,
 }) => {

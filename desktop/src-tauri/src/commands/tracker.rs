@@ -6,125 +6,39 @@ use buzz_sdk_pkg::tracker::{
 use chrono::{DateTime, Utc};
 use nostr::{Event, PublicKey};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct TrackerFoldCacheKey {
-    workspace_id: String,
-    managed_signer: String,
-}
+use super::tracker_cache::{
+    cache_key, load_entry, persist_entry, TrackerFoldCache, TrackerFoldCacheEntry,
+    TrackerFoldCacheKey,
+};
+use crate::app_state::AppState;
 
-#[derive(Clone, Debug)]
-struct TrackerFoldCacheEntry {
-    events: BTreeMap<String, Value>,
-    task_events: BTreeMap<String, Value>,
-    membership_event: Value,
-}
-
-/// Rust-owned raw event history backing incremental Dispatch folds.
-///
-/// The renderer may submit new signed events, but it never owns or mutates the
-/// canonical projection. Every incremental result is rebuilt by the same SDK
-/// fold as a cold load. Entries are cleared when `apply_workspace` changes the
-/// active community so identical workspace UUIDs cannot share history.
-#[derive(Default)]
-pub(crate) struct TrackerFoldCache {
-    entries: Mutex<HashMap<TrackerFoldCacheKey, TrackerFoldCacheEntry>>,
-}
-
-fn cache_key(workspace_id: &str, managed_signer: &str) -> Result<TrackerFoldCacheKey, String> {
-    let workspace_id = workspace_id
-        .parse::<Uuid>()
-        .map_err(|error| format!("invalid Tracker workspace UUID: {error}"))?
-        .to_string();
-    let managed_signer = PublicKey::parse(managed_signer)
-        .map_err(|error| format!("invalid Tracker managed signer: {error}"))?
-        .to_hex();
-    Ok(TrackerFoldCacheKey {
+fn active_cache_key(
+    state: &AppState,
+    workspace_id: &str,
+    managed_signer: &str,
+) -> Result<TrackerFoldCacheKey, String> {
+    cache_key(
+        &crate::relay::relay_ws_url_with_override(state),
         workspace_id,
         managed_signer,
-    })
+    )
 }
 
-fn raw_event_key(raw: &Value) -> String {
-    raw.get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(|id| format!("id:{id}"))
-        .unwrap_or_else(|| format!("raw:{raw}"))
-}
-
-fn index_raw_events(events: Vec<Value>) -> BTreeMap<String, Value> {
-    events
-        .into_iter()
-        .map(|event| (raw_event_key(&event), event))
-        .collect()
-}
-
-fn merge_raw_events(target: &mut BTreeMap<String, Value>, events: Vec<Value>) {
-    for event in events {
-        target.insert(raw_event_key(&event), event);
-    }
-}
-
-impl TrackerFoldCache {
-    pub(crate) fn clear(&self) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        entries.clear();
-    }
-
-    fn seed(
-        &self,
-        key: TrackerFoldCacheKey,
-        events: Vec<Value>,
-        task_events: Vec<Value>,
-        membership_event: Value,
-    ) -> Result<(), String> {
-        self.entries
-            .lock()
-            .map_err(|error| error.to_string())?
-            .insert(
-                key,
-                TrackerFoldCacheEntry {
-                    events: index_raw_events(events),
-                    task_events: index_raw_events(task_events),
-                    membership_event,
-                },
-            );
-        Ok(())
-    }
-
-    fn fold_incremental(
-        &self,
-        key: &TrackerFoldCacheKey,
-        events: Vec<Value>,
-        task_events: Vec<Value>,
-        snapshot_at: u64,
-    ) -> Result<Value, String> {
-        let mut entries = self.entries.lock().map_err(|error| error.to_string())?;
-        let cached = entries.get(key).ok_or_else(|| {
-            "incremental Tracker fold has no cold-load history; refresh the workspace".to_string()
-        })?;
-        let mut merged = cached.clone();
-        merge_raw_events(&mut merged.events, events);
-        merge_raw_events(&mut merged.task_events, task_events);
-
-        let folded = fold_tracker_context_values(
-            merged.events.values().cloned().collect(),
-            merged.task_events.values().cloned().collect(),
-            merged.membership_event.clone(),
-            &key.workspace_id,
-            &key.managed_signer,
-            snapshot_at,
-        )?;
-        entries.insert(key.clone(), merged);
-        Ok(folded)
+fn persist_cache_best_effort(
+    app: &AppHandle,
+    key: &TrackerFoldCacheKey,
+    entry: &TrackerFoldCacheEntry,
+) {
+    let result = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("resolve app data directory: {error}"))
+        .and_then(|root| persist_entry(&root, key, entry));
+    if let Err(error) = result {
+        eprintln!("buzz-desktop: failed to persist Tracker fold cache: {error}");
     }
 }
 
@@ -429,6 +343,7 @@ fn fold_tracker_context_values(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes these as named IPC fields.
 pub fn fold_tracker_context(
     events: Vec<Value>,
     task_events: Vec<Value>,
@@ -436,9 +351,12 @@ pub fn fold_tracker_context(
     workspace_id: String,
     managed_signer: String,
     snapshot_at: u64,
+    advance_cursor: bool,
     cache: State<'_, TrackerFoldCache>,
+    state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<Value, String> {
-    let key = cache_key(&workspace_id, &managed_signer)?;
+    let key = active_cache_key(&state, &workspace_id, &managed_signer)?;
     let folded = fold_tracker_context_values(
         events.clone(),
         task_events.clone(),
@@ -447,11 +365,86 @@ pub fn fold_tracker_context(
         &managed_signer,
         snapshot_at,
     )?;
-    cache.seed(key, events, task_events, membership_event)?;
+    let entry = TrackerFoldCacheEntry::new(
+        &key,
+        advance_cursor.then_some(snapshot_at),
+        events,
+        task_events,
+        membership_event,
+    );
+    cache.seed(key.clone(), entry.clone())?;
+    persist_cache_best_effort(&app, &key, &entry);
     Ok(folded)
 }
 
 #[tauri::command]
+pub fn tracker_fold_cursor(
+    workspace_id: String,
+    managed_signer: String,
+    cache: State<'_, TrackerFoldCache>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Option<u64>, String> {
+    let key = active_cache_key(&state, &workspace_id, &managed_signer)?;
+    if let Some(entry) = cache.get(&key)? {
+        return Ok(entry.cursor);
+    }
+    let root = match app.path().app_data_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("buzz-desktop: failed to resolve Tracker cache directory: {error}");
+            return Ok(None);
+        }
+    };
+    let entry = match load_entry(&root, &key) {
+        Ok(entry) => entry,
+        Err(error) => {
+            eprintln!("buzz-desktop: ignoring unusable Tracker fold cache: {error}");
+            return Ok(None);
+        }
+    };
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let cursor = entry.cursor;
+    cache.seed(key, entry)?;
+    Ok(cursor)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes these as named IPC fields.
+pub fn resume_tracker_context(
+    events: Vec<Value>,
+    task_events: Vec<Value>,
+    membership_event: Value,
+    workspace_id: String,
+    managed_signer: String,
+    snapshot_at: u64,
+    advance_cursor: bool,
+    cache: State<'_, TrackerFoldCache>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Value, String> {
+    let key = active_cache_key(&state, &workspace_id, &managed_signer)?;
+    let mut merged = cache.merge(&key, events, task_events, Some(membership_event))?;
+    let folded = fold_tracker_context_values(
+        merged.events.values().cloned().collect(),
+        merged.task_events.values().cloned().collect(),
+        merged.membership_event.clone(),
+        &key.workspace_id,
+        &key.managed_signer,
+        snapshot_at,
+    )?;
+    if advance_cursor {
+        merged.cursor = Some(snapshot_at);
+    }
+    cache.seed(key.clone(), merged.clone())?;
+    persist_cache_best_effort(&app, &key, &merged);
+    Ok(folded)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes these as named IPC fields.
 pub fn fold_tracker_context_incremental(
     events: Vec<Value>,
     task_events: Vec<Value>,
@@ -459,9 +452,22 @@ pub fn fold_tracker_context_incremental(
     managed_signer: String,
     snapshot_at: u64,
     cache: State<'_, TrackerFoldCache>,
+    state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<Value, String> {
-    let key = cache_key(&workspace_id, &managed_signer)?;
-    cache.fold_incremental(&key, events, task_events, snapshot_at)
+    let key = active_cache_key(&state, &workspace_id, &managed_signer)?;
+    let merged = cache.merge(&key, events, task_events, None)?;
+    let folded = fold_tracker_context_values(
+        merged.events.values().cloned().collect(),
+        merged.task_events.values().cloned().collect(),
+        merged.membership_event.clone(),
+        &key.workspace_id,
+        &key.managed_signer,
+        snapshot_at,
+    )?;
+    cache.seed(key.clone(), merged.clone())?;
+    persist_cache_best_effort(&app, &key, &merged);
+    Ok(folded)
 }
 
 #[cfg(test)]
@@ -875,26 +881,39 @@ mod tests {
         .custom_created_at(nostr::Timestamp::from(101))
         .sign_with_keys(&member)
         .expect("signed revision");
-        let key =
-            cache_key(&workspace_id.to_string(), &member.public_key().to_hex()).expect("cache key");
+        let key = cache_key(
+            "wss://relay.example",
+            &workspace_id.to_string(),
+            &member.public_key().to_hex(),
+        )
+        .expect("cache key");
         let cache = TrackerFoldCache::default();
-        cache
-            .seed(
-                key.clone(),
-                vec![serde_json::to_value(root).expect("root JSON")],
-                Vec::new(),
-                serde_json::to_value(membership).expect("membership JSON"),
-            )
-            .expect("seed cache");
+        let entry = TrackerFoldCacheEntry::new(
+            &key,
+            Some(100),
+            vec![serde_json::to_value(root).expect("root JSON")],
+            Vec::new(),
+            serde_json::to_value(membership).expect("membership JSON"),
+        );
+        cache.seed(key.clone(), entry).expect("seed cache");
 
-        let actual = cache
-            .fold_incremental(
+        let merged = cache
+            .merge(
                 &key,
                 vec![serde_json::to_value(revision).expect("revision JSON")],
                 Vec::new(),
-                102,
+                None,
             )
             .expect("incremental fold");
+        let actual = fold_tracker_context_values(
+            merged.events.values().cloned().collect(),
+            merged.task_events.values().cloned().collect(),
+            merged.membership_event,
+            &key.workspace_id,
+            &key.managed_signer,
+            102,
+        )
+        .expect("incremental projection");
 
         assert_eq!(actual["issues"].as_array().map(Vec::len), Some(1));
         assert_eq!(actual["issues"][0]["revision"], 1);
