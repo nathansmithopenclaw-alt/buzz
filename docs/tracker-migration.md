@@ -87,6 +87,42 @@ run `apply` if either deployment is incomplete or the audit is nonzero. New
 v5 `d` identifiers are invisible to the deployed P0-A CLI, and events that use
 the additive provenance fields require the upgraded reader.
 
+## Post-restore cache reconciliation
+
+After restoring relay Postgres from a snapshot, treat retained client caches as
+legitimate recovery sources for signed events and diff them against the relay
+before trusting normal reads. For Tracker specifically, reconcile every
+retained cache before allowing new writes. A cache may contain signed events
+created after the database snapshot; normal Tracker reads merge those local
+events with relay results, which can make a missing root look healthy until its
+next revision is rejected as `reply parent not found`.
+
+Run the comparison first. It is read-only by default and verifies every cached
+Tracker signature and workspace tag before reporting gaps:
+
+```bash
+buzz track repair-cache \
+  --workspace <tracker-stream-uuid> \
+  --cache-file <retained-tracker-cache.json>
+```
+
+Review `replay_scope` and `missing_events`, then replay the exact signed events
+through normal relay ingest with `--apply`:
+
+```bash
+buzz track repair-cache \
+  --workspace <tracker-stream-uuid> \
+  --cache-file <retained-tracker-cache.json> \
+  --apply
+```
+
+Replay is chronological, resumable, and idempotent: already-present event IDs
+are skipped, any failure stops the run, and a final relay query must prove that
+every cached Tracker event is present. Run the command once per independently
+retained cache because one client may not have observed every workspace event.
+Keep the caches until a fresh-cache `buzz track get` succeeds for the restored
+issues and a new revision is accepted.
+
 ## Project limitations
 
 Tracker-managed projects must be signed by the workspace signer and carry the
