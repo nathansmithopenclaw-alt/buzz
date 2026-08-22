@@ -54,6 +54,7 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
 /// approval and again before PostgreSQL purge. A new tenant table therefore
 /// blocks deletion until this manifest is intentionally updated.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
+    "addressable_event_tombstones",
     "api_tokens",
     "archived_identities",
     "audit_log",
@@ -105,6 +106,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "relay_invites",
     "delivery_log",
     "events",
+    "addressable_event_tombstones",
     "parameterized_event_watermarks",
     "git_repo_names",
     "archived_identities",

@@ -196,7 +196,7 @@ The Buzz validator enforces all eight rules. The shared fixtures in [`NIP-MP.fix
 **Deletion** follows NIP-09 with two Buzz-wide behaviors that are not project-specific:
 
 - A `kind:5` naming the coordinate deletes it when signed by the project signer **or** by that signer's registered NIP-OA owner ([Deletion](#deletion)).
-- The deletion applies only to versions whose `created_at` is at or before the deletion's own, per NIP-09. A delayed or replayed tombstone signed before the current head MUST NOT remove it; the relay MUST compare timestamps at the coordinate (`soft_delete_by_coordinate`, `crates/buzz-db/src/event.rs`, whose inclusive `created_at <= <deletion>` bound is introduced alongside this specification in [#3171](https://github.com/block/buzz/pull/3171)).
+- The deletion applies only to versions whose `created_at` is at or before the deletion's own, per NIP-09. A delayed or replayed tombstone signed before the current head MUST NOT remove it. Conversely, once a deletion is accepted, the relay durably retains that timestamp as the coordinate's deletion floor: a version at or below the floor cannot reappear merely because it arrives after the head was deleted, while a later version may recreate the coordinate. The relay serializes that floor with NIP-33 replacement under the coordinate lock (`soft_delete_by_coordinate`, `crates/buzz-db/src/event.rs`; `replace_parameterized_event`, `crates/buzz-db/src/lib.rs`).
 
 ## Client Behavior
 

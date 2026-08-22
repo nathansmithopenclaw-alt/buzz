@@ -820,18 +820,11 @@ pub async fn soft_delete_event(
 /// scopes an `a`-tag deletion to versions at or before that instant, so a
 /// delayed or replayed tombstone signed between two versions must not erase the
 /// newer replacement. `events.created_at` is immutable per row, so the predicate
-/// guarantees a tombstone can never erase a version newer than itself — the UPDATE
-/// re-evaluates its WHERE clause after any lock wait, so a replacement that races
-/// the deletion and lands with a later `created_at` is always spared.
-///
-/// This does NOT guarantee deletion completeness when a same-coordinate
-/// replacement races the deletion: the deletion may evaluate its predicate before
-/// the replacement arrives, miss the incoming head, and return `Ok(false)`. That
-/// outcome is state-identical to the deletion having arrived first (old head
-/// gone, new head present), which is a valid Nostr ordering — Nostr never fixes
-/// the order of concurrent writes from different signers, and even same-signer
-/// ordering is advisory. The return value feeds only a debug log, not a
-/// correctness gate.
+/// guarantees a tombstone can never erase a version newer than itself. The
+/// transaction also advances a durable deletion floor under the same advisory
+/// lock used by replacement, so a same-coordinate version that races or arrives
+/// later cannot become live when its `created_at` is at or below that floor.
+/// A strictly newer version remains a valid recreation under NIP-09.
 ///
 /// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no live row matched
 /// (already deleted, never existed, or strictly newer than the deletion).
@@ -845,6 +838,37 @@ pub async fn soft_delete_by_coordinate(
 ) -> Result<bool> {
     let deletion_created_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
         .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+    let lock_key =
+        crate::event_replacement_lock_key(community_id, kind, pubkey, Some(d_tag.as_bytes()));
+    let mut tx = pool.begin().await?;
+
+    // Serialize tombstones and replacements for the same NIP-33 coordinate.
+    // This makes both arrival orders equivalent: once the deletion commits,
+    // no version at or below its timestamp can become live.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await?;
+
+    let deleted_through: DateTime<Utc> = sqlx::query_scalar(
+        "INSERT INTO addressable_event_tombstones \
+             (community_id, kind, pubkey, d_tag, deleted_through) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+             deleted_through = GREATEST( \
+                 addressable_event_tombstones.deleted_through, \
+                 EXCLUDED.deleted_through \
+             ) \
+         RETURNING deleted_through",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(pubkey)
+    .bind(d_tag)
+    .bind(deletion_created_at)
+    .fetch_one(&mut *tx)
+    .await?;
+
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
@@ -854,9 +878,11 @@ pub async fn soft_delete_by_coordinate(
     .bind(kind)
     .bind(pubkey)
     .bind(d_tag)
-    .bind(deletion_created_at)
-    .execute(pool)
+    .bind(deleted_through)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
