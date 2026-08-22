@@ -4655,6 +4655,131 @@ mod tests {
         );
     }
 
+    // ── M3 live matrix (ignored by default; run explicitly) ─────────────
+    // Drives the REAL forked adapter (node dist/index.js) end-to-end through
+    // this consumer: initialize → session/new readiness → prompt with a
+    // background bash task → typed snapshot consumption + observe-only
+    // promotion. Env: ACP_FORK_DIST=<path to dist dir>, CLAUDE_CODE_EXECUTABLE
+    // set for the armed case, unset for the disarm case.
+
+    fn fork_adapter_command() -> Option<(String, Vec<String>)> {
+        let dist = std::env::var("ACP_FORK_DIST").ok()?;
+        Some(("node".to_string(), vec![format!("{dist}/index.js")]))
+    }
+
+    #[tokio::test]
+    #[ignore = "live M3 matrix: needs real claude CLI; run with --ignored"]
+    async fn m3_live_typed_configured_end_to_end() {
+        use tokio::time::{timeout, Duration};
+        let Some((cmd, args)) = fork_adapter_command() else {
+            panic!("set ACP_FORK_DIST to the forked adapter's dist dir");
+        };
+        let claude_cli =
+            std::env::var("CLAUDE_CODE_EXECUTABLE").expect("set CLAUDE_CODE_EXECUTABLE (armed)");
+        let mut env: Vec<(String, String)> = vec![
+            ("CLAUDE_CODE_EXECUTABLE".into(), claude_cli),
+            ("HOME".into(), std::env::var("HOME").unwrap_or_default()),
+        ];
+        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+            env.push(("ANTHROPIC_API_KEY".into(), key));
+        }
+        let mut client = AcpClient::spawn(&cmd, &args, &env, false)
+            .await
+            .expect("spawn forked adapter");
+        timeout(Duration::from_secs(30), client.initialize())
+            .await
+            .expect("initialize")
+            .expect("init ok");
+        assert_eq!(
+            client.background_mode_label(),
+            "typed-unconfirmed",
+            "fork adapter must advertise init cap -> typed mode"
+        );
+        let resp = timeout(
+            Duration::from_secs(60),
+            client.session_new_full("/tmp", vec![], None, None),
+        )
+        .await
+        .expect("session/new in time")
+        .expect("session/new ok");
+        eprintln!("M3EVIDENCE session/new _meta={:?}", resp.raw.get("_meta"));
+        let session_id = resp.session_id.clone();
+        let prompt = "Run exactly one background Bash task that echoes m3-probe then sleeps 2 seconds, then finish your turn.";
+        let outcome = timeout(
+            Duration::from_secs(240),
+            client.session_prompt_with_idle_timeout(
+                &session_id,
+                prompt,
+                Duration::from_secs(120),
+                Duration::from_secs(240),
+            ),
+        )
+        .await;
+        // The turn may outlive the quiet window while the bg task runs — that
+        // is fine; what matters is the typed path fired.
+        eprintln!("M3EVIDENCE prompt_outcome={outcome:?}");
+        eprintln!(
+            "M3EVIDENCE final_mode={} pending={:?}",
+            client.background_mode_label(),
+            client.pending_background_tasks()
+        );
+        assert_eq!(
+            client.background_mode_label(),
+            "typed-confirmed",
+            "adapter snapshot must have promoted monitoring to confirmed"
+        );
+        let _ = client
+            .cancel_with_cleanup(&session_id, Duration::from_secs(10))
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "live M3 matrix: disarm variant"]
+    async fn m3_live_disarmed_bundled_end_to_end() {
+        use tokio::time::{timeout, Duration};
+        let Some((cmd, args)) = fork_adapter_command() else {
+            panic!("set ACP_FORK_DIST to the forked adapter's dist dir");
+        };
+        let mut env: Vec<(String, String)> =
+            vec![("HOME".into(), std::env::var("HOME").unwrap_or_default())];
+        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+            env.push(("ANTHROPIC_API_KEY".into(), key));
+        }
+        let mut client = AcpClient::spawn(&cmd, &args, &env, false)
+            .await
+            .expect("spawn forked adapter");
+        timeout(Duration::from_secs(30), client.initialize())
+            .await
+            .expect("initialize")
+            .expect("init ok");
+        // Init cap stays advertised even when unarmed (static contract L1.3).
+        assert_eq!(
+            client.background_mode_label(),
+            "typed-unconfirmed",
+            "init capability is static; mode refines only at session/new"
+        );
+        let resp = timeout(
+            Duration::from_secs(60),
+            client.session_new_full("/tmp", vec![], None, None),
+        )
+        .await
+        .expect("session/new in time")
+        .expect("session/new ok");
+        eprintln!(
+            "M3EVIDENCE disarmed session/new _meta={:?}",
+            resp.raw.get("_meta")
+        );
+        assert_eq!(
+            client.background_mode_label(),
+            "unarmed",
+            "bundled-CLI readiness must narrow to unarmed"
+        );
+        let session_id = resp.session_id.clone();
+        let _ = client
+            .cancel_with_cleanup(&session_id, Duration::from_secs(10))
+            .await;
+    }
+
     #[tokio::test]
     async fn background_tasks_are_tracked_per_session_and_clear_fail_closed() {
         let mut client = spawn_inert_client().await;
