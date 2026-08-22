@@ -198,8 +198,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
-pub(crate) fn preset_harness_definitions()
--> Vec<crate::managed_agents::custom_harnesses::HarnessDefinition> {
+pub(crate) fn preset_harness_definitions(
+) -> Vec<crate::managed_agents::custom_harnesses::HarnessDefinition> {
     PRESET_HARNESSES
         .iter()
         .map(
@@ -299,7 +299,7 @@ mod tests {
 
     use crate::managed_agents::{AcpAvailabilityStatus, AuthStatus, HarnessSource};
 
-    use super::{PRESET_HARNESSES, PresetHarness, preset_catalog_entry};
+    use super::{preset_catalog_entry, PresetHarness, PRESET_HARNESSES};
 
     /// Amp-shaped preset: an ACP adapter wrapping a separately installed CLI.
     const ADAPTER_PRESET: PresetHarness = PresetHarness {

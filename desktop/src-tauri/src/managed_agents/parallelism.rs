@@ -315,7 +315,7 @@ mod tests {
     /// Snapshot export carries the requested definition parallelism verbatim.
     #[test]
     fn snapshot_export_carries_requested_definition_parallelism() {
-        use crate::managed_agents::agent_snapshot::{MemoryLevel, build_snapshot};
+        use crate::managed_agents::agent_snapshot::{build_snapshot, MemoryLevel};
         // definition_parallelism=Some(10) stored → exported as 10 unchanged.
         let snap = build_snapshot(
             &snapshot_record(Some("openclaw"), 10, Some(10)),
