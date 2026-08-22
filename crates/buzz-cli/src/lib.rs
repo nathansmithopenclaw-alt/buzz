@@ -5,6 +5,8 @@ mod error;
 mod links;
 mod validate;
 
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 use client::BuzzClient;
 use error::CliError;
@@ -984,6 +986,17 @@ pub enum TrackCmd {
         include_comments: bool,
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         include_linked_tasks: bool,
+    },
+    /// Compare signed local Tracker cache events with the relay and optionally replay gaps
+    RepairCache {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        /// Cache JSON to inspect; defaults to this workspace's normal Tracker cache
+        #[arg(long)]
+        cache_file: Option<PathBuf>,
+        /// Replay missing signed events through normal relay ingest (default is dry-run)
+        #[arg(long)]
+        apply: bool,
     },
     /// Group folded issues into board buckets
     Board {
@@ -3038,8 +3051,18 @@ mod tests {
         assert_eq!(
             names(&cmd, "track"),
             vec![
-                "board", "comment", "create", "dispatch", "get", "link", "list", "project",
-                "relate", "update", "watch"
+                "board",
+                "comment",
+                "create",
+                "dispatch",
+                "get",
+                "link",
+                "list",
+                "project",
+                "relate",
+                "repair-cache",
+                "update",
+                "watch"
             ]
         );
         assert_eq!(

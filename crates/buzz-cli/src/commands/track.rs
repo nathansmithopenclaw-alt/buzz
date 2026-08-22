@@ -42,6 +42,7 @@ use crate::{OutputFormat, TrackCmd, TrackFilterArgs, TrackMutationArgs, TrackPro
 const TRACKER_CACHE_ENV: &str = "BUZZ_TRACKER_CACHE_DIR";
 const DEFAULT_TIMEZONE: &str = "America/New_York";
 const PROJECT_UPDATE_INTENT_TAG: &str = "buzz-project-update";
+const CACHE_REPAIR_QUERY_BATCH: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ProjectStatusMigration {
@@ -292,6 +293,201 @@ fn parse_cached_events(events: &[Event]) -> (Vec<TrackerEvent>, Vec<String>) {
         }
     }
     (parsed, warnings)
+}
+
+fn validated_cache_repair_events(
+    cache: &CachedProjection,
+    workspace_id: Uuid,
+    now: u64,
+) -> Result<Vec<Event>, CliError> {
+    let mut events = Vec::new();
+    for event in &cache.events {
+        if !matches!(
+            event.kind.as_u16() as u32,
+            KIND_TRACKER_ISSUE | KIND_TRACKER_REVISION | KIND_TRACKER_COMMENT
+        ) {
+            continue;
+        }
+        let parsed = parse_tracker_event(event, now)
+            .map_err(|error| usage("invalid signed Tracker cache event", error))?;
+        if parsed.stream_id != workspace_id {
+            return Err(CliError::Conflict(format!(
+                "cache event {} belongs to workspace {}, not {}",
+                event.id.to_hex(),
+                parsed.stream_id,
+                workspace_id
+            )));
+        }
+        let parent = match parsed.payload {
+            TrackerPayload::Root(_) => None,
+            TrackerPayload::Revision(revision) => Some(revision.parent_event),
+            TrackerPayload::Comment(comment) => comment.parent_event,
+        };
+        events.push((event.clone(), parent));
+    }
+    events.sort_by(|(left, _), (right, _)| {
+        (left.created_at.as_secs(), left.id.to_hex())
+            .cmp(&(right.created_at.as_secs(), right.id.to_hex()))
+    });
+
+    let mut ordered = Vec::with_capacity(events.len());
+    while !events.is_empty() {
+        let remaining_ids: HashSet<String> =
+            events.iter().map(|(event, _)| event.id.to_hex()).collect();
+        let Some(index) = events.iter().position(|(_, parent)| {
+            parent
+                .as_ref()
+                .is_none_or(|parent| !remaining_ids.contains(parent))
+        }) else {
+            return Err(CliError::Conflict(
+                "Tracker cache contains a cyclic reply-parent dependency".into(),
+            ));
+        };
+        ordered.push(events.remove(index).0);
+    }
+    Ok(ordered)
+}
+
+async fn relay_tracker_event_ids(
+    client: &BuzzClient,
+    events: &[Event],
+) -> Result<HashSet<String>, CliError> {
+    let mut present = HashSet::new();
+    for batch in events.chunks(CACHE_REPAIR_QUERY_BATCH) {
+        let ids: Vec<String> = batch.iter().map(|event| event.id.to_hex()).collect();
+        let values = client
+            .query_paginated(
+                json!({
+                    "kinds": [
+                        KIND_TRACKER_ISSUE,
+                        KIND_TRACKER_REVISION,
+                        KIND_TRACKER_COMMENT,
+                    ],
+                    "ids": ids,
+                }),
+                batch.len() as u32,
+            )
+            .await?;
+        for value in values {
+            let id = value
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| id.len() == 64 && id.chars().all(|ch| ch.is_ascii_hexdigit()))
+                .ok_or_else(|| {
+                    CliError::Other("relay returned an event without a valid id".into())
+                })?;
+            let id = id.to_ascii_lowercase();
+            if !ids.contains(&id) {
+                return Err(CliError::Other(format!(
+                    "relay returned unexpected event id {id} during cache repair query"
+                )));
+            }
+            present.insert(id);
+        }
+    }
+    Ok(present)
+}
+
+fn cache_repair_event_json(event: &Event) -> Value {
+    let parsed = parse_tracker_event(event, Utc::now().timestamp().max(0) as u64);
+    json!({
+        "event_id": event.id.to_hex(),
+        "kind": event.kind.as_u16(),
+        "created_at": event.created_at.as_secs(),
+        "issue_id": parsed.ok().map(|event| event.issue_id),
+    })
+}
+
+async fn cmd_repair_cache(
+    client: &BuzzClient,
+    workspace: Option<String>,
+    cache_file: Option<PathBuf>,
+    apply: bool,
+) -> Result<(), CliError> {
+    let workspace_id = parse_workspace(workspace)?;
+    let path = cache_file.unwrap_or(cache_path(workspace_id)?);
+    let cache = read_cache(&path, workspace_id)?;
+    let candidates =
+        validated_cache_repair_events(&cache, workspace_id, Utc::now().timestamp().max(0) as u64)?;
+    let present_before = relay_tracker_event_ids(client, &candidates).await?;
+    let missing: Vec<Event> = candidates
+        .iter()
+        .filter(|event| !present_before.contains(&event.id.to_hex()))
+        .cloned()
+        .collect();
+
+    if !apply {
+        println!(
+            "{}",
+            json!({
+                "accepted": true,
+                "operation": "track.repair-cache",
+                "dry_run": true,
+                "workspace_id": workspace_id,
+                "replay_scope": {
+                    "community_id": workspace_id,
+                    "kinds": [
+                        KIND_TRACKER_ISSUE,
+                        KIND_TRACKER_REVISION,
+                        KIND_TRACKER_COMMENT,
+                    ],
+                },
+                "cache_file": path,
+                "cached_tracker_events": candidates.len(),
+                "relay_present_events": present_before.len(),
+                "missing_events": missing.iter().map(cache_repair_event_json).collect::<Vec<_>>(),
+                "missing_count": missing.len(),
+                "replayed_count": 0,
+            })
+        );
+        return Ok(());
+    }
+
+    let mut replayed = Vec::with_capacity(missing.len());
+    for event in &missing {
+        submit_raw_event(client, event.clone()).await?;
+        replayed.push(event.id.to_hex());
+    }
+
+    let present_after = relay_tracker_event_ids(client, &candidates).await?;
+    let still_missing: Vec<Value> = candidates
+        .iter()
+        .filter(|event| !present_after.contains(&event.id.to_hex()))
+        .map(cache_repair_event_json)
+        .collect();
+    if !still_missing.is_empty() {
+        return Err(CliError::Other(format!(
+            "Tracker cache repair verification failed; {} event(s) are still missing",
+            still_missing.len()
+        )));
+    }
+
+    println!(
+        "{}",
+        json!({
+            "accepted": true,
+            "operation": "track.repair-cache",
+            "dry_run": false,
+            "workspace_id": workspace_id,
+            "replay_scope": {
+                "community_id": workspace_id,
+                "kinds": [
+                    KIND_TRACKER_ISSUE,
+                    KIND_TRACKER_REVISION,
+                    KIND_TRACKER_COMMENT,
+                ],
+            },
+            "cache_file": path,
+            "cached_tracker_events": candidates.len(),
+            "relay_present_events_before": present_before.len(),
+            "missing_count": missing.len(),
+            "replayed_event_ids": replayed,
+            "replayed_count": replayed.len(),
+            "verified_present_events": present_after.len(),
+            "still_missing_events": still_missing,
+        })
+    );
+    Ok(())
 }
 
 async fn workspace_membership(client: &BuzzClient, workspace_id: Uuid) -> Result<Value, CliError> {
@@ -3483,6 +3679,11 @@ pub async fn dispatch(
             )
             .await
         }
+        TrackCmd::RepairCache {
+            workspace,
+            cache_file,
+            apply,
+        } => cmd_repair_cache(client, workspace, cache_file, apply).await,
         TrackCmd::Board {
             filters,
             group_by,
@@ -3705,6 +3906,116 @@ mod tests {
         write_cache(&path, &cache).unwrap();
         let loaded = read_cache(&path, workspace).unwrap();
         assert_eq!(loaded.cursor, cache.cursor);
+    }
+
+    fn repair_root_event(workspace: Uuid, created_at: u64) -> Event {
+        let keys = Keys::generate();
+        let issue_id = Uuid::new_v4();
+        let root = IssueRoot {
+            v: TRACKER_VERSION,
+            op: "create".into(),
+            issue_id,
+            identifier: format!("T-{}", issue_id.simple()),
+            title: "Restore repair fixture".into(),
+            body: String::new(),
+            status: IssueStatus::Todo,
+            priority: None,
+            assignee: None,
+            project_id: None,
+            due: None,
+            estimate_minutes: None,
+            home_channel_id: Some(workspace),
+            source_event_id: None,
+            workflow: "default-v1".into(),
+            labels: vec![],
+            external_refs: vec![],
+            request_id: Some(issue_id),
+            import: None,
+        };
+        build_tracker_issue(workspace, &root)
+            .unwrap()
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn cache_repair_selects_valid_tracker_events_in_replay_order() {
+        let workspace = Uuid::new_v4();
+        let later = repair_root_event(workspace, 200);
+        let earlier = repair_root_event(workspace, 100);
+        let unrelated = EventBuilder::new(Kind::Custom(1), "not Tracker")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let cache = CachedProjection {
+            workspace_id: Some(workspace),
+            cursor: None,
+            events: vec![later.clone(), unrelated, earlier.clone()],
+        };
+        let selected = validated_cache_repair_events(&cache, workspace, 300).unwrap();
+        assert_eq!(selected, vec![earlier, later]);
+    }
+
+    #[test]
+    fn cache_repair_orders_parent_before_child_when_timestamps_tie() {
+        let workspace = Uuid::new_v4();
+        let root = repair_root_event(workspace, 100);
+        let revision = IssueRevision {
+            v: TRACKER_VERSION,
+            op: "revise".into(),
+            issue_id: parse_tracker_event(&root, 200).unwrap().issue_id,
+            root_event: root.id.to_hex(),
+            parent_event: root.id.to_hex(),
+            revision: 1,
+            set: RevisionSet {
+                body: Some("restored".into()),
+                ..RevisionSet::default()
+            },
+            clear: vec![],
+            relations: SetOperations::default(),
+            external_refs: SetOperations::default(),
+            reason: None,
+            request_id: Some(Uuid::new_v4()),
+            import: None,
+        };
+        let child = build_tracker_revision(workspace, &revision)
+            .unwrap()
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let cache = CachedProjection {
+            workspace_id: Some(workspace),
+            cursor: None,
+            events: vec![child.clone(), root.clone()],
+        };
+        let selected = validated_cache_repair_events(&cache, workspace, 200).unwrap();
+        assert_eq!(selected, vec![root, child]);
+    }
+
+    #[test]
+    fn cache_repair_rejects_cross_workspace_tracker_events() {
+        let workspace = Uuid::new_v4();
+        let event = repair_root_event(Uuid::new_v4(), 100);
+        let cache = CachedProjection {
+            workspace_id: Some(workspace),
+            cursor: None,
+            events: vec![event],
+        };
+        let error = validated_cache_repair_events(&cache, workspace, 200).unwrap_err();
+        assert!(error.to_string().contains("belongs to workspace"));
+    }
+
+    #[test]
+    fn cache_repair_rejects_tampered_tracker_events() {
+        let workspace = Uuid::new_v4();
+        let mut event = repair_root_event(workspace, 100);
+        event.content.push_str("tampered");
+        let cache = CachedProjection {
+            workspace_id: Some(workspace),
+            cursor: None,
+            events: vec![event],
+        };
+        assert!(validated_cache_repair_events(&cache, workspace, 200).is_err());
     }
 
     #[test]
