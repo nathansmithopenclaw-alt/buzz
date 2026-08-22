@@ -1989,6 +1989,17 @@ pub async fn ingest_event(
     result
 }
 
+fn timestamp_is_acceptable(now: u64, event_ts: u64, restore_max_age_secs: Option<u32>) -> bool {
+    if event_ts > now {
+        event_ts - now <= crate::config::DEFAULT_MAX_TIMESTAMP_DRIFT_SECS
+    } else {
+        now - event_ts
+            <= restore_max_age_secs
+                .map(u64::from)
+                .unwrap_or(crate::config::DEFAULT_MAX_TIMESTAMP_DRIFT_SECS)
+    }
+}
+
 async fn ingest_event_inner(
     state: &Arc<AppState>,
     tracer: &Arc<dyn buzz_conformance::Tracer>,
@@ -2053,10 +2064,10 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
-    let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    let now_secs = now.max(0) as u64;
+    let event_ts = event.created_at.as_secs();
+    if !timestamp_is_acceptable(now_secs, event_ts, state.config.restore_ingest_max_age_secs) {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -4232,6 +4243,21 @@ mod tests {
     #[test]
     fn not_before_accepts_zero() {
         assert_eq!(validate_not_before("0"), Ok(0));
+    }
+
+    #[test]
+    fn restore_ingest_window_only_expands_past_age() {
+        let now = 1_800_000_000;
+
+        assert!(timestamp_is_acceptable(now, now - 900, None));
+        assert!(!timestamp_is_acceptable(now, now - 901, None));
+        assert!(timestamp_is_acceptable(now, now - 172_800, Some(259_200)));
+        assert!(!timestamp_is_acceptable(now, now - 259_201, Some(259_200)));
+        assert!(timestamp_is_acceptable(now, now + 900, Some(259_200)));
+        assert!(
+            !timestamp_is_acceptable(now, now + 901, Some(259_200)),
+            "restore mode must never widen the future-event limit"
+        );
     }
 
     #[test]

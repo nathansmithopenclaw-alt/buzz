@@ -107,7 +107,23 @@ buzz track repair-cache \
 ```
 
 Review `replay_scope` and `missing_events`, then replay the exact signed events
-through normal relay ingest with `--apply`:
+through normal relay ingest with `--apply`. If the events are more than 15
+minutes old, first restart the relay for a dedicated recovery window with a
+past-age limit large enough to include the oldest missing event:
+
+```bash
+BUZZ_RESTORE_INGEST_MAX_AGE_SECS=259200 buzz-relay
+```
+
+The relay emits `RESTORE INGEST WINDOW ACTIVE` at startup. The override expands
+only the maximum past age; signature, kind, size, authenticated identity,
+community/workspace scope, parent, and future-timestamp validation remain
+unchanged. It also expands the matching commit-time database floor and forces
+all reads to the writer for the window; configured read replicas are not used.
+While it is active, its blast radius is every community served by that relay
+process, so do not admit unrelated writes during the recovery window.
+
+Then apply the replay:
 
 ```bash
 buzz track repair-cache \
@@ -121,7 +137,9 @@ are skipped, any failure stops the run, and a final relay query must prove that
 every cached Tracker event is present. Run the command once per independently
 retained cache because one client may not have observed every workspace event.
 Keep the caches until a fresh-cache `buzz track get` succeeds for the restored
-issues and a new revision is accepted.
+issues and a new revision is accepted. Immediately restart the relay without
+`BUZZ_RESTORE_INGEST_MAX_AGE_SECS`, confirm the active-window warning is absent,
+and run the cache comparison again to prove no retained events remain missing.
 
 ## Project limitations
 
