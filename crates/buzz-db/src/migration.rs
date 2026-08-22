@@ -2488,7 +2488,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("apply renumbered community-host migration");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(32));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(33));
         assert_t6_fold_objects(&pool).await;
         let mapped: uuid::Uuid = sqlx::query_scalar(
             "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
@@ -2542,7 +2542,7 @@ mod tests {
             .expect("move community hosts to 32 and apply upstream error-code version 31");
         assert_eq!(
             applied_versions(&pool).await,
-            (1_i64..=32).collect::<Vec<_>>()
+            (1_i64..=33).collect::<Vec<_>>()
         );
         let descriptions: Vec<(i64, String)> = sqlx::query_as(
             "SELECT version, description FROM _sqlx_migrations WHERE version IN (31, 32) ORDER BY version",
@@ -2603,7 +2603,7 @@ mod tests {
             .expect("move community hosts to 32 and apply upstream 29-31");
         assert_eq!(
             applied_versions(&pool).await,
-            (1_i64..=32).collect::<Vec<_>>()
+            (1_i64..=33).collect::<Vec<_>>()
         );
         assert_t6_fold_objects(&pool).await;
         let mapped: uuid::Uuid = sqlx::query_scalar(
@@ -2817,7 +2817,7 @@ mod tests {
             .expect("move community hosts to 32 and apply upstream 27-31");
         assert_eq!(
             applied_versions(&pool).await,
-            (1_i64..=32).collect::<Vec<_>>()
+            (1_i64..=33).collect::<Vec<_>>()
         );
         assert_t6_fold_objects(&pool).await;
     }
