@@ -65,6 +65,112 @@ test("Dispatch shows a retrying state and recovers from a rate-limited history p
   await expect(page.getByTestId("dispatch-new-issue")).toBeEnabled();
 });
 
+test("Dispatch merges a live revision without refetching cold history", async ({
+  page,
+}) => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const issueId = "22222222-2222-4222-8222-222222222222";
+  const context: DispatchContext = {
+    issues: [],
+    activity: [],
+    comments: [],
+    linkedTasks: [],
+    projects: [],
+    diagnostics: [],
+    taskDiagnostics: [],
+    viewerRole: "maintainer",
+    sectionErrors: { comments: null, projects: null, tasks: null },
+    snapshotAt: new Date().toISOString(),
+  };
+  await installMockBridge(
+    page,
+    {
+      dispatch: {
+        workspace: { id: workspaceId, name: "Dispatch Test" },
+        context,
+      },
+    },
+    { seedPreviewFeatures: true },
+  );
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-dispatch-view").click();
+  await expect(page.getByTestId("dispatch-new-issue")).toBeEnabled();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_COMMANDS__?.filter(
+            (command) => command === "fold_tracker_context",
+          ).length ?? 0,
+      ),
+    )
+    .toBe(1);
+
+  const liveContext: DispatchContext = {
+    ...context,
+    issues: [
+      {
+        streamId: workspaceId,
+        issueId,
+        rootEvent: "1".repeat(64),
+        rootCreatedAt: 100,
+        tipEvent: "2".repeat(64),
+        tipCreatedAt: 101,
+        revision: 1,
+        enteredStatusAt: 101,
+        identifier: "D-live",
+        title: "Incremental revision reached the board",
+        body: "Live projection fixture",
+        status: "in_progress",
+        priority: "P1",
+        assignee: null,
+        projectId: null,
+        due: null,
+        estimateMinutes: null,
+        homeChannelId: null,
+        workflow: "default",
+        labels: ["live"],
+        externalRefs: [],
+        relations: [],
+      },
+    ],
+    snapshotAt: new Date().toISOString(),
+  };
+  await page.evaluate(
+    ({ workspaceId, liveContext }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_DISPATCH_EVENT__?.({
+        workspaceId,
+        context: liveContext,
+        event: {
+          id: "2".repeat(64),
+          pubkey: "a".repeat(64),
+          created_at: 101,
+          kind: 40021,
+          tags: [["h", workspaceId]],
+          content: JSON.stringify({ issue_id: liveContext.issues[0].issueId }),
+          sig: "b".repeat(128),
+        },
+      });
+    },
+    { workspaceId, liveContext },
+  );
+
+  await expect(
+    page.getByText("Incremental revision reached the board"),
+  ).toBeVisible();
+  const foldCounts = await page.evaluate(() => ({
+    cold:
+      window.__BUZZ_E2E_COMMANDS__?.filter(
+        (command) => command === "fold_tracker_context",
+      ).length ?? 0,
+    incremental:
+      window.__BUZZ_E2E_COMMANDS__?.filter(
+        (command) => command === "fold_tracker_context_incremental",
+      ).length ?? 0,
+  }));
+  expect(foldCounts).toEqual({ cold: 1, incremental: 1 });
+});
+
 test("New Issue creates a revision-zero issue visible in Board, List, and Triage", async ({
   page,
 }) => {

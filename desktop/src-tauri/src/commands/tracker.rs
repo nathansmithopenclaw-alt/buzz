@@ -6,7 +6,127 @@ use buzz_sdk_pkg::tracker::{
 use chrono::{DateTime, Utc};
 use nostr::{Event, PublicKey};
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
+use tauri::State;
 use uuid::Uuid;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TrackerFoldCacheKey {
+    workspace_id: String,
+    managed_signer: String,
+}
+
+#[derive(Clone, Debug)]
+struct TrackerFoldCacheEntry {
+    events: BTreeMap<String, Value>,
+    task_events: BTreeMap<String, Value>,
+    membership_event: Value,
+}
+
+/// Rust-owned raw event history backing incremental Dispatch folds.
+///
+/// The renderer may submit new signed events, but it never owns or mutates the
+/// canonical projection. Every incremental result is rebuilt by the same SDK
+/// fold as a cold load. Entries are cleared when `apply_workspace` changes the
+/// active community so identical workspace UUIDs cannot share history.
+#[derive(Default)]
+pub(crate) struct TrackerFoldCache {
+    entries: Mutex<HashMap<TrackerFoldCacheKey, TrackerFoldCacheEntry>>,
+}
+
+fn cache_key(workspace_id: &str, managed_signer: &str) -> Result<TrackerFoldCacheKey, String> {
+    let workspace_id = workspace_id
+        .parse::<Uuid>()
+        .map_err(|error| format!("invalid Tracker workspace UUID: {error}"))?
+        .to_string();
+    let managed_signer = PublicKey::parse(managed_signer)
+        .map_err(|error| format!("invalid Tracker managed signer: {error}"))?
+        .to_hex();
+    Ok(TrackerFoldCacheKey {
+        workspace_id,
+        managed_signer,
+    })
+}
+
+fn raw_event_key(raw: &Value) -> String {
+    raw.get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(|id| format!("id:{id}"))
+        .unwrap_or_else(|| format!("raw:{raw}"))
+}
+
+fn index_raw_events(events: Vec<Value>) -> BTreeMap<String, Value> {
+    events
+        .into_iter()
+        .map(|event| (raw_event_key(&event), event))
+        .collect()
+}
+
+fn merge_raw_events(target: &mut BTreeMap<String, Value>, events: Vec<Value>) {
+    for event in events {
+        target.insert(raw_event_key(&event), event);
+    }
+}
+
+impl TrackerFoldCache {
+    pub(crate) fn clear(&self) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        entries.clear();
+    }
+
+    fn seed(
+        &self,
+        key: TrackerFoldCacheKey,
+        events: Vec<Value>,
+        task_events: Vec<Value>,
+        membership_event: Value,
+    ) -> Result<(), String> {
+        self.entries
+            .lock()
+            .map_err(|error| error.to_string())?
+            .insert(
+                key,
+                TrackerFoldCacheEntry {
+                    events: index_raw_events(events),
+                    task_events: index_raw_events(task_events),
+                    membership_event,
+                },
+            );
+        Ok(())
+    }
+
+    fn fold_incremental(
+        &self,
+        key: &TrackerFoldCacheKey,
+        events: Vec<Value>,
+        task_events: Vec<Value>,
+        snapshot_at: u64,
+    ) -> Result<Value, String> {
+        let mut entries = self.entries.lock().map_err(|error| error.to_string())?;
+        let cached = entries.get(key).ok_or_else(|| {
+            "incremental Tracker fold has no cold-load history; refresh the workspace".to_string()
+        })?;
+        let mut merged = cached.clone();
+        merge_raw_events(&mut merged.events, events);
+        merge_raw_events(&mut merged.task_events, task_events);
+
+        let folded = fold_tracker_context_values(
+            merged.events.values().cloned().collect(),
+            merged.task_events.values().cloned().collect(),
+            merged.membership_event.clone(),
+            &key.workspace_id,
+            &key.managed_signer,
+            snapshot_at,
+        )?;
+        entries.insert(key.clone(), merged);
+        Ok(folded)
+    }
+}
 
 fn authorization_from_membership(event: &Event, managed_signer: &str) -> TrackerAuthorization {
     let mut roles = vec![(event.pubkey.to_hex(), TrackerRole::Maintainer)];
@@ -316,15 +436,32 @@ pub fn fold_tracker_context(
     workspace_id: String,
     managed_signer: String,
     snapshot_at: u64,
+    cache: State<'_, TrackerFoldCache>,
 ) -> Result<Value, String> {
-    fold_tracker_context_values(
-        events,
-        task_events,
-        membership_event,
+    let key = cache_key(&workspace_id, &managed_signer)?;
+    let folded = fold_tracker_context_values(
+        events.clone(),
+        task_events.clone(),
+        membership_event.clone(),
         &workspace_id,
         &managed_signer,
         snapshot_at,
-    )
+    )?;
+    cache.seed(key, events, task_events, membership_event)?;
+    Ok(folded)
+}
+
+#[tauri::command]
+pub fn fold_tracker_context_incremental(
+    events: Vec<Value>,
+    task_events: Vec<Value>,
+    workspace_id: String,
+    managed_signer: String,
+    snapshot_at: u64,
+    cache: State<'_, TrackerFoldCache>,
+) -> Result<Value, String> {
+    let key = cache_key(&workspace_id, &managed_signer)?;
+    cache.fold_incremental(&key, events, task_events, snapshot_at)
 }
 
 #[cfg(test)]
@@ -675,6 +812,98 @@ mod tests {
         assert!(diagnostics[0]["message"]
             .as_str()
             .is_some_and(|message| message.contains("member-project")));
+    }
+
+    #[test]
+    fn incremental_fold_merges_into_the_cached_sdk_history() {
+        let workspace_id = Uuid::new_v4();
+        let issue_id = Uuid::new_v4();
+        let member = Keys::generate();
+        let owner = Keys::generate();
+        let membership = membership(workspace_id, &member, &owner);
+        let root = build_tracker_issue(
+            workspace_id,
+            &IssueRoot {
+                v: TRACKER_VERSION,
+                op: "create".to_string(),
+                issue_id,
+                identifier: "D-incremental".to_string(),
+                title: "Cold title".to_string(),
+                body: String::new(),
+                status: IssueStatus::Backlog,
+                priority: None,
+                assignee: None,
+                project_id: None,
+                due: None,
+                estimate_minutes: None,
+                home_channel_id: None,
+                source_event_id: None,
+                workflow: "default".to_string(),
+                labels: Vec::new(),
+                external_refs: Vec::new(),
+                request_id: None,
+                import: None,
+            },
+        )
+        .expect("root builder")
+        .custom_created_at(nostr::Timestamp::from(100))
+        .sign_with_keys(&member)
+        .expect("signed root");
+        let revision = build_tracker_revision(
+            workspace_id,
+            &IssueRevision {
+                v: TRACKER_VERSION,
+                op: "revise".to_string(),
+                issue_id,
+                root_event: root.id.to_hex(),
+                parent_event: root.id.to_hex(),
+                revision: 1,
+                set: RevisionSet {
+                    title: Some("Live title".to_string()),
+                    status: Some(IssueStatus::InProgress),
+                    ..RevisionSet::default()
+                },
+                clear: Vec::new(),
+                relations: SetOperations::default(),
+                external_refs: SetOperations::default(),
+                reason: None,
+                request_id: None,
+                import: None,
+            },
+        )
+        .expect("revision builder")
+        .custom_created_at(nostr::Timestamp::from(101))
+        .sign_with_keys(&member)
+        .expect("signed revision");
+        let key =
+            cache_key(&workspace_id.to_string(), &member.public_key().to_hex()).expect("cache key");
+        let cache = TrackerFoldCache::default();
+        cache
+            .seed(
+                key.clone(),
+                vec![serde_json::to_value(root).expect("root JSON")],
+                Vec::new(),
+                serde_json::to_value(membership).expect("membership JSON"),
+            )
+            .expect("seed cache");
+
+        let actual = cache
+            .fold_incremental(
+                &key,
+                vec![serde_json::to_value(revision).expect("revision JSON")],
+                Vec::new(),
+                102,
+            )
+            .expect("incremental fold");
+
+        assert_eq!(actual["issues"].as_array().map(Vec::len), Some(1));
+        assert_eq!(actual["issues"][0]["revision"], 1);
+        assert_eq!(actual["issues"][0]["title"], "Live title");
+        assert_eq!(actual["issues"][0]["status"], "in_progress");
+        assert_eq!(actual["activity"].as_array().map(Vec::len), Some(2));
+        assert!(actual["activity"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| entry["revision"] == 1)));
     }
 
     #[test]

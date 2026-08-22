@@ -219,6 +219,7 @@ pub async fn apply_workspace(
         // Reset the Rust-side admission gate when switching workspace/community,
         // matching `resetRateLimitGate()` on the TS side (useCommunityInit.ts:38).
         crate::relay_admission::reset_gate_for_workspace_change();
+        app.state::<super::tracker::TrackerFoldCache>().clear();
 
         if let Some(keys) = parsed_keys {
             let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;

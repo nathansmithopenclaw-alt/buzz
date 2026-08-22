@@ -234,6 +234,7 @@ pub fn run() {
         .manage(archive::sync::ArchiveSyncState::default())
         .manage(native_relay_client::NativeRelayClient::default())
         .manage(observed_unread::ObservedUnreadStore::default())
+        .manage(commands::TrackerFoldCache::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
@@ -562,6 +563,7 @@ pub fn run() {
             get_git_identity,
             get_project_repo_snapshot,
             fold_tracker_context,
+            fold_tracker_context_incremental,
             get_project_repo_file_content,
             get_project_repo_diff,
             get_project_local_repo_diff,

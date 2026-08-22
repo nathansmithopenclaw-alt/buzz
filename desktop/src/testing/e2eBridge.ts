@@ -1237,6 +1237,11 @@ declare global {
       ownerPubkey: string;
       kind: number;
     }) => boolean;
+    __BUZZ_E2E_EMIT_MOCK_DISPATCH_EVENT__?: (input: {
+      workspaceId: string;
+      event: RelayEvent;
+      context: DispatchContext;
+    }) => void;
     __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
       channelName: string;
       content: string;
@@ -11081,6 +11086,14 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__ = (payload) =>
     emit("huddle-tts-speaker-level", payload);
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
+  window.__BUZZ_E2E_EMIT_MOCK_DISPATCH_EVENT__ = ({
+    workspaceId,
+    event,
+    context,
+  }) => {
+    mockDispatchContext = structuredClone(context);
+    emitMockLiveEvent(workspaceId, event);
+  };
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
   window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__ = async (input) => {
     await emit("media-upload-phase", input);
@@ -12097,6 +12110,15 @@ export function maybeInstallE2eTauriMocks() {
             diagnostics: [],
             taskDiagnostics: [],
           };
+        }
+        return structuredClone(mockDispatchContext);
+      }
+      case "fold_tracker_context_incremental": {
+        if (activeConfig?.mock?.dispatchFoldError) {
+          throw new Error(activeConfig.mock.dispatchFoldError);
+        }
+        if (!mockDispatchContext) {
+          throw new Error("No mocked Dispatch fold is configured.");
         }
         return structuredClone(mockDispatchContext);
       }

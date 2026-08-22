@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { relayClient } from "@/shared/api/relayClient";
@@ -9,10 +9,13 @@ import {
   parseRateLimitHint,
   waitForRateLimit,
 } from "@/shared/api/relayRateLimitGate";
-import { foldTrackerContext } from "@/shared/api/tauri";
-import { createTrailingDebounce } from "@/shared/lib/trailingDebounce";
+import {
+  foldTrackerContext,
+  foldTrackerContextIncremental,
+} from "@/shared/api/tracker";
 import type { RelayEvent } from "@/shared/api/types";
 import { createDispatchHistoryClient } from "./history";
+import { createDispatchLiveMerge, type DispatchLiveMerge } from "./liveMerge";
 import type { DispatchContext, DispatchWorkspace } from "./types";
 
 const TRACKER_KINDS = [40020, 40021, 40022, 40025];
@@ -173,10 +176,17 @@ export function useDispatchWorkspaces() {
 
 export function useDispatchContext(workspaceId: string | null) {
   const identity = useIdentityQuery();
+  const queryClient = useQueryClient();
   const [liveError, setLiveError] = React.useState<Error | null>(null);
   const [isRetrying, setIsRetrying] = React.useState(false);
+  const queryKey = [
+    "dispatch",
+    "context",
+    workspaceId,
+    identity.data?.pubkey,
+  ] as const;
   const query = useQuery({
-    queryKey: ["dispatch", "context", workspaceId, identity.data?.pubkey],
+    queryKey,
     queryFn: () =>
       loadContext(
         workspaceId ?? "",
@@ -185,18 +195,48 @@ export function useDispatchContext(workspaceId: string | null) {
       ),
     enabled: Boolean(workspaceId && identity.data?.pubkey),
   });
-  const refetchRef = React.useRef(query.refetch);
-  refetchRef.current = query.refetch;
+  const liveMergeRef = React.useRef<DispatchLiveMerge | null>(null);
   React.useEffect(() => {
     setLiveError(null);
     setIsRetrying(false);
-    if (!workspaceId) return;
+    const managedSigner = identity.data?.pubkey;
+    if (!workspaceId || !managedSigner) return;
+    const activeQueryKey = [
+      "dispatch",
+      "context",
+      workspaceId,
+      managedSigner,
+    ] as const;
     const disposers = new Set<() => void>();
     let cancelled = false;
-    const refresh = createTrailingDebounce(
-      () => void refetchRef.current({ cancelRefetch: false }),
-      LIVE_REFRESH_DEBOUNCE_MS,
-    );
+    const merger = createDispatchLiveMerge({
+      delayMs: LIVE_REFRESH_DEBOUNCE_MS,
+      fold: ({ events, taskEvents, snapshotAt }) =>
+        foldTrackerContextIncremental<Omit<DispatchContext, "sectionErrors">>({
+          events,
+          taskEvents,
+          workspaceId,
+          managedSigner,
+          snapshotAt,
+        }),
+      onFolded: (folded) => {
+        setLiveError(null);
+        queryClient.setQueryData<DispatchContext>(
+          activeQueryKey,
+          (current) => ({
+            ...folded,
+            sectionErrors: current?.sectionErrors ?? {
+              comments: null,
+              projects: null,
+              tasks: null,
+            },
+          }),
+        );
+      },
+      onError: (error) => setLiveError(asError(error)),
+    });
+    merger.setColdLoadReady(Boolean(queryClient.getQueryData(activeQueryKey)));
+    liveMergeRef.current = merger;
     const capture = (subscription: Promise<() => void>) => {
       void subscription
         .then((dispose) => {
@@ -210,13 +250,13 @@ export function useDispatchContext(workspaceId: string | null) {
     capture(
       relayClient.subscribeLive(
         { kinds: TRACKER_KINDS, "#h": [workspaceId], limit: 0 },
-        refresh.trigger,
+        merger.push,
       ),
     );
     capture(
       relayClient.subscribeLive(
         { kinds: [PROJECT_KIND], "#buzz-workspace": [workspaceId], limit: 0 },
-        refresh.trigger,
+        merger.push,
       ),
     );
     capture(
@@ -227,18 +267,22 @@ export function useDispatchContext(workspaceId: string | null) {
           "#h": [workspaceId],
           limit: 0,
         },
-        refresh.trigger,
+        merger.push,
       ),
     );
     return () => {
       cancelled = true;
-      refresh.cancel();
+      merger.cancel();
+      if (liveMergeRef.current === merger) liveMergeRef.current = null;
       disposers.forEach((dispose) => {
         dispose();
       });
       disposers.clear();
     };
-  }, [workspaceId]);
+  }, [identity.data?.pubkey, queryClient, workspaceId]);
+  React.useEffect(() => {
+    liveMergeRef.current?.setColdLoadReady(Boolean(query.data));
+  }, [query.data]);
   const data = query.data ?? {
     issues: [],
     activity: [],
