@@ -30,6 +30,7 @@ fn recovery_group_ids(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_audit_receipt_event(
     owner_keys: &Keys,
     source_hex: &str,
