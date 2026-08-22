@@ -9,5 +9,5 @@
   "built_from": "~/.buzz/REPOS/claude-agent-acp-fork via `npm pack`",
   "built_at": "2026-08-22T12:05:00Z",
   "built_by": "Ox (Smith Crafts Worker) <ox@smithcrafts.dev>",
-  "rebuild": "git -C ~/.buzz/REPOS/claude-agent-acp-fork checkout 5145251e && npm pack && shasum -a 256 agentclientprotocol-claude-agent-acp-0.70.0.tgz  # must equal tarball_sha256 above"
+  "rebuild": "git -C ~/.buzz/REPOS/claude-agent-acp-fork checkout 5145251e && npm ci && npm run build && npm pack && shasum -a 256 agentclientprotocol-claude-agent-acp-0.70.0.tgz  # must equal tarball_sha256 above. NOTE: the fork has prepublishOnly but no prepack, so `npm pack` alone from a clean clone packs WITHOUT dist/ \u2014 the build step is mandatory. Reproducibility verified byte-identical by Helm 2026-08-22."
 }
