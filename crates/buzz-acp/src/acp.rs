@@ -57,6 +57,46 @@ pub(crate) struct PendingBackgroundTasks {
     pub tasks: Vec<BackgroundTask>,
 }
 
+/// Consumer-side background-task monitoring mode (design v2.1 L2.1: four
+/// branches, one enum). Selected at `initialize` from the init `_meta`
+/// capability's presence, then refined by the per-session readiness object
+/// from `session/new`. Readiness changes flow ONLY from adapter-published
+/// snapshots — the consumer observes promotion, never performs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackgroundMode {
+    /// Init `_meta.backgroundTasks` absent (stock/unforked adapter): filtered
+    /// raw `_claude/sdkMessage` seam, exactly the verified 5eeeb3f8 path.
+    RawSeam,
+    /// Session readiness `unarmed`: loud operator notice already emitted; NO
+    /// raw fallback and no listening — falling back would recreate the
+    /// false-green this lane exists to kill.
+    Unarmed,
+    /// Session readiness `unconfirmed` (honest default for a configured CLI
+    /// that has not yet emitted): typed snapshots only, protection visibly
+    /// NOT confirmed.
+    UnconfirmedTyped,
+    /// Adapter snapshot carried `readiness: "confirmed"`: typed only, ignore
+    /// any raw lifecycle duplicates; full protection claims.
+    ConfirmedTyped,
+}
+
+impl BackgroundMode {
+    /// True when lifecycle state may be consumed at all (typed or raw).
+    pub(crate) fn is_listening(self) -> bool {
+        !matches!(self, BackgroundMode::Unarmed)
+    }
+
+    /// Human-readable monitoring state for logs and notices (L2.3).
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            BackgroundMode::RawSeam => "raw-seam",
+            BackgroundMode::Unarmed => "unarmed",
+            BackgroundMode::UnconfirmedTyped => "typed-unconfirmed",
+            BackgroundMode::ConfirmedTyped => "typed-confirmed",
+        }
+    }
+}
+
 /// Prefix goose uses when the adapter, rather than the model, synthesizes a
 /// terminal provider/runtime failure as an `agent_message_chunk`.
 const GOOSE_RUNTIME_FAILURE_PREFIX: &str = "Ran into this error:";
@@ -415,7 +455,10 @@ pub struct AcpClient {
     standard_adapter: Option<StandardAdapterKind>,
     /// True when initialize identified claude-agent-acp, whose session/new
     /// metadata can request filtered raw SDK lifecycle events.
-    claude_background_task_tracking: bool,
+    claude_adapter: bool,
+    /// Consumer-side monitoring mode: which lifecycle signal this client
+    /// trusts (raw seam, typed snapshots, or none), per BackgroundMode docs.
+    background_mode: BackgroundMode,
     /// Latest pending task set for each Claude session. Entries are removed on
     /// an empty `background_tasks_changed` update and bounded defensively.
     background_tasks: HashMap<String, SessionBackgroundTasks>,
@@ -810,7 +853,8 @@ impl AcpClient {
             turn_delivery_evidence: TurnDeliveryEvidence::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
-            claude_background_task_tracking: false,
+            claude_adapter: false,
+            background_mode: BackgroundMode::RawSeam,
             background_tasks: HashMap::new(),
         })
     }
@@ -867,12 +911,23 @@ impl AcpClient {
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
         let params = build_initialize_params();
         let result = self.send_request("initialize", params).await?;
-        self.claude_background_task_tracking = result
+        self.claude_adapter = result
             .get("agentInfo")
             .or_else(|| result.get("serverInfo"))
             .and_then(|info| info.get("name"))
             .and_then(serde_json::Value::as_str)
             .is_some_and(|name| name.eq_ignore_ascii_case(CLAUDE_AGENT_ACP_NAME));
+        // Track-A consumer selection (design v2.1 L2.1): the init capability is
+        // connection-scoped static. Present ⇒ fork-aware adapter ⇒ typed
+        // snapshots (session/new readiness refines below; until a snapshot
+        // carries "confirmed" this stays visibly unconfirmed). Absent ⇒ stock
+        // adapter ⇒ raw seam. Per-session readiness can narrow but never widen
+        // what init advertised.
+        self.background_mode = if result.pointer("/_meta/backgroundTasks").is_some() {
+            BackgroundMode::UnconfirmedTyped
+        } else {
+            BackgroundMode::RawSeam
+        };
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
@@ -933,10 +988,12 @@ impl AcpClient {
             // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
         }
-        if self.claude_background_task_tracking {
-            // Request only the lifecycle event buzz-acp consumes. Enabling all
-            // raw SDK traffic would duplicate the normal ACP stream and create
-            // an unbounded compatibility surface.
+        if self.claude_adapter && self.background_mode == BackgroundMode::RawSeam {
+            // Stock claude-agent-acp (no typed capability): request only the
+            // lifecycle event buzz-acp consumes. Enabling all raw SDK traffic
+            // would duplicate the normal ACP stream and create an unbounded
+            // compatibility surface. A fork-aware adapter never gets this —
+            // the typed path replaces it.
             params["_meta"]["claudeCode"]["emitRawSDKMessages"] = serde_json::json!([{
                 "type": "system",
                 "subtype": "background_tasks_changed"
@@ -947,6 +1004,56 @@ impl AcpClient {
             .as_str()
             .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
             .to_owned();
+        // Per-session readiness (design v2.1 L1.3/L2.1): refines the
+        // init-selected mode but never widens it. Unarmed fires the loud
+        // operator notice here; there is no raw or typed listening on that
+        // session, by contract.
+        match result
+            .pointer("/_meta/backgroundTasks/readiness")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("unarmed") => {
+                self.background_mode = BackgroundMode::Unarmed;
+                tracing::warn!(
+                    target: "acp::background",
+                    session_id,
+                    "UNARMED: adapter reports bundled-CLI fallback; task lifecycle events cannot be observed for this session"
+                );
+            }
+            Some("unconfirmed") => {
+                if self.background_mode != BackgroundMode::RawSeam {
+                    self.background_mode = BackgroundMode::UnconfirmedTyped;
+                }
+                tracing::info!(
+                    target: "acp::background",
+                    session_id,
+                    "monitoring state: {} (protection NOT confirmed until adapter observes a lifecycle emission)",
+                    self.background_mode.label()
+                );
+            }
+            Some("confirmed") => {
+                if self.background_mode != BackgroundMode::RawSeam {
+                    self.background_mode = BackgroundMode::ConfirmedTyped;
+                }
+                tracing::info!(
+                    target: "acp::background",
+                    session_id,
+                    "monitoring state: {}",
+                    self.background_mode.label()
+                );
+            }
+            Some(other) => tracing::warn!(
+                target: "acp::background",
+                session_id,
+                "unknown backgroundTasks readiness {other:?}; retaining conservative unconfirmed typed listening"
+            ),
+            None => tracing::info!(
+                target: "acp::background",
+                session_id,
+                "monitoring state: {}",
+                self.background_mode.label()
+            ),
+        }
         tracing::info!(target: "acp::session", "session created: {session_id}");
         Ok(SessionNewResponse {
             session_id,
@@ -2087,6 +2194,10 @@ impl AcpClient {
                 false
             }
             "session_info_update" => {
+                // Track-A: a fork-aware adapter publishes bounded background-task
+                // snapshots on this carrier (`_meta.backgroundTasks`). Parse is
+                // fail-closed: malformed input drops the whole snapshot.
+                self.handle_typed_background_snapshot(update);
                 // Both goose and buzz-agent emit `session_info_update` with
                 // `_meta.goose.activeRunId`: the id of the currently-active
                 // prompt run, or `null` when the run has cleared. Other agents
@@ -2134,7 +2245,95 @@ impl AcpClient {
         }
     }
 
+    /// Track-A typed path: consume a `session_info_update` snapshot carrying
+    /// `_meta.backgroundTasks` from a fork-aware adapter. Mirrors the raw
+    /// seam's bounded store exactly (same caps, same first_observed_at
+    /// preservation) but keys off the adapter-normalized camelCase shape and
+    /// OBSERVES readiness promotion instead of deriving any state locally.
+    fn handle_typed_background_snapshot(&mut self, update: &serde_json::Value) {
+        if self.background_mode == BackgroundMode::RawSeam {
+            return; // stock adapter: this carrier carries no backgroundTasks
+        }
+        let Some(snapshot) = update.pointer("/_meta/backgroundTasks") else {
+            return; // ordinary title/updatedAt session_info_update
+        };
+        let Some(readiness) = snapshot
+            .get("readiness")
+            .and_then(serde_json::Value::as_str)
+        else {
+            tracing::warn!(target: "acp::background", "typed background snapshot missing readiness — dropping entire snapshot (fail-closed)");
+            return;
+        };
+        let Some(session_id) = update
+            .get("sessionId")
+            .or_else(|| update.get("session_id"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            tracing::warn!(target: "acp::background", "typed background snapshot missing sessionId — dropping entire snapshot");
+            return;
+        };
+        // Observe the adapter's promotion; never promote or demote locally.
+        match (self.background_mode, readiness) {
+            (BackgroundMode::UnconfirmedTyped, "confirmed") => {
+                self.background_mode = BackgroundMode::ConfirmedTyped;
+                tracing::info!(target: "acp::background", session_id, "adapter promoted monitoring to confirmed");
+            }
+            (_, other) => {
+                tracing::debug!(target: "acp::background", session_id, "snapshot readiness {other:?} observed in mode {}", self.background_mode.label())
+            }
+        }
+        if !self.background_mode.is_listening() {
+            return;
+        }
+        let Some(raw_tasks) = snapshot.get("tasks").and_then(serde_json::Value::as_array) else {
+            // Malformed input must not clear a known-pending entry.
+            tracing::warn!(target: "acp::background", session_id, "typed snapshot missing tasks array — dropping entire snapshot");
+            return;
+        };
+        if raw_tasks.is_empty() {
+            self.background_tasks.remove(session_id);
+            tracing::info!(target: "acp::background", session_id, "background tasks cleared (typed)");
+            return;
+        }
+        let tasks = raw_tasks
+            .iter()
+            .take(MAX_BACKGROUND_TASKS_PER_SESSION)
+            .map(|task| BackgroundTask {
+                task_id: bounded_background_field(task.get("taskId"), "unknown"),
+                task_type: bounded_background_field(task.get("taskType"), "unknown"),
+                description: bounded_background_field(task.get("description"), "background task"),
+            })
+            .collect::<Vec<_>>();
+        if !self.background_tasks.contains_key(session_id)
+            && self.background_tasks.len() >= MAX_BACKGROUND_TASK_SESSIONS
+        {
+            if let Some(oldest) = self
+                .background_tasks
+                .iter()
+                .min_by_key(|(_, state)| state.first_observed_at)
+                .map(|(id, _)| id.clone())
+            {
+                self.background_tasks.remove(&oldest);
+                tracing::warn!(target: "acp::background", evicted_session_id = oldest, "background task session bound reached; evicted oldest entry");
+            }
+        }
+        let now = tokio::time::Instant::now();
+        self.background_tasks
+            .entry(session_id.to_owned())
+            .and_modify(|state| state.tasks.clone_from(&tasks))
+            .or_insert(SessionBackgroundTasks {
+                first_observed_at: now,
+                tasks,
+            });
+    }
+
     fn handle_claude_sdk_message(&mut self, msg: &serde_json::Value) {
+        // Track-A: raw seam is only trusted on stock adapters. Typed-mode
+        // sessions never requested it, and unarmed sessions must not fall
+        // back — ignoring here keeps a stray frame from re-arming a dead path.
+        if !self.background_mode.is_listening() || self.background_mode != BackgroundMode::RawSeam {
+            return;
+        }
         let Some(message) = msg.pointer("/params/message") else {
             tracing::warn!(target: "acp::background", "_claude/sdkMessage missing params.message");
             return;
