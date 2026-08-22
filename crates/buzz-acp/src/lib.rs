@@ -3368,6 +3368,29 @@ async fn tokio_main() -> Result<()> {
                             )
                             .await;
                         }
+                        // L3.3 unconfirmed-teardown case: sessions whose
+                        // monitoring never got confirmed (no lifecycle emission
+                        // observed) must say so AT teardown even with an empty
+                        // tracked set — silence here would read as protection.
+                        {
+                            let unconfirmed: Vec<&'static str> = pool
+                                .agents_mut()
+                                .iter()
+                                .flatten()
+                                .map(|agent| agent.acp.background_mode_label())
+                                .filter(|label| {
+                                    matches!(*label, "typed-unconfirmed" | "raw-seam")
+                                })
+                                .collect();
+                            if !unconfirmed.is_empty() {
+                                tracing::warn!(
+                                    target: "acp::background",
+                                    failure_shape = "background_task_monitoring_unconfirmed",
+                                    states = ?unconfirmed,
+                                    "idle teardown with task monitoring active-but-UNCONFIRMED; a real background task may have gone untracked"
+                                );
+                            }
+                        }
                         tracing::info!(
                             idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
                             "idle pool sleep bound reached — tearing pool back to lazy state"

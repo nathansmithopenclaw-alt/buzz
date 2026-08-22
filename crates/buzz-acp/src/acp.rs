@@ -2413,6 +2413,11 @@ impl AcpClient {
         );
     }
 
+    /// Current consumer-side monitoring label, for teardown-time surfacing.
+    pub(crate) fn background_mode_label(&self) -> &'static str {
+        self.background_mode.label()
+    }
+
     pub(crate) fn pending_background_tasks(&self) -> Vec<PendingBackgroundTasks> {
         self.background_tasks
             .iter()
