@@ -2201,7 +2201,11 @@ impl AcpClient {
                 // Track-A: a fork-aware adapter publishes bounded background-task
                 // snapshots on this carrier (`_meta.backgroundTasks`). Parse is
                 // fail-closed: malformed input drops the whole snapshot.
-                self.handle_typed_background_snapshot(update);
+                self.handle_typed_background_snapshot(
+                    update,
+                    msg.pointer("/params/sessionId")
+                        .and_then(serde_json::Value::as_str),
+                );
                 // Both goose and buzz-agent emit `session_info_update` with
                 // `_meta.goose.activeRunId`: the id of the currently-active
                 // prompt run, or `null` when the run has cleared. Other agents
@@ -2254,7 +2258,11 @@ impl AcpClient {
     /// seam's bounded store exactly (same caps, same first_observed_at
     /// preservation) but keys off the adapter-normalized camelCase shape and
     /// OBSERVES readiness promotion instead of deriving any state locally.
-    fn handle_typed_background_snapshot(&mut self, update: &serde_json::Value) {
+    fn handle_typed_background_snapshot(
+        &mut self,
+        update: &serde_json::Value,
+        outer_session_id: Option<&str>,
+    ) {
         if self.background_mode == BackgroundMode::RawSeam {
             return; // stock adapter: this carrier carries no backgroundTasks
         }
@@ -2268,10 +2276,9 @@ impl AcpClient {
             tracing::warn!(target: "acp::background", "typed background snapshot missing readiness — dropping entire snapshot (fail-closed)");
             return;
         };
-        let Some(session_id) = update
-            .get("sessionId")
-            .or_else(|| update.get("session_id"))
-            .and_then(serde_json::Value::as_str)
+        let Some(session_id) = outer_session_id
+            .or_else(|| update.get("sessionId").and_then(serde_json::Value::as_str))
+            .or_else(|| update.get("session_id").and_then(serde_json::Value::as_str))
         else {
             tracing::warn!(target: "acp::background", "typed background snapshot missing sessionId — dropping entire snapshot");
             return;
@@ -4534,6 +4541,113 @@ mod tests {
                 }
             }
         })
+    }
+
+    /// Track-A: full session/update frame carrying a fork adapter's
+    /// `_meta.backgroundTasks` snapshot on the session_info_update carrier.
+    fn typed_session_update(session_id: &str, snapshot: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "session_info_update",
+                    "_meta": { "backgroundTasks": snapshot }
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn typed_snapshot_stores_tasks_and_observes_promotion() {
+        let mut client = spawn_inert_client().await;
+        client.background_mode = BackgroundMode::UnconfirmedTyped;
+        client.handle_session_update(&typed_session_update(
+            "sess-t",
+            serde_json::json!({
+                "readiness": "unconfirmed",
+                "cli": {"source": "configured", "path": "/usr/bin/claude"},
+                "tasks": [{"taskId": "b1", "taskType": "local_bash", "kind": "shell", "description": "Run build"}]
+            }),
+        ));
+        let pending = client.pending_background_tasks();
+        assert_eq!(pending.len(), 1, "typed task must be stored");
+        assert_eq!(pending[0].tasks[0].task_id, "b1");
+        assert_eq!(
+            pending[0].monitoring_state, "typed-unconfirmed",
+            "notice label must reflect unconfirmed state before promotion"
+        );
+        // Adapter publishes promotion; consumer observes only.
+        client.handle_session_update(&typed_session_update(
+            "sess-t",
+            serde_json::json!({"readiness": "confirmed", "tasks": []}),
+        ));
+        assert_eq!(client.background_mode, BackgroundMode::ConfirmedTyped);
+        assert!(
+            client.pending_background_tasks().is_empty(),
+            "empty tasks array is the only clear signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_snapshot_malformed_drops_whole_snapshot_not_state() {
+        let mut client = spawn_inert_client().await;
+        client.background_mode = BackgroundMode::UnconfirmedTyped;
+        client.handle_session_update(&typed_session_update(
+            "sess-m",
+            serde_json::json!({"readiness": "unconfirmed", "tasks": [
+                {"taskId": "keep-1", "taskType": "local_bash", "description": "Keep me"}
+            ]}),
+        ));
+        assert_eq!(client.pending_background_tasks().len(), 1);
+        // Missing tasks array: fail-closed — never normalizes to a clear.
+        client.handle_session_update(&typed_session_update(
+            "sess-m",
+            serde_json::json!({"readiness": "unconfirmed"}),
+        ));
+        // Missing readiness entirely: also dropped.
+        client.handle_session_update(&typed_session_update(
+            "sess-m",
+            serde_json::json!({"tasks": []}),
+        ));
+        assert_eq!(
+            client.pending_background_tasks().len(),
+            1,
+            "malformed snapshots must not clear known-pending work"
+        );
+    }
+
+    #[tokio::test]
+    async fn unarmed_and_typed_modes_ignore_raw_seam_frames() {
+        let mut client = spawn_inert_client().await;
+        for mode in [BackgroundMode::Unarmed, BackgroundMode::ConfirmedTyped] {
+            client.background_mode = mode;
+            client.handle_claude_sdk_message(&background_tasks_message(
+                "sess-r",
+                serde_json::json!([{"task_id": "raw-1", "task_type": "local_bash"}]),
+            ));
+        }
+        assert!(
+            client.pending_background_tasks().is_empty(),
+            "raw seam must not feed typed/unarmed sessions (no fallback)"
+        );
+    }
+
+    #[tokio::test]
+    async fn unarmed_mode_ignores_even_typed_snapshots() {
+        let mut client = spawn_inert_client().await;
+        client.background_mode = BackgroundMode::Unarmed;
+        client.handle_session_update(&typed_session_update(
+            "sess-u",
+            serde_json::json!({"readiness": "unarmed", "tasks": [
+                {"taskId": "ghost", "taskType": "local_bash"}
+            ]}),
+        ));
+        assert!(
+            client.pending_background_tasks().is_empty(),
+            "unarmed sessions listen to nothing by contract"
+        );
     }
 
     #[tokio::test]
