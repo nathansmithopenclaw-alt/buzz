@@ -112,12 +112,16 @@ type MutationDependencies = {
   fetchRequestEvents: (streamId: string) => Promise<RelayEvent[]>;
 };
 
+// Request-id matching for issue-create idempotency. Includes 40025 so a
+// request-id used by project activity cannot be reused as an issue root.
+export const TRACKER_REQUEST_MATCH_KINDS = [40020, 40021, 40022, 40025, 30621];
+
 async function fetchRequestEvents(streamId: string): Promise<RelayEvent[]> {
   const events = new Map<string, RelayEvent>();
   let until: number | undefined;
   for (;;) {
     const page = await relayClient.fetchEvents({
-      kinds: [40020, 40021, 40022, 40025, 30621],
+      kinds: TRACKER_REQUEST_MATCH_KINDS,
       "#h": [streamId],
       limit: 500,
       ...(until === undefined ? {} : { until }),
@@ -126,7 +130,7 @@ async function fetchRequestEvents(streamId: string): Promise<RelayEvent[]> {
     if (page.length < 500) return [...events.values()];
     const oldest = Math.min(...page.map((event) => event.created_at));
     const boundary = await relayClient.fetchEvents({
-      kinds: [40020, 40021, 40022, 40025, 30621],
+      kinds: TRACKER_REQUEST_MATCH_KINDS,
       "#h": [streamId],
       since: oldest,
       until: oldest,
