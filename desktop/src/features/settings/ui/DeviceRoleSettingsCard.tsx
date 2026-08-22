@@ -1,3 +1,5 @@
+import * as React from "react";
+
 import { REMOTE_CONTROL_FEATURE_ID } from "@/features/agents/lib/remoteControlFeature";
 import {
   updateFleetVisibilityRole,
@@ -9,7 +11,29 @@ import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 export function DeviceRoleSettingsCard() {
   const experimentEnabled = useFeatureEnabled(REMOTE_CONTROL_FEATURE_ID);
   const settings = useFleetVisibilitySettings();
+  const [pendingRole, setPendingRole] = React.useState<
+    "host" | "observer" | null
+  >(null);
+  const [error, setError] = React.useState<string | null>(null);
   if (!experimentEnabled || !settings?.enabled) return null;
+
+  const updateRole = async (role: "host" | "observer") => {
+    if (pendingRole || settings.role === role) return;
+    setPendingRole(role);
+    setError(null);
+    try {
+      await updateFleetVisibilityRole(role);
+    } catch (updateError) {
+      console.error("Failed to update device role:", updateError);
+      setError(
+        updateError instanceof Error
+          ? updateError.message
+          : "Could not update this device role.",
+      );
+    } finally {
+      setPendingRole(null);
+    }
+  };
 
   return (
     <SettingsOptionGroup title="This Mac">
@@ -20,8 +44,23 @@ export function DeviceRoleSettingsCard() {
             Hosts run agent processes on this Mac. Observers view and message
             the fleet without running agents locally.
           </p>
+          {pendingRole ? (
+            <p className="mt-1 text-xs text-muted-foreground" role="status">
+              {pendingRole === "observer"
+                ? "Stopping local agents and switching to Observer…"
+                : "Switching to Host…"}
+            </p>
+          ) : null}
+          {error ? (
+            <p className="mt-1 text-xs text-destructive" role="alert">
+              {error}
+            </p>
+          ) : null}
         </div>
-        <div className="flex rounded-lg border border-border/70 p-0.5">
+        <div
+          aria-busy={pendingRole !== null}
+          className="flex rounded-lg border border-border/70 p-0.5"
+        >
           {(["host", "observer"] as const).map((role) => (
             <button
               aria-pressed={settings.role === role}
@@ -31,11 +70,10 @@ export function DeviceRoleSettingsCard() {
                   : "rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted"
               }
               data-testid={`fleet-visibility-role-${role}`}
+              disabled={pendingRole !== null}
               key={role}
               onClick={() => {
-                void updateFleetVisibilityRole(role).catch((error) => {
-                  console.error("Failed to update device role:", error);
-                });
+                void updateRole(role);
               }}
               type="button"
             >
