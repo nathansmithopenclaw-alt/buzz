@@ -553,6 +553,13 @@ pub struct DbConfig {
     /// than the staleness gate never routes anyway, so a larger budget
     /// would only misrepresent the config.
     pub replica_read_max_age_ms: u64,
+    /// Temporary override for the commit-time channel-event age floor.
+    ///
+    /// `None` arms the normal [`replica_fence::CREATED_AT_FLOOR_SECS`]. A
+    /// larger value is only safe for a restore window with no read-replica
+    /// pool configured, because admitting older rows invalidates covered-page
+    /// routing until their WAL has replayed.
+    pub created_at_floor_override_secs: Option<u64>,
 }
 
 impl Default for DbConfig {
@@ -570,6 +577,7 @@ impl Default for DbConfig {
             max_lifetime_secs: 1800,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
+            created_at_floor_override_secs: None,
         }
     }
 }
@@ -706,6 +714,20 @@ impl Db {
     /// `buzz.created_at_floor` GUC — this is what makes the replica fence
     /// proof hold for every insert path that goes through this pool.
     pub async fn new(config: &DbConfig) -> Result<Self> {
+        if config
+            .created_at_floor_override_secs
+            .is_some_and(|floor| floor < replica_fence::CREATED_AT_FLOOR_SECS as u64)
+        {
+            return Err(DbError::InvalidData(format!(
+                "created_at floor override must be at least {} seconds",
+                replica_fence::CREATED_AT_FLOOR_SECS
+            )));
+        }
+        if config.created_at_floor_override_secs.is_some() && config.read_database_url.is_some() {
+            return Err(DbError::InvalidData(
+                "created_at floor override requires read_database_url to be unset".to_string(),
+            ));
+        }
         let pool = Self::connect_pool(config, &config.database_url).await?;
         let read_max_connections = config
             .read_max_connections
@@ -732,17 +754,20 @@ impl Db {
     /// isolation assertion must remain in this single closure. Registering a
     /// second hook replaces the first and silently disarms the floor trigger.
     async fn connect_pool(config: &DbConfig, url: &str) -> Result<PgPool> {
+        let created_at_floor_secs = config
+            .created_at_floor_override_secs
+            .unwrap_or(replica_fence::CREATED_AT_FLOOR_SECS as u64);
         let options = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-            .after_connect(|conn, _meta| {
+            .after_connect(move |conn, _meta| {
                 Box::pin(async move {
                     // `SET` cannot take bind parameters; `set_config` can.
                     sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
-                        .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
+                        .bind(created_at_floor_secs.to_string())
                         .execute(&mut *conn)
                         .await?;
                     let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
@@ -7688,6 +7713,43 @@ mod tests {
             read_budget_from_ms(10_000_000),
             Some(replica_fence::FENCE_STALENESS),
             "budgets above the staleness gate clamp to it"
+        );
+    }
+
+    #[tokio::test]
+    async fn created_at_floor_override_refuses_a_read_replica() {
+        let result = Db::new(&DbConfig {
+            read_database_url: Some("postgres://reader.invalid/buzz".to_string()),
+            created_at_floor_override_secs: Some(259_260),
+            ..DbConfig::default()
+        })
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(DbError::InvalidData(ref message))
+                    if message.contains("read_database_url to be unset")
+            ),
+            "restore floor must fail closed before opening a reader: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn created_at_floor_override_cannot_weaken_the_normal_guard() {
+        let result = Db::new(&DbConfig {
+            created_at_floor_override_secs: Some(959),
+            ..DbConfig::default()
+        })
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(DbError::InvalidData(ref message))
+                    if message.contains("at least 960 seconds")
+            ),
+            "restore floor must not weaken the normal commit guard: {result:?}"
         );
     }
 

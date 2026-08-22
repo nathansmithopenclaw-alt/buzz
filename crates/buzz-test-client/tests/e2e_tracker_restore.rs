@@ -5,6 +5,10 @@
 //! ```text
 //! cargo test -p buzz-test-client --test e2e_tracker_restore -- --ignored
 //! ```
+//!
+//! Run once against a normal relay (expects the aged replay to be rejected),
+//! then restart it with `BUZZ_RESTORE_INGEST_MAX_AGE_SECS=259200` and run with
+//! `BUZZ_E2E_EXPECT_RESTORE_INGEST=true` (expects restore-then-revise to pass).
 
 use std::time::Duration;
 
@@ -65,6 +69,9 @@ async fn retained_root_replay_restores_revision_writes() {
     let workspace_id = create_test_channel(&keys).await;
     let issue_id = Uuid::new_v4();
     let now = Timestamp::now().as_secs();
+    let aged_created_at = now.saturating_sub(172_800);
+    let expect_restore_ingest = std::env::var("BUZZ_E2E_EXPECT_RESTORE_INGEST")
+        .is_ok_and(|value| value == "true" || value == "1");
     let root = IssueRoot {
         v: TRACKER_VERSION,
         op: "create".into(),
@@ -88,7 +95,7 @@ async fn retained_root_replay_restores_revision_writes() {
     };
     let root_event = build_tracker_issue(workspace_id, &root)
         .expect("build root")
-        .custom_created_at(Timestamp::from(now.saturating_sub(2)))
+        .custom_created_at(Timestamp::from(aged_created_at))
         .sign_with_keys(&keys)
         .expect("sign root");
     let revision = IssueRevision {
@@ -111,7 +118,7 @@ async fn retained_root_replay_restores_revision_writes() {
     };
     let revision_event = build_tracker_revision(workspace_id, &revision)
         .expect("build revision")
-        .custom_created_at(Timestamp::from(now.saturating_sub(1)))
+        .custom_created_at(Timestamp::from(aged_created_at.saturating_add(1)))
         .sign_with_keys(&keys)
         .expect("sign revision");
 
@@ -124,6 +131,30 @@ async fn retained_root_replay_restores_revision_writes() {
         .await
         .expect("relay response before root replay");
     assert!(!before_restore.accepted, "orphan revision must be rejected");
+    if !expect_restore_ingest {
+        assert!(
+            before_restore
+                .message
+                .contains("event timestamp too far from server time"),
+            "normal relay must reject aged replay at the timestamp guard: {}",
+            before_restore.message
+        );
+
+        let root_without_window = client
+            .send_event(root_event)
+            .await
+            .expect("relay response for aged root without restore window");
+        assert!(!root_without_window.accepted);
+        assert!(
+            root_without_window
+                .message
+                .contains("event timestamp too far from server time"),
+            "unexpected aged root rejection: {}",
+            root_without_window.message
+        );
+        client.disconnect().await.expect("disconnect cleanly");
+        return;
+    }
     assert!(
         before_restore.message.contains("reply parent not found"),
         "unexpected orphan rejection: {}",

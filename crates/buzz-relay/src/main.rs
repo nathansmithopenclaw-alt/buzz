@@ -143,6 +143,12 @@ async fn main() -> anyhow::Result<()> {
         error!("Invalid configuration: {e}");
         anyhow::anyhow!("Configuration error: {e}")
     })?;
+    if let Some(max_age_secs) = config.restore_ingest_max_age_secs {
+        warn!(
+            max_age_secs,
+            "RESTORE INGEST WINDOW ACTIVE: past signed events within this age may be ingested; future timestamp limits and all other validation remain enforced; read-replica routing is forced off; remove BUZZ_RESTORE_INGEST_MAX_AGE_SECS and restart immediately after recovery"
+        );
+    }
     info!(
         bind_addr = %config.bind_addr,
         relay_url = %config.relay_url,
@@ -163,10 +169,22 @@ async fn main() -> anyhow::Result<()> {
         "Prometheus metrics exporter started"
     );
 
+    let restore_created_at_floor_secs = config
+        .restore_ingest_max_age_secs
+        .map(|max_age_secs| u64::from(max_age_secs).saturating_add(60));
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
-        read_database_url: config.read_database_url.clone(),
-        replica_read_max_age_ms: config.replica_read_max_age_ms,
+        read_database_url: if restore_created_at_floor_secs.is_some() {
+            None
+        } else {
+            config.read_database_url.clone()
+        },
+        replica_read_max_age_ms: if restore_created_at_floor_secs.is_some() {
+            0
+        } else {
+            config.replica_read_max_age_ms
+        },
+        created_at_floor_override_secs: restore_created_at_floor_secs,
         max_connections: config.db_pool_size,
         read_max_connections: config.db_read_pool_size,
         ..DbConfig::default()

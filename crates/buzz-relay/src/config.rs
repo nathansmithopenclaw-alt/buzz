@@ -13,6 +13,9 @@ use tracing::warn;
 /// NIP-44 encryption overhead.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 512 * 1024;
 
+/// Normal maximum past/future timestamp drift accepted at relay ingest.
+pub const DEFAULT_MAX_TIMESTAMP_DRIFT_SECS: u64 = 900;
+
 /// Errors that can occur while loading relay configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -78,6 +81,11 @@ pub struct Config {
     /// [`MAX_DRAIN_JITTER_MS`] are capped, leaving headroom under the relay's
     /// 30-second hard-drain timeout for close-frame delivery.
     pub drain_jitter_ms: u64,
+    /// Temporary maximum age, in seconds, for replaying signed events after a
+    /// restore (`BUZZ_RESTORE_INGEST_MAX_AGE_SECS`). `None` preserves the
+    /// normal 15-minute timestamp window. This never relaxes the future-event
+    /// limit and must be removed from the environment after recovery.
+    pub restore_ingest_max_age_secs: Option<u32>,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
     /// Maximum connections in the shared Redis pool. Defaults to 16.
@@ -515,6 +523,28 @@ impl Config {
                 })?
                 .min(MAX_DRAIN_JITTER_MS),
             Err(_) => 0,
+        };
+
+        let restore_ingest_max_age_secs = match std::env::var("BUZZ_RESTORE_INGEST_MAX_AGE_SECS") {
+            Ok(raw) if raw.trim().is_empty() => None,
+            Ok(raw) => Some(
+                raw.trim()
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|value| u64::from(*value) > DEFAULT_MAX_TIMESTAMP_DRIFT_SECS)
+                    .ok_or_else(|| {
+                        ConfigError::InvalidValue(
+                            "BUZZ_RESTORE_INGEST_MAX_AGE_SECS must be an integer greater than 900"
+                                .to_string(),
+                        )
+                    })?,
+            ),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_RESTORE_INGEST_MAX_AGE_SECS must be valid Unicode".to_string(),
+                ));
+            }
         };
 
         let redis_url =
@@ -1025,6 +1055,7 @@ impl Config {
             read_database_url,
             replica_read_max_age_ms,
             drain_jitter_ms,
+            restore_ingest_max_age_secs,
             redis_url,
             redis_pool_size,
             db_pool_size,
@@ -1151,6 +1182,10 @@ mod tests {
         assert_eq!(config.redis_pool_size, 16);
         assert_eq!(config.db_pool_size, 50);
         assert!(config.max_connections > 0);
+        assert_eq!(
+            config.restore_ingest_max_age_secs, None,
+            "restore ingest window must default off"
+        );
         assert!(config.send_buffer_size > 0);
         assert_eq!(config.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
         assert!(
@@ -1463,6 +1498,55 @@ mod tests {
             "an empty value is treated as unset — a kill switch, not a crashloop"
         );
         assert_eq!(blank, 0, "a whitespace-only value is treated as unset");
+    }
+
+    #[test]
+    fn restore_ingest_max_age_defaults_off_and_rejects_invalid_values() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_RESTORE_INGEST_MAX_AGE_SECS");
+
+        std::env::remove_var("BUZZ_RESTORE_INGEST_MAX_AGE_SECS");
+        let unset = Config::from_env()
+            .expect("unset restore window")
+            .restore_ingest_max_age_secs;
+
+        std::env::set_var("BUZZ_RESTORE_INGEST_MAX_AGE_SECS", "259200");
+        let set = Config::from_env()
+            .expect("configured restore window")
+            .restore_ingest_max_age_secs;
+
+        std::env::set_var("BUZZ_RESTORE_INGEST_MAX_AGE_SECS", "0");
+        let zero = Config::from_env();
+
+        std::env::set_var("BUZZ_RESTORE_INGEST_MAX_AGE_SECS", "900");
+        let normal_window = Config::from_env();
+
+        std::env::set_var("BUZZ_RESTORE_INGEST_MAX_AGE_SECS", "old");
+        let junk = Config::from_env();
+
+        std::env::set_var("BUZZ_RESTORE_INGEST_MAX_AGE_SECS", "  ");
+        let blank = Config::from_env()
+            .expect("blank restore window is off")
+            .restore_ingest_max_age_secs;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_RESTORE_INGEST_MAX_AGE_SECS", value);
+        } else {
+            std::env::remove_var("BUZZ_RESTORE_INGEST_MAX_AGE_SECS");
+        }
+
+        assert_eq!(unset, None);
+        assert_eq!(set, Some(259_200));
+        assert_eq!(blank, None);
+        assert!(
+            zero.is_err(),
+            "zero must not silently enable or disable recovery"
+        );
+        assert!(
+            normal_window.is_err(),
+            "recovery mode must expand rather than restate the normal window"
+        );
+        assert!(junk.is_err(), "junk must fail relay startup");
     }
 
     #[test]
