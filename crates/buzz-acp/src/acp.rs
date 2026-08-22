@@ -55,6 +55,10 @@ pub(crate) struct PendingBackgroundTasks {
     pub session_id: String,
     pub first_observed_at: tokio::time::Instant,
     pub tasks: Vec<BackgroundTask>,
+    /// Monitoring mode label observed for this client's session
+    /// (`typed-confirmed` / `typed-unconfirmed` / `raw-seam` / `unarmed`),
+    /// surfaced so teardown notices state protection status directly (L2.3).
+    pub monitoring_state: &'static str,
 }
 
 /// Consumer-side background-task monitoring mode (design v2.1 L2.1: four
@@ -2409,6 +2413,7 @@ impl AcpClient {
                 session_id: session_id.clone(),
                 first_observed_at: state.first_observed_at,
                 tasks: state.tasks.clone(),
+                monitoring_state: self.background_mode.label(),
             })
             .collect()
     }

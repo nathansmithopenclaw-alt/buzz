@@ -1709,6 +1709,9 @@ struct ChannelPendingBackgroundTasks {
     session_id: String,
     first_observed_at: tokio::time::Instant,
     tasks: Vec<BackgroundTask>,
+    /// Consumer-side monitoring label at observation time (see
+    /// acp::PendingBackgroundTasks) — surfaced in termination notices.
+    monitoring_state: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -1750,6 +1753,7 @@ fn channel_pending_background_tasks(pool: &mut AgentPool) -> Vec<ChannelPendingB
                     session_id: state.session_id,
                     first_observed_at: state.first_observed_at,
                     tasks: state.tasks,
+                    monitoring_state: state.monitoring_state,
                 });
             }
         }
@@ -1794,10 +1798,20 @@ fn background_task_termination_notice(
     } else {
         format!(" Pending: {}.", descriptions.join("; "))
     };
+    // L2.3(ii): post-incident triage reads protection status straight off the
+    // notice — name the monitoring state and say plainly when it was not
+    // confirmed active at teardown.
+    let protection = match pending.iter().map(|s| s.monitoring_state).next() {
+        Some("typed-confirmed") => " Monitoring was confirmed active (typed snapshots).".to_string(),
+        Some(state) => format!(
+            " Monitoring was NOT confirmed active at teardown (state: {state}); a real background task may have gone untracked."
+        ),
+        None => String::new(),
+    };
     format!(
         "⚠️ Background work was terminated (`failure_shape: background_tasks_terminated`): \
          {reason_text}, so the ACP process was torn down with {task_count} task(s) still pending.\
-         {detail} Inspect the local agent transcript/log and restart the commitment if needed."
+         {detail}{protection} Inspect the local agent transcript/log and restart the commitment if needed."
     )
 }
 
@@ -1962,6 +1976,7 @@ mod idle_pool_sleep_tests {
             channel_id: Some(Uuid::nil()),
             session_id: "sess-1".to_string(),
             first_observed_at: started,
+            monitoring_state: "typed-confirmed",
             tasks: vec![BackgroundTask {
                 task_id: "task-1".to_string(),
                 task_type: "local_bash".to_string(),
@@ -1987,6 +2002,7 @@ mod idle_pool_sleep_tests {
             channel_id: Some(Uuid::nil()),
             session_id: "sess-1".to_string(),
             first_observed_at: tokio::time::Instant::now(),
+            monitoring_state: "typed-confirmed",
             tasks: vec![BackgroundTask {
                 task_id: "task-1".to_string(),
                 task_type: "local_bash".to_string(),
