@@ -877,7 +877,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 33);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1299,6 +1299,13 @@ mod tests {
         assert!(community_hosts.contains("SELECT host, id FROM communities"));
         assert!(community_hosts.contains("CREATE TRIGGER trg_communities_sync_canonical_host"));
         assert!(community_hosts.contains("_operator_global_tables"));
+
+        assert_eq!(migrations[32].version, 33);
+        let nip09_tombstones = migrations[32].sql.as_str();
+        assert!(nip09_tombstones.contains("CREATE TABLE addressable_event_tombstones"));
+        assert!(nip09_tombstones.contains("deleted_through TIMESTAMPTZ NOT NULL"));
+        assert!(nip09_tombstones
+            .contains("SELECT attach_community_write_fence('addressable_event_tombstones')"));
     }
 
     #[test]
@@ -1574,8 +1581,9 @@ mod tests {
     /// plane table, function, trigger, and index 0028 creates must exist in
     /// schema.sql with an identical normalized definition; every operator-
     /// global registry row 0028 inserts must be inserted by schema.sql; the
-    /// write-fence attachment target sets must be equal; and every column
-    /// 0028 adds to `communities` must exist in the desired-state
+    /// write-fence attachment target sets must be equal after accounting for
+    /// later tenant tables that attach their fence in their own migrations;
+    /// and every column 0028 adds to `communities` must exist in the desired-state
     /// `communities` table. A desired-state bootstrap that passes this test
     /// cannot silently omit part of the deletion surface the way the
     /// pre-parity schema.sql omitted `community_deletion_manifest_keys` (and
@@ -1748,6 +1756,10 @@ mod tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        // 0033 introduces this tenant-scoped table after 0029's dynamic and
+        // explicit fence pass. Its own migration attaches the fence, while the
+        // desired-state schema declares the complete final target set.
+        expected_fences.insert("addressable_event_tombstones".to_owned());
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -2476,7 +2488,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("apply renumbered community-host migration");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(32));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(33));
         assert_t6_fold_objects(&pool).await;
         let mapped: uuid::Uuid = sqlx::query_scalar(
             "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
@@ -2530,7 +2542,7 @@ mod tests {
             .expect("move community hosts to 32 and apply upstream error-code version 31");
         assert_eq!(
             applied_versions(&pool).await,
-            (1_i64..=32).collect::<Vec<_>>()
+            (1_i64..=33).collect::<Vec<_>>()
         );
         let descriptions: Vec<(i64, String)> = sqlx::query_as(
             "SELECT version, description FROM _sqlx_migrations WHERE version IN (31, 32) ORDER BY version",
@@ -2591,7 +2603,7 @@ mod tests {
             .expect("move community hosts to 32 and apply upstream 29-31");
         assert_eq!(
             applied_versions(&pool).await,
-            (1_i64..=32).collect::<Vec<_>>()
+            (1_i64..=33).collect::<Vec<_>>()
         );
         assert_t6_fold_objects(&pool).await;
         let mapped: uuid::Uuid = sqlx::query_scalar(
@@ -2805,7 +2817,7 @@ mod tests {
             .expect("move community hosts to 32 and apply upstream 27-31");
         assert_eq!(
             applied_versions(&pool).await,
-            (1_i64..=32).collect::<Vec<_>>()
+            (1_i64..=33).collect::<Vec<_>>()
         );
         assert_t6_fold_objects(&pool).await;
     }

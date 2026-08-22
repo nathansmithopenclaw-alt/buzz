@@ -11,6 +11,8 @@
 //! - a NIP-09 `a`-tag tombstone removes the project coordinate and leaves every
 //!   referenced kind:30617 announcement untouched, because membership is an
 //!   assertion about repositories and never authority over them;
+//! - a previously unseen older project version arriving after that tombstone
+//!   cannot rematerialize the deleted coordinate;
 //! - malformed envelopes are refused by the relay, not merely by the validator.
 //!
 //! See `docs/nips/NIP-MP.md` for the normative contract.
@@ -340,6 +342,62 @@ async fn test_project_tombstone_deletes_coordinate_and_spares_members() {
         repo.len(),
         1,
         "deleting a project must not touch the repositories it referenced"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// A coordinate tombstone is an ordering floor, not merely a mutation of the
+/// row that happened to be live when the deletion arrived. An older signed
+/// version withheld until after deletion must therefore remain invisible.
+#[tokio::test]
+#[ignore]
+async fn test_project_tombstone_blocks_older_late_arrival() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let project_d = unique("project-late-arrival");
+    let now = Timestamp::now().as_secs();
+    let unseen_v1 = project_event(&owner, &project_d, "Unseen V1", &[], Some(now - 100));
+    let v2 = project_event(&owner, &project_d, "V2", &[], Some(now - 50));
+
+    let mut client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect");
+
+    let ok = client.send_event(v2).await.expect("send v2");
+    assert!(ok.accepted, "relay rejected V2: {}", ok.message);
+
+    let ok = client
+        .send_event(coordinate_delete(
+            &owner,
+            PROJECT_KIND,
+            &project_d,
+            Some(now),
+        ))
+        .await
+        .expect("send tombstone");
+    assert!(ok.accepted, "relay rejected tombstone: {}", ok.message);
+
+    let ok = client
+        .send_event(unseen_v1)
+        .await
+        .expect("send older late-arriving version");
+    assert!(
+        ok.accepted,
+        "stale NIP-33 writes use the relay's accepted no-op response: {}",
+        ok.message
+    );
+
+    let after = query(
+        &mut client,
+        "late-arrival-post",
+        addressable_filter(PROJECT_KIND, &owner, &project_d),
+    )
+    .await;
+    assert!(
+        after.is_empty(),
+        "an older late-arriving version must remain tombstoned, got {} event(s)",
+        after.len()
     );
 
     client.disconnect().await.expect("disconnect");

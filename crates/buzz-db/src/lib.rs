@@ -5526,6 +5526,16 @@ impl Db {
         .bind(d_tag)
         .fetch_optional(&mut *tx)
         .await?;
+        let deleted_through: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT deleted_through FROM addressable_event_tombstones \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .bind(d_tag)
+        .fetch_optional(&mut *tx)
+        .await?;
         let watermark: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = if is_nip_rs {
             sqlx::query_as(
                 "SELECT created_at, event_id FROM parameterized_event_watermarks \
@@ -5541,10 +5551,12 @@ impl Db {
             None
         };
 
-        // Stale-write protection: reject if either durable ordering source
-        // dominates the incoming tuple. Equal timestamps use lowest event id.
+        // Stale-write protection: reject if any durable ordering source
+        // dominates the incoming tuple. The NIP-09 floor is inclusive by
+        // timestamp; live heads and NIP-RS watermarks use lowest-id tie-breaks.
         let incoming_id = event.id.as_bytes().as_slice();
-        let dominated =
+        let dominated_by_tombstone = deleted_through.is_some_and(|floor| created_at <= floor);
+        let dominated_by_head =
             existing
                 .iter()
                 .chain(watermark.iter())
@@ -5552,6 +5564,7 @@ impl Db {
                     created_at < *accepted_ts
                         || (created_at == *accepted_ts && incoming_id >= accepted_id.as_slice())
                 });
+        let dominated = dominated_by_tombstone || dominated_by_head;
         if dominated {
             tx.rollback().await?;
             let received_at = chrono::Utc::now();
@@ -6171,6 +6184,95 @@ mod tests {
             current_deleted,
             "a tombstone at the head's timestamp must delete it (NIP-09 is at-or-before)"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn coordinate_delete_rejects_older_late_arrival_and_allows_newer_recreation() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "nip09_late_replaceable").await;
+        let db = Db::from_pool(pool.clone());
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let kind = buzz_core::kind::KIND_PROJECT as i32;
+        let d_tag = "nip09-late-arrival-project";
+        let pubkey = keys.public_key().to_bytes().to_vec();
+        let base = Timestamp::now().as_secs();
+        let version = |content: &str, offset: u64| {
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_PROJECT as u16), content)
+                .tags(vec![Tag::parse(["d", d_tag]).expect("d tag")])
+                .custom_created_at(Timestamp::from(base + offset))
+                .sign_with_keys(&keys)
+                .expect("sign project version")
+        };
+
+        // V1 is signed first but deliberately withheld from the relay. V2 is
+        // the only known head when the coordinate is deleted.
+        let unseen_v1 = version("unseen-v1", 10);
+        let v2 = version("v2", 20);
+        assert!(
+            db.replace_parameterized_event(community, &v2, d_tag, None)
+                .await
+                .expect("store v2")
+                .1
+        );
+        assert!(db
+            .soft_delete_by_coordinate(community, kind, &pubkey, d_tag, (base + 20) as i64)
+            .await
+            .expect("delete coordinate"));
+
+        assert!(
+            !db.replace_parameterized_event(community, &unseen_v1, d_tag, None)
+                .await
+                .expect("submit unseen old version")
+                .1,
+            "a previously unseen version at or before the deletion floor must stay tombstoned"
+        );
+        let live_after_old: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id=$1 AND kind=$2 AND pubkey=$3 AND d_tag=$4 \
+             AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(kind)
+        .bind(&pubkey)
+        .bind(d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count live rows after old arrival");
+        assert_eq!(
+            live_after_old, 0,
+            "old arrival must not rematerialize the coordinate"
+        );
+
+        let v3 = version("v3", 21);
+        assert!(
+            db.replace_parameterized_event(community, &v3, d_tag, None)
+                .await
+                .expect("submit newer version")
+                .1,
+            "a version newer than the deletion floor may recreate the coordinate"
+        );
+        let live_content: String = sqlx::query_scalar(
+            "SELECT content FROM events \
+             WHERE community_id=$1 AND kind=$2 AND pubkey=$3 AND d_tag=$4 \
+             AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(kind)
+        .bind(&pubkey)
+        .bind(d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read recreated coordinate");
+        assert_eq!(live_content, "v3");
+
+        drop(db);
+        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]

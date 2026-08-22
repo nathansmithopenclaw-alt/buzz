@@ -796,7 +796,7 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('rate_limit_violations', 'deployment abuse/health; never tenant-observable; community_id is an attribution label only'),
     ('_operator_global_tables', 'the registry table itself');
 
--- ── Additive tenant tables represented in migrations 0002/0007/0017 ──────────
+-- ── Additive tenant tables represented in later migrations ───────────────────
 -- Keep desired-state schema parity with the embedded SQLx migration path.
 CREATE TABLE git_repo_names (
     community_id  UUID NOT NULL REFERENCES communities(id),
@@ -814,6 +814,15 @@ CREATE TABLE parameterized_event_watermarks (
     d_tag         TEXT NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL,
     event_id      BYTEA NOT NULL,
+    PRIMARY KEY (community_id, kind, pubkey, d_tag)
+);
+
+CREATE TABLE addressable_event_tombstones (
+    community_id    UUID NOT NULL REFERENCES communities(id),
+    kind            INT NOT NULL CHECK (kind BETWEEN 30000 AND 39999),
+    pubkey          BYTEA NOT NULL CHECK (length(pubkey) = 32),
+    d_tag           TEXT NOT NULL,
+    deleted_through TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (community_id, kind, pubkey, d_tag)
 );
 CREATE INDEX idx_event_mentions_community_event
@@ -1678,6 +1687,7 @@ $$;
 -- these explicit calls as first-class catalog declarations. They also make the
 -- fence contract visible to migration linting instead of hiding it only in the
 -- dynamic bootstrap loop above.
+SELECT attach_community_write_fence('addressable_event_tombstones');
 SELECT attach_community_write_fence('api_tokens');
 SELECT attach_community_write_fence('archived_identities');
 SELECT attach_community_write_fence('audit_log');
