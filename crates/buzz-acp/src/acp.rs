@@ -788,6 +788,14 @@ impl AcpClient {
                 cmd.env(key, value);
             }
         }
+        if let Ok(cwd) = std::env::current_dir() {
+            let parent_already_set = std::env::var_os("PRIME_AGENT_CODING_AGENT_DIR").is_some();
+            if let Some(dir) =
+                crate::config::prime_coding_agent_dir(command, extra_env, &cwd, parent_already_set)
+            {
+                cmd.env("PRIME_AGENT_CODING_AGENT_DIR", dir);
+            }
+        }
         let goose_bridge_keys = [
             "GOOSE_PROVIDER",
             "OPENAI_COMPAT_BASE_URL",
@@ -2931,6 +2939,41 @@ pub fn resolve_model_switch_method(
     None
 }
 
+/// Whether `session/new` advertised a model catalog Buzz can switch against.
+///
+/// Prime ACP returns only `{sessionId}` — no `configOptions`, no `models`.
+/// That is not "the configured model is invalid"; the agent does not participate
+/// in ACP model switching. Callers must not treat a miss as `unsupported_model`
+/// or a protocol kill when this is false.
+pub fn session_advertises_model_catalog(session_new_result: &serde_json::Value) -> bool {
+    let has_config_options = extract_model_config_options(session_new_result)
+        .iter()
+        .any(|opt| {
+            opt.get("options")
+                .and_then(|v| v.as_array())
+                .is_some_and(|options| {
+                    options
+                        .iter()
+                        .any(|entry| entry.get("value").and_then(|v| v.as_str()).is_some())
+                })
+        });
+    if has_config_options {
+        return true;
+    }
+    extract_model_state(session_new_result)
+        .and_then(|models| {
+            models
+                .get("availableModels")
+                .and_then(|v| v.as_array())
+                .cloned()
+        })
+        .is_some_and(|available| {
+            available
+                .iter()
+                .any(|model| model.get("modelId").and_then(|v| v.as_str()).is_some())
+        })
+}
+
 /// Whether `desired_model` appears in pre-extracted catalog halves.
 ///
 /// Mirrors [`resolve_model_switch_method`]'s match, but operates on the
@@ -3454,6 +3497,49 @@ mod tests {
     fn extract_model_state_none_when_absent() {
         let result = serde_json::json!({ "sessionId": "sess-1" });
         assert!(super::extract_model_state(&result).is_none());
+    }
+
+    #[test]
+    fn session_advertises_model_catalog_false_for_session_id_only() {
+        let result = serde_json::json!({ "sessionId": "sess-1" });
+        assert!(
+            !super::session_advertises_model_catalog(&result),
+            "Prime-style session/new must not count as a catalog"
+        );
+    }
+
+    #[test]
+    fn session_advertises_model_catalog_true_for_config_options() {
+        let result = serde_json::json!({
+            "sessionId": "sess-1",
+            "configOptions": [{
+                "configId": "model",
+                "category": "model",
+                "options": [{ "value": "model-a" }]
+            }]
+        });
+        assert!(super::session_advertises_model_catalog(&result));
+    }
+
+    #[test]
+    fn session_advertises_model_catalog_true_for_available_models() {
+        let result = serde_json::json!({
+            "sessionId": "sess-1",
+            "models": {
+                "currentModelId": "local-v4",
+                "availableModels": [{ "modelId": "local-v4" }]
+            }
+        });
+        assert!(super::session_advertises_model_catalog(&result));
+    }
+
+    #[test]
+    fn session_advertises_model_catalog_false_for_empty_available_models() {
+        let result = serde_json::json!({
+            "sessionId": "sess-1",
+            "models": { "currentModelId": "local-v4", "availableModels": [] }
+        });
+        assert!(!super::session_advertises_model_catalog(&result));
     }
 
     #[test]

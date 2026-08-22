@@ -179,6 +179,22 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             Gateway's own environment separately.",
         underlying_cli: None,
     },
+    PresetHarness {
+        id: "prime",
+        label: "Prime Agent",
+        command: "prime-agent",
+        args: &["--mode", "acp"],
+        install_instructions_url: "https://github.com/PrimeIntellect-ai/prime-agent",
+        install_hint: "Buzz talks to Prime Agent through its first-party ACP mode \
+            (`prime-agent --mode acp`). Install Prime from the vendor docs so \
+            `prime-agent` is on your PATH (Node 20.6+; IPython is used at runtime). \
+            Buzz does not auto-install this harness.\n\n\
+            Prime holds one conversation per process. Buzz therefore spawns one \
+            Prime subprocess per channel (capped at 3). Point Prime at a local \
+            OpenAI-compat endpoint via `~/.prime/agent/models.json` if you want \
+            Spark V4 or the MBP Qwen lane — there is no API key required for those.",
+        underlying_cli: None,
+    },
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
@@ -455,6 +471,48 @@ mod tests {
             Some(crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM),
             "available OpenClaw must carry max_parallelism {}",
             crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM
+        );
+    }
+
+    #[test]
+    fn prime_preset_uses_official_acp_mode() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "prime")
+            .expect("Prime preset should be present");
+
+        assert_eq!(preset.label, "Prime Agent");
+        assert_eq!(preset.command, "prime-agent");
+        assert_eq!(preset.args, &["--mode", "acp"]);
+        assert_eq!(preset.underlying_cli, None);
+        assert_eq!(
+            preset.install_instructions_url,
+            "https://github.com/PrimeIntellect-ai/prime-agent"
+        );
+
+        let entry = preset_catalog_entry(preset, |command| {
+            (command == "prime-agent").then(|| PathBuf::from("/usr/local/bin/prime-agent"))
+        });
+        assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
+        assert_eq!(entry.command.as_deref(), Some("prime-agent"));
+        assert_eq!(entry.default_args, vec!["--mode", "acp"]);
+        assert_eq!(
+            entry.max_parallelism,
+            Some(crate::managed_agents::parallelism::PRIME_MAX_PARALLELISM)
+        );
+    }
+
+    #[test]
+    fn prime_preset_unavailable_carries_max_parallelism() {
+        let prime = PRESET_HARNESSES
+            .iter()
+            .find(|p| p.id == "prime")
+            .expect("prime preset must be present");
+        let entry = preset_catalog_entry(prime, |_| None);
+        assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
+        assert_eq!(
+            entry.max_parallelism,
+            Some(crate::managed_agents::parallelism::PRIME_MAX_PARALLELISM)
         );
     }
 

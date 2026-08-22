@@ -22,6 +22,14 @@
 /// design. Tyler's ruling: "try 5 and lower if needed."
 pub const OPENCLAW_MAX_PARALLELISM: u32 = 5;
 
+/// Maximum parallelism for Prime Agent.
+///
+/// Prime holds one ACP session per process (IPython kernel + conversation +
+/// cwd are process-scoped). Buzz therefore spawns one subprocess per channel.
+/// Three concurrent kernels is the starting cap; extra channels queue rather
+/// than sharing a kernel.
+pub const PRIME_MAX_PARALLELISM: u32 = 3;
+
 /// Return the maximum allowed parallelism for the given harness command, or
 /// `None` when the harness has no cap.
 ///
@@ -30,6 +38,7 @@ pub const OPENCLAW_MAX_PARALLELISM: u32 = 5;
 pub fn harness_max_parallelism(command: &str) -> Option<u32> {
     match super::discovery::normalize_command_identity(command).as_str() {
         "openclaw" => Some(OPENCLAW_MAX_PARALLELISM),
+        "prime-agent" | "primeagent" => Some(PRIME_MAX_PARALLELISM),
         _ => None,
     }
 }
@@ -173,6 +182,14 @@ mod tests {
         assert_eq!(super::harness_max_parallelism("goose"), None);
         assert_eq!(super::harness_max_parallelism("buzz-agent"), None);
         assert_eq!(super::harness_max_parallelism(""), None);
+        assert_eq!(
+            super::harness_max_parallelism("prime-agent"),
+            Some(super::PRIME_MAX_PARALLELISM)
+        );
+        assert_eq!(
+            super::harness_max_parallelism("/usr/local/bin/prime-agent"),
+            Some(super::PRIME_MAX_PARALLELISM)
+        );
 
         // effective_parallelism: openclaw clamps above cap, honors at/below; goose passes through.
         assert_eq!(super::effective_parallelism("openclaw", cap + 5), cap);
@@ -196,6 +213,16 @@ mod tests {
             "BUZZ_ACP_AGENTS for openclaw with parallelism 10 must be \"5\""
         );
         assert_eq!(super::acp_agents_value("goose", 10), "10");
+    }
+
+    #[test]
+    fn acp_agents_value_prime_above_cap_is_capped() {
+        assert_eq!(
+            super::acp_agents_value("prime-agent", 10),
+            "3",
+            "BUZZ_ACP_AGENTS for prime-agent with parallelism 10 must be \"3\""
+        );
+        assert_eq!(super::acp_agents_value("prime-agent", 2), "2");
     }
 
     // ── Override-direction: summary seam agreement ────────────────────────────

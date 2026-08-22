@@ -31,9 +31,9 @@ use uuid::Uuid;
 
 use crate::acp::{
     extract_model_config_options, extract_model_state, extract_thought_level_config_id,
-    model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
-    ModelSwitchMethod, StopReason, SystemPromptTransport, TurnDeliveryEvidence,
-    CLAUDE_AGENT_ACP_NAME,
+    model_in_catalog, resolve_model_switch_method, session_advertises_model_catalog, AcpClient,
+    AcpError, EnvVar, McpServer, ModelSwitchMethod, StopReason, SystemPromptTransport,
+    TurnDeliveryEvidence, CLAUDE_AGENT_ACP_NAME,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -250,6 +250,28 @@ impl SessionState {
     }
 }
 
+/// Whether an idle worker may take `channel_id` under the spawn policy.
+///
+/// Multiplex (Goose/OpenCode): any idle worker. Exclusive (Prime): only a
+/// worker with no sessions yet, or one that already holds this channel
+/// (handled by `try_claim` pass 1). Heartbeat (`None`) also requires an
+/// empty worker — Prime will not accept a second `session/new`.
+pub(crate) fn exclusive_worker_can_claim(
+    state: &SessionState,
+    channel_id: Option<Uuid>,
+    exclusive: bool,
+) -> bool {
+    if !exclusive {
+        return true;
+    }
+    if let Some(cid) = channel_id {
+        if state.sessions.contains_key(&cid) {
+            return true;
+        }
+    }
+    state.sessions.is_empty() && state.heartbeat_session.is_none()
+}
+
 fn invalidate_session_after_adapter_runtime_failure(
     state: &mut SessionState,
     source: &PromptSource,
@@ -359,6 +381,9 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    /// When true, a worker may hold at most one ACP session (Prime's contract).
+    /// `try_claim` will not hand a worker that already has channel A to channel B.
+    exclusive_session: bool,
 }
 
 /// Result returned by a completed prompt task.
@@ -722,7 +747,21 @@ impl AgentPool {
     /// index into `self.agents`. Use this instead of `new()` when the startup
     /// loop skips failed agents — `new()` would pack agents densely and break
     /// the index invariant.
+    /// Multiplex default. Tests use this; production always passes the
+    /// exclusive-session flag via [`from_slots_with_exclusive`].
+    #[cfg(test)]
     pub fn from_slots(slots: Vec<Option<OwnedAgent>>) -> Self {
+        Self::from_slots_with_exclusive(slots, false)
+    }
+
+    /// Like [`from_slots`], with the exclusive-session spawn policy.
+    ///
+    /// Exclusive workers (Prime) refuse a second `session/new` on the same
+    /// connection. The pool must not multiplex channels onto those pipes.
+    pub fn from_slots_with_exclusive(
+        slots: Vec<Option<OwnedAgent>>,
+        exclusive_session: bool,
+    ) -> Self {
         let (result_tx, result_rx) = mpsc::unbounded_channel();
         Self {
             agents: slots,
@@ -730,15 +769,17 @@ impl AgentPool {
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            exclusive_session,
         }
     }
 
     /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
     ///
     /// Pass 1: prefer an agent that already has a session for `channel_id`.
-    /// Pass 2: any idle agent.
+    /// Pass 2: any idle agent that may take this channel under the spawn policy.
     ///
-    /// Returns `None` if all agents are checked out.
+    /// Returns `None` if all agents are checked out, or (exclusive policy) if
+    /// every idle worker already holds a different channel's session.
     pub fn try_claim(&mut self, channel_id: Option<Uuid>) -> Option<OwnedAgent> {
         // Pass 1: prefer agent with existing session for this channel.
         if let Some(cid) = channel_id {
@@ -752,8 +793,13 @@ impl AgentPool {
             }
         }
 
-        // Pass 2: first idle agent.
-        let idx = self.agents.iter().position(|slot| slot.is_some());
+        // Pass 2: first idle agent allowed to take this channel.
+        let exclusive = self.exclusive_session;
+        let idx = self.agents.iter().position(|slot| {
+            slot.as_ref()
+                .map(|a| exclusive_worker_can_claim(&a.state, channel_id, exclusive))
+                .unwrap_or(false)
+        });
         idx.map(|i| self.agents[i].take().unwrap())
     }
 
@@ -1305,20 +1351,32 @@ async fn create_session_and_apply_model(
                 }
             }
             None => {
-                tracing::error!(
-                    target: "pool::model",
-                    "desired model {desired} not found in agent's available models — refusing silent fallback"
-                );
-                agent.acp.observe(
-                    "control_result",
-                    serde_json::json!({
-                        "type": "switch_model",
-                        "status": "unsupported_model",
-                        "modelId": desired,
-                        // Echo the pick's request_id (see the failure arm).
-                        "requestId": agent.desired_model_request_id,
-                    }),
-                );
+                if session_advertises_model_catalog(&resp.raw) {
+                    tracing::error!(
+                        target: "pool::model",
+                        "desired model {desired} not found in agent's available models — refusing silent fallback"
+                    );
+                    agent.acp.observe(
+                        "control_result",
+                        serde_json::json!({
+                            "type": "switch_model",
+                            "status": "unsupported_model",
+                            "modelId": desired,
+                            // Echo the pick's request_id (see the failure arm).
+                            "requestId": agent.desired_model_request_id,
+                        }),
+                    );
+                } else {
+                    // Prime (and other exclusive ACP servers) return only
+                    // `{sessionId}`. The spawn command / nest settings already
+                    // selected the model; treating the empty catalog as
+                    // unsupported_model used to protocol-kill the worker.
+                    tracing::info!(
+                        target: "pool::model",
+                        configured_model = desired.as_str(),
+                        "agent advertised no model catalog — leaving spawn-selected model in place"
+                    );
+                }
                 None
             }
         }
@@ -5421,6 +5479,28 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    #[test]
+    fn exclusive_claim_allows_empty_worker() {
+        let state = SessionState::default();
+        let channel_a = Uuid::new_v4();
+        assert!(exclusive_worker_can_claim(&state, Some(channel_a), true));
+        assert!(exclusive_worker_can_claim(&state, None, true));
+        assert!(exclusive_worker_can_claim(&state, Some(channel_a), false));
+    }
+
+    #[test]
+    fn exclusive_claim_refuses_other_channel() {
+        let mut state = SessionState::default();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        state.sessions.insert(channel_a, "sess-a".into());
+        assert!(exclusive_worker_can_claim(&state, Some(channel_a), true));
+        assert!(!exclusive_worker_can_claim(&state, Some(channel_b), true));
+        assert!(!exclusive_worker_can_claim(&state, None, true));
+        // Multiplex still reuses the worker for B.
+        assert!(exclusive_worker_can_claim(&state, Some(channel_b), false));
     }
 
     // MINOR (#2884): the permission-mode RPC is gated on agent_supports_mode.
@@ -10012,6 +10092,45 @@ done"#
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["status"], "unsupported_model");
         assert_eq!(results[0]["modelId"], "model-z");
+    }
+
+    #[tokio::test]
+    async fn test_empty_catalog_leaves_spawn_model_without_unsupported() {
+        // Prime ACP session/new is `{sessionId}` only. A configured model must
+        // not emit unsupported_model or fail session creation — the harness
+        // already selected the model at spawn.
+        let acp =
+            spawn_switch_acp_full(r#"{"sessionId":"sess-1"}"#, r#""result":{"ok":true}"#).await;
+        let mut agent = switching_agent(acp, "local-v4");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        let session_id = create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                id: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("empty catalog must not fail session creation");
+        assert_eq!(session_id, "sess-1");
+
+        let cap = capture(&obs);
+        assert_eq!(
+            cap["modelOverridden"], false,
+            "no ACP switch applied against an empty catalog"
+        );
+        assert!(
+            control_results(&obs).is_empty(),
+            "empty catalog is not unsupported_model"
+        );
     }
 
     /// Scripted ACP whose `session/new` (request #1) returns a full result body

@@ -782,10 +782,25 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "prime-agent" | "primeagent" => Some(vec!["--mode".to_string(), "acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
+}
+
+/// Whether this harness allows only one ACP session per subprocess.
+///
+/// Prime Agent refuses a second `session/new` on the same connection
+/// (one session per process is deliberate: conversation, cwd, and the
+/// IPython kernel are process-scoped). Buzz otherwise multiplexes many
+/// channels onto one pipe — exclusive spawn pins one subprocess per
+/// channel instead.
+pub(crate) fn exclusive_session(command: &str) -> bool {
+    matches!(
+        normalize_agent_command_identity(command).as_str(),
+        "prime-agent" | "primeagent"
+    )
 }
 
 /// Per-runtime environment defaults applied when Buzz owns the agent process.
@@ -803,8 +818,36 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
 pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'static str)] {
     match normalize_agent_command_identity(command).as_str() {
         "hermes" | "hermes-agent" | "hermes-acp" => &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
+        "prime-agent" | "primeagent" => &[("DO_NOT_TRACK", "1"), ("PI_SKIP_VERSION_CHECK", "1")],
         _ => &[],
     }
+}
+
+/// Nest-scoped Prime config dir (`<cwd>/.prime/agent`) unless the operator
+/// already set `PRIME_AGENT_CODING_AGENT_DIR` in parent env or persona env.
+///
+/// Prime defaults to `~/.prime/agent`. Redirecting into the nest keeps
+/// Continual Harness writes next to Buzz nest memory instead of a second
+/// home-level source of truth.
+pub(crate) fn prime_coding_agent_dir(
+    command: &str,
+    extra_env: &[(String, String)],
+    cwd: &std::path::Path,
+    parent_already_set: bool,
+) -> Option<std::path::PathBuf> {
+    if !exclusive_session(command) {
+        return None;
+    }
+    if parent_already_set {
+        return None;
+    }
+    if extra_env
+        .iter()
+        .any(|(key, _)| key == "PRIME_AGENT_CODING_AGENT_DIR")
+    {
+        return None;
+    }
+    Some(cwd.join(".prime").join("agent"))
 }
 
 /// Build the `CODEX_CONFIG` environment variable that enables full outbound
@@ -1811,6 +1854,70 @@ mod tests {
                 "non-Hermes command must have no env defaults: {command}"
             );
         }
+        assert_eq!(
+            default_agent_env("prime-agent"),
+            &[("DO_NOT_TRACK", "1"), ("PI_SKIP_VERSION_CHECK", "1")]
+        );
+    }
+
+    #[test]
+    fn prime_coding_agent_dir_is_nest_scoped_unless_already_set() {
+        let cwd = std::path::Path::new("/tmp/nest");
+        let expected = cwd.join(".prime").join("agent");
+        assert_eq!(
+            prime_coding_agent_dir("prime-agent", &[], cwd, false).as_deref(),
+            Some(expected.as_path())
+        );
+        assert_eq!(
+            prime_coding_agent_dir("goose", &[], cwd, false),
+            None,
+            "non-Prime harnesses must not get a Prime home redirect"
+        );
+        assert_eq!(
+            prime_coding_agent_dir("prime-agent", &[], cwd, true),
+            None,
+            "parent env must win over the nest default"
+        );
+        let extra = vec![("PRIME_AGENT_CODING_AGENT_DIR".into(), "/tmp/other".into())];
+        assert_eq!(
+            prime_coding_agent_dir("prime-agent", &extra, cwd, false),
+            None,
+            "persona env must win over the nest default"
+        );
+    }
+
+    #[test]
+    fn exclusive_session_recognizes_prime_identities() {
+        for command in [
+            "prime-agent",
+            "primeagent",
+            "/usr/local/bin/prime-agent",
+            r"C:\Users\test\AppData\Roaming\npm\prime-agent.cmd",
+            r"C:\Tools\Prime\PRIME-AGENT.EXE",
+        ] {
+            assert!(
+                exclusive_session(command),
+                "Prime command must be exclusive-session: {command}"
+            );
+        }
+        for command in ["goose", "openclaw", "hermes-acp", "buzz-agent", ""] {
+            assert!(
+                !exclusive_session(command),
+                "non-Prime command must multiplex: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_agent_args_prime_mode_acp() {
+        assert_eq!(
+            normalize_agent_args("prime-agent", vec![]),
+            vec!["--mode".to_string(), "acp".to_string()]
+        );
+        assert_eq!(
+            normalize_agent_args("prime-agent", vec!["--mode".into(), "acp".into()]),
+            vec!["--mode".to_string(), "acp".to_string()]
+        );
     }
 
     #[test]

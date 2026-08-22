@@ -25,6 +25,7 @@ export const PRESET_LOGOS: Record<string, string> = {
   amp: "/harness-logos/amp.png",
   hermes: "/harness-logos/hermes.png",
   openclaw: "/harness-logos/openclaw.svg",
+  prime: "/harness-logos/prime.svg",
 };
 
 function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {
@@ -75,6 +76,7 @@ export function RuntimeIcon({
           className,
           id === "omp" && "bg-[#0d0d0d] p-1",
           id === "grok" && "bg-white p-1",
+          id === "prime" && "bg-white p-1",
         )}
         onError={() => setImageFailed(true)}
         src={imageUrl}
