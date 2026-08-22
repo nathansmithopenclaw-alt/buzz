@@ -97,15 +97,32 @@ fn stop_local_agents_for_observer(app: &AppHandle, state: &AppState) -> Result<(
 }
 
 #[tauri::command]
-pub fn set_fleet_visibility_role(
+pub async fn set_fleet_visibility_role(
     role: DeviceRole,
     app: AppHandle,
-    state: State<'_, AppState>,
+) -> Result<FleetVisibilitySettings, String> {
+    // Stopping a live Host is intentionally blocking process work: every local
+    // harness gets a graceful-shutdown window before it is killed. A large
+    // fleet can therefore take several seconds to drain. Keep that work off
+    // Tauri's command thread so relay events and the rest of the desktop remain
+    // responsive throughout the role transition.
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        set_fleet_visibility_role_blocking(role, &app, &state)
+    })
+    .await
+    .map_err(|error| format!("Fleet Visibility role transition task failed: {error}"))?
+}
+
+fn set_fleet_visibility_role_blocking(
+    role: DeviceRole,
+    app: &AppHandle,
+    state: &AppState,
 ) -> Result<FleetVisibilitySettings, String> {
     match role {
         DeviceRole::Observer => {
-            stop_local_agents_for_observer(&app, &state)?;
-            let settings = fleet_visibility::set_role(&app, &state, role)?;
+            stop_local_agents_for_observer(app, state)?;
+            let settings = fleet_visibility::set_role(app, state, role)?;
             state
                 .managed_agent_restore_pending
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -127,9 +144,9 @@ pub fn set_fleet_visibility_role(
             Ok(settings)
         }
         DeviceRole::Host => {
-            let settings = fleet_visibility::set_role(&app, &state, role)?;
-            fleet_visibility::retain_host_heartbeat_tick(&app, &state);
-            resume_deferred_restore_if_allowed(&app, &state);
+            let settings = fleet_visibility::set_role(app, state, role)?;
+            fleet_visibility::retain_host_heartbeat_tick(app, state);
+            resume_deferred_restore_if_allowed(app, state);
             let flush_app = app.clone();
             tauri::async_runtime::spawn(async move {
                 let state = flush_app.state::<AppState>();

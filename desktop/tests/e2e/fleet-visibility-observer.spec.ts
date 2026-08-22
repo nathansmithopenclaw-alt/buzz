@@ -608,3 +608,33 @@ test("pending role choice hides legacy local state behind the designed banner", 
   await expect(page.getByTestId("agents-fleet-grid")).toHaveCount(0);
   await expect(page.getByTestId("agents-library-teams")).toHaveCount(0);
 });
+
+test("Device role round-trips Host to Observer to Host from Settings", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    fleetVisibilitySettings: {
+      enabled: true,
+      role: "host",
+      needsChoice: false,
+      hostId: HOST,
+      hostName: "This Mac",
+    },
+  });
+
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await page.getByTestId("settings-nav-agents").click();
+
+  const host = page.getByTestId("fleet-visibility-role-host");
+  const observer = page.getByTestId("fleet-visibility-role-observer");
+  await expect(host).toHaveAttribute("aria-pressed", "true");
+
+  await observer.click();
+  await expect(observer).toHaveAttribute("aria-pressed", "true");
+
+  await host.click();
+  await expect(host).toHaveAttribute("aria-pressed", "true");
+});
