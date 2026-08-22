@@ -199,6 +199,10 @@ type E2eConfig = {
     dispatchFoldError?: string;
     /** Number of canonical Dispatch history REQs rejected once with a 1s hint. */
     dispatchHistoryRateLimitCount?: number;
+    /** Persisted Rust-owned Dispatch cache cursor exposed on warm start. */
+    dispatchWarmCursor?: number;
+    /** Saturate one warm timestamp boundary so Dispatch must cold-fallback. */
+    dispatchHistoryGapOnce?: boolean;
     /** Tauri window label exposed to the app. Defaults to the main window. */
     windowLabel?: string;
     /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */
@@ -1203,6 +1207,7 @@ declare global {
   interface Window {
     __BUZZ_E2E__?: E2eConfig;
     __BUZZ_E2E_COMMANDS__?: string[];
+    __BUZZ_E2E_DISPATCH_HISTORY_FILTERS__?: MockFilter[];
     __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
       command: string;
       payload: unknown;
@@ -8179,6 +8184,7 @@ function withMockRuntimeConfigMetadata(
 let runtimeCatalogDiscoveryCount = 0;
 let mockDispatchContext: DispatchContext | null = null;
 let mockDispatchHistoryRateLimitsRemaining = 0;
+let mockDispatchHistoryGapPagesRemaining = 0;
 let mockInstallCompleted = false;
 let mockConnectCompleted = false;
 
@@ -10419,7 +10425,7 @@ function dispatchFixtureEvent(
   content = "",
 ): RelayEvent {
   return {
-    id: idDigit.repeat(64),
+    id: idDigit.length === 64 ? idDigit : idDigit.repeat(64),
     pubkey: MOCK_IDENTITY_PUBKEY,
     created_at: Math.floor(Date.now() / 1000) - 1,
     kind,
@@ -10443,6 +10449,27 @@ function emitMockDispatchFixture(
     { ...fixture.workspace, populated: true },
   ];
   const kinds = new Set(filter.kinds ?? []);
+  window.__BUZZ_E2E_DISPATCH_HISTORY_FILTERS__?.push(structuredClone(filter));
+  if (
+    mockDispatchHistoryGapPagesRemaining > 0 &&
+    filter.since !== undefined &&
+    kinds.size === 2 &&
+    kinds.has(40020) &&
+    kinds.has(40021)
+  ) {
+    mockDispatchHistoryGapPagesRemaining -= 1;
+    for (let index = 0; index < 500; index += 1) {
+      sendWsText(socket.handler, [
+        "EVENT",
+        subId,
+        dispatchFixtureEvent(index.toString(16).padStart(64, "0"), 40020, [
+          ["h", filter["#h"]?.[0] ?? fixture.workspace.id],
+        ]),
+      ]);
+    }
+    sendWsText(socket.handler, ["EOSE", subId]);
+    return true;
+  }
   if (
     mockDispatchHistoryRateLimitsRemaining > 0 &&
     kinds.size === 2 &&
@@ -11025,6 +11052,9 @@ export function maybeInstallE2eTauriMocks() {
     : null;
   mockDispatchHistoryRateLimitsRemaining =
     config.mock?.dispatchHistoryRateLimitCount ?? 0;
+  mockDispatchHistoryGapPagesRemaining = config.mock?.dispatchHistoryGapOnce
+    ? 2
+    : 0;
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
   cancelledMediaUploadIds = new Set<string>();
@@ -11072,6 +11102,7 @@ export function maybeInstallE2eTauriMocks() {
   }
   mockWindows(config.mock?.windowLabel ?? "main");
   window.__BUZZ_E2E_COMMANDS__ = [];
+  window.__BUZZ_E2E_DISPATCH_HISTORY_FILTERS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
   mockMediaProxyPort = config.mock?.mediaProxyInitiallyUnavailable
@@ -12110,6 +12141,14 @@ export function maybeInstallE2eTauriMocks() {
             diagnostics: [],
             taskDiagnostics: [],
           };
+        }
+        return structuredClone(mockDispatchContext);
+      }
+      case "tracker_fold_cursor":
+        return activeConfig?.mock?.dispatchWarmCursor ?? null;
+      case "resume_tracker_context": {
+        if (!mockDispatchContext) {
+          throw new Error("No mocked Dispatch fold is configured.");
         }
         return structuredClone(mockDispatchContext);
       }

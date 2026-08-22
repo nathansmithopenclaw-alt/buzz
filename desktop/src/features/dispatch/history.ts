@@ -24,6 +24,17 @@ export type DispatchHistoryClient = {
   fetchExhaustively: (filter: ExhaustiveFilter) => Promise<RelayEvent[]>;
 };
 
+export class DispatchHistoryGapError extends Error {
+  constructor() {
+    super("Tracker history cannot be exhausted at the timestamp boundary.");
+    this.name = "DispatchHistoryGapError";
+  }
+}
+
+export function isDispatchHistoryGap(error: unknown): boolean {
+  return error instanceof DispatchHistoryGapError;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -126,9 +137,10 @@ export function createDispatchHistoryClient({
       });
       for (const event of boundary) events.set(event.id, event);
       if (boundary.length >= PAGE_SIZE) {
-        throw new Error(
-          "Tracker history cannot be exhausted at the timestamp boundary.",
-        );
+        throw new DispatchHistoryGapError();
+      }
+      if (filter.since !== undefined && oldest <= filter.since) {
+        return [...events.values()];
       }
       if (oldest <= 0) return [...events.values()];
       until = oldest - 1;

@@ -12,9 +12,11 @@ import {
 import {
   foldTrackerContext,
   foldTrackerContextIncremental,
+  resumeTrackerContext,
+  trackerFoldCursor,
 } from "@/shared/api/tracker";
 import type { RelayEvent } from "@/shared/api/types";
-import { createDispatchHistoryClient } from "./history";
+import { createDispatchHistoryClient, isDispatchHistoryGap } from "./history";
 import { createDispatchLiveMerge, type DispatchLiveMerge } from "./liveMerge";
 import type { DispatchContext, DispatchWorkspace } from "./types";
 
@@ -106,43 +108,78 @@ async function loadContext(
     "#d": [workspaceId],
     limit: 1,
   });
-  const [trackerHistory, comments, projects, tasks] = await Promise.allSettled([
-    history.fetchExhaustively({
-      kinds: TRACKER_HISTORY_KINDS,
-      "#h": [workspaceId],
-    }),
-    history.fetchExhaustively({
-      kinds: [TRACKER_COMMENT_KIND],
-      "#h": [workspaceId],
-    }),
-    history.fetchExhaustively({
-      kinds: [PROJECT_KIND],
-      "#buzz-workspace": [workspaceId],
-    }),
-    history.fetchExhaustively({
-      kinds: [TASK_KIND],
-      "#t": [TASK_DISCOVERY_TAG],
-      "#h": [workspaceId],
-    }),
-  ]);
-  if (trackerHistory.status === "rejected") throw trackerHistory.reason;
   const membershipEvent = memberships[0];
   if (!membershipEvent)
     throw new Error("Tracker workspace membership snapshot is unavailable.");
-  const folded = await foldTrackerContext<
-    Omit<DispatchContext, "sectionErrors">
-  >({
-    events: [
-      ...trackerHistory.value,
-      ...(comments.status === "fulfilled" ? comments.value : []),
-      ...(projects.status === "fulfilled" ? projects.value : []),
-    ],
-    taskEvents: tasks.status === "fulfilled" ? tasks.value : [],
-    membershipEvent,
-    workspaceId,
-    managedSigner,
-    snapshotAt,
-  });
+  const cursor = await trackerFoldCursor({ workspaceId, managedSigner }).catch(
+    () => null,
+  );
+  const fetchStreams = (since: number | null) =>
+    Promise.allSettled([
+      history.fetchExhaustively({
+        kinds: TRACKER_HISTORY_KINDS,
+        "#h": [workspaceId],
+        ...(since === null ? {} : { since }),
+      }),
+      history.fetchExhaustively({
+        kinds: [TRACKER_COMMENT_KIND],
+        "#h": [workspaceId],
+        ...(since === null ? {} : { since }),
+      }),
+      history.fetchExhaustively({
+        kinds: [PROJECT_KIND],
+        "#buzz-workspace": [workspaceId],
+        ...(since === null ? {} : { since }),
+      }),
+      history.fetchExhaustively({
+        kinds: [TASK_KIND],
+        "#t": [TASK_DISCOVERY_TAG],
+        "#h": [workspaceId],
+        ...(since === null ? {} : { since }),
+      }),
+    ]);
+  let warm = cursor !== null;
+  let [trackerHistory, comments, projects, tasks] = await fetchStreams(cursor);
+  if (
+    warm &&
+    [trackerHistory, comments, projects, tasks].some(
+      (result) =>
+        result.status === "rejected" && isDispatchHistoryGap(result.reason),
+    )
+  ) {
+    warm = false;
+    [trackerHistory, comments, projects, tasks] = await fetchStreams(null);
+  }
+  if (trackerHistory.status === "rejected") throw trackerHistory.reason;
+  const events = [
+    ...trackerHistory.value,
+    ...(comments.status === "fulfilled" ? comments.value : []),
+    ...(projects.status === "fulfilled" ? projects.value : []),
+  ];
+  const taskEvents = tasks.status === "fulfilled" ? tasks.value : [];
+  const folded = warm
+    ? await resumeTrackerContext<Omit<DispatchContext, "sectionErrors">>({
+        events,
+        taskEvents,
+        membershipEvent,
+        workspaceId,
+        managedSigner,
+        snapshotAt,
+        advanceCursor: [comments, projects, tasks].every(
+          (result) => result.status === "fulfilled",
+        ),
+      })
+    : await foldTrackerContext<Omit<DispatchContext, "sectionErrors">>({
+        events,
+        taskEvents,
+        membershipEvent,
+        workspaceId,
+        managedSigner,
+        snapshotAt,
+        advanceCursor: [comments, projects, tasks].every(
+          (result) => result.status === "fulfilled",
+        ),
+      });
   const errorMessage = (result: PromiseSettledResult<unknown>) =>
     result.status === "rejected"
       ? result.reason instanceof Error

@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   createDispatchHistoryClient,
+  DispatchHistoryGapError,
+  isDispatchHistoryGap,
   isRateLimitRejection,
 } from "./history.ts";
 
@@ -72,6 +74,48 @@ test("exhaustive pagination gates every page and timestamp boundary", async () =
   );
   assert.equal(filters[2].until, 198);
   assert.equal(events.length, 502);
+});
+
+test("a saturated timestamp boundary is a typed cursor gap", async () => {
+  const dense = Array.from({ length: 500 }, (_, index) =>
+    event(index + 1, 200),
+  );
+  const history = client({ fetchEvents: async () => dense });
+
+  await assert.rejects(
+    history.fetchExhaustively({ kinds: [40020], since: 100 }),
+    (error) => {
+      assert.equal(error instanceof DispatchHistoryGapError, true);
+      assert.equal(isDispatchHistoryGap(error), true);
+      return true;
+    },
+  );
+});
+
+test("cursor pagination stops before constructing an inverted since/until range", async () => {
+  const firstPage = Array.from({ length: 500 }, (_, index) =>
+    event(index + 1, index === 499 ? 100 : 200),
+  );
+  const pages = [firstPage, [event(501, 100)]];
+  const filters = [];
+  const history = client({
+    fetchEvents: async (filter) => {
+      filters.push(filter);
+      return pages.shift() ?? [];
+    },
+  });
+
+  const events = await history.fetchExhaustively({
+    kinds: [40020],
+    since: 100,
+  });
+
+  assert.equal(events.length, 501);
+  assert.equal(filters.length, 2);
+  assert.deepEqual(
+    { since: filters[1].since, until: filters[1].until },
+    { since: 100, until: 100 },
+  );
 });
 
 test("serial queue paces concurrent cold-load streams", async () => {
