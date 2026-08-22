@@ -2,8 +2,10 @@
 # Install the vendored, pinned Track-A ACP adapter (L4.1).
 # - verifies the committed tarball against PROVENANCE.json BEFORE installing
 # - installs via npm from the file: pin (never hand-edited node_modules)
-# - writes a shim at ~/.buzz/agents/bin/claude-agent-acp (override dir with
-#   BUZZ_AGENT_BIN_DIR). Put that dir ahead of any global npm bin on PATH.
+# - writes a shim at ~/.local/bin/claude-agent-acp (override dir with
+#   ACP_SHIM_BIN_DIR). Live probe (2026-08-22, MBP): desktop-spawned agents
+#   inherit PATH with ~/.local/bin already ahead of the nvm global bin, so no
+#   precedence flip is needed. Re-verify per host at rollout.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,7 +35,7 @@ if [[ "$ACTUAL_VER" != "$EXPECT_VER" ]]; then
 fi
 echo "installed version OK: $ACTUAL_VER"
 
-BIN_DIR="${BUZZ_AGENT_BIN_DIR:-$HOME/.buzz/agents/bin}"
+BIN_DIR="${ACP_SHIM_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$BIN_DIR"
 SHIM="$BIN_DIR/claude-agent-acp"
 cat > "$SHIM" <<EOF
@@ -44,5 +46,8 @@ EOF
 chmod 755 "$SHIM"
 
 echo "shim written: $SHIM"
-echo "NOTE: ensure $BIN_DIR precedes the global npm bin on PATH for the harness;"
-echo "      running sessions keep their existing adapter until respawn."
+echo "NOTE: ~/.local/bin precedes the nvm global bin in the desktop spawn env"
+echo "      (probed 2026-08-22 on the MBP — re-verify per host). Install ONLY as"
+echo "      part of a rollout that also ships the typed consumer; ROLLBACK MUST"
+echo "      remove this shim explicitly (files outside the bundle outlive app"
+echo "      reverts)."
