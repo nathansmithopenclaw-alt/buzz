@@ -6,6 +6,7 @@ import {
   publishDispatchComment,
   publishDispatchIssueCreate,
   publishDispatchIssueMutation,
+  TRACKER_REQUEST_MATCH_KINDS,
   TrackerMutationConflictError,
   TrackerRevisionRejectedError,
 } from "./mutations.ts";
@@ -275,6 +276,13 @@ test("issue create replays the same literal request tag without republishing", a
 
   assert.equal(result.replayed, true);
   assert.equal(published, false);
+});
+
+test("issue-create request matching still fetches kind-40025 project activity", () => {
+  assert.deepEqual(
+    TRACKER_REQUEST_MATCH_KINDS,
+    [40020, 40021, 40022, 40025, 30621],
+  );
 });
 
 test("issue create rejects a request ID already used by another Tracker kind", async () => {

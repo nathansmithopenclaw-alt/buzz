@@ -20,8 +20,11 @@ import { createDispatchHistoryClient, isDispatchHistoryGap } from "./history";
 import { createDispatchLiveMerge, type DispatchLiveMerge } from "./liveMerge";
 import type { DispatchContext, DispatchWorkspace } from "./types";
 
-const TRACKER_KINDS = [40020, 40021, 40022, 40025];
-const TRACKER_HISTORY_KINDS = [40020, 40021];
+// Fold-consumed issue/revision/comment kinds. Kind 40025 is M20 project-activity
+// history (`buzz track project get --history`); Dispatch has no consumer, so the
+// live sub and populated-workspace probe must not fetch it.
+export const TRACKER_KINDS = [40020, 40021, 40022];
+export const TRACKER_HISTORY_KINDS = [40020, 40021];
 const TRACKER_COMMENT_KIND = 40022;
 const PROJECT_KIND = 30621;
 const TASK_KIND = 9;
