@@ -445,9 +445,9 @@ fn retain_host_retractions_in_db(
     let mut tombstones = Vec::with_capacity(2);
 
     for target_kind in [KIND_HOST_DECLARATION, KIND_HOST_STATUS] {
-        let target = get_retained_event(&conn, target_kind, &owner, host_id)?;
+        let target = get_retained_event(conn, target_kind, &owner, host_id)?;
         let tombstone_d_tag = tombstone_retention_d_tag(target_kind, host_id);
-        let previous_tombstone = get_retained_event(&conn, 5, &owner, &tombstone_d_tag)?;
+        let previous_tombstone = get_retained_event(conn, 5, &owner, &tombstone_d_tag)?;
         let previous_created_at = target
             .as_ref()
             .map(|row| row.created_at)
@@ -486,7 +486,7 @@ fn retain_host_retractions_in_db(
 
 fn host_id_to_retract(config: &FleetVisibilityConfig, role: DeviceRole) -> Option<&str> {
     (config.role_selected && config.role == DeviceRole::Host && role == DeviceRole::Observer)
-        .then(|| config.host_id.as_deref())
+        .then_some(config.host_id.as_deref())
         .flatten()
 }
 
@@ -828,8 +828,10 @@ mod tests {
 
     #[test]
     fn only_a_selected_host_to_observer_transition_retracts() {
-        let mut config = FleetVisibilityConfig::default();
-        config.host_id = Some("host-a".into());
+        let mut config = FleetVisibilityConfig {
+            host_id: Some("host-a".into()),
+            ..FleetVisibilityConfig::default()
+        };
         assert_eq!(host_id_to_retract(&config, DeviceRole::Observer), None);
 
         config.role_selected = true;

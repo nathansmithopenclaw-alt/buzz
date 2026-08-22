@@ -713,11 +713,6 @@ async fn discover_anthropic_models(
 
 #[path = "agent_models_databricks.rs"]
 mod databricks;
-#[cfg(test)]
-use databricks::{
-    databricks_sign_in_required_error, databricks_static_token_error, is_databricks_provider,
-    should_start_interactive_auth,
-};
 use databricks::{discover_databricks_models, DatabricksAuthIntent};
 
 #[path = "agent_models_update.rs"]
