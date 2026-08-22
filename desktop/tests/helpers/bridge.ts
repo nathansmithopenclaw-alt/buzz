@@ -156,6 +156,8 @@ type MockBridgeOptions = {
     workspace: { id: string; name: string };
     workspaces?: Array<{ id: string; name: string; populated: boolean }>;
     context: DispatchContext;
+    /** Next status revision is published then fold-rejected, not applied. */
+    rejectNextRevision?: boolean;
   };
   ttsSettings?: {
     version: number;

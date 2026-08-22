@@ -7,6 +7,7 @@ import {
   publishDispatchIssueCreate,
   publishDispatchIssueMutation,
   TrackerMutationConflictError,
+  TrackerRevisionRejectedError,
 } from "./mutations.ts";
 
 const PUBKEY = "a".repeat(64);
@@ -105,7 +106,30 @@ function dependencies(event = relayEvent()) {
   };
 }
 
-test("status mutation round-trips through builders and accepts an absent reason", async () => {
+test("status mutation requires a non-empty reason before building", async () => {
+  const current = issue();
+  const deps = dependencies();
+  const optimistic = [];
+  await assert.rejects(
+    publishDispatchIssueMutation(
+      {
+        issue: current,
+        mutation: { type: "status", status: "in_progress", reason: "   " },
+        viewerRole: "member",
+        onOptimistic: (value) => optimistic.push(value),
+        onRollback: () => assert.fail("must not roll back a blocked emit"),
+        refresh: async () => assert.fail("must not refresh a blocked emit"),
+      },
+      deps.value,
+    ),
+    /status change reason is required/,
+  );
+  assert.equal(deps.calls.revisions.length, 0);
+  assert.equal(deps.calls.published.length, 0);
+  assert.equal(optimistic.length, 0);
+});
+
+test("status mutation round-trips a required reason through builders", async () => {
   const current = issue();
   const event = relayEvent();
   const next = {
@@ -120,7 +144,11 @@ test("status mutation round-trips through builders and accepts an absent reason"
   const result = await publishDispatchIssueMutation(
     {
       issue: current,
-      mutation: { type: "status", status: "in_progress", reason: null },
+      mutation: {
+        type: "status",
+        status: "in_progress",
+        reason: " Execution started ",
+      },
       viewerRole: "member",
       onOptimistic: (value) => optimistic.push(value),
       onRollback: (value) => rolledBack.push(value),
@@ -131,9 +159,46 @@ test("status mutation round-trips through builders and accepts an absent reason"
 
   assert.equal(result, next);
   assert.equal(deps.calls.revisions[0].revision.parent_event, current.tipEvent);
-  assert.equal(deps.calls.revisions[0].revision.reason, null);
+  assert.equal(deps.calls.revisions[0].revision.reason, "Execution started");
   assert.equal(optimistic[0].tipEvent, event.id);
   assert.equal(rolledBack.length, 0);
+  assert.deepEqual(deps.calls.published, [event]);
+});
+
+test("a fold-rejected status revision rolls back instead of keeping optimistic state", async () => {
+  const current = issue();
+  const event = relayEvent();
+  const deps = dependencies(event);
+  const optimistic = [];
+  const rolledBack = [];
+  await assert.rejects(
+    publishDispatchIssueMutation(
+      {
+        issue: current,
+        mutation: {
+          type: "status",
+          status: "in_progress",
+          reason: "Execution started",
+        },
+        viewerRole: "member",
+        onOptimistic: (value) => optimistic.push(value),
+        onRollback: (value) => rolledBack.push(value),
+        refresh: async () => ({
+          ...context([current]),
+          diagnostics: [
+            {
+              kind: "InvalidEvent",
+              message: `InvalidEvent { event_id: "${event.id}", reason: "status change reason must be non-empty when present" }`,
+            },
+          ],
+        }),
+      },
+      deps.value,
+    ),
+    TrackerRevisionRejectedError,
+  );
+  assert.equal(optimistic[0].status, "in_progress");
+  assert.deepEqual(rolledBack, [current]);
   assert.deepEqual(deps.calls.published, [event]);
 });
 
@@ -309,7 +374,7 @@ test("terminal and reopen transitions remain maintainer-only", () => {
   assert.equal(
     canApplyDispatchMutation(
       issue(),
-      { type: "status", status: "done", reason: null },
+      { type: "status", status: "done", reason: "Closing" },
       "member",
     ),
     false,
@@ -317,7 +382,7 @@ test("terminal and reopen transitions remain maintainer-only", () => {
   assert.equal(
     canApplyDispatchMutation(
       issue({ status: "done" }),
-      { type: "status", status: "todo", reason: null },
+      { type: "status", status: "todo", reason: "Reopening" },
       "maintainer",
     ),
     true,

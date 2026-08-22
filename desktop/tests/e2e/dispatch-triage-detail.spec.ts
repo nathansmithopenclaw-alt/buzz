@@ -156,11 +156,13 @@ function context(overrides: Partial<DispatchContext> = {}): DispatchContext {
 async function openDispatch(
   page: import("@playwright/test").Page,
   dispatchContext = context(),
+  dispatchOptions: { rejectNextRevision?: boolean } = {},
 ) {
   await installMockBridge(page, {
     dispatch: {
       workspace: { id: WORKSPACE, name: "Dispatch Test Workspace" },
       context: dispatchContext,
+      ...dispatchOptions,
     },
     searchProfiles: [{ pubkey: OTHER, displayName: "Helm" }],
   });
@@ -228,6 +230,7 @@ test("detail mutation round-trips through the Rust-builder and canonical refresh
 }) => {
   await openDispatch(page);
   await openPrimaryIssue(page);
+  await page.getByTestId("dispatch-status-reason").fill("Needs owner review");
   const status = page.getByLabel("Issue status");
   await status.selectOption("in_review");
   await expect(page.getByText("Issue updated")).toBeVisible();
@@ -235,11 +238,54 @@ test("detail mutation round-trips through the Rust-builder and canonical refresh
   const signed = await page.evaluate(
     () => window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [],
   );
+  const revision = signed.find((event) => event.kind === 40021);
+  expect(revision).toBeTruthy();
+  const content = JSON.parse(revision?.content ?? "{}") as {
+    set?: { status?: string };
+    reason?: string | null;
+  };
+  expect(content.set?.status).toBe("in_review");
+  expect(content.reason).toBe("Needs owner review");
+});
+
+test("detail does not emit a reason-less status change", async ({ page }) => {
+  await openDispatch(page);
+  await openPrimaryIssue(page);
+  const status = page.getByLabel("Issue status");
+  await status.selectOption("in_review");
+  await expect(page.getByTestId("dispatch-status-reason-error")).toHaveText(
+    "status change reason is required",
+  );
+  await expect(status).toHaveValue("triage");
+  await expect(page.getByText("Issue updated")).toHaveCount(0);
+  const signed = await page.evaluate(
+    () => window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [],
+  );
+  expect(signed.some((event) => event.kind === 40021)).toBe(false);
+});
+
+test("detail does not keep an optimistic status when the fold rejects the revision", async ({
+  page,
+}) => {
+  await openDispatch(page, context(), { rejectNextRevision: true });
+  await openPrimaryIssue(page);
+  await page.getByTestId("dispatch-status-reason").fill("Execution started");
+  const status = page.getByLabel("Issue status");
+  await status.selectOption("in_progress");
+  await expect(
+    page.getByText(/Canonical fold rejected the revision/),
+  ).toBeVisible();
+  await expect(status).toHaveValue("triage");
+  await expect(page.getByText("Issue updated")).toHaveCount(0);
+  await expect(page.getByText("Triage → In Progress")).toHaveCount(0);
+  const signed = await page.evaluate(
+    () => window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [],
+  );
   expect(
     signed.some(
       (event) =>
         event.kind === 40021 &&
-        JSON.parse(event.content).set.status === "in_review",
+        JSON.parse(event.content).set.status === "in_progress",
     ),
   ).toBe(true);
 });
