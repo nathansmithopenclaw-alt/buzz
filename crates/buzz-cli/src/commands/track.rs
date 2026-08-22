@@ -294,10 +294,7 @@ fn parse_cached_events(events: &[Event]) -> (Vec<TrackerEvent>, Vec<String>) {
     (parsed, warnings)
 }
 
-async fn tracker_authorization(
-    client: &BuzzClient,
-    workspace_id: Uuid,
-) -> Result<TrackerAuthorization, CliError> {
+async fn workspace_membership(client: &BuzzClient, workspace_id: Uuid) -> Result<Value, CliError> {
     let events = client
         .query_paginated(
             json!({
@@ -307,11 +304,50 @@ async fn tracker_authorization(
             1,
         )
         .await?;
-    let event = events.first().ok_or_else(|| {
+    events.into_iter().next().ok_or_else(|| {
         CliError::Auth(format!(
             "workspace {workspace_id} has no readable membership snapshot"
         ))
-    })?;
+    })
+}
+
+/// NIP-BT workspace signer: the `owner` row on the kind-39002 snapshot, not the caller.
+fn workspace_signer_from_membership(event: &Value) -> Result<String, CliError> {
+    event
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+        .find_map(|tag| {
+            if tag.first().and_then(Value::as_str) != Some("p")
+                || tag.get(3).and_then(Value::as_str) != Some("owner")
+            {
+                return None;
+            }
+            tag.get(1)
+                .and_then(Value::as_str)
+                .and_then(|pubkey| PublicKey::parse(pubkey).ok())
+                .map(|pubkey| pubkey.to_hex())
+        })
+        .ok_or_else(|| {
+            CliError::Auth("membership snapshot has no valid workspace owner row".into())
+        })
+}
+
+fn fold_workspace_projects(
+    project_events: impl IntoIterator<Item = Event>,
+    workspace_id: Uuid,
+    membership: &Value,
+) -> Result<buzz_sdk::tracker::TrackerProjectProjection, CliError> {
+    let signer = workspace_signer_from_membership(membership)?;
+    Ok(fold_tracker_projects(project_events, workspace_id, &signer))
+}
+
+fn tracker_authorization_from_membership(
+    client: &BuzzClient,
+    event: &Value,
+) -> TrackerAuthorization {
     let mut roles = Vec::new();
     if let Some(author) = event.get("pubkey").and_then(Value::as_str) {
         roles.push((author.to_string(), TrackerRole::Maintainer));
@@ -339,7 +375,7 @@ async fn tracker_authorization(
     if let Some(owner) = client.auth_tag_owner_hex() {
         roles.push((owner, TrackerRole::Maintainer));
     }
-    Ok(TrackerAuthorization::new(roles))
+    TrackerAuthorization::new(roles)
 }
 
 async fn load_context(
@@ -374,7 +410,8 @@ async fn load_context(
     cache.cursor = max_cursor(&cache.events);
     write_cache(&path, &cache)?;
 
-    let authorization = tracker_authorization(client, workspace_id).await?;
+    let membership = workspace_membership(client, workspace_id).await?;
+    let authorization = tracker_authorization_from_membership(client, &membership);
     let (parsed, mut warnings) = parse_cached_events(&cache.events);
     let fold = fold_tracker_events(parsed.clone(), &authorization);
     warnings.extend(
@@ -395,8 +432,7 @@ async fn load_context(
                 .map_err(|error| CliError::Other(format!("invalid project event JSON: {error}")))
         })
         .collect::<Result<_, _>>()?;
-    let signer = client.keys().public_key().to_hex();
-    let projects = fold_tracker_projects(project_events, workspace_id, &signer);
+    let projects = fold_workspace_projects(project_events, workspace_id, &membership)?;
     warnings.extend(
         projects
             .diagnostics
@@ -3852,5 +3888,119 @@ mod tests {
         let conflict = build(&"b".repeat(64), 2, "different intent");
         assert!(same_semantic_request(&first, &retry));
         assert!(!same_semantic_request(&first, &conflict));
+    }
+
+    fn membership_json(member: &Keys, owner: &Keys, owner_role: &str) -> Value {
+        json!({
+            "tags": [
+                ["p", member.public_key().to_hex(), "", "member"],
+                ["p", owner.public_key().to_hex(), "", owner_role],
+            ]
+        })
+    }
+
+    fn tracker_project_head(
+        keys: &Keys,
+        workspace: Uuid,
+        project_id: Uuid,
+        slug: &str,
+        created_at: u64,
+    ) -> Event {
+        build_project_with_tags(
+            "",
+            vec![
+                Tag::parse(["d", slug]).unwrap(),
+                Tag::parse(["name", slug]).unwrap(),
+                Tag::parse(["buzz-project-id", &project_id.to_string()]).unwrap(),
+                Tag::parse(["buzz-workspace", &workspace.to_string()]).unwrap(),
+            ],
+        )
+        .unwrap()
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .unwrap()
+    }
+
+    #[test]
+    fn workspace_signer_is_the_membership_owner_row_not_admin_or_member() {
+        let member = Keys::generate();
+        let owner = Keys::generate();
+        let admin = Keys::generate();
+        assert_eq!(
+            workspace_signer_from_membership(&membership_json(&member, &owner, "owner")).unwrap(),
+            owner.public_key().to_hex()
+        );
+        assert!(
+            workspace_signer_from_membership(&membership_json(&member, &admin, "admin")).is_err()
+        );
+        assert!(workspace_signer_from_membership(&json!({"tags": []})).is_err());
+    }
+
+    #[test]
+    fn workspace_signer_normalizes_npub_owner_rows() {
+        use nostr::ToBech32;
+        let owner = Keys::generate();
+        let npub = owner.public_key().to_bech32().unwrap();
+        let membership = json!({"tags": [["p", npub, "", "owner"]]});
+        assert_eq!(
+            workspace_signer_from_membership(&membership).unwrap(),
+            owner.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn project_fold_keeps_owner_authored_heads_for_owner_and_member_callers() {
+        let owner = Keys::generate();
+        let member = Keys::generate();
+        let workspace = Uuid::new_v4();
+        let owner_project_id = Uuid::new_v4();
+        let member_project_id = Uuid::new_v4();
+        let owner_head = tracker_project_head(&owner, workspace, owner_project_id, "dispatch", 100);
+        let member_head =
+            tracker_project_head(&member, workspace, member_project_id, "member-project", 100);
+        let membership = membership_json(&member, &owner, "owner");
+        let expected_member_coordinate =
+            format!("30621:{}:member-project", member.public_key().to_hex());
+
+        let via_membership = fold_workspace_projects(
+            [owner_head.clone(), member_head.clone()],
+            workspace,
+            &membership,
+        )
+        .unwrap();
+        let via_owner_hex = fold_tracker_projects(
+            [owner_head.clone(), member_head.clone()],
+            workspace,
+            &owner.public_key().to_hex(),
+        );
+        let via_caller_hex = fold_tracker_projects(
+            [owner_head.clone(), member_head.clone()],
+            workspace,
+            &member.public_key().to_hex(),
+        );
+
+        assert_eq!(via_membership, via_owner_hex);
+        assert_eq!(via_membership.projects.len(), 1);
+        assert_eq!(via_membership.projects[&owner_project_id].slug, "dispatch");
+        assert!(!via_membership.projects.contains_key(&member_project_id));
+        assert_eq!(
+            via_membership.diagnostics,
+            vec![buzz_sdk::tracker::ProjectDiagnostic::UnmanagedCoordinate {
+                coordinate: expected_member_coordinate,
+            }]
+        );
+        assert!(!via_caller_hex.projects.contains_key(&owner_project_id));
+        assert_eq!(via_caller_hex.projects.len(), 1);
+        assert_eq!(
+            via_caller_hex.projects[&member_project_id].slug,
+            "member-project"
+        );
+        assert!(via_caller_hex.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic,
+                buzz_sdk::tracker::ProjectDiagnostic::UnmanagedCoordinate { coordinate }
+                    if coordinate.ends_with(":dispatch")
+            )
+        }));
     }
 }
