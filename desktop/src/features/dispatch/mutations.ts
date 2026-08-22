@@ -77,9 +77,11 @@ type TrackerCommentWire = {
 };
 
 export type DispatchIssueMutation =
-  | { type: "status"; status: DispatchStatus; reason: string | null }
+  | { type: "status"; status: DispatchStatus; reason: string }
   | { type: "assignee"; assignee: string | null }
   | { type: "priority"; priority: DispatchPriority | null };
+
+const STATUS_REASON_REQUIRED = "status change reason is required";
 
 type MutationDependencies = {
   identity: () => Promise<{ pubkey: string }>;
@@ -290,6 +292,25 @@ export class TrackerMutationConflictError extends Error {
   }
 }
 
+export class TrackerRevisionRejectedError extends Error {
+  constructor(reason: string) {
+    super(
+      `The status change was not applied. Canonical fold rejected the revision: ${reason}`,
+    );
+    this.name = "TrackerRevisionRejectedError";
+  }
+}
+
+export function foldRejectionForEvent(
+  diagnostics: DispatchContext["diagnostics"],
+  eventId: string,
+): string | null {
+  return (
+    diagnostics.find((diagnostic) => diagnostic.message.includes(eventId))
+      ?.message ?? null
+  );
+}
+
 export function canApplyDispatchMutation(
   issue: DispatchIssue,
   mutation: DispatchIssueMutation,
@@ -311,13 +332,14 @@ function mutationFields(mutation: DispatchIssueMutation): {
 } {
   switch (mutation.type) {
     case "status": {
-      if (mutation.reason !== null && !mutation.reason.trim()) {
-        throw new Error("Status change reason must be non-empty when present.");
+      const reason = mutation.reason.trim();
+      if (!reason) {
+        throw new Error(STATUS_REASON_REQUIRED);
       }
       return {
         set: { status: mutation.status },
         clear: [],
-        reason: mutation.reason?.trim() ?? null,
+        reason,
       };
     }
     case "assignee":
@@ -415,6 +437,11 @@ export async function publishDispatchIssueMutation(
     const canonical = context.issues.find(
       (candidate) => candidate.issueId === issue.issueId,
     );
+    const rejection = foldRejectionForEvent(context.diagnostics, event.id);
+    if (rejection) {
+      onRollback(issue);
+      throw new TrackerRevisionRejectedError(rejection);
+    }
     const applied = context.activity.some(
       (entry) => entry.issueId === issue.issueId && entry.eventId === event.id,
     );
@@ -425,7 +452,12 @@ export async function publishDispatchIssueMutation(
     }
     return canonical;
   } catch (error) {
-    if (!(error instanceof TrackerMutationConflictError)) onRollback(issue);
+    if (
+      !(error instanceof TrackerMutationConflictError) &&
+      !(error instanceof TrackerRevisionRejectedError)
+    ) {
+      onRollback(issue);
+    }
     throw error;
   }
 }

@@ -65,6 +65,16 @@ fn unsigned_shape(
     })
 }
 
+fn require_status_change_reason(revision: &IssueRevision) -> Result<(), String> {
+    if revision.set.status.is_none() {
+        return Ok(());
+    }
+    match revision.reason.as_deref().map(str::trim) {
+        Some(reason) if !reason.is_empty() => Ok(()),
+        _ => Err("status change reason is required".into()),
+    }
+}
+
 /// Build and validate a Tracker revision without signing or publishing it.
 #[tauri::command]
 pub fn build_tracker_revision_event(
@@ -72,6 +82,7 @@ pub fn build_tracker_revision_event(
     revision: IssueRevision,
     author_pubkey: String,
 ) -> Result<TrackerUnsignedEvent, String> {
+    require_status_change_reason(&revision)?;
     let builder =
         build_tracker_revision(stream_id, &revision).map_err(|error| error.to_string())?;
     unsigned_shape(builder, &author_pubkey)
@@ -162,6 +173,66 @@ mod tests {
                 .sign_with_keys(&keys)
                 .expect("sign");
         assert!(Event::from_json(signed.as_json()).is_ok());
+    }
+
+    #[test]
+    fn revision_command_rejects_a_status_change_without_reason() {
+        let keys = Keys::generate();
+        let error = build_tracker_revision_event(
+            Uuid::new_v4(),
+            IssueRevision {
+                v: TRACKER_VERSION,
+                op: "revise".into(),
+                issue_id: Uuid::new_v4(),
+                root_event: event_id('a'),
+                parent_event: event_id('b'),
+                revision: 1,
+                set: RevisionSet {
+                    status: Some(IssueStatus::InProgress),
+                    ..RevisionSet::default()
+                },
+                clear: Vec::new(),
+                relations: SetOperations::default(),
+                external_refs: SetOperations::default(),
+                reason: None,
+                request_id: Some(Uuid::new_v4()),
+                import: None,
+            },
+            keys.public_key().to_hex(),
+        )
+        .expect_err("reason-less status change");
+        assert!(
+            error.contains("status change reason is required"),
+            "unexpected builder error: {error}"
+        );
+
+        let blank = build_tracker_revision_event(
+            Uuid::new_v4(),
+            IssueRevision {
+                v: TRACKER_VERSION,
+                op: "revise".into(),
+                issue_id: Uuid::new_v4(),
+                root_event: event_id('a'),
+                parent_event: event_id('b'),
+                revision: 1,
+                set: RevisionSet {
+                    status: Some(IssueStatus::Todo),
+                    ..RevisionSet::default()
+                },
+                clear: Vec::new(),
+                relations: SetOperations::default(),
+                external_refs: SetOperations::default(),
+                reason: Some("   ".into()),
+                request_id: Some(Uuid::new_v4()),
+                import: None,
+            },
+            keys.public_key().to_hex(),
+        )
+        .expect_err("blank status change reason");
+        assert!(
+            blank.contains("status change reason is required"),
+            "unexpected builder error: {blank}"
+        );
     }
 
     #[test]

@@ -206,6 +206,8 @@ type E2eConfig = {
       workspace: { id: string; name: string };
       workspaces?: Array<{ id: string; name: string; populated: boolean }>;
       context: DispatchContext;
+      /** Next status revision is published then fold-rejected, not applied. */
+      rejectNextRevision?: boolean;
     };
     ttsSettings?: {
       version: number;
@@ -8178,6 +8180,7 @@ function withMockRuntimeConfigMetadata(
 
 let runtimeCatalogDiscoveryCount = 0;
 let mockDispatchContext: DispatchContext | null = null;
+let rejectNextDispatchRevision = false;
 let mockDispatchHistoryRateLimitsRemaining = 0;
 let mockInstallCompleted = false;
 let mockConnectCompleted = false;
@@ -11023,6 +11026,9 @@ export function maybeInstallE2eTauriMocks() {
   mockDispatchContext = config.mock?.dispatch
     ? structuredClone(config.mock.dispatch.context)
     : null;
+  rejectNextDispatchRevision = Boolean(
+    config.mock?.dispatch?.rejectNextRevision,
+  );
   mockDispatchHistoryRateLimitsRemaining =
     config.mock?.dispatchHistoryRateLimitCount ?? 0;
   deferredLinkPreviewMetadataQueue = [];
@@ -14114,14 +14120,8 @@ export function maybeInstallE2eTauriMocks() {
             reason: string | null;
           };
         };
-        if (
-          args.revision.set.status &&
-          args.revision.reason !== null &&
-          !args.revision.reason.trim()
-        ) {
-          throw new Error(
-            "status change reason must be non-empty when present",
-          );
+        if (args.revision.set.status && !(args.revision.reason ?? "").trim()) {
+          throw new Error("status change reason is required");
         }
         const tags = [
           ["h", args.streamId],
@@ -14276,44 +14276,57 @@ export function maybeInstallE2eTauriMocks() {
             });
           } else if (signed.kind === 40021 && issue) {
             const set = (content.set ?? {}) as Record<string, unknown>;
-            const clear = Array.isArray(content.clear)
-              ? content.clear.map(String)
-              : [];
-            const changes = Object.entries(set).map(([field, after]) => ({
-              field,
-              before: issue[field as keyof typeof issue] ?? null,
-              after,
-            }));
-            for (const [field, value] of Object.entries(set))
-              (issue as unknown as Record<string, unknown>)[field] = value;
-            for (const field of clear) {
-              changes.push({
+            const reasonText =
+              typeof content.reason === "string" ? content.reason : null;
+            const rejectBlankStatusReason =
+              Boolean(set.status) && reasonText !== null && !reasonText.trim();
+            const rejectForced =
+              rejectNextDispatchRevision && Boolean(set.status);
+            if (rejectForced) rejectNextDispatchRevision = false;
+            if (rejectBlankStatusReason || rejectForced) {
+              mockDispatchContext.diagnostics.push({
+                kind: "InvalidEvent",
+                message: `InvalidEvent { event_id: "${signed.id}", reason: "status change reason must be non-empty when present" }`,
+              });
+            } else {
+              const clear = Array.isArray(content.clear)
+                ? content.clear.map(String)
+                : [];
+              const changes = Object.entries(set).map(([field, after]) => ({
                 field,
                 before: issue[field as keyof typeof issue] ?? null,
-                after: null,
+                after,
+              }));
+              for (const [field, value] of Object.entries(set))
+                (issue as unknown as Record<string, unknown>)[field] = value;
+              for (const field of clear) {
+                changes.push({
+                  field,
+                  before: issue[field as keyof typeof issue] ?? null,
+                  after: null,
+                });
+                (issue as unknown as Record<string, unknown>)[field] = null;
+              }
+              if (Object.hasOwn(set, "status"))
+                issue.enteredStatusAt = signed.created_at;
+              issue.tipEvent = signed.id;
+              issue.tipCreatedAt = signed.created_at;
+              issue.revision = Number(content.revision);
+              mockDispatchContext.activity.push({
+                issueId,
+                eventId: signed.id,
+                authorPubkey: signed.pubkey,
+                createdAt: signed.created_at,
+                revision: issue.revision,
+                reason: reasonText,
+                requestId:
+                  typeof content.request_id === "string"
+                    ? content.request_id
+                    : null,
+                import: null,
+                changes,
               });
-              (issue as unknown as Record<string, unknown>)[field] = null;
             }
-            if (Object.hasOwn(set, "status"))
-              issue.enteredStatusAt = signed.created_at;
-            issue.tipEvent = signed.id;
-            issue.tipCreatedAt = signed.created_at;
-            issue.revision = Number(content.revision);
-            mockDispatchContext.activity.push({
-              issueId,
-              eventId: signed.id,
-              authorPubkey: signed.pubkey,
-              createdAt: signed.created_at,
-              revision: issue.revision,
-              reason:
-                typeof content.reason === "string" ? content.reason : null,
-              requestId:
-                typeof content.request_id === "string"
-                  ? content.request_id
-                  : null,
-              import: null,
-              changes,
-            });
           } else if (signed.kind === 40022 && issue) {
             mockDispatchContext.comments.push({
               issueId,
