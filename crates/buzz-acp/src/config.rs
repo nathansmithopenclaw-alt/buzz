@@ -678,7 +678,11 @@ fn sanitize_session_title(raw: &str) -> Option<String> {
         .collect::<String>()
         .trim_end()
         .to_string();
-    if title.is_empty() { None } else { Some(title) }
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
 }
 
 /// Separator between the agent name and the channel in a composed title.
@@ -814,8 +818,36 @@ pub(crate) fn exclusive_session(command: &str) -> bool {
 pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'static str)] {
     match normalize_agent_command_identity(command).as_str() {
         "hermes" | "hermes-agent" | "hermes-acp" => &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
+        "prime-agent" | "primeagent" => &[("DO_NOT_TRACK", "1"), ("PI_SKIP_VERSION_CHECK", "1")],
         _ => &[],
     }
+}
+
+/// Nest-scoped Prime config dir (`<cwd>/.prime/agent`) unless the operator
+/// already set `PRIME_AGENT_CODING_AGENT_DIR` in parent env or persona env.
+///
+/// Prime defaults to `~/.prime/agent`. Redirecting into the nest keeps
+/// Continual Harness writes next to Buzz nest memory instead of a second
+/// home-level source of truth.
+pub(crate) fn prime_coding_agent_dir(
+    command: &str,
+    extra_env: &[(String, String)],
+    cwd: &std::path::Path,
+    parent_already_set: bool,
+) -> Option<std::path::PathBuf> {
+    if !exclusive_session(command) {
+        return None;
+    }
+    if parent_already_set {
+        return None;
+    }
+    if extra_env
+        .iter()
+        .any(|(key, _)| key == "PRIME_AGENT_CODING_AGENT_DIR")
+    {
+        return None;
+    }
+    Some(cwd.join(".prime").join("agent"))
 }
 
 /// Build the `CODEX_CONFIG` environment variable that enables full outbound
@@ -1319,8 +1351,8 @@ struct TomlConfig {
 }
 
 pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, ConfigError> {
-    use std::sync::Arc;
     use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
 
     let content = std::fs::read_to_string(path)?;
     let mut config: TomlConfig =
@@ -1650,8 +1682,8 @@ mod tests {
         kinds: Vec<u32>,
         mention: bool,
     ) -> SubscriptionRule {
-        use std::sync::Arc;
         use std::sync::atomic::AtomicU32;
+        use std::sync::Arc;
         SubscriptionRule {
             name: name.into(),
             channels,
@@ -1822,6 +1854,36 @@ mod tests {
                 "non-Hermes command must have no env defaults: {command}"
             );
         }
+        assert_eq!(
+            default_agent_env("prime-agent"),
+            &[("DO_NOT_TRACK", "1"), ("PI_SKIP_VERSION_CHECK", "1")]
+        );
+    }
+
+    #[test]
+    fn prime_coding_agent_dir_is_nest_scoped_unless_already_set() {
+        let cwd = std::path::Path::new("/tmp/nest");
+        let expected = cwd.join(".prime").join("agent");
+        assert_eq!(
+            prime_coding_agent_dir("prime-agent", &[], cwd, false).as_deref(),
+            Some(expected.as_path())
+        );
+        assert_eq!(
+            prime_coding_agent_dir("goose", &[], cwd, false),
+            None,
+            "non-Prime harnesses must not get a Prime home redirect"
+        );
+        assert_eq!(
+            prime_coding_agent_dir("prime-agent", &[], cwd, true),
+            None,
+            "parent env must win over the nest default"
+        );
+        let extra = vec![("PRIME_AGENT_CODING_AGENT_DIR".into(), "/tmp/other".into())];
+        assert_eq!(
+            prime_coding_agent_dir("prime-agent", &extra, cwd, false),
+            None,
+            "persona env must win over the nest default"
+        );
     }
 
     #[test]
@@ -2675,7 +2737,11 @@ channels = "ALL"
             (None, Some(turn)) => turn,
             (None, None) => DEFAULT_IDLE_TIMEOUT_SECS,
         };
-        if raw == 0 { 1 } else { raw }
+        if raw == 0 {
+            1
+        } else {
+            raw
+        }
     }
 
     #[test]

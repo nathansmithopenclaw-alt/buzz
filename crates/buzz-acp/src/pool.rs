@@ -31,9 +31,9 @@ use uuid::Uuid;
 
 use crate::acp::{
     extract_model_config_options, extract_model_state, extract_thought_level_config_id,
-    model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
-    ModelSwitchMethod, StopReason, SystemPromptTransport, TurnDeliveryEvidence,
-    CLAUDE_AGENT_ACP_NAME,
+    model_in_catalog, resolve_model_switch_method, session_advertises_model_catalog, AcpClient,
+    AcpError, EnvVar, McpServer, ModelSwitchMethod, StopReason, SystemPromptTransport,
+    TurnDeliveryEvidence, CLAUDE_AGENT_ACP_NAME,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -1351,20 +1351,32 @@ async fn create_session_and_apply_model(
                 }
             }
             None => {
-                tracing::error!(
-                    target: "pool::model",
-                    "desired model {desired} not found in agent's available models — refusing silent fallback"
-                );
-                agent.acp.observe(
-                    "control_result",
-                    serde_json::json!({
-                        "type": "switch_model",
-                        "status": "unsupported_model",
-                        "modelId": desired,
-                        // Echo the pick's request_id (see the failure arm).
-                        "requestId": agent.desired_model_request_id,
-                    }),
-                );
+                if session_advertises_model_catalog(&resp.raw) {
+                    tracing::error!(
+                        target: "pool::model",
+                        "desired model {desired} not found in agent's available models — refusing silent fallback"
+                    );
+                    agent.acp.observe(
+                        "control_result",
+                        serde_json::json!({
+                            "type": "switch_model",
+                            "status": "unsupported_model",
+                            "modelId": desired,
+                            // Echo the pick's request_id (see the failure arm).
+                            "requestId": agent.desired_model_request_id,
+                        }),
+                    );
+                } else {
+                    // Prime (and other exclusive ACP servers) return only
+                    // `{sessionId}`. The spawn command / nest settings already
+                    // selected the model; treating the empty catalog as
+                    // unsupported_model used to protocol-kill the worker.
+                    tracing::info!(
+                        target: "pool::model",
+                        configured_model = desired.as_str(),
+                        "agent advertised no model catalog — leaving spawn-selected model in place"
+                    );
+                }
                 None
             }
         }
@@ -10080,6 +10092,45 @@ done"#
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["status"], "unsupported_model");
         assert_eq!(results[0]["modelId"], "model-z");
+    }
+
+    #[tokio::test]
+    async fn test_empty_catalog_leaves_spawn_model_without_unsupported() {
+        // Prime ACP session/new is `{sessionId}` only. A configured model must
+        // not emit unsupported_model or fail session creation — the harness
+        // already selected the model at spawn.
+        let acp =
+            spawn_switch_acp_full(r#"{"sessionId":"sess-1"}"#, r#""result":{"ok":true}"#).await;
+        let mut agent = switching_agent(acp, "local-v4");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        let session_id = create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                id: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("empty catalog must not fail session creation");
+        assert_eq!(session_id, "sess-1");
+
+        let cap = capture(&obs);
+        assert_eq!(
+            cap["modelOverridden"], false,
+            "no ACP switch applied against an empty catalog"
+        );
+        assert!(
+            control_results(&obs).is_empty(),
+            "empty catalog is not unsupported_model"
+        );
     }
 
     /// Scripted ACP whose `session/new` (request #1) returns a full result body
