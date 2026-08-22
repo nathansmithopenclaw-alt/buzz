@@ -1,0 +1,13 @@
+{
+  "package": "@agentclientprotocol/claude-agent-acp",
+  "version": "0.70.0",
+  "tarball": "agentclientprotocol-claude-agent-acp-0.70.0.tgz",
+  "tarball_sha256": "3cd8ddadb6960096dbfc6a95965b408ea80ac7c728a66ec30734bd59e3b0565c",
+  "fork_git_sha": "5145251e28a7ba76690e6f2ef273f30d6f5edffb",
+  "fork_provenance": "Track-A background-tasks fork. Packaging tip 5145251e differs from Helm-verified Track-A tip 0eaf85885d0c347bd5594990c9c97660f642e415 by lockfile restore ONLY (git diff 0eaf8588..5145251e = package-lock.json +42); src/ is byte-identical.",
+  "upstream_base": "ee9f300db4562e8b7958cec9fa63dab05a5c2eb0",
+  "built_from": "~/.buzz/REPOS/claude-agent-acp-fork via `npm pack`",
+  "built_at": "2026-08-22T12:05:00Z",
+  "built_by": "Ox (Smith Crafts Worker) <ox@smithcrafts.dev>",
+  "rebuild": "git -C ~/.buzz/REPOS/claude-agent-acp-fork checkout 5145251e && npm pack && shasum -a 256 agentclientprotocol-claude-agent-acp-0.70.0.tgz  # must equal tarball_sha256 above"
+}

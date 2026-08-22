@@ -1,0 +1,8 @@
+{
+  "name": "smith-crafts-vendored-acp-adapter",
+  "private": true,
+  "description": "Pinned vendored build of @agentclientprotocol/claude-agent-acp (Track-A background-tasks fork). Identity + build provenance in PROVENANCE.json. Install ONLY via scripts/install-vendored-acp-adapter.sh — never hand-edit node_modules.",
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "file:./agentclientprotocol-claude-agent-acp-0.70.0.tgz"
+  }
+}
