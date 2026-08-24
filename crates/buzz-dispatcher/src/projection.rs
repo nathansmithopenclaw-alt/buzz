@@ -20,6 +20,7 @@
 //! its request-ID pre-checks keep replays idempotent (see docs/dispatcher.md).
 
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
@@ -36,6 +37,11 @@ const CURSOR_FILE: &str = "cursor.json";
 const EVENTS_FILE: &str = "events.jsonl";
 const REQUESTS_FILE: &str = "requests.json";
 const OUTBOX_FILE: &str = "outbox.json";
+/// Reaction event-id → home-channel map (B5). Real kind-7 reactions carry no
+/// `h` tag — the relay derives the channel from the reaction's target and
+/// indexes by `#h` without materializing the tag — so the loop records the
+/// monitored channel each reaction was fetched under.
+const REACTION_CHANNELS_FILE: &str = "reaction_channels.json";
 /// Single-instance lock for the resident loop (M7).
 pub const DISPATCHER_LOCK_FILE: &str = "dispatcher.lock";
 /// Single-instance lock for the watchdog process (M7).
@@ -105,11 +111,15 @@ pub struct ProjectionStore {
     seen_ids: HashSet<String>,
     fired: FiredRequests,
     outbox: Outbox,
+    /// Reaction event-id → home-channel map (B5).
+    reaction_channels: HashMap<String, Uuid>,
     /// Journal/cursor changed (new events ingested) — the only condition that
     /// rewrites events.jsonl (M8 cheap win).
     journal_dirty: bool,
     /// Fired-request ledger changed.
     ledger_dirty: bool,
+    /// Reaction-channel map gained entries.
+    reaction_channels_dirty: bool,
 }
 
 impl ProjectionStore {
@@ -158,6 +168,15 @@ impl ProjectionStore {
             Outbox::default()
         };
 
+        let reaction_channels_path = state_dir.join(REACTION_CHANNELS_FILE);
+        let reaction_channels = if reaction_channels_path.exists() {
+            serde_json::from_str(&fs::read_to_string(&reaction_channels_path)?).map_err(
+                |error| DispatchError::Other(format!("corrupt reaction_channels file: {error}")),
+            )?
+        } else {
+            HashMap::new()
+        };
+
         Ok(Self {
             state_dir: state_dir.to_path_buf(),
             cursor,
@@ -165,8 +184,10 @@ impl ProjectionStore {
             seen_ids,
             fired,
             outbox,
+            reaction_channels,
             journal_dirty: false,
             ledger_dirty: false,
+            reaction_channels_dirty: false,
         })
     }
 
@@ -298,6 +319,28 @@ impl ProjectionStore {
         }
     }
 
+    /// Home channel recorded for a reaction event id (B5), if known.
+    pub fn reaction_channel(&self, event_id_hex: &str) -> Option<Uuid> {
+        self.reaction_channels.get(event_id_hex).copied()
+    }
+
+    /// Record the monitored channel each fetched reaction belongs to (B5).
+    /// Real kind-7 events carry no `h` tag: the relay derives the channel
+    /// from the reaction's target and indexes by `#h` without materializing
+    /// the tag, so the channel context comes from the query that fetched the
+    /// event. New entries persist at [`Self::commit`].
+    pub fn record_reaction_channels(&mut self, channels: HashMap<String, Uuid>) {
+        for (event_id, channel_id) in channels {
+            if self
+                .reaction_channels
+                .insert(event_id, channel_id)
+                .is_none()
+            {
+                self.reaction_channels_dirty = true;
+            }
+        }
+    }
+
     /// Observe externally fired request ids (e.g. 40023s authored by another
     /// service) so the at-most-once pre-check covers them too.
     pub fn observe_fired_requests(&mut self, request_ids: impl IntoIterator<Item = Uuid>) {
@@ -370,8 +413,18 @@ impl ProjectionStore {
     /// when new events were ingested, and the fired-request ledger ONLY when
     /// it changed (M8 cheap win: a ledger-only tick no longer rewrites the
     /// whole journal). Each file is written to a temp sibling, fsynced, and
-    /// renamed, so a crash mid-write never leaves a torn state file.
+    /// renamed, so a crash mid-write never leaves a torn state file. The
+    /// reaction-channel map is written BEFORE the journal so a crash between
+    /// the two re-fetches (and re-records) the reactions rather than
+    /// journaling reactions whose channel is unknown.
     pub fn commit(&mut self) -> Result<(), DispatchError> {
+        if self.reaction_channels_dirty {
+            write_atomic(
+                &self.state_dir.join(REACTION_CHANNELS_FILE),
+                serde_json::to_string(&self.reaction_channels)?.as_bytes(),
+            )?;
+            self.reaction_channels_dirty = false;
+        }
         if self.journal_dirty {
             let mut journal = String::new();
             for event in &self.events {
@@ -769,6 +822,42 @@ pub(crate) mod tests {
     fn corrupt_outbox_is_a_hard_error_not_a_reset() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join(OUTBOX_FILE), "not-json\n").expect("write");
+        let error = ProjectionStore::open(dir.path()).expect_err("must fail");
+        assert!(matches!(error, DispatchError::Other(_)));
+    }
+
+    /// B5: the reaction → home-channel map survives a restart (capture must
+    /// keep working for reactions ingested before a crash), and a corrupt
+    /// map is a hard error like every other state file.
+    #[test]
+    fn reaction_channels_round_trip_and_hard_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let channel_id = Uuid::new_v4();
+        let event_id = "b".repeat(64);
+
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        assert_eq!(store.reaction_channel(&event_id), None);
+        let mut map = std::collections::HashMap::new();
+        map.insert(event_id.clone(), channel_id);
+        store.record_reaction_channels(map);
+        assert_eq!(store.reaction_channel(&event_id), Some(channel_id));
+        store.commit().expect("commit");
+
+        let reopened = ProjectionStore::open(dir.path()).expect("reopen");
+        assert_eq!(
+            reopened.reaction_channel(&event_id),
+            Some(channel_id),
+            "recorded channel survives restart"
+        );
+
+        // Re-recording the same mapping is a no-op (not dirty).
+        let mut reopened = reopened;
+        let mut same = std::collections::HashMap::new();
+        same.insert(event_id.clone(), channel_id);
+        reopened.record_reaction_channels(same);
+        assert!(!reopened.reaction_channels_dirty);
+
+        fs::write(dir.path().join(REACTION_CHANNELS_FILE), "not-json\n").expect("write");
         let error = ProjectionStore::open(dir.path()).expect_err("must fail");
         assert!(matches!(error, DispatchError::Other(_)));
     }

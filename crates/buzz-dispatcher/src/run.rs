@@ -75,8 +75,11 @@ pub async fn tick(
     // Inclusive refresh: query everything at/after the cursor. Event-id dedupe
     // in the store absorbs the boundary overlap. `now` is computed BEFORE
     // ingest so the cursor clamp (M1) bounds advancement at local time.
-    let fresh = fetch_new_events(config, relay, since).await?;
+    let (fresh, reaction_channels) = fetch_new_events(config, relay, since).await?;
     let now = current_unix_seconds();
+    // B5: record which monitored channel each reaction came from BEFORE
+    // planning — real reactions carry no `h` tag to recover it from.
+    store.record_reaction_channels(reaction_channels);
     let ingested = store.ingest(fresh, now);
     if ingested > 0 {
         debug!(count = ingested, "ingested new events");
@@ -191,28 +194,35 @@ fn short_id(id: &str) -> &str {
 /// composite `(until, before_id)` cursor (B4): the relay clamps limitless
 /// filters to the newest 1000 rows, so a single unpaginated refresh against a
 /// >1000-event stream silently gaps everything older.
+///
+/// Returns the events plus a reaction-id → home-channel map (B5): real kind-7
+/// reactions carry no `h` tag — the relay derives the channel from the
+/// reaction's target and indexes by `#h` without materializing the tag — so
+/// the per-channel query that fetched each reaction is its only channel
+/// source.
 async fn fetch_new_events(
     config: &DispatcherConfig,
     relay: &RelayHttp,
     since: u64,
-) -> Result<Vec<Event>, DispatchError> {
+) -> Result<(Vec<Event>, std::collections::HashMap<String, Uuid>), DispatchError> {
     let mut events = Vec::new();
 
     // Tracker stream: roots, revisions, comments, dispatch actions.
     events.extend(query_paginated_events(relay, tracker_refresh_filter(config, since)).await?);
 
-    // Monitored-channel pin reactions for capture.
-    if !config.monitored_channels.is_empty() {
-        events.extend(
-            query_paginated_events(
-                relay,
-                reaction_refresh_filter(&config.monitored_channels, since),
-            )
-            .await?,
-        );
+    // Monitored-channel pin reactions for capture. One query PER channel (B5)
+    // so every returned reaction can be attributed to its home channel.
+    let mut reaction_channels = std::collections::HashMap::new();
+    for channel_id in &config.monitored_channels {
+        let fetched =
+            query_paginated_events(relay, reaction_refresh_filter(channel_id, since)).await?;
+        for event in &fetched {
+            reaction_channels.insert(event.id.to_hex(), *channel_id);
+        }
+        events.extend(fetched);
     }
 
-    Ok(events)
+    Ok((events, reaction_channels))
 }
 
 /// Tracker-stream inclusive-refresh filter. MUST serialize as a single filter
@@ -231,10 +241,10 @@ fn tracker_refresh_filter(config: &DispatcherConfig, since: u64) -> Value {
 }
 
 /// Monitored-channel reaction inclusive-refresh filter (single filter OBJECT;
-/// B1).
-fn reaction_refresh_filter(channels: &[Uuid], since: u64) -> Value {
-    let channel_ids: Vec<String> = channels.iter().map(Uuid::to_string).collect();
-    json!({ "kinds": [7], "#h": channel_ids, "since": since })
+/// B1). One filter per channel (B5): the channel attributed to each returned
+/// reaction comes from the filter, since real reactions have no `h` tag.
+fn reaction_refresh_filter(channel: &Uuid, since: u64) -> Value {
+    json!({ "kinds": [7], "#h": [channel.to_string()], "since": since })
 }
 
 /// Page size for backward refresh pagination. Below the relay's 1000-row page
@@ -365,10 +375,16 @@ mod tests {
         assert_eq!(tracker["#h"], json!([config.stream_id.to_string()]));
         assert!(tracker["kinds"].as_array().expect("kinds").len() >= 4);
 
-        let reactions = reaction_refresh_filter(&config.monitored_channels, 42);
+        let reactions = reaction_refresh_filter(&config.monitored_channels[0], 42);
         assert!(reactions.is_object(), "reaction filter must be an object");
         assert_eq!(reactions["kinds"], json!([7]));
         assert_eq!(reactions["since"], json!(42));
+        // B5: one filter per channel, so the query carries the channel
+        // context real reactions have no `h` tag for.
+        assert_eq!(
+            reactions["#h"],
+            json!([config.monitored_channels[0].to_string()])
+        );
 
         // And the transport serializes them as a flat top-level array.
         let body = crate::relay_http::query_body(std::slice::from_ref(&tracker)).expect("body");

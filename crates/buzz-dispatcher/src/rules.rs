@@ -104,6 +104,13 @@ pub enum RuleAction {
 /// reactions in the same batch collapse on the request id, and reactions whose
 /// source already has a root (or whose request id was already fired) are
 /// skipped.
+///
+/// Channel resolution (B5): real kind-7 reactions carry NO `h` tag — the
+/// relay derives the channel from the reaction's target and indexes by `#h`
+/// without materializing the tag on the stored event. The home channel is
+/// therefore taken from the persisted reaction-channel map (recorded from
+/// the per-channel query that fetched each event), with an `h`-tag fallback
+/// for any client that does materialize one.
 pub fn plan_captures(config: &DispatcherConfig, store: &ProjectionStore) -> Vec<CapturePlan> {
     let reaction_kind = Kind::Custom(7);
     let mut plans = Vec::new();
@@ -113,9 +120,11 @@ pub fn plan_captures(config: &DispatcherConfig, store: &ProjectionStore) -> Vec<
         if event.kind != reaction_kind || !emoji_matches(&event.content, &config.pin_emoji) {
             continue;
         }
-        let channel_id = match first_tag_uuid(event, "h") {
-            Some(channel_id) if config.monitored_channels.contains(&channel_id) => channel_id,
-            _ => continue,
+        let channel_id =
+            first_tag_uuid(event, "h").or_else(|| store.reaction_channel(&event.id.to_hex()));
+        let Some(channel_id) = channel_id.filter(|id| config.monitored_channels.contains(id))
+        else {
+            continue;
         };
         let Some(source_event_id) = first_tag_value(event, "e") else {
             continue;
@@ -419,7 +428,25 @@ mod tests {
         fold
     }
 
-    fn reaction(channel_id: Uuid, source_event_id: &str, emoji: &str) -> Event {
+    /// REAL reaction shape (B5): a kind-7 carrying only the `e` tag of the
+    /// pinned message. Real clients — including buzz-sdk's `build_reaction` —
+    /// emit no `h` tag; the relay derives the channel from the reaction's
+    /// target and indexes by `#h` without materializing the tag on the stored
+    /// event. Capture tests must keep this shape, or capture can pass in
+    /// tests while it is dead in production.
+    fn reaction(source_event_id: &str, emoji: &str) -> Event {
+        let keys = Keys::generate();
+        let tags = vec![Tag::parse(["e", source_event_id]).expect("tag")];
+        EventBuilder::new(Kind::Custom(7), emoji)
+            .tags(tags)
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .expect("signed")
+    }
+
+    /// `h`-tagged variant for fallback coverage only — not the production
+    /// shape.
+    fn reaction_with_h_tag(channel_id: Uuid, source_event_id: &str, emoji: &str) -> Event {
         let keys = Keys::generate();
         let tags = vec![
             Tag::parse(["e", source_event_id]).expect("tag"),
@@ -432,6 +459,14 @@ mod tests {
             .expect("signed")
     }
 
+    /// Attribute a reaction to its home channel exactly the way the loop
+    /// does — from the per-channel query that fetched it (B5).
+    fn attribute(store: &mut ProjectionStore, event: &Event, channel_id: Uuid) {
+        let mut map = std::collections::HashMap::new();
+        map.insert(event.id.to_hex(), channel_id);
+        store.record_reaction_channels(map);
+    }
+
     #[test]
     fn pin_reactions_collapse_to_one_capture_per_source() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -442,16 +477,22 @@ mod tests {
 
         // Three reactions (initial pin + two re-pins) on the same message,
         // plus one reaction in an unmonitored channel and one wrong emoji.
-        store.ingest(
-            vec![
-                reaction(home, &source, &config.pin_emoji),
-                reaction(home, &source, &config.pin_emoji),
-                reaction(home, &source, &config.pin_emoji),
-                reaction(channel(), &source, &config.pin_emoji),
-                reaction(home, &source, "\u{1F44D}"),
-            ],
-            TEST_NOW,
-        );
+        let pins = [
+            reaction(&source, &config.pin_emoji),
+            reaction(&source, &config.pin_emoji),
+            reaction(&source, &config.pin_emoji),
+        ];
+        let unmonitored = reaction(&source, &config.pin_emoji);
+        let wrong_emoji = reaction(&source, "\u{1F44D}");
+        for pin in &pins {
+            attribute(&mut store, pin, home);
+        }
+        attribute(&mut store, &unmonitored, channel());
+        attribute(&mut store, &wrong_emoji, home);
+        let mut batch: Vec<Event> = pins.to_vec();
+        batch.push(unmonitored);
+        batch.push(wrong_emoji);
+        store.ingest(batch, TEST_NOW);
 
         let plans = plan_captures(&config, &store);
         assert_eq!(plans.len(), 1, "duplicates and unmonitored collapse");
@@ -463,6 +504,71 @@ mod tests {
         assert!(plan_captures(&config, &store).is_empty());
     }
 
+    /// B5 regression: real reactions carry no `h` tag, so capture must work
+    /// purely from the recorded reaction-channel map — this is the exact
+    /// shape that was dead in production while the old `h`-tagged fixture
+    /// passed.
+    #[test]
+    fn pin_capture_works_without_h_tag_via_recorded_channel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let config = base_config(dir.path().to_path_buf(), stream_id(), home);
+        let source = "e".repeat(64);
+
+        let pin = reaction(&source, &config.pin_emoji);
+        assert!(
+            first_tag_uuid(&pin, "h").is_none(),
+            "fixture must be the real h-less shape"
+        );
+        attribute(&mut store, &pin, home);
+        store.ingest(vec![pin], TEST_NOW);
+
+        let plans = plan_captures(&config, &store);
+        assert_eq!(
+            plans.len(),
+            1,
+            "h-less reaction captures via recorded channel"
+        );
+        assert_eq!(plans[0].channel_id, home);
+        assert_eq!(plans[0].source_event_id, source);
+    }
+
+    /// A reaction whose channel context was never recorded (e.g. pre-B5
+    /// journal entries) is skipped, not mis-attributed.
+    #[test]
+    fn reaction_without_channel_context_is_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let config = base_config(dir.path().to_path_buf(), stream_id(), home);
+        let source = "f".repeat(64);
+
+        store.ingest(vec![reaction(&source, &config.pin_emoji)], TEST_NOW);
+        assert!(
+            plan_captures(&config, &store).is_empty(),
+            "no channel context, no capture"
+        );
+    }
+
+    /// Clients that DO materialize an `h` tag keep working via the fallback.
+    #[test]
+    fn pin_capture_falls_back_to_h_tag_when_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let config = base_config(dir.path().to_path_buf(), stream_id(), home);
+        let source = "a1".repeat(32);
+
+        store.ingest(
+            vec![reaction_with_h_tag(home, &source, &config.pin_emoji)],
+            TEST_NOW,
+        );
+        let plans = plan_captures(&config, &store);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].channel_id, home);
+    }
+
     #[test]
     fn root_precheck_suppresses_capture_even_without_fired_ledger() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -471,7 +577,9 @@ mod tests {
         let config = base_config(dir.path().to_path_buf(), stream_id(), home);
         let source = "d".repeat(64);
 
-        store.ingest(vec![reaction(home, &source, &config.pin_emoji)], TEST_NOW);
+        let pin = reaction(&source, &config.pin_emoji);
+        attribute(&mut store, &pin, home);
+        store.ingest(vec![pin], TEST_NOW);
         assert_eq!(plan_captures(&config, &store).len(), 1);
 
         // A root already exists for this source (e.g. namespace drift): no plan.
@@ -820,16 +928,17 @@ mod tests {
         let home = channel();
         let config = base_config(dir.path().to_path_buf(), stream_id(), home);
 
-        store.ingest(
-            vec![
-                reaction(home, "short", &config.pin_emoji),
-                reaction(home, "", &config.pin_emoji),
-                reaction(home, &"F".repeat(64), &config.pin_emoji), // uppercase
-                reaction(home, &"z".repeat(64), &config.pin_emoji), // non-hex
-                reaction(home, &"é".repeat(32), &config.pin_emoji), // multibyte
-            ],
-            TEST_NOW,
-        );
+        let malformed = [
+            reaction("short", &config.pin_emoji),
+            reaction("", &config.pin_emoji),
+            reaction(&"F".repeat(64), &config.pin_emoji), // uppercase
+            reaction(&"z".repeat(64), &config.pin_emoji), // non-hex
+            reaction(&"é".repeat(32), &config.pin_emoji), // multibyte
+        ];
+        for event in &malformed {
+            attribute(&mut store, event, home);
+        }
+        store.ingest(malformed.to_vec(), TEST_NOW);
         assert!(
             plan_captures(&config, &store).is_empty(),
             "no capture plan from malformed e-tags"
@@ -846,14 +955,9 @@ mod tests {
         let config = base_config(dir.path().to_path_buf(), stream_id(), home);
         let source = "c".repeat(64);
 
-        store.ingest(
-            vec![reaction(
-                home,
-                &source,
-                &format!("{}\u{FE0F}", config.pin_emoji),
-            )],
-            TEST_NOW,
-        );
+        let pin = reaction(&source, &format!("{}\u{FE0F}", config.pin_emoji));
+        attribute(&mut store, &pin, home);
+        store.ingest(vec![pin], TEST_NOW);
         let plans = plan_captures(&config, &store);
         assert_eq!(plans.len(), 1, "FE0F variant of the pin emoji captures");
         assert_eq!(plans[0].source_event_id, source);
