@@ -42,6 +42,8 @@ const OUTBOX_FILE: &str = "outbox.json";
 /// indexes by `#h` without materializing the tag — so the loop records the
 /// monitored channel each reaction was fetched under.
 const REACTION_CHANNELS_FILE: &str = "reaction_channels.json";
+/// Bound on retained quarantined outbox entries (oldest dropped first).
+const MAX_QUARANTINED_OUTBOX: usize = 100;
 /// Single-instance lock for the resident loop (M7).
 pub const DISPATCHER_LOCK_FILE: &str = "dispatcher.lock";
 /// Single-instance lock for the watchdog process (M7).
@@ -92,6 +94,13 @@ pub struct OutboxEntry {
     pub request_id: Uuid,
     /// Signed events (serialized JSON) in publication order.
     pub events: Vec<serde_json::Value>,
+    /// Replay attempts already spent on this entry. Entries that keep failing
+    /// past the retry bound are quarantined instead of wedging the loop.
+    #[serde(default)]
+    pub attempts: u64,
+    /// Set when the entry was quarantined; carries the last rejection reason.
+    #[serde(default)]
+    pub quarantine_reason: Option<String>,
 }
 
 /// Pending publications awaiting relay submission.
@@ -99,6 +108,11 @@ pub struct OutboxEntry {
 struct Outbox {
     #[serde(default)]
     pending: Vec<OutboxEntry>,
+    /// Permanently-rejected entries evicted from `pending`. Quarantine keeps
+    /// one poison event from aborting every tick forever; the request id is
+    /// NOT marked fired, so the rule engine re-plans and re-signs fresh.
+    #[serde(default)]
+    quarantined: Vec<OutboxEntry>,
 }
 
 /// Persistent projection store: raw event journal + composite cursor +
@@ -367,6 +381,53 @@ impl ProjectionStore {
         &self.outbox.pending
     }
 
+    /// Record one failed replay attempt against a pending outbox entry and
+    /// persist the counter. Returns the new attempt count.
+    pub fn bump_outbox_attempts(&mut self, request_id: &Uuid) -> Result<u64, DispatchError> {
+        let attempts = self
+            .outbox
+            .pending
+            .iter_mut()
+            .find(|entry| &entry.request_id == request_id)
+            .map(|entry| {
+                entry.attempts += 1;
+                entry.attempts
+            })
+            .ok_or_else(|| {
+                DispatchError::Other(format!(
+                    "bump_outbox_attempts: no pending entry for {request_id}"
+                ))
+            })?;
+        self.write_outbox()?;
+        Ok(attempts)
+    }
+
+    /// Move a permanently-rejected pending entry to quarantine and persist.
+    /// The request id stays UNFIRED, so planning re-emits it with a fresh
+    /// signature; quarantine only evicts the poison artifact.
+    pub fn quarantine_outbox(
+        &mut self,
+        request_id: &Uuid,
+        reason: &str,
+    ) -> Result<(), DispatchError> {
+        if let Some(position) = self
+            .outbox
+            .pending
+            .iter()
+            .position(|entry| &entry.request_id == request_id)
+        {
+            let mut entry = self.outbox.pending.remove(position);
+            entry.quarantine_reason = Some(reason.to_string());
+            self.outbox.quarantined.push(entry);
+            if self.outbox.quarantined.len() > MAX_QUARANTINED_OUTBOX {
+                let excess = self.outbox.quarantined.len() - MAX_QUARANTINED_OUTBOX;
+                self.outbox.quarantined.drain(..excess);
+            }
+            self.write_outbox()?;
+        }
+        Ok(())
+    }
+
     /// Persist one pending publication BEFORE it is published (M2). Any
     /// existing entry for the same request id is replaced (a failed publish
     /// re-queues, never duplicates).
@@ -378,7 +439,12 @@ impl ProjectionStore {
         self.outbox
             .pending
             .retain(|entry| entry.request_id != request_id);
-        self.outbox.pending.push(OutboxEntry { request_id, events });
+        self.outbox.pending.push(OutboxEntry {
+            request_id,
+            events,
+            attempts: 0,
+            quarantine_reason: None,
+        });
         self.write_outbox()
     }
 
@@ -860,5 +926,53 @@ pub(crate) mod tests {
         fs::write(dir.path().join(REACTION_CHANNELS_FILE), "not-json\n").expect("write");
         let error = ProjectionStore::open(dir.path()).expect_err("must fail");
         assert!(matches!(error, DispatchError::Other(_)));
+    }
+
+    /// M2 quarantine: failed replays bump a persisted attempt counter, and
+    /// after the bound the entry is evicted from `pending` into quarantine
+    /// with its reason. Re-queueing (a fresh signature for the same request)
+    /// starts the counter over.
+    #[test]
+    fn outbox_retry_counter_and_quarantine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let request_id = Uuid::new_v4();
+
+        store
+            .queue_outbox(request_id, vec![serde_json::json!({"k": 1})])
+            .expect("queue");
+        assert_eq!(store.bump_outbox_attempts(&request_id).expect("bump"), 1);
+        assert_eq!(store.bump_outbox_attempts(&request_id).expect("bump"), 2);
+
+        // Counter survives restart (persisted on every bump).
+        let mut store = ProjectionStore::open(dir.path()).expect("reopen");
+        assert_eq!(store.pending_outbox()[0].attempts, 2);
+
+        store
+            .quarantine_outbox(&request_id, "rejected: bad signature")
+            .expect("quarantine");
+        assert!(store.pending_outbox().is_empty());
+
+        let reopened = ProjectionStore::open(dir.path()).expect("reopen");
+        assert!(reopened.pending_outbox().is_empty());
+
+        // Re-queue resets the counter and does not resurrect quarantine.
+        let mut reopened = reopened;
+        reopened
+            .queue_outbox(request_id, vec![serde_json::json!({"k": 2})])
+            .expect("re-queue");
+        assert_eq!(reopened.pending_outbox()[0].attempts, 0);
+        assert!(reopened.pending_outbox()[0].quarantine_reason.is_none());
+    }
+
+    /// Quarantine must reject an unknown request id silently (idempotent
+    /// replay after a crash between quarantine and its caller).
+    #[test]
+    fn quarantine_unknown_request_is_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        store
+            .quarantine_outbox(&Uuid::new_v4(), "ghost")
+            .expect("noop");
     }
 }

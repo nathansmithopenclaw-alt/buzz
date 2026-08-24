@@ -67,7 +67,9 @@ pub async fn tick(
     store: &mut ProjectionStore,
 ) -> Result<(), DispatchError> {
     // M2: replay anything that reached the outbox but not the fired ledger
-    // before a crash. Duplicate-tolerant and idempotent.
+    // before a crash. Duplicate-tolerant and idempotent; a permanently
+    // rejected entry is retried a bounded number of times, then quarantined
+    // — one poison event must not abort every tick (heartbeat included).
     replay_outbox(store, relay).await?;
 
     let since = store.since();
@@ -133,27 +135,44 @@ pub async fn tick(
     Ok(())
 }
 
-/// Replay pending outbox publications (M2 persist-before-publish). The relay
-/// answers `accepted:false, "duplicate: …"` for events it already stores,
-/// which counts as success here; anything else aborts the tick and retries
-/// next round.
+/// Replay attempts after which a still-failing outbox entry is quarantined.
+/// With the default 30s poll this is ~5 minutes of continuous rejection —
+/// comfortably past transient relay blips, and quarantine loses nothing: the
+/// request id stays unfired, so planning re-signs a fresh event afterwards.
+const MAX_OUTBOX_RETRIES: u64 = 10;
+
+/// Replay pending outbox publications (M2 persist-before-publish). Duplicate
+/// receipts count as success: the current relay answers `accepted:true` for
+/// events it already stores (the message may note the duplicate), and older
+/// relays may answer `accepted:false, "duplicate: …"` — both are tolerated.
+/// Any other failure bumps the entry's attempt counter; after
+/// [`MAX_OUTBOX_RETRIES`] the entry is quarantined and the loop moves on, so
+/// one permanently-rejected event cannot wedge the dispatcher.
 async fn replay_outbox(
     store: &mut ProjectionStore,
     relay: &RelayHttp,
 ) -> Result<(), DispatchError> {
     let pending = store.pending_outbox().to_vec();
     for entry in pending {
-        for payload in &entry.events {
-            let event: Event = serde_json::from_value(payload.clone())?;
-            let raw = relay.submit_event(&event).await?;
-            let receipt = parse_submit_receipt(&raw)?;
-            if !receipt.accepted && !receipt.message.starts_with("duplicate") {
-                return Err(DispatchError::Relay(format!(
-                    "outbox replay rejected {}: {}",
-                    event.id.to_hex(),
-                    receipt.message
-                )));
+        if let Err(error) = publish_outbox_entry(relay, &entry).await {
+            let attempts = store.bump_outbox_attempts(&entry.request_id)?;
+            if attempts >= MAX_OUTBOX_RETRIES {
+                warn!(
+                    request_id = %entry.request_id,
+                    %error,
+                    attempts,
+                    "quarantining permanently-rejected outbox entry; the request re-plans with a fresh signature"
+                );
+                store.quarantine_outbox(&entry.request_id, &error.to_string())?;
+            } else {
+                warn!(
+                    request_id = %entry.request_id,
+                    %error,
+                    attempts,
+                    "outbox replay rejected; retrying on a later tick"
+                );
             }
+            continue;
         }
         store.mark_request_fired(entry.request_id);
         store.persist_ledger()?;
@@ -162,6 +181,27 @@ async fn replay_outbox(
             request_id = %entry.request_id,
             "replayed pending outbox publication"
         );
+    }
+    Ok(())
+}
+
+/// Publish every event of one outbox entry in order. Transport failures and
+/// non-duplicate rejections are returned for retry/quarantine by the caller.
+async fn publish_outbox_entry(
+    relay: &RelayHttp,
+    entry: &crate::projection::OutboxEntry,
+) -> Result<(), DispatchError> {
+    for payload in &entry.events {
+        let event: Event = serde_json::from_value(payload.clone())?;
+        let raw = relay.submit_event(&event).await?;
+        let receipt = parse_submit_receipt(&raw)?;
+        if !receipt.accepted && !receipt.message.starts_with("duplicate") {
+            return Err(DispatchError::Relay(format!(
+                "outbox replay rejected {}: {}",
+                event.id.to_hex(),
+                receipt.message
+            )));
+        }
     }
     Ok(())
 }
