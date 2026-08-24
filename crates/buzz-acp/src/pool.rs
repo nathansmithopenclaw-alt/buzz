@@ -92,6 +92,7 @@ fn is_channel_report_kind(kind: u32) -> bool {
 struct PublicationWatch {
     channel_id: Uuid,
     trigger_event_id: String,
+    is_dm: bool,
     observed_at_start: u64,
     turn_started_at: nostr::Timestamp,
     thread_tags: ThreadTags,
@@ -2213,14 +2214,16 @@ fn event_mentions_pubkey(event: &nostr::Event, pubkey_hex: &str) -> bool {
 fn publication_watch_for_batch(
     batch: Option<&FlushBatch>,
     agent_pubkey_hex: &str,
+    channel_info: Option<&PromptChannelInfo>,
     tracker: &ChannelPublicationTracker,
 ) -> Option<PublicationWatch> {
     let batch = batch?;
+    let is_dm = channel_info.is_some_and(|info| info.channel_type == "dm");
     let trigger = batch
         .events
         .iter()
         .rev()
-        .find(|event| event_mentions_pubkey(&event.event, agent_pubkey_hex))?;
+        .find(|event| is_dm || event_mentions_pubkey(&event.event, agent_pubkey_hex))?;
     let mut thread_tags = crate::queue::parse_thread_tags(&trigger.event);
     if thread_tags.root_event_id.is_none() {
         let trigger_id = trigger.event.id.to_hex();
@@ -2230,6 +2233,7 @@ fn publication_watch_for_batch(
     Some(PublicationWatch {
         channel_id: batch.channel_id,
         trigger_event_id: trigger.event.id.to_hex(),
+        is_dm,
         observed_at_start: tracker.snapshot(batch.channel_id),
         turn_started_at: nostr::Timestamp::now(),
         thread_tags,
@@ -2312,23 +2316,36 @@ enum PublicationSilenceDisposition {
 fn publication_silence_disposition(
     turn_id: &str,
     evidence: &TurnDeliveryEvidence,
+    is_dm: bool,
+    stop_reason: Option<&StopReason>,
 ) -> PublicationSilenceDisposition {
     if evidence.publish_attempt_count == 0 && evidence.adapter_runtime_failure_present {
         return PublicationSilenceDisposition::LoudFailure(format!(
-            "⚠️ Mention-triggered turn delivery failed (`failure_shape: agent_runtime_failed`). \
+            "⚠️ Addressed turn delivery failed (`failure_shape: agent_runtime_failed`). \
              The agent adapter returned a provider/runtime error as terminal output, and no report \
              reached the relay. Inspect the local agent transcript/log for turn `{turn_id}`."
         ));
     }
-    if evidence.publish_attempt_count == 0 && evidence.final_answer_present {
-        return PublicationSilenceDisposition::ChosenSilence;
-    }
-
     let (shape, detail) = if evidence.publish_attempt_count == 0 {
-        (
-            "no_final_output",
-            "The turn produced no final answer and made no channel publish attempt.",
-        )
+        if evidence.final_answer_present
+            && !is_dm
+            && !matches!(
+                stop_reason,
+                Some(StopReason::Refusal | StopReason::MaxTokens | StopReason::MaxTurnRequests)
+            )
+        {
+            return PublicationSilenceDisposition::ChosenSilence;
+        } else if evidence.final_answer_present {
+            (
+                "unpublished_final_output",
+                "The turn produced terminal agent text but made no channel publish attempt.",
+            )
+        } else {
+            (
+                "no_final_output",
+                "The turn produced no final answer and made no channel publish attempt.",
+            )
+        }
     } else if evidence.publish_failure_count > 0 {
         (
             "publish_failed",
@@ -2346,7 +2363,7 @@ fn publication_silence_disposition(
         .map(|snippet| format!(" Final answer snippet: {snippet:?}."))
         .unwrap_or_default();
     PublicationSilenceDisposition::LoudFailure(format!(
-        "⚠️ Mention-triggered turn delivery failed (`failure_shape: {shape}`). \
+        "⚠️ Addressed turn delivery failed (`failure_shape: {shape}`). \
          {detail}{snippet} Inspect the local agent transcript/log for turn `{turn_id}`."
     ))
 }
@@ -2356,8 +2373,9 @@ async fn emit_publication_silence_surface(
     watch: &PublicationWatch,
     turn_id: &str,
     evidence: &TurnDeliveryEvidence,
+    stop_reason: Option<&StopReason>,
 ) {
-    match publication_silence_disposition(turn_id, evidence) {
+    match publication_silence_disposition(turn_id, evidence, watch.is_dm, stop_reason) {
         PublicationSilenceDisposition::ChosenSilence => {
             reaction_add(rest, &watch.trigger_event_id, REACTION_CHOSEN_SILENCE).await;
         }
@@ -2372,6 +2390,7 @@ fn spawn_publication_silence_notice(
     watch: Option<PublicationWatch>,
     turn_id: &str,
     evidence: TurnDeliveryEvidence,
+    stop_reason: Option<StopReason>,
 ) {
     let Some(watch) = watch else {
         return;
@@ -2390,7 +2409,14 @@ fn spawn_publication_silence_notice(
             Some(false) => {}
             Some(true) | None => return,
         }
-        emit_publication_silence_surface(&ctx.rest_client, &watch, &turn_id, &evidence).await;
+        emit_publication_silence_surface(
+            &ctx.rest_client,
+            &watch,
+            &turn_id,
+            &evidence,
+            stop_reason.as_ref(),
+        )
+        .await;
     });
 }
 
@@ -2420,11 +2446,7 @@ pub async fn run_prompt_task(
         Some(b) => PromptSource::Channel(b.channel_id),
         None => PromptSource::Heartbeat,
     };
-    let publication_watch = publication_watch_for_batch(
-        batch.as_ref(),
-        &ctx.agent_keys.public_key().to_hex(),
-        &ctx.publication_tracker,
-    );
+    let mut publication_watch = None;
     let observer_channel_id = match &source {
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
@@ -2997,6 +3019,12 @@ pub async fn run_prompt_task(
         // Build prompt from batch with context enrichment.
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
         let channel_info = ctx.channel_info.resolve(b.channel_id).await;
+        publication_watch = publication_watch_for_batch(
+            Some(b),
+            &ctx.agent_keys.public_key().to_hex(),
+            channel_info.as_ref(),
+            &ctx.publication_tracker,
+        );
 
         let conversation_context = if ctx.context_message_limit > 0 {
             fetch_conversation_context(b, &channel_info, &ctx).await
@@ -3318,6 +3346,7 @@ pub async fn run_prompt_task(
                                 publication_watch,
                                 &turn_id,
                                 delivery_evidence,
+                                Some(StopReason::EndTurn),
                             );
                             send_prompt_result(
                                 &result_tx,
@@ -3343,6 +3372,7 @@ pub async fn run_prompt_task(
                             publication_watch,
                             &turn_id,
                             agent.acp.turn_delivery_evidence(),
+                            Some(StopReason::EndTurn),
                         );
                         send_prompt_result(
                             &result_tx,
@@ -3386,6 +3416,7 @@ pub async fn run_prompt_task(
                     publication_watch,
                     &turn_id,
                     delivery_evidence,
+                    Some(stop_reason),
                 );
                 send_prompt_result(
                     &result_tx,
@@ -3484,6 +3515,7 @@ pub async fn run_prompt_task(
                 publication_watch,
                 &turn_id,
                 agent.acp.turn_delivery_evidence(),
+                Some(stop_reason.clone()),
             );
 
             send_prompt_result(
@@ -5249,9 +5281,8 @@ async fn publish_agent_turn_metric(
 
 const REACTION_SEEN: &str = "👀";
 const REACTION_WORKING: &str = "💬";
-/// Persistent, non-error receipt for a completed turn that intentionally chose silence.
+/// Persistent, non-error receipt for a completed channel turn that intentionally chose silence.
 const REACTION_CHOSEN_SILENCE: &str = "✓";
-
 /// Best-effort timeout for a single reaction REST call.
 const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -5471,6 +5502,167 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    fn publication_batch(agent_keys: &Keys, mention_agent: bool) -> FlushBatch {
+        let mut builder = EventBuilder::new(Kind::Custom(9), "prompt the agent");
+        if mention_agent {
+            let agent_hex = agent_keys.public_key().to_hex();
+            builder = builder.tags([Tag::parse(["p", agent_hex.as_str()]).expect("agent p tag")]);
+        }
+        FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![crate::queue::BatchEvent {
+                event: builder.sign_with_keys(&Keys::generate()).unwrap(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn publication_watch_arms_from_resolved_channel_type() {
+        let agent_keys = Keys::generate();
+        let tracker = ChannelPublicationTracker::default();
+        let mentioned = publication_batch(&agent_keys, true);
+        let unaddressed = publication_batch(&agent_keys, false);
+        let agent_hex = agent_keys.public_key().to_hex();
+        let stream_info = PromptChannelInfo {
+            name: "dev".into(),
+            channel_type: "stream".into(),
+            description: None,
+        };
+        let dm_info = PromptChannelInfo {
+            name: "dm".into(),
+            channel_type: "dm".into(),
+            description: None,
+        };
+
+        let mention_watch =
+            publication_watch_for_batch(Some(&mentioned), &agent_hex, Some(&stream_info), &tracker)
+                .expect("direct mention arms channel watch");
+        assert!(!mention_watch.is_dm);
+        let dm_watch =
+            publication_watch_for_batch(Some(&unaddressed), &agent_hex, Some(&dm_info), &tracker)
+                .expect("confirmed DM arms watch without p tag");
+        assert!(dm_watch.is_dm);
+        assert!(publication_watch_for_batch(
+            Some(&unaddressed),
+            &agent_hex,
+            Some(&stream_info),
+            &tracker,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mentioned_dm_watch_uses_loud_silence_disposition() {
+        let agent_keys = Keys::generate();
+        let tracker = ChannelPublicationTracker::default();
+        let mentioned = publication_batch(&agent_keys, true);
+        let dm_info = PromptChannelInfo {
+            name: "dm".into(),
+            channel_type: "dm".into(),
+            description: None,
+        };
+        let watch = publication_watch_for_batch(
+            Some(&mentioned),
+            &agent_keys.public_key().to_hex(),
+            Some(&dm_info),
+            &tracker,
+        )
+        .expect("mentioned DM arms a watch");
+        assert!(
+            watch.is_dm,
+            "resolved DM type must win even when the p-tag also matches"
+        );
+
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.final_answer_present = true;
+        evidence.final_answer_snippet = Some("already handled".into());
+        assert!(matches!(
+            publication_silence_disposition(
+                "turn-mentioned-dm",
+                &evidence,
+                watch.is_dm,
+                Some(&StopReason::EndTurn),
+            ),
+            PublicationSilenceDisposition::LoudFailure(_)
+        ));
+    }
+
+    #[test]
+    fn channel_terminal_text_with_normal_stop_reason_is_chosen_silence() {
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.final_answer_present = true;
+        evidence.final_answer_snippet = Some("already handled; no duplicate reply".into());
+
+        assert_eq!(
+            publication_silence_disposition(
+                "turn-replay",
+                &evidence,
+                false,
+                Some(&StopReason::EndTurn),
+            ),
+            PublicationSilenceDisposition::ChosenSilence
+        );
+    }
+
+    #[test]
+    fn dm_unpublished_terminal_text_is_a_loud_failure_with_detail() {
+        let placeholder =
+            "The model returned an empty response. Please resend your message to continue.";
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.final_answer_present = true;
+        evidence.final_answer_snippet = Some(placeholder.into());
+
+        let PublicationSilenceDisposition::LoudFailure(content) = publication_silence_disposition(
+            "turn-empty",
+            &evidence,
+            true,
+            Some(&StopReason::EndTurn),
+        ) else {
+            panic!("DM terminal text must be loud");
+        };
+        assert!(content.contains("failure_shape: unpublished_final_output"));
+        assert!(content.contains(placeholder));
+        assert!(content.contains("turn `turn-empty`"));
+    }
+
+    #[test]
+    fn channel_refusal_with_terminal_text_is_a_loud_failure() {
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.final_answer_present = true;
+
+        let PublicationSilenceDisposition::LoudFailure(content) = publication_silence_disposition(
+            "turn-refusal",
+            &evidence,
+            false,
+            Some(&StopReason::Refusal),
+        ) else {
+            panic!("refusal stop reason must be loud");
+        };
+        assert!(content.contains("failure_shape: unpublished_final_output"));
+    }
+
+    #[test]
+    fn addressed_zero_output_is_a_loud_failure_in_channel_and_dm() {
+        for is_dm in [false, true] {
+            let PublicationSilenceDisposition::LoudFailure(content) =
+                publication_silence_disposition(
+                    "turn-zero",
+                    &TurnDeliveryEvidence::default(),
+                    is_dm,
+                    Some(&StopReason::EndTurn),
+                )
+            else {
+                panic!("zero final output must be loud");
+            };
+            assert!(content.contains("failure_shape: no_final_output"));
+            assert!(content.contains("no final answer"));
+        }
+    }
 
     fn test_mcp_server() -> McpServer {
         McpServer {
