@@ -53,6 +53,11 @@ impl RelayHttp {
         self.keys.public_key().to_hex()
     }
 
+    /// The service keypair (for signing tracker/channel events).
+    pub fn keys(&self) -> &Keys {
+        &self.keys
+    }
+
     /// NIP-98 `Authorization` header for one request.
     fn auth_header(&self, method: &str, url: &str, body: &[u8]) -> Result<String, DispatchError> {
         let payload = hex::encode(Sha256::digest(body));

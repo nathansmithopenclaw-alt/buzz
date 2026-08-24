@@ -18,9 +18,11 @@
 //! channel UUIDs, or state paths are hardcoded (binding plan amendments).
 
 pub mod config;
+pub mod emit;
 pub mod error;
 pub mod projection;
 pub mod relay_http;
 pub mod rules;
+pub mod run;
 
 pub use error::DispatchError;

@@ -3,10 +3,9 @@
 //! Subcommands:
 //!
 //! - `check-config` — load + validate configuration and print a redacted summary.
-//! - `run` — resident capture/route/escalate/heartbeat loop (lands in a later
-//!   checkpoint of this lane).
-//! - `watchdog` — external liveness watcher over kind-40024 heartbeats (later
-//!   checkpoint).
+//! - `run` — resident capture/route/escalate/heartbeat loop.
+//! - `watchdog` — external liveness watcher over kind-40024 heartbeats (lands
+//!   in a later checkpoint of this lane).
 
 use std::path::{Path, PathBuf};
 
@@ -55,11 +54,16 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::CheckConfig { config } => check_config(&config),
         Command::Run { config } => {
-            let (summary, _) = load_validated(&config)?;
+            let (summary, config) = load_validated(&config)?;
             println!("{summary}");
-            anyhow::bail!(
-                "run mode is not implemented yet in this checkpoint of the P2 dispatcher lane"
-            )
+            let (keys, auth_tag) = buzz_dispatcher::config::identity_from_env()
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let relay =
+                buzz_dispatcher::relay_http::RelayHttp::new(config.relay_url(), keys, auth_tag);
+            let instance_id = uuid::Uuid::new_v4();
+            buzz_dispatcher::run::run(config, relay, instance_id)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error}"))
         }
         Command::Watchdog { config } => {
             let (summary, _) = load_validated(&config)?;

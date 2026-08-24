@@ -329,6 +329,7 @@ mod tests {
                 channel: None,
             }],
             thresholds: Vec::new(),
+            roles: std::collections::BTreeMap::new(),
             decision_surface: DecisionSurface { channel: home },
             liveness: LivenessConfig {
                 channel: home,

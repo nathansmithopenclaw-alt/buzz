@@ -53,6 +53,12 @@ pub struct DispatcherConfig {
     /// Escalation thresholds (stable config IDs per NIP-BT).
     #[serde(default)]
     pub thresholds: Vec<Threshold>,
+    /// Workspace tracker roles by pubkey hex (fold authorization). The
+    /// service identity is merged in at runtime with at least Member so its
+    /// own captures fold valid; grant Maintainer here for terminal/reopen
+    /// authority (M13, deploy-time step).
+    #[serde(default)]
+    pub roles: std::collections::BTreeMap<String, RoleConfig>,
     /// Where P0/deadline escalations surface for owner decision.
     pub decision_surface: DecisionSurface,
     /// Heartbeat liveness configuration for the external watchdog.
@@ -102,6 +108,26 @@ pub struct Threshold {
     pub window_secs: u64,
     /// What happens when the threshold fires.
     pub action: ThresholdAction,
+}
+
+/// Workspace tracker role for fold authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleConfig {
+    /// May create, edit, relate, and comment.
+    Member,
+    /// Additionally may make terminal/reopen transitions and renumber issues.
+    Maintainer,
+}
+
+impl RoleConfig {
+    /// The SDK fold role equivalent.
+    pub fn to_tracker_role(self) -> buzz_sdk::tracker::TrackerRole {
+        match self {
+            RoleConfig::Member => buzz_sdk::tracker::TrackerRole::Member,
+            RoleConfig::Maintainer => buzz_sdk::tracker::TrackerRole::Maintainer,
+        }
+    }
 }
 
 /// Condition under which a threshold qualifies an issue.
@@ -260,6 +286,10 @@ impl DispatcherConfig {
             ));
         }
 
+        for pubkey in self.roles.keys() {
+            validate_hex_pubkey(pubkey, &format!("roles key {pubkey}"))?;
+        }
+
         validate_state_dir(&self.state_dir)?;
         Ok(())
     }
@@ -267,6 +297,21 @@ impl DispatcherConfig {
     /// Resolved relay URL (always present after [`Self::load`]).
     pub fn relay_url(&self) -> &str {
         self.relay_url.as_deref().unwrap_or_default()
+    }
+
+    /// Fold authorization: configured roles plus the service identity, which
+    /// always needs at least Member so the dispatcher's own capture roots and
+    /// revisions fold valid. A configured Maintainer grant for the service
+    /// pubkey is preserved (M13 terminal/reopen authority).
+    pub fn authorization(&self, service_pubkey: &str) -> buzz_sdk::tracker::TrackerAuthorization {
+        let mut roles = std::collections::HashMap::new();
+        for (pubkey, role) in &self.roles {
+            roles.insert(pubkey.clone(), role.to_tracker_role());
+        }
+        roles
+            .entry(service_pubkey.to_string())
+            .or_insert(buzz_sdk::tracker::TrackerRole::Member);
+        buzz_sdk::tracker::TrackerAuthorization::new(roles)
     }
 }
 
