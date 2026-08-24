@@ -281,6 +281,15 @@ impl EventQueue {
     /// across channels), drains ALL events for that channel into a single batch,
     /// inserts into `in_flight_channels`, and returns the batch.
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
+        self.flush_next_skipping(&HashSet::new())
+    }
+
+    /// Like [`flush_next`], excluding `skip` so one unclaimable head cannot
+    /// starve later claimable channels in the same scheduling pass.
+    ///
+    /// `skip` is caller-owned and per-pass — a parked channel is retried on
+    /// the next `dispatch_pending` cycle, when a worker may have freed.
+    pub fn flush_next_skipping(&mut self, skip: &HashSet<Uuid>) -> Option<FlushBatch> {
         let now = Instant::now();
 
         // Auto-expire any stuck in-flight entries that missed mark_complete.
@@ -322,6 +331,7 @@ impl EventQueue {
             .iter()
             .filter(|(id, q)| {
                 !q.is_empty()
+                    && !skip.contains(*id)
                     && !self.in_flight_channels.contains(id)
                     && self.retry_after.get(id).is_none_or(|&t| t <= now)
             })
@@ -337,7 +347,7 @@ impl EventQueue {
                 let cancelled_id = self
                     .cancelled_batches
                     .keys()
-                    .find(|id| !self.in_flight_channels.contains(id))
+                    .find(|id| !skip.contains(*id) && !self.in_flight_channels.contains(id))
                     .copied();
                 match cancelled_id {
                     Some(id) => {
@@ -2937,6 +2947,29 @@ mod tests {
 
         q.mark_complete(ch_a);
         q.mark_complete(ch_b);
+    }
+
+    #[test]
+    fn flush_next_skipping_passes_over_oldest_unclaimable_head() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch_b = Uuid::new_v4();
+        let ch_a = Uuid::new_v4();
+        q.push(make_queued_at(ch_b, "B-older", Duration::from_secs(2)));
+        q.push(make_queued_at(ch_a, "A-newer", Duration::from_secs(1)));
+
+        let mut skip = HashSet::new();
+        skip.insert(ch_b);
+        let batch = q.flush_next_skipping(&skip).expect("A should flush");
+        assert_eq!(batch.channel_id, ch_a);
+        assert_eq!(batch.events[0].event.content, "A-newer");
+        q.mark_complete(ch_a);
+
+        let leftover = q.flush_next_skipping(&skip);
+        assert!(
+            leftover.is_none(),
+            "skipped B must not flush this pass even though it is oldest"
+        );
+        assert_eq!(q.queued_event_count(&ch_b), 1);
     }
 
     #[test]

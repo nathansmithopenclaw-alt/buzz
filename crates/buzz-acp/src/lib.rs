@@ -4085,6 +4085,84 @@ fn try_native_steer(
 
 // ── dispatch_pending ──────────────────────────────────────────────────────────
 
+enum ScheduleOutcome {
+    Empty,
+    Dispatch {
+        agent: Box<OwnedAgent>,
+        batch: FlushBatch,
+        affinity_hit: bool,
+    },
+    /// Idle workers exist but none can take this channel (exclusive-session).
+    /// Batch is requeued; skip-set holds the channel for the rest of this pass.
+    Park {
+        batch: FlushBatch,
+        first_notice: bool,
+    },
+    /// No idle workers. Batch is requeued; stop this pass (wait for a return).
+    Exhausted,
+}
+
+/// One step of the dispatch scan. `skip` is per-pass and caller-owned.
+fn schedule_next(
+    pool: &mut AgentPool,
+    queue: &mut EventQueue,
+    skip: &mut HashSet<Uuid>,
+) -> ScheduleOutcome {
+    let batch = match if skip.is_empty() {
+        queue.flush_next()
+    } else {
+        queue.flush_next_skipping(skip)
+    } {
+        Some(b) => b,
+        None => return ScheduleOutcome::Empty,
+    };
+    let channel_id = batch.channel_id;
+    let affinity_hit = pool.has_session_for(channel_id);
+    match pool.try_claim(Some(channel_id)) {
+        Some(agent) => {
+            pool.clear_exclusive_park(channel_id);
+            ScheduleOutcome::Dispatch {
+                agent: Box::new(agent),
+                batch,
+                affinity_hit,
+            }
+        }
+        None if pool.any_idle() => {
+            let first_notice = pool.note_exclusive_park(channel_id);
+            tracing::warn!(
+                channel = %channel_id,
+                pending_channels = queue.pending_channels(),
+                exclusive_session = pool.exclusive_session(),
+                first_notice,
+                "exclusive_unclaimable — skipping head, scanning remaining queue"
+            );
+            queue.requeue_preserve_timestamps(batch.clone());
+            queue.mark_complete(channel_id);
+            skip.insert(channel_id);
+            ScheduleOutcome::Park {
+                batch,
+                first_notice,
+            }
+        }
+        None => {
+            tracing::debug!(
+                pending_channels = queue.pending_channels(),
+                "pool_exhausted"
+            );
+            queue.requeue_preserve_timestamps(batch);
+            queue.mark_complete(channel_id);
+            ScheduleOutcome::Exhausted
+        }
+    }
+}
+
+fn exclusive_park_notice() -> String {
+    "⚠️ I can't take this conversation right now — this agent runs exclusive-session \
+     (one conversation per worker) and is already busy in another channel. Mentions \
+     there still work; this one is queued and will run when a worker is free."
+        .to_string()
+}
+
 /// Flush queued work to available agents.
 fn dispatch_pending(
     pool: &mut AgentPool,
@@ -4093,12 +4171,26 @@ fn dispatch_pending(
     last_activity: &mut tokio::time::Instant,
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
+    let mut skip = HashSet::new();
     loop {
-        let next_batch = queue.flush_next();
+        let outcome = schedule_next(pool, queue, &mut skip);
         spawn_queue_loss_notices(queue, Some(&ctx.rest_client));
-        let batch = match next_batch {
-            Some(b) => b,
-            None => break,
+        let (mut agent, batch, affinity_hit) = match outcome {
+            ScheduleOutcome::Empty | ScheduleOutcome::Exhausted => break,
+            ScheduleOutcome::Park {
+                batch,
+                first_notice,
+            } => {
+                if first_notice {
+                    spawn_failure_notice(Some(&ctx.rest_client), &batch, exclusive_park_notice());
+                }
+                continue;
+            }
+            ScheduleOutcome::Dispatch {
+                agent,
+                batch,
+                affinity_hit,
+            } => (*agent, batch, affinity_hit),
         };
         let channel_id = batch.channel_id;
         let typing_scope = batch
@@ -4106,17 +4198,6 @@ fn dispatch_pending(
             .last()
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
-        let affinity_hit = pool.has_session_for(channel_id);
-        let mut agent = match pool.try_claim(Some(channel_id)) {
-            Some(a) => a,
-            None => {
-                let pending = queue.pending_channels();
-                tracing::debug!(pending_channels = pending, "pool_exhausted");
-                queue.requeue_preserve_timestamps(batch);
-                queue.mark_complete(channel_id);
-                break;
-            }
-        };
         tracing::debug!(agent = agent.index, channel = %channel_id, affinity_hit, "agent_claimed");
 
         let recoverable_batch = match ctx.dedup_mode {
@@ -9352,5 +9433,213 @@ mod observer_payload_trim_tests {
             encrypt_observer_payload(&sender, &recipient.public_key(), &event)
                 .unwrap_or_else(|e| panic!("trimmed over={over} frame must encrypt: {e}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod exclusive_schedule_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind};
+    use std::time::{Duration, Instant};
+
+    struct Pass {
+        dispatched: Vec<Uuid>,
+        parks: Vec<(Uuid, bool)>,
+        claimed: Vec<OwnedAgent>,
+        exhausted: bool,
+    }
+
+    fn make_queued(channel_id: Uuid, content: &str, age: Duration) -> QueuedEvent {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), content)
+            .tags([])
+            .sign_with_keys(&keys)
+            .unwrap();
+        QueuedEvent {
+            channel_id,
+            event,
+            received_at: Instant::now() - age,
+            prompt_tag: "test".into(),
+        }
+    }
+
+    async fn dummy_agent(index: usize) -> OwnedAgent {
+        OwnedAgent {
+            index,
+            acp: AcpClient::spawn("cat", &[], &[], false)
+                .await
+                .expect("spawn cat as inert agent"),
+            state: Default::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        }
+    }
+
+    fn run_pass(pool: &mut AgentPool, queue: &mut EventQueue) -> Pass {
+        let mut skip = HashSet::new();
+        let mut pass = Pass {
+            dispatched: Vec::new(),
+            parks: Vec::new(),
+            claimed: Vec::new(),
+            exhausted: false,
+        };
+        loop {
+            match schedule_next(pool, queue, &mut skip) {
+                ScheduleOutcome::Empty => break,
+                ScheduleOutcome::Exhausted => {
+                    pass.exhausted = true;
+                    break;
+                }
+                ScheduleOutcome::Park {
+                    batch,
+                    first_notice,
+                } => pass.parks.push((batch.channel_id, first_notice)),
+                ScheduleOutcome::Dispatch { agent, batch, .. } => {
+                    pass.dispatched.push(batch.channel_id);
+                    pass.claimed.push(*agent);
+                }
+            }
+        }
+        pass
+    }
+
+    /// Helm HOL repro: exclusive worker holds A; B mention parks; later A
+    /// mention is served; B is not re-noticed on the second pass.
+    #[tokio::test]
+    async fn exclusive_hol_serves_bound_channel_behind_unclaimable_head() {
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let mut bound = dummy_agent(0).await;
+        bound.state.sessions.insert(channel_a, "sess-a".into());
+        let mut pool = AgentPool::from_slots_with_exclusive(vec![Some(bound)], true);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(make_queued(channel_b, "B-older", Duration::from_secs(2)));
+        queue.push(make_queued(channel_a, "A-newer", Duration::from_secs(1)));
+
+        let pass = run_pass(&mut pool, &mut queue);
+        assert_eq!(
+            pass.dispatched,
+            vec![channel_a],
+            "bound channel A must be served"
+        );
+        assert_eq!(
+            pass.parks,
+            vec![(channel_b, true)],
+            "B parks with first notice"
+        );
+        assert_eq!(queue.queued_event_count(&channel_b), 1);
+        assert_eq!(queue.queued_event_count(&channel_a), 0);
+        assert!(!pass.exhausted);
+
+        for id in &pass.dispatched {
+            queue.mark_complete(*id);
+        }
+        for agent in pass.claimed {
+            pool.return_agent(agent);
+        }
+        queue.push(make_queued(channel_a, "A-again", Duration::from_secs(0)));
+        let pass2 = run_pass(&mut pool, &mut queue);
+        assert_eq!(
+            pass2.dispatched,
+            vec![channel_a],
+            "subsequent A mention must still be served while B is parked"
+        );
+        assert_eq!(
+            pass2.parks,
+            vec![(channel_b, false)],
+            "same park episode must not re-notice"
+        );
+
+        drop(pass2.claimed);
+    }
+
+    /// True exhaustion: no idle worker. Break without parking/noticing.
+    #[tokio::test]
+    async fn true_exhaustion_still_breaks_without_skipping() {
+        let channel_a = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots_with_exclusive(vec![None], true);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(make_queued(channel_a, "A", Duration::from_secs(1)));
+
+        let pass = run_pass(&mut pool, &mut queue);
+        assert!(pass.dispatched.is_empty());
+        assert!(
+            pass.parks.is_empty(),
+            "true exhaustion is not an exclusive park"
+        );
+        assert!(pass.exhausted);
+        assert_eq!(queue.queued_event_count(&channel_a), 1);
+    }
+
+    /// Multiplex: exclusive=false still claims the oldest channel with any
+    /// idle worker, even if that worker already has a different session.
+    #[tokio::test]
+    async fn multiplex_still_claims_oldest_on_idle_worker() {
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let mut bound = dummy_agent(0).await;
+        bound.state.sessions.insert(channel_a, "sess-a".into());
+        let mut pool = AgentPool::from_slots(vec![Some(bound)]);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(make_queued(channel_b, "B-older", Duration::from_secs(2)));
+        queue.push(make_queued(channel_a, "A-newer", Duration::from_secs(1)));
+
+        let pass = run_pass(&mut pool, &mut queue);
+        assert_eq!(
+            pass.dispatched,
+            vec![channel_b],
+            "multiplex must still FIFO-claim oldest B on the idle worker"
+        );
+        assert!(
+            pass.parks.is_empty(),
+            "multiplex must not exclusive-park; remaining work is true exhaustion"
+        );
+        assert!(
+            pass.exhausted,
+            "after claiming the only idle worker, leftover channels take the exhaustion break"
+        );
+        assert_eq!(queue.queued_event_count(&channel_a), 1);
+        drop(pass.claimed);
+    }
+
+    /// Parked B is served once a free exclusive worker appears.
+    #[tokio::test]
+    async fn parked_channel_is_served_once_a_worker_frees() {
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let mut bound = dummy_agent(0).await;
+        bound.state.sessions.insert(channel_a, "sess-a".into());
+        let mut pool = AgentPool::from_slots_with_exclusive(vec![Some(bound), None], true);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(make_queued(channel_b, "B-older", Duration::from_secs(2)));
+        queue.push(make_queued(channel_a, "A-newer", Duration::from_secs(1)));
+
+        let pass = run_pass(&mut pool, &mut queue);
+        assert_eq!(pass.dispatched, vec![channel_a]);
+        assert_eq!(pass.parks, vec![(channel_b, true)]);
+        for id in &pass.dispatched {
+            queue.mark_complete(*id);
+        }
+        for agent in pass.claimed {
+            pool.return_agent(agent);
+        }
+
+        let free = dummy_agent(1).await;
+        pool.return_agent(free);
+        let pass2 = run_pass(&mut pool, &mut queue);
+        assert_eq!(
+            pass2.dispatched,
+            vec![channel_b],
+            "parked B must dispatch once an empty exclusive worker is available"
+        );
+        assert!(pass2.parks.is_empty());
+        drop(pass2.claimed);
     }
 }

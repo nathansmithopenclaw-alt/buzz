@@ -385,6 +385,10 @@ pub struct AgentPool {
     /// When true, a worker may hold at most one ACP session (Prime's contract).
     /// `try_claim` will not hand a worker that already has channel A to channel B.
     exclusive_session: bool,
+    /// Channels that have already received a once-per-park exclusive-unclaimable
+    /// notice. Insert returns true on a new park episode; cleared when the
+    /// channel is successfully claimed.
+    exclusive_park_notices: HashSet<Uuid>,
 }
 
 /// Result returned by a completed prompt task.
@@ -771,7 +775,26 @@ impl AgentPool {
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
             exclusive_session,
+            exclusive_park_notices: HashSet::new(),
         }
+    }
+
+    pub fn exclusive_session(&self) -> bool {
+        self.exclusive_session
+    }
+
+    /// Record that `channel_id` is parked as exclusive-unclaimable.
+    ///
+    /// Returns `true` on a **new** park episode (caller should post the
+    /// once-per-park notice). Returns `false` if this channel is already in
+    /// an open park episode — subsequent scheduling passes must not re-notice.
+    pub fn note_exclusive_park(&mut self, channel_id: Uuid) -> bool {
+        self.exclusive_park_notices.insert(channel_id)
+    }
+
+    /// End the park episode: this channel was claimed by a worker.
+    pub fn clear_exclusive_park(&mut self, channel_id: Uuid) {
+        self.exclusive_park_notices.remove(&channel_id);
     }
 
     /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
@@ -5693,6 +5716,22 @@ mod tests {
         assert!(!exclusive_worker_can_claim(&state, None, true));
         // Multiplex still reuses the worker for B.
         assert!(exclusive_worker_can_claim(&state, Some(channel_b), false));
+    }
+
+    #[test]
+    fn exclusive_park_notice_is_once_per_episode() {
+        let mut pool = AgentPool::from_slots_with_exclusive(vec![None], true);
+        let channel = Uuid::new_v4();
+        assert!(pool.note_exclusive_park(channel));
+        assert!(
+            !pool.note_exclusive_park(channel),
+            "same park episode must not re-notice"
+        );
+        pool.clear_exclusive_park(channel);
+        assert!(
+            pool.note_exclusive_park(channel),
+            "a new park episode after claim must notice again"
+        );
     }
 
     // MINOR (#2884): the permission-mode RPC is gated on agent_supports_mode.
