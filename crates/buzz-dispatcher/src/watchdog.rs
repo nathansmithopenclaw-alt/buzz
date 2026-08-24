@@ -106,6 +106,17 @@ pub fn latest_heartbeats(
     latest
 }
 
+/// Heartbeat query filter for one watchdog tick. MUST serialize as a single
+/// filter OBJECT: the bridge parses the `POST /query` body as `Vec<Filter>`
+/// (B1 regression guard — see the unit test).
+fn heartbeat_filter(config: &DispatcherConfig) -> serde_json::Value {
+    json!({
+        "kinds": [kind::KIND_TRACKER_SERVICE_HEARTBEAT],
+        "#h": [config.stream_id.to_string()],
+        "limit": 200,
+    })
+}
+
 /// Watchdog process state for stale-episode edge detection.
 #[derive(Debug, Clone)]
 struct Episode {
@@ -147,12 +158,8 @@ async fn tick_watchdog(
     episode: &mut Episode,
 ) -> Result<(), DispatchError> {
     let now = current_unix_seconds();
-    let filter = json!([{
-        "kinds": [kind::KIND_TRACKER_SERVICE_HEARTBEAT],
-        "#h": [config.stream_id.to_string()],
-        "limit": 200,
-    }]);
-    let values = relay.query(&[filter]).await?;
+    let filter = heartbeat_filter(config);
+    let values = relay.query(std::slice::from_ref(&filter)).await?;
     let events: Vec<Event> = values
         .into_iter()
         .filter_map(|value| serde_json::from_value::<Event>(value).ok())
@@ -330,5 +337,41 @@ mod tests {
             .get(&(keys.public_key().to_hex(), "svc".to_string()))
             .expect("entry");
         assert_eq!(entry.observed_at, 200, "newest wins, other stream ignored");
+    }
+
+    /// B1 regression guard: the watchdog filter is a single filter OBJECT,
+    /// not an array-wrapped filter (the bridge parses `Vec<Filter>`).
+    #[test]
+    fn heartbeat_filter_is_an_object_not_an_array() {
+        let home = uuid::Uuid::new_v4();
+        let config = crate::config::DispatcherConfig {
+            relay_url: Some("http://localhost:3000".to_string()),
+            service_id: "triage-dispatcher".to_string(),
+            stream_id: uuid::Uuid::new_v4(),
+            poll_interval_secs: 30,
+            monitored_channels: Vec::new(),
+            pin_emoji: "\u{1F4CC}".to_string(),
+            default_channel: None,
+            routing: Vec::new(),
+            thresholds: Vec::new(),
+            roles: std::collections::BTreeMap::new(),
+            decision_surface: crate::config::DecisionSurface { channel: home },
+            liveness: crate::config::LivenessConfig {
+                channel: home,
+                owner: None,
+                stale_after_secs: 300,
+            },
+            state_dir: std::path::PathBuf::from("/tmp/watchdog-state-test"),
+        };
+        let filter = heartbeat_filter(&config);
+        assert!(filter.is_object(), "filter must be an object");
+        assert_eq!(filter["#h"], json!([config.stream_id.to_string()]));
+        assert_eq!(filter["limit"], json!(200));
+        let body = crate::relay_http::query_body(std::slice::from_ref(&filter)).expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            parsed[0].is_object(),
+            "body must be [{{...}}], not [[{{...}}]]"
+        );
     }
 }

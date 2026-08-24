@@ -99,6 +99,11 @@ pub async fn tick(
 
 /// Fetch tracker-stream events, monitored-channel reactions, and prior dispatch
 /// actions at/after `since`.
+///
+/// Both families paginate backward from the newest event with the bridge's
+/// composite `(until, before_id)` cursor (B4): the relay clamps limitless
+/// filters to the newest 1000 rows, so a single unpaginated refresh against a
+/// >1000-event stream silently gaps everything older.
 async fn fetch_new_events(
     config: &DispatcherConfig,
     relay: &RelayHttp,
@@ -106,8 +111,27 @@ async fn fetch_new_events(
 ) -> Result<Vec<Event>, DispatchError> {
     let mut events = Vec::new();
 
-    // Tracker stream: roots, revisions, comments, dispatch actions, heartbeats.
-    let tracker_filter = json!([{
+    // Tracker stream: roots, revisions, comments, dispatch actions.
+    events.extend(query_paginated_events(relay, tracker_refresh_filter(config, since)).await?);
+
+    // Monitored-channel pin reactions for capture.
+    if !config.monitored_channels.is_empty() {
+        events.extend(
+            query_paginated_events(
+                relay,
+                reaction_refresh_filter(&config.monitored_channels, since),
+            )
+            .await?,
+        );
+    }
+
+    Ok(events)
+}
+
+/// Tracker-stream inclusive-refresh filter. MUST serialize as a single filter
+/// OBJECT: the bridge parses the `POST /query` body as `Vec<Filter>` (B1).
+fn tracker_refresh_filter(config: &DispatcherConfig, since: u64) -> Value {
+    json!({
         "kinds": [
             buzz_sdk::kind::KIND_TRACKER_ISSUE,
             buzz_sdk::kind::KIND_TRACKER_REVISION,
@@ -116,24 +140,51 @@ async fn fetch_new_events(
         ],
         "#h": [config.stream_id.to_string()],
         "since": since,
-    }]);
-    events.extend(query_events(relay, &tracker_filter).await?);
-
-    // Monitored-channel pin reactions for capture.
-    if !config.monitored_channels.is_empty() {
-        let channels: Vec<String> = config
-            .monitored_channels
-            .iter()
-            .map(Uuid::to_string)
-            .collect();
-        let reaction_filter = json!([{ "kinds": [7], "#h": channels, "since": since }]);
-        events.extend(query_events(relay, &reaction_filter).await?);
-    }
-
-    Ok(events)
+    })
 }
 
-async fn query_events(relay: &RelayHttp, filter: &Value) -> Result<Vec<Event>, DispatchError> {
+/// Monitored-channel reaction inclusive-refresh filter (single filter OBJECT;
+/// B1).
+fn reaction_refresh_filter(channels: &[Uuid], since: u64) -> Value {
+    let channel_ids: Vec<String> = channels.iter().map(Uuid::to_string).collect();
+    json!({ "kinds": [7], "#h": channel_ids, "since": since })
+}
+
+/// Page size for backward refresh pagination. Below the relay's 1000-row page
+/// clamp; matches the buzz-cli `QUERY_PAGE_SIZE`.
+const REFRESH_PAGE_SIZE: usize = 500;
+/// Hard cap on pages per refresh so a pathological stream cannot spin the
+/// tick forever (500 * 200 = 100k events per family per tick).
+const REFRESH_MAX_PAGES: usize = 200;
+
+/// Query one filter backward across bounded pages until the result is
+/// exhausted, newest page first. The base filter carries the inclusive
+/// `since`; each full page advances the composite `(until, before_id)`
+/// cursor, exactly the shape `buzz-cli query_pages` uses.
+async fn query_paginated_events(
+    relay: &RelayHttp,
+    mut filter: Value,
+) -> Result<Vec<Event>, DispatchError> {
+    let mut events = Vec::new();
+    for _ in 0..REFRESH_MAX_PAGES {
+        filter["limit"] = json!(REFRESH_PAGE_SIZE);
+        let page = query_page(relay, &filter).await?;
+        let done = page.len() < REFRESH_PAGE_SIZE;
+        if !done {
+            advance_refresh_cursor(&mut filter, &page)?;
+        }
+        events.extend(page);
+        if done {
+            return Ok(events);
+        }
+    }
+    Err(DispatchError::Other(format!(
+        "refresh pagination exceeded {REFRESH_MAX_PAGES} pages; aborting instead of looping"
+    )))
+}
+
+/// One `POST /query` page; unparseable events are skipped with a warning.
+async fn query_page(relay: &RelayHttp, filter: &Value) -> Result<Vec<Event>, DispatchError> {
     let values = relay.query(std::slice::from_ref(filter)).await?;
     let mut events = Vec::with_capacity(values.len());
     for value in values {
@@ -143,6 +194,19 @@ async fn query_events(relay: &RelayHttp, filter: &Value) -> Result<Vec<Event>, D
         }
     }
     Ok(events)
+}
+
+/// Advance a backward pagination cursor past `page`'s oldest event. The
+/// bridge orders pages `(created_at DESC, id ASC)` and keys the next page on
+/// `created_at < until OR (created_at = until AND id > before_id)`, so both
+/// fields must move together (`before_id` without `until` is a 400).
+fn advance_refresh_cursor(filter: &mut Value, page: &[Event]) -> Result<(), DispatchError> {
+    let last = page.last().ok_or_else(|| {
+        DispatchError::Other("cannot advance refresh cursor on an empty page".into())
+    })?;
+    filter["until"] = json!(last.created_at.as_secs());
+    filter["before_id"] = json!(last.id.to_hex());
+    Ok(())
 }
 
 /// Fold the persisted journal into the current tracker projection. Non-tracker
@@ -169,10 +233,89 @@ fn current_unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{DecisionSurface, LivenessConfig};
+    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+
+    fn test_config() -> DispatcherConfig {
+        let home = Uuid::new_v4();
+        DispatcherConfig {
+            relay_url: Some("http://localhost:3000".to_string()),
+            service_id: "triage-dispatcher".to_string(),
+            stream_id: Uuid::new_v4(),
+            poll_interval_secs: 30,
+            monitored_channels: vec![home],
+            pin_emoji: "\u{1F4CC}".to_string(),
+            default_channel: Some(home),
+            routing: Vec::new(),
+            thresholds: Vec::new(),
+            roles: std::collections::BTreeMap::new(),
+            decision_surface: DecisionSurface { channel: home },
+            liveness: LivenessConfig {
+                channel: home,
+                owner: None,
+                stale_after_secs: 300,
+            },
+            state_dir: std::path::PathBuf::from("/tmp/dispatcher-state-test"),
+        }
+    }
 
     #[test]
     fn current_unix_seconds_is_reasonable() {
         let now = current_unix_seconds();
         assert!(now > 1_700_000_000, "epoch seconds should be post-2023");
+    }
+
+    /// B1 regression guard: refresh filters are single filter OBJECTS. The
+    /// bridge parses the `POST /query` body as `Vec<Filter>`, so wrapping a
+    /// filter in its own array double-nests the body and 400s every query.
+    #[test]
+    fn refresh_filters_are_objects_not_arrays() {
+        let config = test_config();
+        let tracker = tracker_refresh_filter(&config, 42);
+        assert!(tracker.is_object(), "tracker filter must be an object");
+        assert_eq!(tracker["since"], json!(42));
+        assert_eq!(tracker["#h"], json!([config.stream_id.to_string()]));
+        assert!(tracker["kinds"].as_array().expect("kinds").len() >= 4);
+
+        let reactions = reaction_refresh_filter(&config.monitored_channels, 42);
+        assert!(reactions.is_object(), "reaction filter must be an object");
+        assert_eq!(reactions["kinds"], json!([7]));
+        assert_eq!(reactions["since"], json!(42));
+
+        // And the transport serializes them as a flat top-level array.
+        let body = crate::relay_http::query_body(std::slice::from_ref(&tracker)).expect("body");
+        let parsed: Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            parsed[0].is_object(),
+            "body must be [{{...}}], not [[{{...}}]]"
+        );
+    }
+
+    #[test]
+    fn advance_refresh_cursor_sets_composite_until_before_id() {
+        let keys = Keys::generate();
+        let newer = EventBuilder::new(Kind::TextNote, "newer")
+            .custom_created_at(Timestamp::from(200))
+            .sign_with_keys(&keys)
+            .expect("signed");
+        let older = EventBuilder::new(Kind::TextNote, "older")
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .expect("signed");
+
+        // Pages arrive newest-first; the cursor keys off the page's LAST
+        // (oldest) event.
+        let page = vec![newer, older.clone()];
+        let mut filter = json!({ "kinds": [1], "since": 0 });
+        advance_refresh_cursor(&mut filter, &page).expect("advance");
+        assert_eq!(filter["until"], json!(100));
+        assert_eq!(filter["before_id"], json!(older.id.to_hex()));
+        assert_eq!(filter["since"], json!(0), "since stays inclusive");
+    }
+
+    #[test]
+    fn advance_refresh_cursor_rejects_empty_page() {
+        let mut filter = json!({ "kinds": [1] });
+        assert!(advance_refresh_cursor(&mut filter, &[]).is_err());
     }
 }

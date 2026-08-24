@@ -59,7 +59,8 @@ async fn main() -> anyhow::Result<()> {
             let (keys, auth_tag) = buzz_dispatcher::config::identity_from_env()
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             let relay =
-                buzz_dispatcher::relay_http::RelayHttp::new(config.relay_url(), keys, auth_tag);
+                buzz_dispatcher::relay_http::RelayHttp::new(config.relay_url(), keys, auth_tag)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
             let instance_id = uuid::Uuid::new_v4();
             buzz_dispatcher::run::run(config, relay, instance_id)
                 .await
@@ -71,7 +72,8 @@ async fn main() -> anyhow::Result<()> {
             let (keys, auth_tag) = buzz_dispatcher::config::identity_from_env()
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             let relay =
-                buzz_dispatcher::relay_http::RelayHttp::new(config.relay_url(), keys, auth_tag);
+                buzz_dispatcher::relay_http::RelayHttp::new(config.relay_url(), keys, auth_tag)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
             buzz_dispatcher::watchdog::watch(config, relay)
                 .await
                 .map_err(|error| anyhow::anyhow!("{error}"))
