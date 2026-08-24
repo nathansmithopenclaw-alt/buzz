@@ -202,8 +202,15 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         args: &["--profile", "buzz-acp"],
         install_instructions_url: "https://github.com/deepseek-ai/deepseek-harness",
         install_hint: "⚠️  DEVELOPER PREVIEW — pinned to upstream @deepseek-ai/dsh 0.1.1-rc.2; \
-            expect breaking churn between pins. Install the pinned CLI manually \
-            (never auto-installed): `npm install -g @deepseek-ai/dsh@0.1.1-rc.2` \
+            expect breaking churn between pins. Install the pinned CLI plus its two ACP \
+            companion packages (the CLI alone does not pull them) into Buzz's dsh home — \
+            profile plugins resolve up-chain from the profile directory, so they must live \
+            under `~/.buzz/.dsh-home`, not the npm global root (never auto-installed):\n\n\
+            mkdir -p ~/.buzz/.dsh-home && cd ~/.buzz/.dsh-home\n\
+            npm install @deepseek-ai/dsh@0.1.1-rc.2 @deepseek-ai/dsh-acp@0.1.1-rc.2 \
+            @deepseek-ai/dsh-acp-demo@0.1.1-rc.2\n\
+            mkdir -p ~/.local/bin && ln -sf ~/.buzz/.dsh-home/node_modules/.bin/dsh \
+            ~/.local/bin/dsh\n\
             (Node 22.19+ / 24).\n\n\
             Buzz runs `dsh --profile buzz-acp` — an owned profile Buzz provisions \
             into the nest `.dsh-home` on first spawn (LLM route to the Smith Crafts \
@@ -211,7 +218,10 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             dsh scrubs credential-shaped env vars out of model shells, so publishing \
             goes through that tool rather than raw CLI calls). Set `DSH_HOME` to \
             override the provisioned home; publish credentials flow only through \
-            the harness process environment — nothing is written to disk.\n\n\
+            the harness process environment — nothing is written to disk. To override \
+            the model or provider per deployment, pass a Cordis patch (`dsh --patch \
+            <file>`): each patch row REPLACES that plugin's entire config block, so \
+            repeat every field you want to keep.\n\n\
             Like Prime, one conversation per process — capped at 3 concurrent workers.",
         underlying_cli: None,
     },
@@ -347,9 +357,17 @@ mod tests {
         // appear so operators can see what they are opting into.
         assert!(preset.install_hint.contains("DEVELOPER PREVIEW"));
         assert!(preset.install_hint.contains("0.1.1-rc.2"));
+        // Round 3: all three pins in one command, installed where the
+        // profile's up-chain resolution actually reaches (the dsh home), and
+        // the --patch wholesale-replace caveat stated for overlay authors.
+        assert!(preset.install_hint.contains(
+            "npm install @deepseek-ai/dsh@0.1.1-rc.2 \
+             @deepseek-ai/dsh-acp@0.1.1-rc.2 @deepseek-ai/dsh-acp-demo@0.1.1-rc.2"
+        ));
         assert!(preset
             .install_hint
-            .contains("npm install -g @deepseek-ai/dsh@0.1.1-rc.2"));
+            .contains("mkdir -p ~/.buzz/.dsh-home && cd ~/.buzz/.dsh-home"));
+        assert!(preset.install_hint.contains("REPLACES"));
 
         let entry = preset_catalog_entry(preset, |command| {
             (command == "dsh").then(|| PathBuf::from("/usr/local/bin/dsh"))
