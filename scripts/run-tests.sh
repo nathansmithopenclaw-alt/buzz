@@ -120,6 +120,13 @@ run_unit_tests() {
   # `just test-unit` — the two lists must stay in step.
   run_test_step "buzz-agent unit tests" \
     cargo test -p buzz-agent --lib -- --nocapture
+
+  # Tracker SDK + triage dispatcher (Dispatch P2): pure unit suites, no infra.
+  # Mirrors the nextest path in `just test-unit` — keep the lists in step.
+  run_test_step "buzz-sdk unit tests" \
+    cargo test -p buzz-sdk --lib -- --nocapture
+  run_test_step "buzz-dispatcher unit tests" \
+    cargo test -p buzz-dispatcher --lib -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
