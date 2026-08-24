@@ -65,16 +65,6 @@ fn unsigned_shape(
     })
 }
 
-fn require_status_change_reason(revision: &IssueRevision) -> Result<(), String> {
-    if revision.set.status.is_none() {
-        return Ok(());
-    }
-    match revision.reason.as_deref().map(str::trim) {
-        Some(reason) if !reason.is_empty() => Ok(()),
-        _ => Err("status change reason is required".into()),
-    }
-}
-
 /// Build and validate a Tracker revision without signing or publishing it.
 #[tauri::command]
 pub fn build_tracker_revision_event(
@@ -82,7 +72,6 @@ pub fn build_tracker_revision_event(
     revision: IssueRevision,
     author_pubkey: String,
 ) -> Result<TrackerUnsignedEvent, String> {
-    require_status_change_reason(&revision)?;
     let builder =
         build_tracker_revision(stream_id, &revision).map_err(|error| error.to_string())?;
     unsigned_shape(builder, &author_pubkey)
@@ -176,9 +165,9 @@ mod tests {
     }
 
     #[test]
-    fn revision_command_rejects_a_status_change_without_reason() {
+    fn revision_command_allows_a_status_change_without_reason() {
         let keys = Keys::generate();
-        let error = build_tracker_revision_event(
+        let shape = build_tracker_revision_event(
             Uuid::new_v4(),
             IssueRevision {
                 v: TRACKER_VERSION,
@@ -200,11 +189,12 @@ mod tests {
             },
             keys.public_key().to_hex(),
         )
-        .expect_err("reason-less status change");
-        assert!(
-            error.contains("status change reason is required"),
-            "unexpected builder error: {error}"
-        );
+        .expect("reason-less status change");
+        assert_eq!(shape.kind, 40021);
+        let content: serde_json::Value =
+            serde_json::from_str(&shape.content).expect("revision content");
+        assert_eq!(content["set"]["status"], "in_progress");
+        assert!(content["reason"].is_null());
 
         let blank = build_tracker_revision_event(
             Uuid::new_v4(),
@@ -230,7 +220,7 @@ mod tests {
         )
         .expect_err("blank status change reason");
         assert!(
-            blank.contains("status change reason is required"),
+            blank.contains("status change reason must be non-empty when present"),
             "unexpected builder error: {blank}"
         );
     }

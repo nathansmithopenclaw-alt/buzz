@@ -14159,9 +14159,6 @@ export function maybeInstallE2eTauriMocks() {
             reason: string | null;
           };
         };
-        if (args.revision.set.status && !(args.revision.reason ?? "").trim()) {
-          throw new Error("status change reason is required");
-        }
         const tags = [
           ["h", args.streamId],
           ["d", args.revision.issue_id],

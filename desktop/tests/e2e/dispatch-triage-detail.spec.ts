@@ -246,22 +246,27 @@ test("detail mutation round-trips through the Rust-builder and canonical refresh
   };
   expect(content.set?.status).toBe("in_review");
   expect(content.reason).toBe("Needs owner review");
+  await expect(page.getByTestId("dispatch-status-reason")).toHaveValue("");
 });
 
-test("detail does not emit a reason-less status change", async ({ page }) => {
+test("detail emits a reason-less status change", async ({ page }) => {
   await openDispatch(page);
   await openPrimaryIssue(page);
   const status = page.getByLabel("Issue status");
   await status.selectOption("in_review");
-  await expect(page.getByTestId("dispatch-status-reason-error")).toHaveText(
-    "status change reason is required",
-  );
-  await expect(status).toHaveValue("triage");
-  await expect(page.getByText("Issue updated")).toHaveCount(0);
+  await expect(page.getByText("Issue updated")).toBeVisible();
+  await expect(status).toHaveValue("in_review");
   const signed = await page.evaluate(
     () => window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [],
   );
-  expect(signed.some((event) => event.kind === 40021)).toBe(false);
+  const revision = signed.find((event) => event.kind === 40021);
+  expect(revision).toBeTruthy();
+  const content = JSON.parse(revision?.content ?? "{}") as {
+    set?: { status?: string };
+    reason?: string | null;
+  };
+  expect(content.set?.status).toBe("in_review");
+  expect(content.reason).toBeNull();
 });
 
 test("detail does not keep an optimistic status when the fold rejects the revision", async ({
@@ -288,6 +293,9 @@ test("detail does not keep an optimistic status when the fold rejects the revisi
         JSON.parse(event.content).set.status === "in_progress",
     ),
   ).toBe(true);
+  await expect(page.getByTestId("dispatch-status-reason")).toHaveValue(
+    "Execution started",
+  );
 });
 
 test("detail keeps canonical activity visible when comments and profiles degrade", async ({

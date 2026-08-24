@@ -212,7 +212,6 @@ export function IssueDetail({
   const [expanded, setExpanded] = React.useState(false);
   const [comment, setComment] = React.useState("");
   const [reason, setReason] = React.useState("");
-  const [reasonError, setReasonError] = React.useState<string | null>(null);
   const project = projects.find(
     (candidate) => candidate.projectId === issue.projectId,
   );
@@ -419,16 +418,10 @@ export function IssueDetail({
               onChange={(event) => {
                 const status = event.target.value as DispatchStatus;
                 if (!canTransition(role, issue.status, status)) return;
-                const trimmed = reason.trim();
-                if (!trimmed) {
-                  setReasonError("status change reason is required");
-                  return;
-                }
-                setReasonError(null);
                 void onMutate({
                   type: "status",
                   status,
-                  reason: trimmed,
+                  reason: reason.trim() || null,
                 })
                   .then(() => setReason(""))
                   .catch(() => undefined);
@@ -447,34 +440,15 @@ export function IssueDetail({
             </select>
           </Property>
           <Property label="Reason">
-            <div>
-              <input
-                aria-describedby={
-                  reasonError ? "dispatch-status-reason-error" : undefined
-                }
-                aria-invalid={Boolean(reasonError)}
-                aria-label="Status change reason"
-                aria-required={true}
-                className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm disabled:opacity-50"
-                data-testid="dispatch-status-reason"
-                disabled={!canEdit || isMutating}
-                onChange={(event) => {
-                  setReason(event.target.value);
-                  if (reasonError) setReasonError(null);
-                }}
-                placeholder="Required to change status"
-                value={reason}
-              />
-              {reasonError ? (
-                <p
-                  className="mt-1 text-xs text-destructive"
-                  data-testid="dispatch-status-reason-error"
-                  id="dispatch-status-reason-error"
-                >
-                  {reasonError}
-                </p>
-              ) : null}
-            </div>
+            <input
+              aria-label="Status change reason"
+              className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm disabled:opacity-50"
+              data-testid="dispatch-status-reason"
+              disabled={!canEdit || isMutating}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder="Optional"
+              value={reason}
+            />
           </Property>
           <Property label="Priority">
             <select
