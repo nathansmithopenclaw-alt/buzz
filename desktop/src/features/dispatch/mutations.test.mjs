@@ -107,30 +107,51 @@ function dependencies(event = relayEvent()) {
   };
 }
 
-test("status mutation requires a non-empty reason before building", async () => {
+test("status mutation allows a missing reason and rejects a blank one", async () => {
   const current = issue();
-  const deps = dependencies();
-  const optimistic = [];
+  const event = relayEvent();
+  const deps = dependencies(event);
+  const next = {
+    ...current,
+    status: "in_progress",
+    tipEvent: event.id,
+    revision: 2,
+  };
+  const result = await publishDispatchIssueMutation(
+    {
+      issue: current,
+      mutation: { type: "status", status: "in_progress", reason: null },
+      viewerRole: "member",
+      onOptimistic: () => undefined,
+      onRollback: () => assert.fail("must not roll back an allowed emit"),
+      refresh: async () => context([next]),
+    },
+    deps.value,
+  );
+  assert.equal(result, next);
+  assert.equal(deps.calls.revisions[0].revision.reason, null);
+  assert.deepEqual(deps.calls.published, [event]);
+
+  const blocked = dependencies();
   await assert.rejects(
     publishDispatchIssueMutation(
       {
         issue: current,
         mutation: { type: "status", status: "in_progress", reason: "   " },
         viewerRole: "member",
-        onOptimistic: (value) => optimistic.push(value),
+        onOptimistic: () => assert.fail("must not emit a blank reason"),
         onRollback: () => assert.fail("must not roll back a blocked emit"),
         refresh: async () => assert.fail("must not refresh a blocked emit"),
       },
-      deps.value,
+      blocked.value,
     ),
-    /status change reason is required/,
+    /Status change reason must be non-empty when present/,
   );
-  assert.equal(deps.calls.revisions.length, 0);
-  assert.equal(deps.calls.published.length, 0);
-  assert.equal(optimistic.length, 0);
+  assert.equal(blocked.calls.revisions.length, 0);
+  assert.equal(blocked.calls.published.length, 0);
 });
 
-test("status mutation round-trips a required reason through builders", async () => {
+test("status mutation round-trips an optional reason through builders", async () => {
   const current = issue();
   const event = relayEvent();
   const next = {

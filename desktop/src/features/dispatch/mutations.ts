@@ -77,11 +77,9 @@ type TrackerCommentWire = {
 };
 
 export type DispatchIssueMutation =
-  | { type: "status"; status: DispatchStatus; reason: string }
+  | { type: "status"; status: DispatchStatus; reason: string | null }
   | { type: "assignee"; assignee: string | null }
   | { type: "priority"; priority: DispatchPriority | null };
-
-const STATUS_REASON_REQUIRED = "status change reason is required";
 
 type MutationDependencies = {
   identity: () => Promise<{ pubkey: string }>;
@@ -336,14 +334,13 @@ function mutationFields(mutation: DispatchIssueMutation): {
 } {
   switch (mutation.type) {
     case "status": {
-      const reason = mutation.reason.trim();
-      if (!reason) {
-        throw new Error(STATUS_REASON_REQUIRED);
+      if (mutation.reason !== null && !mutation.reason.trim()) {
+        throw new Error("Status change reason must be non-empty when present.");
       }
       return {
         set: { status: mutation.status },
         clear: [],
-        reason,
+        reason: mutation.reason?.trim() ?? null,
       };
     }
     case "assignee":
