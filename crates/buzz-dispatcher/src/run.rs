@@ -341,6 +341,7 @@ mod tests {
                 channel: home,
                 owner: None,
                 stale_after_secs: 300,
+                signer_allowlist: vec!["c".repeat(64)],
             },
             state_dir: std::path::PathBuf::from("/tmp/dispatcher-state-test"),
         }

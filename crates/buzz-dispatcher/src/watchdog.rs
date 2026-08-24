@@ -3,17 +3,23 @@
 //! Runs under its OWN identity (separate launchd job): reads the latest
 //! kind-40024 heartbeat per `(stream, signer, service_id)` and, when one goes
 //! stale beyond `liveness.stale_after_secs`, posts a channel message naming
-//! the config liveness owner. Surface is message-only — never a shared-canvas
+//! the config liveness owner. Only heartbeats signed by a key in
+//! `liveness.signer_allowlist` count (M6): any channel member can publish a
+//! 40024 carrying the service slug, so the SIGNER — not the content — is the
+//! proof of life. Surface is message-only — never a shared-canvas
 //! mutation (canvases are hand-curated; bot read-modify-write is a clobber
 //! class). A dead process cannot author its own death notice; watchdog death
 //! is covered by the next layer up (disk-guard pattern).
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 use buzz_sdk::tracker::parse_service_heartbeat;
 use buzz_sdk::{build_message, kind};
 use nostr::Event;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{debug, error, info, warn};
 
@@ -109,40 +115,96 @@ pub fn latest_heartbeats(
 
 /// Heartbeat query filter for one watchdog tick. MUST serialize as a single
 /// filter OBJECT: the bridge parses the `POST /query` body as `Vec<Filter>`
-/// (B1 regression guard — see the unit test).
+/// (B1 regression guard — see the unit test). `authors` scopes the relay
+/// query to the allowlisted signers (M6); the allowlist check is applied
+/// again in code when reducing the results.
 fn heartbeat_filter(config: &DispatcherConfig) -> serde_json::Value {
     json!({
         "kinds": [kind::KIND_TRACKER_SERVICE_HEARTBEAT],
         "#h": [config.stream_id.to_string()],
+        "authors": config.liveness.signer_allowlist,
         "limit": 200,
     })
 }
 
-/// Watchdog process state for stale-episode edge detection.
-#[derive(Debug, Clone)]
+/// Newest `observed_at` for `service_id` among ALLOWLISTED signers only
+/// (M6). A 40024 with the service slug signed by anyone else — any channel
+/// member can build one — never moves the staleness clock.
+pub fn best_allowed_observed_at(
+    latest: &BTreeMap<(String, String), LatestHeartbeat>,
+    service_id: &str,
+    signer_allowlist: &[String],
+) -> Option<u64> {
+    latest
+        .iter()
+        .filter(|((signer, service), _)| {
+            service == service_id && signer_allowlist.iter().any(|allowed| allowed == signer)
+        })
+        .map(|(_, heartbeat)| heartbeat.observed_at)
+        .max()
+}
+
+/// Watchdog state for stale-episode edge detection. Persisted in
+/// `state_dir/watchdog_state.json`: it used to be in-memory only, so every
+/// restart reset the never-seen grace window and re-posted the stale notice
+/// mid-episode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Episode {
-    /// When this watchdog process started monitoring (never-seen grace).
+    /// When the watchdog first started monitoring (never-seen grace anchor).
     monitoring_since: u64,
     /// Whether the previous tick judged the service stale.
     was_stale: bool,
 }
 
+/// Persisted watchdog episode-state file inside the config `state_dir`.
+pub const WATCHDOG_STATE_FILE: &str = "watchdog_state.json";
+
+/// Load persisted episode state; a missing file yields a fresh episode.
+/// A CORRUPT file is a hard error (crate-wide corrupt-state policy — never
+/// silent reset). Returns `(episode, freshly_created)`.
+fn load_episode(state_dir: &Path) -> Result<(Episode, bool), DispatchError> {
+    let path = state_dir.join(WATCHDOG_STATE_FILE);
+    if !path.exists() {
+        return Ok((
+            Episode {
+                monitoring_since: current_unix_seconds(),
+                was_stale: false,
+            },
+            true,
+        ));
+    }
+    let raw = fs::read_to_string(&path)?;
+    let episode = serde_json::from_str(&raw)
+        .map_err(|error| DispatchError::Other(format!("corrupt watchdog state file: {error}")))?;
+    Ok((episode, false))
+}
+
+fn persist_episode(state_dir: &Path, episode: &Episode) -> Result<(), DispatchError> {
+    crate::projection::write_atomic(
+        &state_dir.join(WATCHDOG_STATE_FILE),
+        serde_json::to_string(episode)?.as_bytes(),
+    )
+}
+
 /// Run the watchdog until the process is stopped. Watches the configured
-/// `service_id`; the signer is not pinned in config (a service-key rotation
-/// must not blind the watchdog), so any signer for that service counts and is
-/// reported when stale.
+/// `service_id`; ONLY heartbeats signed by a key in
+/// `liveness.signer_allowlist` count (M6 — any channel member can publish a
+/// 40024 with the service slug, so the signer is the proof of life). Service
+/// key rotation is a config edit: update the allowlist in the same change.
 pub async fn watch(config: DispatcherConfig, relay: RelayHttp) -> Result<(), DispatchError> {
     // M7: single-instance guard, matching the resident loop.
     let _lock = InstanceLock::acquire(&config.state_dir, WATCHDOG_LOCK_FILE)?;
     let interval = Duration::from_secs(config.poll_interval_secs);
-    let mut episode = Episode {
-        monitoring_since: current_unix_seconds(),
-        was_stale: false,
-    };
+    let (mut episode, created) = load_episode(&config.state_dir)?;
+    if created {
+        // Anchor the never-seen grace durably so restarts cannot extend it.
+        persist_episode(&config.state_dir, &episode)?;
+    }
 
     info!(
         service_id = %config.service_id,
         stale_after_secs = config.liveness.stale_after_secs,
+        resumed_stale = episode.was_stale,
         "watchdog starting"
     );
 
@@ -170,12 +232,13 @@ async fn tick_watchdog(
 
     let latest = latest_heartbeats(&events, config.stream_id, now);
 
-    // Any signer for the configured service counts; newest heartbeat wins.
-    let service_best: Option<u64> = latest
-        .iter()
-        .filter(|((_, service_id), _)| service_id == &config.service_id)
-        .map(|(_, heartbeat)| heartbeat.observed_at)
-        .max();
+    // M6: only allowlisted signers count; newest heartbeat wins. A spoofed
+    // 40024 from any other member never updates the staleness clock.
+    let service_best = best_allowed_observed_at(
+        &latest,
+        &config.service_id,
+        &config.liveness.signer_allowlist,
+    );
 
     // Never-seen gets a grace window from watchdog start so a fresh deploy
     // does not page before the dispatcher emits its first heartbeat.
@@ -200,7 +263,12 @@ async fn tick_watchdog(
     if !stale && episode.was_stale {
         info!(service_id = %config.service_id, "service heartbeat recovered");
     }
-    episode.was_stale = stale;
+    if episode.was_stale != stale {
+        episode.was_stale = stale;
+        // Persist the edge so a restart mid-episode neither re-notifies nor
+        // loses the recovery transition.
+        persist_episode(&config.state_dir, episode)?;
+    }
     if stale {
         debug!(service_id = %config.service_id, "service stale");
     }
@@ -363,12 +431,14 @@ mod tests {
                 channel: home,
                 owner: None,
                 stale_after_secs: 300,
+                signer_allowlist: vec!["d".repeat(64)],
             },
             state_dir: std::path::PathBuf::from("/tmp/watchdog-state-test"),
         };
         let filter = heartbeat_filter(&config);
         assert!(filter.is_object(), "filter must be an object");
         assert_eq!(filter["#h"], json!([config.stream_id.to_string()]));
+        assert_eq!(filter["authors"], json!(config.liveness.signer_allowlist));
         assert_eq!(filter["limit"], json!(200));
         let body = crate::relay_http::query_body(std::slice::from_ref(&filter)).expect("body");
         let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
@@ -376,5 +446,69 @@ mod tests {
             parsed[0].is_object(),
             "body must be [{{...}}], not [[{{...}}]]"
         );
+    }
+
+    /// M6 regression guard: a 40024 with the service slug signed by a key
+    /// OUTSIDE the allowlist (spoofing by any channel member) never moves
+    /// the staleness clock; only allowlisted signers count.
+    #[test]
+    fn spoofed_heartbeats_outside_allowlist_do_not_move_the_clock() {
+        let stream = uuid::Uuid::new_v4();
+        let service = "triage-dispatcher".to_string();
+        let service_keys = Keys::generate();
+        let spoofer_keys = Keys::generate();
+
+        let events = vec![
+            heartbeat_event(stream, &service, 1_000, &service_keys),
+            heartbeat_event(stream, &service, 9_999, &spoofer_keys),
+        ];
+        let latest = latest_heartbeats(&events, stream, 10_000);
+
+        // Only the service key is allowlisted.
+        let allowlist = vec![service_keys.public_key().to_hex()];
+        assert_eq!(
+            best_allowed_observed_at(&latest, &service, &allowlist),
+            Some(1_000),
+            "spoofer's newer heartbeat must not count"
+        );
+
+        // Empty allowlist trusts nothing, even the real service key.
+        assert_eq!(best_allowed_observed_at(&latest, &service, &[]), None);
+
+        // A different service slug is ignored too.
+        assert_eq!(
+            best_allowed_observed_at(&latest, "other-service", &allowlist),
+            None
+        );
+    }
+
+    /// Minor fix: episode state survives restarts (previously in-memory
+    /// only, so a restart mid-episode re-posted the stale notice and reset
+    /// the never-seen grace).
+    #[test]
+    fn episode_state_round_trips_through_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let (fresh, created) = load_episode(dir.path()).expect("fresh load");
+        assert!(created);
+        assert!(!fresh.was_stale);
+        persist_episode(dir.path(), &fresh).expect("anchor");
+
+        // Mid-episode transition must persist.
+        let mut stale = fresh.clone();
+        stale.was_stale = true;
+        persist_episode(dir.path(), &stale).expect("persist edge");
+
+        let (loaded, created) = load_episode(dir.path()).expect("reload");
+        assert!(!created, "restart resumes, does not reset");
+        assert_eq!(loaded, stale);
+        assert_eq!(loaded.monitoring_since, fresh.monitoring_since);
+    }
+
+    #[test]
+    fn corrupt_episode_state_is_a_hard_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(WATCHDOG_STATE_FILE), "{nope").expect("write");
+        assert!(load_episode(dir.path()).is_err());
     }
 }

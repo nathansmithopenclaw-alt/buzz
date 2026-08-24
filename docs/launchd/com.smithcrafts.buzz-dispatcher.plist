@@ -23,7 +23,13 @@
     </array>
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- Service key: hex or nsec. Mint is Nathan-gated. -->
+        <!-- Service key: hex or nsec. Mint is Nathan-gated.
+             SECURITY: launchd stores this plist in PLAINTEXT and
+             `launchctl print gui/$(id -u)/<label>` exposes these values to
+             anything running as this user. Treat the installed plist as key
+             material (chmod 600). For long-lived deployments prefer a
+             keychain-backed wrapper — see docs/dispatcher.md § "Key
+             exposure (launchd)". -->
         <key>BUZZ_PRIVATE_KEY</key>
         <string>REPLACE_WITH_SERVICE_NSEC_OR_HEX</string>
         <!-- Optional NIP-OA auth tag JSON; delete when unused.

@@ -62,7 +62,8 @@ documents. No key material ever lives in the repo or the config file.
   "liveness": {
     "channel": "<uuid>",
     "owner": "<64-hex pubkey|null>",
-    "stale_after_secs": 300
+    "stale_after_secs": 300,
+    "signer_allowlist": ["<64-hex pubkey>", ...]  // REQUIRED, non-empty (M6)
   },
   "state_dir": "/absolute/path/outside/repo"   // BINDING: never repo-relative
 }
@@ -76,17 +77,22 @@ with at least `member` so its capture roots fold valid; grant it
 ## State directory (binding amendment 3)
 
 `state_dir` must be **absolute and outside the repo checkout** (validated at
-load). It holds three atomically-written files:
+load). It holds atomically-written files:
 
 | File | Contents |
 |---|---|
-| `events.jsonl` | Append-only journal of every ingested relay event. |
+| `events.jsonl` | Event journal (one JSON event per line); rewritten on commit only when new events were ingested. |
 | `cursor.json` | Composite `(created_at, event_id)` high-water cursor. |
 | `requests.json` | Fired dispatch request ids (at-most-once ledger). |
+| `outbox.json` | Signed events pending publication (persist-before-publish, M2). |
+| `dispatcher.lock` / `watchdog.lock` | flock(2) single-instance locks (M7). |
+| `watchdog_state.json` | Watchdog episode state (stale edge, never-seen grace anchor). |
 
-A corrupt journal or cursor is a **hard error** — the dispatcher never
+A corrupt state file is a **hard error** — the dispatcher never
 silently resets state. Refresh is inclusive (`since = cursor.created_at`)
-with event-id dedupe, so restarts resume with no gaps or duplicate effects.
+with event-id dedupe, so restarts resume with no gaps or duplicate effects;
+a crash between relay accept and ledger commit replays the outbox entry on
+restart (duplicate-tolerant), never re-plans the request.
 
 ## Rule semantics
 
@@ -117,19 +123,56 @@ with event-id dedupe, so restarts resume with no gaps or duplicate effects.
 Every emission re-checks the fired ledger before submitting and marks it after
 an accepted relay receipt, so replays stay at-most-once.
 
-## Liveness and watchdog (M17, amendment 2)
+## Liveness and watchdog (M17, amendment 2, M6)
 
 `run` publishes a kind-40024 heartbeat every tick with
 `service_id`, `instance_id`, `observed_at`, the composite `cursor`, and
-`health`. The `watchdog` subcommand runs under a **separate identity**
+`health` (`Healthy`, or `Degraded` + detail when this tick's emissions
+failed). The `watchdog` subcommand runs under a **separate identity**
 (different `BUZZ_PRIVATE_KEY`, separate launchd job): it reads the newest
 heartbeat per `(stream, signer, service_id)` and, when the configured
 `service_id` is silent past `stale_after_secs`, posts **one channel message**
 per stale episode to the liveness channel (mentioning `liveness.owner` when
-set). Any signer for the service counts, so a service-key rotation does not
-blind the watchdog. **The surface is message-only — never a shared-canvas
+set).
+
+**M6 signer pinning:** only heartbeats signed by a key in
+`liveness.signer_allowlist` count — any channel member can publish a 40024
+carrying the service slug, so the SIGNER, not the content, is the proof of
+life. The allowlist is required and non-empty (`check-config` rejects an
+empty list), and the watchdog's relay query is additionally scoped to those
+authors. Service-key rotation is a config edit: mint the new key, then add
+its pubkey to `signer_allowlist` (and retire the old one) in the same
+change. Episode state (`was_stale`, first-monitor anchor) persists in
+`state_dir/watchdog_state.json`, so a watchdog restart neither re-posts the
+stale notice mid-episode nor extends the never-seen grace window.
+
+**The surface is message-only — never a shared-canvas
 mutation.** A dead process cannot author its own death notice; watchdog death
 is covered by the layer above (disk-guard pattern).
+
+## Key exposure (launchd)
+
+The launchd templates inject `BUZZ_PRIVATE_KEY` via `EnvironmentVariables`.
+launchd persists plist files **in plaintext**, and
+`launchctl print gui/$(id -u)/<label>` displays environment variables to
+anything running as that user — treat an installed plist as key material:
+
+- `chmod 600 ~/Library/LaunchAgents/com.smithcrafts.buzz-dispatcher*.plist`
+- For long-lived deployments, replace the inline value with a keychain-backed
+  wrapper script in `ProgramArguments`:
+
+  ```bash
+  #!/bin/sh
+  export BUZZ_PRIVATE_KEY="$(security find-generic-password \
+    -a buzz-dispatcher -s buzz-service-key -w)"
+  exec /path/to/buzz-dispatcher run --config /path/to/dispatcher.json
+  ```
+
+  (`security add-generic-password -a buzz-dispatcher -s buzz-service-key -w <key>`
+  once, with the key stored in the service user's login keychain.)
+- Suspected compromise: mint a new service key (Nathan-gated), update the
+  plist/wrapper, rotate `liveness.signer_allowlist`, and revoke channel/roster
+  grants for the old pubkey.
 
 ## Deploy-time checklist (Helm/Nathan — not done by this crate)
 
@@ -139,7 +182,8 @@ is covered by the layer above (disk-guard pattern).
    `TrackerRole::Maintainer` (roles config) if terminal/reopen authority is
    needed; add it to monitored channels + the tracker stream.
 3. Author the config file with routing table, thresholds, monitored channels,
-   decision surface, liveness owner, and an out-of-repo `state_dir`.
+   decision surface, liveness owner, `liveness.signer_allowlist` (the
+   dispatcher service pubkey — M6), and an out-of-repo `state_dir`.
 4. Validate with `check-config`, then install the launchd jobs
    (`docs/launchd/com.smithcrafts.buzz-dispatcher.plist` and
    `docs/launchd/com.smithcrafts.buzz-dispatcher-watchdog.plist`), each with

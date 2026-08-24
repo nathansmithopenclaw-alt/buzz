@@ -26,7 +26,12 @@
     </array>
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- WATCHDOG key: DIFFERENT from the dispatcher service key. -->
+        <!-- WATCHDOG key: DIFFERENT from the dispatcher service key. Its
+             pubkey belongs in the dispatcher config's
+             liveness.signer_allowlist (M6). SECURITY: same plaintext caveat
+             as the dispatcher plist — `launchctl print` exposes these
+             values; chmod 600 the installed plist, or use a keychain-backed
+             wrapper (docs/dispatcher.md § "Key exposure (launchd)"). -->
         <key>BUZZ_PRIVATE_KEY</key>
         <string>REPLACE_WITH_WATCHDOG_NSEC_OR_HEX</string>
         <key>RUST_LOG</key>

@@ -177,6 +177,12 @@ pub struct LivenessConfig {
     /// Heartbeats older than this are stale.
     #[serde(default = "default_stale_after")]
     pub stale_after_secs: u64,
+    /// Signer pubkeys (64-hex) whose kind-40024 heartbeats count toward
+    /// liveness (M6). Any channel member can publish a 40024 with the
+    /// service slug, so the SIGNER — not the content — is the proof of
+    /// life; unlisted signers are ignored. Rotation is a config edit.
+    /// Required and must be non-empty.
+    pub signer_allowlist: Vec<String>,
 }
 
 impl DispatcherConfig {
@@ -221,6 +227,16 @@ impl DispatcherConfig {
             )));
         }
         validate_slug(&self.service_id, "service_id")?;
+        // NIT: the SDK builders require a v4 stream UUID at runtime
+        // (validate_uuid_v4); reject anything else at check-config time
+        // instead of first-boot.
+        if self.stream_id.get_version() != Some(uuid::Version::Random) {
+            return Err(DispatchError::Config(format!(
+                "stream_id must be a version-4 UUID, got {} (version {:?})",
+                self.stream_id,
+                self.stream_id.get_version()
+            )));
+        }
         if !(1..=MAX_POLL_INTERVAL_SECS).contains(&self.poll_interval_secs) {
             return Err(DispatchError::Config(format!(
                 "poll_interval_secs must be 1..={MAX_POLL_INTERVAL_SECS}"
@@ -285,6 +301,23 @@ impl DispatcherConfig {
                 "liveness stale_after_secs must be >= 10".into(),
             ));
         }
+        // M6: the watchdog only trusts allowlisted heartbeat signers. The
+        // list is required and non-empty so a misconfigured watchdog never
+        // silently trusts every channel member.
+        if self.liveness.signer_allowlist.is_empty() {
+            return Err(DispatchError::Config(
+                "liveness signer_allowlist must contain at least one 64-hex pubkey".into(),
+            ));
+        }
+        let mut seen_signers = std::collections::HashSet::new();
+        for (index, pubkey) in self.liveness.signer_allowlist.iter().enumerate() {
+            validate_hex_pubkey(pubkey, &format!("liveness signer_allowlist[{index}]"))?;
+            if !seen_signers.insert(pubkey.clone()) {
+                return Err(DispatchError::Config(format!(
+                    "duplicate liveness signer_allowlist entry: {pubkey}"
+                )));
+            }
+        }
 
         for pubkey in self.roles.keys() {
             validate_hex_pubkey(pubkey, &format!("roles key {pubkey}"))?;
@@ -315,8 +348,10 @@ impl DispatcherConfig {
     }
 }
 
-/// Validate a stable config slug: 1-64 chars of `[a-z0-9_]`, starting with
-/// `[a-z0-9]`. Threshold IDs use underscores (e.g. `unassigned_24h`).
+/// Validate a stable config slug: 1-64 chars matching `[a-z0-9][a-z0-9_-]*`
+/// (leading char lowercase alphanumeric; underscore and hyphen allowed in the
+/// rest). Threshold IDs use underscores (e.g. `unassigned_24h`), service ids
+/// hyphens (e.g. `triage-dispatcher`).
 pub fn validate_slug(value: &str, field: &str) -> Result<(), DispatchError> {
     if value.is_empty() || value.len() > MAX_SERVICE_ID_LEN {
         return Err(DispatchError::Config(format!(
@@ -409,7 +444,7 @@ mod tests {
     {{ "id": "p0_unassigned_4h", "condition": {{ "kind": "unassigned_with_label", "label": "priority:p0" }}, "window_secs": 14400, "action": "decision_surface" }}
   ],
   "decision_surface": {{ "channel": "{}" }},
-  "liveness": {{ "channel": "{}", "owner": "{}" }},
+  "liveness": {{ "channel": "{}", "owner": "{}", "signer_allowlist": ["{}"] }},
   "state_dir": "{}"
 }}"#,
             Uuid::new_v4(),
@@ -419,6 +454,7 @@ mod tests {
             Uuid::new_v4(),
             Uuid::new_v4(),
             "b".repeat(64),
+            "c".repeat(64),
             state_dir.display()
         )
     }
@@ -501,6 +537,13 @@ mod tests {
 
     #[test]
     fn relay_url_falls_back_to_env() {
+        // Process env mutation is race-prone under the multithreaded test
+        // runner; serialize every env-touching test on this lock.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let tmp = tempfile::tempdir().expect("tmp");
         let json = valid_json(tmp.path().join("state").as_path())
             .lines()
@@ -509,8 +552,10 @@ mod tests {
             .join("\n");
         let path = write_config(tmp.path(), &json);
         std::env::set_var("BUZZ_RELAY_URL", "http://env-relay:3000");
-        let config = DispatcherConfig::load(&path).expect("load");
+        let result = DispatcherConfig::load(&path);
         std::env::remove_var("BUZZ_RELAY_URL");
+        drop(guard);
+        let config = result.expect("load");
         assert_eq!(config.relay_url(), "http://env-relay:3000");
     }
 
