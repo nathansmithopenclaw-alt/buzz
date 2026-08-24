@@ -24,5 +24,6 @@ pub mod projection;
 pub mod relay_http;
 pub mod rules;
 pub mod run;
+pub mod watchdog;
 
 pub use error::DispatchError;
