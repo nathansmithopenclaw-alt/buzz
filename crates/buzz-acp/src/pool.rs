@@ -797,6 +797,14 @@ impl AgentPool {
         self.exclusive_park_notices.remove(&channel_id);
     }
 
+    /// Channels currently in an exclusive-unclaimable park episode.
+    ///
+    /// Park bookkeeping lives on the pool. Sleep accounting intersects this
+    /// set with the queue rather than duplicating it there.
+    pub fn exclusive_parked_channels(&self) -> &HashSet<Uuid> {
+        &self.exclusive_park_notices
+    }
+
     /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
     ///
     /// Pass 1: prefer an agent that already has a session for `channel_id`.

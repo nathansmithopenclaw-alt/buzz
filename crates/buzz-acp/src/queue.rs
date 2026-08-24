@@ -658,18 +658,27 @@ impl EventQueue {
     /// and `withheld_native_steer` events. Read-only (no in-flight expiry) —
     /// in-flight liveness is gated separately by [`has_in_flight`](Self::has_in_flight).
     pub fn has_undispatched_work(&self) -> bool {
+        self.has_undispatched_work_except(&HashSet::new())
+    }
+
+    /// Like [`has_undispatched_work`](Self::has_undispatched_work), but skip
+    /// channels in `exclude`.
+    ///
+    /// Used by idle-pool-sleep accounting to ignore exclusive-parked
+    /// channels (park set lives on the pool; this is the intersection).
+    /// Claimable, retry-throttled, cancelled, and withheld work on any
+    /// non-excluded channel still returns true.
+    pub fn has_undispatched_work_except(&self, exclude: &HashSet<Uuid>) -> bool {
+        let visible = |id: &Uuid| !exclude.contains(id) && !self.in_flight_channels.contains(id);
         let has_queued = self
             .queues
             .iter()
-            .any(|(id, q)| !q.is_empty() && !self.in_flight_channels.contains(id));
-        let has_cancelled = self
-            .cancelled_batches
-            .keys()
-            .any(|id| !self.in_flight_channels.contains(id));
+            .any(|(id, q)| visible(id) && !q.is_empty());
+        let has_cancelled = self.cancelled_batches.keys().any(visible);
         let has_withheld = self
             .withheld_native_steer
             .iter()
-            .any(|(id, v)| !v.is_empty() && !self.in_flight_channels.contains(id));
+            .any(|(id, v)| visible(id) && !v.is_empty());
         has_queued || has_cancelled || has_withheld
     }
 
@@ -2426,6 +2435,29 @@ mod tests {
         queue.mark_complete(batch.channel_id);
         assert!(!queue.has_undispatched_work());
         assert!(!queue.has_in_flight());
+    }
+
+    #[test]
+    fn test_has_undispatched_work_except_skips_excluded_channel() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let parked = Uuid::new_v4();
+        let claimable = Uuid::new_v4();
+        queue.push(make_queued(parked, "parked"));
+        let mut exclude = HashSet::new();
+        exclude.insert(parked);
+        assert!(
+            queue.has_undispatched_work(),
+            "parked work is still undispatched"
+        );
+        assert!(
+            !queue.has_undispatched_work_except(&exclude),
+            "excluded parked channel must not block sleep"
+        );
+        queue.push(make_queued(claimable, "claimable"));
+        assert!(
+            queue.has_undispatched_work_except(&exclude),
+            "claimable sibling still blocks sleep"
+        );
     }
 
     #[test]

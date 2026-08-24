@@ -1703,6 +1703,22 @@ fn idle_pool_sleep_due(
         && inactivity_expired(last_activity, now, bound, turn_in_flight)
 }
 
+/// Sleep-blocking queued work: undispatched events an idle worker could take.
+///
+/// Exclusive-parked channels are excluded so a parked foreign mention cannot
+/// pin the pool awake forever. Park bookkeeping stays on the pool; this only
+/// intersects it with the queue. Claimable / retry-throttled / cancelled /
+/// withheld work still blocks. Multiplex never parks, so it matches
+/// [`EventQueue::has_undispatched_work`].
+fn has_sleep_blocking_work(queue: &EventQueue, pool: &AgentPool) -> bool {
+    let parked = pool.exclusive_parked_channels();
+    if parked.is_empty() {
+        queue.has_undispatched_work()
+    } else {
+        queue.has_undispatched_work_except(parked)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ChannelPendingBackgroundTasks {
     channel_id: Option<Uuid>,
@@ -3346,10 +3362,12 @@ async fn tokio_main() -> Result<()> {
                     // A wake in flight (pool not yet ready) is covered by the
                     // pool_ready gate; respawn tasks and in-flight prompt tasks
                     // are the remaining "busy" signals. Never sleep mid-work:
-                    // `has_undispatched_work()` (not `has_flushable_work()`)
+                    // `has_sleep_blocking_work` (not `has_flushable_work()`)
                     // keeps `work_queued` true for a retry-throttled batch too,
                     // so a failed turn awaiting backoff is never stranded — the
-                    // next iteration dispatches or re-wakes it.
+                    // next iteration dispatches or re-wakes it. Exclusive-parked
+                    // channels are *not* sleep-blocking: they wait for idle-sleep
+                    // teardown + lazy re-wake to recycle the pinned worker.
                     if idle_pool_sleep_due(
                         pool_ready,
                         last_activity,
@@ -3358,7 +3376,7 @@ async fn tokio_main() -> Result<()> {
                         queue.has_in_flight() || heartbeat_in_flight,
                         !pool.join_set.is_empty(),
                         pending_within_bound,
-                        queue.has_undispatched_work(),
+                        has_sleep_blocking_work(&queue, &pool),
                         !wake_tasks.is_empty()
                             || any_respawn_in_flight(&crash_history),
                     ) {
@@ -9638,6 +9656,100 @@ mod exclusive_schedule_tests {
             pass2.dispatched,
             vec![channel_b],
             "parked B must dispatch once an empty exclusive worker is available"
+        );
+        assert!(pass2.parks.is_empty());
+        drop(pass2.claimed);
+    }
+
+    /// Parked B does not count as sleep-blocking work; claimable A still does.
+    #[tokio::test]
+    async fn parked_channel_does_not_block_idle_sleep() {
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let mut bound = dummy_agent(0).await;
+        bound.state.sessions.insert(channel_a, "sess-a".into());
+        let mut pool = AgentPool::from_slots_with_exclusive(vec![Some(bound)], true);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(make_queued(channel_b, "B-older", Duration::from_secs(2)));
+        queue.push(make_queued(channel_a, "A-newer", Duration::from_secs(1)));
+
+        let pass = run_pass(&mut pool, &mut queue);
+        assert_eq!(pass.dispatched, vec![channel_a]);
+        assert_eq!(pass.parks, vec![(channel_b, true)]);
+        for id in &pass.dispatched {
+            queue.mark_complete(*id);
+        }
+        for agent in pass.claimed {
+            pool.return_agent(agent);
+        }
+
+        assert!(
+            !has_sleep_blocking_work(&queue, &pool),
+            "only parked B remains — sleep must be allowed so idle-handoff can recycle the worker"
+        );
+        assert!(
+            queue.has_undispatched_work(),
+            "raw undispatched still sees parked B (queue-only view)"
+        );
+
+        queue.push(make_queued(
+            channel_a,
+            "A-claimable",
+            Duration::from_secs(0),
+        ));
+        assert!(
+            has_sleep_blocking_work(&queue, &pool),
+            "claimable work on the bound channel must still block sleep"
+        );
+    }
+
+    /// Multiplex never parks, so any queued work still blocks sleep.
+    #[tokio::test]
+    async fn multiplex_queued_work_still_blocks_sleep() {
+        let channel_a = Uuid::new_v4();
+        let mut bound = dummy_agent(0).await;
+        bound.state.sessions.insert(channel_a, "sess-a".into());
+        let pool = AgentPool::from_slots(vec![Some(bound)]);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(make_queued(channel_a, "A", Duration::from_secs(1)));
+        assert!(
+            pool.exclusive_parked_channels().is_empty(),
+            "multiplex must not populate the park set"
+        );
+        assert!(has_sleep_blocking_work(&queue, &pool));
+        drop(pool);
+    }
+
+    /// Teardown → fresh empty exclusive worker (lazy re-wake) serves parked B.
+    #[tokio::test]
+    async fn teardown_then_fresh_worker_serves_parked_channel() {
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let mut bound = dummy_agent(0).await;
+        bound.state.sessions.insert(channel_a, "sess-a".into());
+        let mut pool = AgentPool::from_slots_with_exclusive(vec![Some(bound)], true);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(make_queued(channel_b, "B-older", Duration::from_secs(2)));
+        queue.push(make_queued(channel_a, "A-newer", Duration::from_secs(1)));
+
+        let pass = run_pass(&mut pool, &mut queue);
+        assert_eq!(pass.parks, vec![(channel_b, true)]);
+        for id in &pass.dispatched {
+            queue.mark_complete(*id);
+        }
+        drop(pass.claimed);
+        assert!(!has_sleep_blocking_work(&queue, &pool));
+
+        // Simulate idle-sleep teardown + lazy re-wake: empty exclusive slots
+        // replaced by a fresh worker with no sessions.
+        drop(pool);
+        let fresh = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots_with_exclusive(vec![Some(fresh)], true);
+        let pass2 = run_pass(&mut pool, &mut queue);
+        assert_eq!(
+            pass2.dispatched,
+            vec![channel_b],
+            "fresh empty exclusive worker must claim parked B"
         );
         assert!(pass2.parks.is_empty());
         drop(pass2.claimed);

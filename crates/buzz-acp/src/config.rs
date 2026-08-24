@@ -206,11 +206,15 @@ pub struct AuthAgentArgs {
     pub agent_command: String,
 
     /// Arguments passed to the agent binary.
+    ///
+    /// Empty default (not goose's `acp`) so clap still reads
+    /// `BUZZ_ACP_AGENT_ARGS` while omitted args stay empty for
+    /// [`normalize_agent_args`]. Unknown runtimes get no implicit args.
     #[arg(
         long,
         env = "BUZZ_ACP_AGENT_ARGS",
-        default_value = "acp",
-        value_delimiter = ','
+        value_delimiter = ',',
+        default_value = ""
     )]
     pub agent_args: Vec<String>,
 }
@@ -264,11 +268,16 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
+    /// Arguments passed to the agent binary.
+    ///
+    /// Empty default (not goose's `acp`) so clap still reads
+    /// `BUZZ_ACP_AGENT_ARGS` while omitted args stay empty for
+    /// [`normalize_agent_args`]. Unknown runtimes get no implicit args.
     #[arg(
         long,
         env = "BUZZ_ACP_AGENT_ARGS",
-        default_value = "acp",
-        value_delimiter = ','
+        value_delimiter = ',',
+        default_value = ""
     )]
     pub agent_args: Vec<String>,
 
@@ -785,6 +794,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
         "prime-agent" | "primeagent" => Some(vec!["--mode".to_string(), "acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        // Unknown runtimes get no implicit args.
         _ => None,
     }
 }
@@ -958,6 +968,7 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         .collect::<Vec<_>>();
 
     let Some(default_args) = default_agent_args(command) else {
+        // Unknown runtimes get no implicit args.
         return normalized;
     };
 
@@ -965,11 +976,10 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return default_args;
     }
 
-    // Older callers relied on the Goose-specific default even for runtimes like
-    // Codex and Claude. Treat that legacy fallback as "no args" for zero-arg
-    // providers so desktop- and env-based launches behave the same way.
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
+    // Legacy clap/env default was a bare "acp" (goose's arg). Treat that as
+    // "no explicit args" so per-command defaults apply: goose keeps acp,
+    // prime gets --mode acp, zero-arg providers (codex/claude) get empty.
+    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") {
         return default_args;
     }
 
@@ -1917,6 +1927,74 @@ mod tests {
         assert_eq!(
             normalize_agent_args("prime-agent", vec!["--mode".into(), "acp".into()]),
             vec!["--mode".to_string(), "acp".to_string()]
+        );
+        // Legacy clap/env default was a lone "acp"; must not stay positional.
+        assert_eq!(
+            normalize_agent_args("prime-agent", vec!["acp".into()]),
+            vec!["--mode".to_string(), "acp".to_string()]
+        );
+    }
+
+    #[test]
+    fn unknown_command_omitted_args_are_empty() {
+        assert_eq!(
+            normalize_agent_args("my-custom-agent", Vec::new()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            normalize_agent_args("my-custom-agent", vec!["".into()]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn clap_omitted_agent_args_are_empty_then_derived() {
+        let key = "0".repeat(64);
+        let unknown = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--agent-command",
+            "my-custom-agent",
+        ]);
+        let unknown_args = unknown
+            .agent_args
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .count();
+        assert_eq!(
+            unknown_args, 0,
+            "unknown runtimes get no implicit clap args, got {:?}",
+            unknown.agent_args
+        );
+        assert_eq!(
+            normalize_agent_args(&unknown.agent_command, unknown.agent_args),
+            Vec::<String>::new()
+        );
+
+        let prime = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--agent-command",
+            "prime-agent",
+        ]);
+        assert_eq!(
+            normalize_agent_args(&prime.agent_command, prime.agent_args),
+            vec!["--mode".to_string(), "acp".to_string()]
+        );
+
+        let goose = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--agent-command",
+            "goose",
+        ]);
+        assert_eq!(
+            normalize_agent_args(&goose.agent_command, goose.agent_args),
+            vec!["acp".to_string()]
         );
     }
 
