@@ -260,6 +260,45 @@ pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Terminate many managed process groups with one shared graceful-shutdown
+/// window.
+///
+/// A fleet role transition can drain dozens of `(agent, relay)` runtimes at
+/// once. Calling [`terminate_process`] for each runtime serializes its one
+/// second grace period and makes the command latency grow with fleet size.
+/// Signal every group first, wait once for the whole set, then kill only the
+/// survivors. The returned rows identify targets that could not be signalled;
+/// callers keep those runtimes tracked and report the aggregate failure.
+#[cfg(unix)]
+pub(crate) fn terminate_processes_with_shared_grace(pids: &[u32]) -> Vec<(u32, String)> {
+    let mut errors = Vec::new();
+    let mut graceful = Vec::with_capacity(pids.len());
+
+    for &pid in pids {
+        match signal_process_group_or_leader(pid, libc::SIGTERM, "terminate") {
+            Ok(()) => graceful.push(pid),
+            Err(error) => errors.push((pid, error)),
+        }
+    }
+
+    for _ in 0..10 {
+        if graceful.iter().all(|&pid| !process_is_running(pid)) {
+            return errors;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    for pid in graceful {
+        if process_is_running(pid) {
+            if let Err(error) = signal_process_group_or_leader(pid, libc::SIGKILL, "kill") {
+                errors.push((pid, error));
+            }
+        }
+    }
+
+    errors
+}
+
 #[cfg(windows)]
 pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
     // No job handle is available on this path (e.g. after an app restart, when
@@ -466,4 +505,54 @@ pub(crate) fn terminate_untracked_pair_runtime(
         process_is_running,
         super::super::remove_agent_runtime_receipt_path,
     )
+}
+
+#[cfg(all(test, unix))]
+mod shared_grace_tests {
+    use std::{
+        os::unix::process::CommandExt as _,
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant},
+    };
+
+    use super::terminate_processes_with_shared_grace;
+
+    fn term_resistant_child() -> Child {
+        Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; while :; do /bin/sleep 1; done"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn TERM-resistant process group")
+    }
+
+    #[test]
+    fn fleet_shutdown_pays_one_shared_grace_window() {
+        let mut children = (0..4).map(|_| term_resistant_child()).collect::<Vec<_>>();
+        // Let every shell install its TERM trap before signalling it.
+        std::thread::sleep(Duration::from_millis(150));
+        let pids = children.iter().map(Child::id).collect::<Vec<_>>();
+
+        let started = Instant::now();
+        let errors = terminate_processes_with_shared_grace(&pids);
+        let elapsed = started.elapsed();
+
+        // Reap every leader even if an assertion below fails. The helper has
+        // already escalated survivors to SIGKILL.
+        for child in &mut children {
+            let _ = child.wait();
+        }
+
+        assert!(errors.is_empty(), "shared termination errors: {errors:?}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "four one-second grace windows were serialized: {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "fixture did not resist SIGTERM long enough to exercise grace: {elapsed:?}"
+        );
+    }
 }

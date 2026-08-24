@@ -5,7 +5,7 @@ use crate::{
     managed_agents::{
         fleet_visibility::{self, FleetVisibilitySettings},
         load_managed_agents, restore_managed_agents_on_launch, save_managed_agents,
-        stop_managed_agent_process, BackendKind, DeviceRole,
+        stop_managed_agent_processes, BackendKind, DeviceRole,
     },
 };
 
@@ -80,14 +80,21 @@ fn stop_local_agents_for_observer(app: &AppHandle, state: &AppState) -> Result<(
         .lock()
         .map_err(|error| error.to_string())?;
     let mut changed = false;
-    for record in records
-        .iter_mut()
+    let local_count = records
+        .iter()
         .filter(|record| record.backend == BackendKind::Local)
-    {
-        // Drain every local record, not just the in-memory runtime map. The
-        // stop helper also clears legacy pid files and restored receipts, so
-        // Observer selection cannot leave an untracked local child behind.
-        stop_managed_agent_process(app, record, &mut runtimes)?;
+        .count();
+    if local_count > 0 {
+        // Drain every local record, not just the in-memory runtime map. Signal
+        // all runtime pairs before waiting so the fleet shares one bounded
+        // graceful-shutdown window instead of paying it once per pair.
+        stop_managed_agent_processes(
+            app,
+            records
+                .iter_mut()
+                .filter(|record| record.backend == BackendKind::Local),
+            &mut runtimes,
+        )?;
         changed = true;
     }
     if changed {
@@ -121,6 +128,7 @@ fn set_fleet_visibility_role_blocking(
 ) -> Result<FleetVisibilitySettings, String> {
     match role {
         DeviceRole::Observer => {
+            fleet_visibility::begin_observer_transition(app, state)?;
             stop_local_agents_for_observer(app, state)?;
             let settings = fleet_visibility::set_role(app, state, role)?;
             state

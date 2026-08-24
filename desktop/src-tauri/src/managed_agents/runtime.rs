@@ -31,10 +31,11 @@ mod child_env;
 #[cfg(test)]
 use child_env::child_rust_log_filter_from;
 use child_env::{apply_thinking_effort_provenance, child_rust_log_filter};
-
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
-pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
+pub use stop::{
+    stop_managed_agent_process, stop_managed_agent_processes, stop_managed_agent_workspace_pair,
+};
 
 mod sweep;
 pub(crate) use sweep::sweep_untracked_bundle_harnesses;
@@ -47,7 +48,8 @@ use process::{
 };
 pub(crate) use process::{
     current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
-    terminate_process, terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+    terminate_process, terminate_processes_with_shared_grace, terminate_untracked_pair_runtime,
+    valid_agent_runtime_receipt,
 };
 
 mod orphan_sweep;
@@ -66,8 +68,6 @@ mod instance_reaper;
 #[cfg(test)]
 use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
 pub(crate) use instance_reaper::{emit_dead_instance_reap_reports, reap_dead_instance_agents};
-
-// Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
 mod lifecycle;
 #[cfg(test)]
