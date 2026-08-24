@@ -7,11 +7,11 @@
 //!   triage-issue creation plans, collapsed by deterministic UUIDv5 request IDs
 //!   plus a `source_event_id` pre-check. Un-pin/reaction-removal is a NO-OP:
 //!   the store never watches deletions (binding amendment 1, append-only).
-//! - **Triage arrival / label auto-routing** — every unassigned triage issue
-//!   gets one arrival notice per triage entry (routing-table owner wake when a
-//!   label matches); unassigned triage/todo issues matching the routing table
-//!   are additionally dispatched via envelope-v2 + kind-40023 sharing one
-//!   request ID.
+//! - **Triage arrival / label auto-routing** — unassigned triage/todo issues
+//!   matching the routing table are dispatched via envelope-v2 + kind-40023
+//!   sharing one request ID; the dispatch PREEMPTS the arrival notice.
+//!   Exclusively UNROUTED triage arrivals get one arrival notice per triage
+//!   entry ("a human needs to triage this").
 //! - **Escalation ladder** — stable threshold IDs, at-most-once firing per
 //!   `(issue, threshold, qualifying-interval epoch)`.
 //!
@@ -59,17 +59,14 @@ pub struct IssueRef {
 /// pure so replays with an unchanged fired-set produce identical plans.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleAction {
-    /// Arrival notice for a new unassigned triage issue (plan rule 1): one
-    /// notice per triage entry, posted to the home channel with the
-    /// routing-table owner's p-tag when a label matches.
+    /// Arrival notice for an UNROUTED triage arrival (plan rule 1): "a human
+    /// needs to triage this". Routed arrivals are preempted by the dispatch
+    /// envelope, which already carries the owner wake.
     NotifyTriage {
         /// Target issue.
         issue: IssueRef,
         /// Channel receiving the notice.
         channel_id: Uuid,
-        /// Best-effort owner mention (routing-table owner for the best matched
-        /// label); `None` posts the arrival notice without a wake.
-        recipient: Option<String>,
         /// Idempotency key recorded when the notice is sent.
         request_id: Uuid,
     },
@@ -172,42 +169,44 @@ pub fn plan_fold_actions(
             title: issue.title.clone(),
         };
 
-        // Arrival notice (plan rule 1): every unassigned triage issue gets
-        // one notice per triage entry. Self-authored mentions are dead, so
-        // the dispatcher signs and the routing-table owner's p-tag carries
-        // the wake; issues with no routing match post without a recipient.
-        if issue.assignee.is_none() && issue.status == IssueStatus::Triage {
-            let recipient = best_route_owner(config, issue);
+        // Label auto-routing (plan rule 2): dispatch path only (M18),
+        // envelope-v2 + kind-40023 sharing one request id. Routing PREEMPTS
+        // the arrival notice (Helm 2026-08-24): the dispatch envelope is
+        // channel-visible and carries the owner wake, so a separate notice
+        // would be a second ping for the same fact.
+        let route = if issue.assignee.is_none()
+            && matches!(issue.status, IssueStatus::Triage | IssueStatus::Todo)
+        {
+            matching_route(config, issue)
+        } else {
+            None
+        };
+
+        if let Some(route) = route {
+            let request_id = route_request_id(issue.issue_id, &route.label);
+            if !store.request_fired(&request_id) {
+                if let Some(channel_id) = route.channel.or(config.default_channel) {
+                    actions.push(RuleAction::RouteAssign {
+                        issue: issue_ref.clone(),
+                        label: route.label.clone(),
+                        owner: route.owner.clone(),
+                        channel_id,
+                        request_id,
+                    });
+                }
+            }
+        } else if issue.assignee.is_none() && issue.status == IssueStatus::Triage {
+            // Arrival notice (plan rule 1), exclusively for UNROUTED arrivals:
+            // "a human needs to triage this". No routing label matched, so no
+            // owner wake — the notice is a human-facing surface.
             let request_id = triage_notify_request_id(issue.issue_id, issue.entered_status_at);
             if !store.request_fired(&request_id) {
                 if let Some(channel_id) = issue.home_channel_id.or(config.default_channel) {
                     actions.push(RuleAction::NotifyTriage {
                         issue: issue_ref.clone(),
                         channel_id,
-                        recipient,
                         request_id,
                     });
-                }
-            }
-        }
-
-        // Label auto-routing (plan rule 2): dispatch path only (M18),
-        // envelope-v2 + kind-40023 sharing one request id.
-        if issue.assignee.is_none()
-            && matches!(issue.status, IssueStatus::Triage | IssueStatus::Todo)
-        {
-            if let Some(route) = matching_route(config, issue) {
-                let request_id = route_request_id(issue.issue_id, &route.label);
-                if !store.request_fired(&request_id) {
-                    if let Some(channel_id) = route.channel.or(config.default_channel) {
-                        actions.push(RuleAction::RouteAssign {
-                            issue: issue_ref.clone(),
-                            label: route.label.clone(),
-                            owner: route.owner.clone(),
-                            channel_id,
-                            request_id,
-                        });
-                    }
                 }
             }
         }
@@ -252,24 +251,6 @@ fn matching_route<'a>(
         .routing
         .iter()
         .find(|rule| issue.labels.contains(&rule.label))
-}
-
-/// Recipient for a triage arrival notice: routing-table owner for the best
-/// matched label, preferring `area:*` labels, then first config-order match.
-fn best_route_owner(config: &DispatcherConfig, issue: &IssueProjection) -> Option<String> {
-    let mut fallback: Option<&str> = None;
-    for rule in &config.routing {
-        if !issue.labels.contains(&rule.label) {
-            continue;
-        }
-        if rule.label.starts_with("area:") {
-            return Some(rule.owner.clone());
-        }
-        if fallback.is_none() {
-            fallback = Some(&rule.owner);
-        }
-    }
-    fallback.map(str::to_string)
 }
 
 /// Entry time when `threshold` qualifies `issue`, else `None`.
@@ -454,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn routed_issue_gets_dispatch_plan_plus_owner_notice() {
+    fn routed_arrival_gets_dispatch_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ProjectionStore::open(dir.path()).expect("open");
         let home = channel();
@@ -467,12 +448,10 @@ mod tests {
         );
         let plans = plan_fold_actions(&config, &fold, &store, 1_000);
 
-        let routes: Vec<_> = plans
-            .iter()
-            .filter(|action| matches!(action, RuleAction::RouteAssign { .. }))
-            .collect();
-        assert_eq!(routes.len(), 1);
-        match routes[0] {
+        // Exclusivity (Helm 2026-08-24): routed arrival emits ONLY the
+        // dispatch; the envelope carries the owner wake.
+        assert_eq!(plans.len(), 1);
+        match &plans[0] {
             RuleAction::RouteAssign {
                 label,
                 owner,
@@ -488,20 +467,7 @@ mod tests {
                     route_request_id(plans_issue_id(&plans), "area:payments")
                 );
             }
-            _ => unreachable!(),
-        }
-
-        // Rule 1 still fires: the arrival notice carries the owner wake.
-        let notices: Vec<_> = plans
-            .iter()
-            .filter(|action| matches!(action, RuleAction::NotifyTriage { .. }))
-            .collect();
-        assert_eq!(notices.len(), 1);
-        match notices[0] {
-            RuleAction::NotifyTriage { recipient, .. } => {
-                assert_eq!(recipient, &Some(OWNER_HEX.to_string()));
-            }
-            _ => unreachable!(),
+            other => panic!("expected RouteAssign, got {other:?}"),
         }
     }
 
@@ -513,22 +479,23 @@ mod tests {
         let stream = stream_id();
         let config = base_config(dir.path().to_path_buf(), stream, home);
 
-        // No routing label matches: arrival notice, no recipient to wake.
+        // No routing label matches: UNROUTED arrival notice only.
         let fold = fold_with(stream, issue(stream, IssueStatus::Triage, &["bug"]));
         let plans = plan_fold_actions(&config, &fold, &store, 1_000);
 
         assert_eq!(plans.len(), 1);
         match &plans[0] {
-            RuleAction::NotifyTriage {
-                recipient,
-                channel_id,
-                ..
-            } => {
-                assert_eq!(recipient, &None);
+            RuleAction::NotifyTriage { channel_id, .. } => {
                 assert_eq!(*channel_id, home);
             }
             other => panic!("expected NotifyTriage, got {other:?}"),
         }
+        assert!(
+            plans
+                .iter()
+                .all(|action| !matches!(action, RuleAction::RouteAssign { .. })),
+            "unrouted arrival must not dispatch"
+        );
     }
 
     #[test]
@@ -546,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn non_area_label_routes_and_notifies_fallback_owner() {
+    fn non_area_label_routes_with_dispatch_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ProjectionStore::open(dir.path()).expect("open");
         let home = channel();
@@ -561,28 +528,14 @@ mod tests {
         let fold = fold_with(stream, issue(stream, IssueStatus::Triage, &["misc"]));
         let plans = plan_fold_actions(&config, &fold, &store, 1_000);
 
-        let routes: Vec<_> = plans
-            .iter()
-            .filter(|action| matches!(action, RuleAction::RouteAssign { .. }))
-            .collect();
-        assert_eq!(routes.len(), 1);
-        match routes[0] {
+        // Non-area routing labels also preempt the arrival notice.
+        assert_eq!(plans.len(), 1);
+        match &plans[0] {
             RuleAction::RouteAssign { owner, label, .. } => {
                 assert_eq!(owner, OTHER_HEX);
                 assert_eq!(label, "misc");
             }
-            _ => unreachable!(),
-        }
-        let notices: Vec<_> = plans
-            .iter()
-            .filter(|action| matches!(action, RuleAction::NotifyTriage { .. }))
-            .collect();
-        assert_eq!(notices.len(), 1);
-        match notices[0] {
-            RuleAction::NotifyTriage { recipient, .. } => {
-                assert_eq!(recipient, &Some(OTHER_HEX.to_string()));
-            }
-            _ => unreachable!(),
+            other => panic!("expected RouteAssign, got {other:?}"),
         }
     }
 
