@@ -5,8 +5,8 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use buzz_core::kind::{
-    KIND_PROJECT, KIND_TRACKER_COMMENT, KIND_TRACKER_ISSUE, KIND_TRACKER_PROJECT_ACTIVITY,
-    KIND_TRACKER_REVISION,
+    KIND_PROJECT, KIND_TRACKER_COMMENT, KIND_TRACKER_DISPATCH_ACTION, KIND_TRACKER_ISSUE,
+    KIND_TRACKER_PROJECT_ACTIVITY, KIND_TRACKER_REVISION, KIND_TRACKER_SERVICE_HEARTBEAT,
 };
 use chrono::{TimeZone, Timelike};
 use chrono_tz::Tz;
@@ -1235,6 +1235,361 @@ pub fn parse_tracker_project_activity(
         created_at: event.created_at.as_secs(),
         activity,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Dispatcher automation events: kind 40023 (dispatch actions) and kind 40024
+// (service heartbeats). First-writer SDK support for two already-allocated
+// NIP-BT kinds; wire shapes follow docs/nips/NIP-BT.md §"Dispatcher actions"
+// and §"Service heartbeat". Both are signed by workspace-configured service
+// identities, and the tuple `(signer pubkey, request_id)` is the 40023
+// idempotency key.
+// ---------------------------------------------------------------------------
+
+/// `t` tag marker carried by every kind-40023 dispatch action.
+pub const DISPATCH_ACTION_TAG: &str = "buzz-tracker-dispatch";
+/// `t` tag marker carried by every kind-40024 service heartbeat.
+pub const SERVICE_HEARTBEAT_TAG: &str = "buzz-tracker-heartbeat";
+/// Maximum serialized cursor length carried in a heartbeat.
+pub const MAX_CURSOR_BYTES: usize = 512;
+
+/// UUIDv5 namespace for dispatcher idempotency request IDs. A fixed constant
+/// so the CLI, the dispatcher, and external verifiers derive identical
+/// request IDs; the value is the ASCII of `"sc-dispatch-v1"` zero-padded to
+/// 16 bytes.
+pub const DISPATCH_REQUEST_NAMESPACE: Uuid = Uuid::from_u128(0x73632d64697370617463682d76310000);
+
+/// Deterministic request ID for pin-capture issue creation. Re-deriving it
+/// from the same pinned event always yields the same UUID, collapsing
+/// duplicate and re-pin reactions into at-most-once creates.
+pub fn pin_capture_request_id(source_event_id: &str) -> Uuid {
+    Uuid::new_v5(
+        &DISPATCH_REQUEST_NAMESPACE,
+        format!("pin:{source_event_id}").as_bytes(),
+    )
+}
+
+/// Deterministic request ID for one threshold-escalation fire. Distinct per
+/// `(issue, threshold, qualifying-interval epoch)`, so a genuine re-entry
+/// refires while repeats inside one interval collapse to at-most-once.
+pub fn threshold_request_id(issue_id: Uuid, threshold_id: &str, interval_epoch: u64) -> Uuid {
+    Uuid::new_v5(
+        &DISPATCH_REQUEST_NAMESPACE,
+        format!("{issue_id}:{threshold_id}:{interval_epoch}").as_bytes(),
+    )
+}
+
+/// Deterministic request ID for label auto-routing of one issue by one label.
+/// Stable per `(issue, label)`, so a retried or re-observed dispatch collapses
+/// to at-most-once assignment effects.
+pub fn route_request_id(issue_id: Uuid, label: &str) -> Uuid {
+    Uuid::new_v5(
+        &DISPATCH_REQUEST_NAMESPACE,
+        format!("route:{issue_id}:{label}").as_bytes(),
+    )
+}
+
+/// Whether a due value has passed at `now` (unix seconds).
+///
+/// `Instant` precision passes once `now >= value`. `Date` precision passes once
+/// the whole local calendar date has elapsed (i.e. at the next local midnight).
+/// Ambiguous or unrepresentable zone transitions fail closed (not passed) so a
+/// malformed due value never triggers an escalation.
+pub fn due_has_passed(due: &Due, now: u64) -> bool {
+    let Ok(timezone) = Tz::from_str(&due.timezone) else {
+        return false;
+    };
+    match due.precision {
+        DuePrecision::Instant => now >= due.value,
+        DuePrecision::Date => {
+            let Ok(value) = i64::try_from(due.value) else {
+                return false;
+            };
+            let Some(local) = timezone.timestamp_opt(value, 0).single() else {
+                return false;
+            };
+            let Some(next_midnight) =
+                (local.date_naive() + chrono::Duration::days(1)).and_hms_opt(0, 0, 0)
+            else {
+                return false;
+            };
+            let Some(end) = timezone.from_local_datetime(&next_midnight).single() else {
+                return false;
+            };
+            let Ok(end_ts) = u64::try_from(end.timestamp()) else {
+                return false;
+            };
+            now >= end_ts
+        }
+    }
+}
+
+/// Action taken by a dispatch automation event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchActionKind {
+    /// Assigned the issue via the task-envelope dispatch path.
+    Assign,
+    /// Fired a threshold escalation notification.
+    Escalate,
+}
+
+/// Strict kind-40023 content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchAction {
+    /// Schema version.
+    pub v: u8,
+    /// Stable issue UUID.
+    pub issue_id: Uuid,
+    /// Immutable root event ID for the issue.
+    pub root_event: String,
+    /// Idempotency request ID shared with any paired task-envelope v2.
+    pub request_id: Uuid,
+    /// Automation action taken.
+    pub action: DispatchActionKind,
+    /// Stable escalation-threshold configuration ID; required for escalations.
+    pub threshold_id: Option<String>,
+    /// Canonical tip event ID observed when the action fired.
+    pub observed_tip: Option<String>,
+    /// Bounded human-readable result summary.
+    pub result: String,
+}
+
+/// Build a strict kind-40023 dispatcher action event.
+pub fn build_dispatch_action(
+    stream_id: Uuid,
+    action: &DispatchAction,
+) -> Result<EventBuilder, SdkError> {
+    validate_uuid_v4(stream_id, "stream_id")?;
+    validate_dispatch_action(action)?;
+    let tags = vec![
+        tracker_tag(&["h", &stream_id.to_string()])?,
+        tracker_tag(&["d", &action.issue_id.to_string()])?,
+        tracker_tag(&["t", DISPATCH_ACTION_TAG])?,
+        tracker_tag(&["request", &action.request_id.to_string()])?,
+    ];
+    tracker_json_builder(KIND_TRACKER_DISPATCH_ACTION, action, tags)
+}
+
+/// Parsed and validated kind-40023 dispatch action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackerDispatchAction {
+    /// Event ID.
+    pub event_id: String,
+    /// Signing service pubkey.
+    pub author_pubkey: String,
+    /// Workspace stream from `h`.
+    pub stream_id: Uuid,
+    /// Event timestamp.
+    pub created_at: u64,
+    /// Strict content.
+    pub action: DispatchAction,
+}
+
+/// Parse and validate one immutable dispatch-action event.
+pub fn parse_dispatch_action(event: &Event, now: u64) -> Result<TrackerDispatchAction, SdkError> {
+    event.verify().map_err(|error| {
+        SdkError::InvalidInput(format!(
+            "dispatch action signature verification failed: {error}"
+        ))
+    })?;
+    if event.kind.as_u16() as u32 != KIND_TRACKER_DISPATCH_ACTION {
+        return invalid("dispatch action must be kind 40023");
+    }
+    let created_at = event.created_at.as_secs();
+    if created_at > now.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+        return invalid("Tracker event timestamp exceeds 300-second future-skew limit");
+    }
+    validate_allowed_tags(event, &["h", "d", "t", "request", "auth"])?;
+    let stream_id = singleton_uuid_value_tag(event, "h", &[4])?;
+    let issue_id = singleton_uuid_value_tag(event, "d", &[4, 5])?;
+    let request_id = singleton_uuid_value_tag(event, "request", &[4, 5])?;
+    require_exact_tag(event, "t", DISPATCH_ACTION_TAG)?;
+    let action: DispatchAction = strict_json(&event.content)?;
+    validate_dispatch_action(&action)?;
+    if action.issue_id != issue_id || action.request_id != request_id {
+        return invalid("dispatch action content disagrees with d/request tags");
+    }
+    Ok(TrackerDispatchAction {
+        event_id: event.id.to_hex(),
+        author_pubkey: event.pubkey.to_hex(),
+        stream_id,
+        created_at,
+        action,
+    })
+}
+
+fn validate_dispatch_action(action: &DispatchAction) -> Result<(), SdkError> {
+    if action.v != TRACKER_VERSION {
+        return invalid("invalid dispatch action version");
+    }
+    validate_uuid_versions(action.issue_id, "issue_id", &[4, 5])?;
+    validate_uuid_versions(action.request_id, "request_id", &[4, 5])?;
+    validate_hex(&action.root_event, "root_event")?;
+    if let Some(threshold_id) = &action.threshold_id {
+        validate_service_slug(threshold_id, "threshold_id")?;
+    }
+    if let Some(observed_tip) = &action.observed_tip {
+        validate_hex(observed_tip, "observed_tip")?;
+    }
+    match action.action {
+        DispatchActionKind::Assign => {}
+        DispatchActionKind::Escalate => {
+            if action.threshold_id.is_none() {
+                return invalid("escalation requires a stable threshold_id");
+            }
+        }
+    }
+    if action.result.trim().is_empty() || action.result.len() > 256 {
+        return invalid("result must be 1-256 characters");
+    }
+    Ok(())
+}
+
+/// Service health reported by a heartbeat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceHealthStatus {
+    /// Operating normally.
+    Healthy,
+    /// Operating with impairment worth surfacing.
+    Degraded,
+}
+
+/// Health details in a service heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceHealth {
+    /// Coarse status.
+    pub status: ServiceHealthStatus,
+    /// Optional bounded explanation; required when status is degraded.
+    pub detail: Option<String>,
+}
+
+/// Strict kind-40024 content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceHeartbeat {
+    /// Schema version.
+    pub v: u8,
+    /// Stable service identity slug, mirrored into the `d` tag.
+    pub service_id: String,
+    /// Per-process instance UUID.
+    pub instance_id: Uuid,
+    /// Observation time (unix seconds).
+    pub observed_at: u64,
+    /// Composite `(created_at,event_id)` cursor; empty at cold start.
+    pub cursor: String,
+    /// Health details.
+    pub health: ServiceHealth,
+}
+
+/// Build a strict kind-40024 service heartbeat event.
+pub fn build_service_heartbeat(
+    stream_id: Uuid,
+    heartbeat: &ServiceHeartbeat,
+) -> Result<EventBuilder, SdkError> {
+    validate_uuid_v4(stream_id, "stream_id")?;
+    validate_service_heartbeat(heartbeat)?;
+    let tags = vec![
+        tracker_tag(&["h", &stream_id.to_string()])?,
+        tracker_tag(&["d", &heartbeat.service_id])?,
+        tracker_tag(&["t", SERVICE_HEARTBEAT_TAG])?,
+    ];
+    tracker_json_builder(KIND_TRACKER_SERVICE_HEARTBEAT, heartbeat, tags)
+}
+
+/// Parsed and validated kind-40024 service heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackerServiceHeartbeat {
+    /// Event ID.
+    pub event_id: String,
+    /// Signing service pubkey.
+    pub author_pubkey: String,
+    /// Workspace stream from `h`.
+    pub stream_id: Uuid,
+    /// Event timestamp.
+    pub created_at: u64,
+    /// Strict content.
+    pub heartbeat: ServiceHeartbeat,
+}
+
+/// Parse and validate one service heartbeat event.
+pub fn parse_service_heartbeat(
+    event: &Event,
+    now: u64,
+) -> Result<TrackerServiceHeartbeat, SdkError> {
+    event.verify().map_err(|error| {
+        SdkError::InvalidInput(format!(
+            "service heartbeat signature verification failed: {error}"
+        ))
+    })?;
+    if event.kind.as_u16() as u32 != KIND_TRACKER_SERVICE_HEARTBEAT {
+        return invalid("service heartbeat must be kind 40024");
+    }
+    let created_at = event.created_at.as_secs();
+    if created_at > now.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+        return invalid("Tracker event timestamp exceeds 300-second future-skew limit");
+    }
+    validate_allowed_tags(event, &["h", "d", "t"])?;
+    let stream_id = singleton_uuid_value_tag(event, "h", &[4])?;
+    let service_id = singleton_string_tag(event, "d")?;
+    require_exact_tag(event, "t", SERVICE_HEARTBEAT_TAG)?;
+    let heartbeat: ServiceHeartbeat = strict_json(&event.content)?;
+    validate_service_heartbeat(&heartbeat)?;
+    if heartbeat.service_id != service_id {
+        return invalid("service heartbeat content disagrees with d tag");
+    }
+    if heartbeat.observed_at > now.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+        return invalid("service heartbeat observation exceeds 300-second future-skew limit");
+    }
+    Ok(TrackerServiceHeartbeat {
+        event_id: event.id.to_hex(),
+        author_pubkey: event.pubkey.to_hex(),
+        stream_id,
+        created_at,
+        heartbeat,
+    })
+}
+
+fn validate_service_heartbeat(heartbeat: &ServiceHeartbeat) -> Result<(), SdkError> {
+    if heartbeat.v != TRACKER_VERSION {
+        return invalid("invalid service heartbeat version");
+    }
+    validate_service_slug(&heartbeat.service_id, "service_id")?;
+    validate_uuid_v4(heartbeat.instance_id, "instance_id")?;
+    if heartbeat.cursor.len() > MAX_CURSOR_BYTES {
+        return invalid("service heartbeat cursor exceeds the size limit");
+    }
+    if let Some(detail) = &heartbeat.health.detail {
+        if detail.trim().is_empty() || detail.len() > MAX_CURSOR_BYTES {
+            return invalid("health detail must be 1-512 characters");
+        }
+    }
+    if heartbeat.health.status == ServiceHealthStatus::Degraded && heartbeat.health.detail.is_none()
+    {
+        return invalid("degraded heartbeat requires a health detail");
+    }
+    Ok(())
+}
+
+/// Validate a stable configuration slug (service IDs, threshold IDs).
+fn validate_service_slug(value: &str, field: &str) -> Result<(), SdkError> {
+    let well_formed = !value.is_empty()
+        && value.len() <= 64
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        });
+    if well_formed {
+        Ok(())
+    } else {
+        invalid(&format!(
+            "{field} must be 1-64 chars from [a-z0-9._-] without leading/trailing '.'"
+        ))
+    }
 }
 
 /// Parse and validate a signed Tracker event against current wall time.
@@ -3939,5 +4294,313 @@ mod tests {
                 ..
             }] if *created_at == 401 && *max_accepted_at == 400
         ));
+    }
+
+    fn sample_dispatch_action(
+        issue: Uuid,
+        request_id: Uuid,
+        kind: DispatchActionKind,
+    ) -> DispatchAction {
+        DispatchAction {
+            v: TRACKER_VERSION,
+            issue_id: issue,
+            root_event: "aa".repeat(32),
+            request_id,
+            action: kind,
+            threshold_id: None,
+            observed_tip: Some("bb".repeat(32)),
+            result: "assigned area:tracker owner".into(),
+        }
+    }
+
+    #[test]
+    fn dispatch_action_assign_round_trips() {
+        let keys = Keys::generate();
+        let stream = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let action = sample_dispatch_action(
+            issue,
+            pin_capture_request_id("feedc0ffee"),
+            DispatchActionKind::Assign,
+        );
+        let event = build_dispatch_action(stream, &action)
+            .expect("build")
+            .sign_with_keys(&keys)
+            .expect("signed");
+        let now = event.created_at.as_secs();
+        let parsed = parse_dispatch_action(&event, now).expect("parsed");
+        assert_eq!(parsed.action, action);
+        assert_eq!(parsed.stream_id, stream);
+        assert_eq!(parsed.author_pubkey, keys.public_key().to_hex());
+    }
+
+    #[test]
+    fn dispatch_action_escalate_requires_stable_threshold_and_round_trips() {
+        let keys = Keys::generate();
+        let stream = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let mut missing = sample_dispatch_action(
+            issue,
+            threshold_request_id(issue, "unassigned_24h", 7),
+            DispatchActionKind::Escalate,
+        );
+        assert!(build_dispatch_action(stream, &missing).is_err());
+        missing.threshold_id = Some("unassigned_24h".into());
+        let event = build_dispatch_action(stream, &missing)
+            .expect("build")
+            .sign_with_keys(&keys)
+            .expect("signed");
+        let parsed = parse_dispatch_action(&event, event.created_at.as_secs()).expect("parsed");
+        assert_eq!(
+            parsed.action.threshold_id.as_deref(),
+            Some("unassigned_24h")
+        );
+    }
+
+    #[test]
+    fn dispatch_request_ids_are_deterministic_per_dimension() {
+        let source = "e".repeat(64);
+        assert_eq!(
+            pin_capture_request_id(&source),
+            pin_capture_request_id(&source)
+        );
+        assert_ne!(
+            pin_capture_request_id(&source),
+            pin_capture_request_id("ff")
+        );
+        let issue = Uuid::new_v4();
+        assert_eq!(
+            threshold_request_id(issue, "p0_unassigned_4h", 42),
+            threshold_request_id(issue, "p0_unassigned_4h", 42)
+        );
+        assert_ne!(
+            threshold_request_id(issue, "p0_unassigned_4h", 42),
+            threshold_request_id(issue, "p0_unassigned_4h", 43)
+        );
+        assert_ne!(
+            threshold_request_id(issue, "p0_unassigned_4h", 42),
+            threshold_request_id(issue, "deadline_breach", 42)
+        );
+        assert_eq!(
+            route_request_id(issue, "area:payments"),
+            route_request_id(issue, "area:payments")
+        );
+        assert_ne!(
+            route_request_id(issue, "area:payments"),
+            route_request_id(issue, "area:risk")
+        );
+        assert_ne!(
+            route_request_id(issue, "area:payments"),
+            threshold_request_id(issue, "area:payments", 0),
+            "request-id families must not collide across dimensions"
+        );
+    }
+
+    #[test]
+    fn due_has_passed_instant_and_date_semantics() {
+        let instant = Due {
+            value: 1_000,
+            precision: DuePrecision::Instant,
+            timezone: "UTC".to_string(),
+        };
+        assert!(!due_has_passed(&instant, 999));
+        assert!(due_has_passed(&instant, 1_000));
+        assert!(due_has_passed(&instant, 1_001));
+
+        // Date precision: value is local midnight; the date passes at the next
+        // local midnight (86_400s later for fixed-offset UTC).
+        let date = Due {
+            value: 86_400,
+            precision: DuePrecision::Date,
+            timezone: "UTC".to_string(),
+        };
+        assert!(
+            !due_has_passed(&date, 86_400),
+            "midnight itself is not passed"
+        );
+        assert!(!due_has_passed(&date, 86_400 + 86_399));
+        assert!(due_has_passed(&date, 86_400 + 86_400));
+
+        // Unknown zone fails closed: never passed.
+        let bad_zone = Due {
+            value: 1,
+            precision: DuePrecision::Instant,
+            timezone: "Not/AZone".to_string(),
+        };
+        assert!(!due_has_passed(&bad_zone, u64::MAX));
+    }
+
+    #[test]
+    fn dispatch_action_parser_rejects_tag_disagreement_unknown_tags_and_kind() {
+        let keys = Keys::generate();
+        let stream = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let action = sample_dispatch_action(
+            issue,
+            threshold_request_id(issue, "unassigned_24h", 1),
+            DispatchActionKind::Assign,
+        );
+        let json = serde_json::to_string(&action).expect("json");
+
+        let wrong_issue = Uuid::new_v4();
+        let disagree = EventBuilder::new(
+            Kind::Custom(KIND_TRACKER_DISPATCH_ACTION as u16),
+            json.clone(),
+        )
+        .tags(vec![
+            Tag::parse(["h", &stream.to_string()]).expect("h"),
+            Tag::parse(["d", &wrong_issue.to_string()]).expect("d"),
+            Tag::parse(["t", DISPATCH_ACTION_TAG]).expect("t"),
+            Tag::parse(["request", &action.request_id.to_string()]).expect("request"),
+        ])
+        .custom_created_at(Timestamp::from(100))
+        .sign_with_keys(&keys)
+        .expect("signed");
+        assert!(parse_dispatch_action(&disagree, 100).is_err());
+
+        let mut unknown_tags = vec![
+            Tag::parse(["h", &stream.to_string()]).expect("h"),
+            Tag::parse(["d", &issue.to_string()]).expect("d"),
+            Tag::parse(["t", DISPATCH_ACTION_TAG]).expect("t"),
+            Tag::parse(["request", &action.request_id.to_string()]).expect("request"),
+        ];
+        unknown_tags.push(Tag::parse(["x-unknown", "v"]).expect("x"));
+        let unknown = EventBuilder::new(Kind::Custom(KIND_TRACKER_DISPATCH_ACTION as u16), json)
+            .tags(unknown_tags)
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .expect("signed");
+        assert!(parse_dispatch_action(&unknown, 100).is_err());
+    }
+
+    #[test]
+    fn service_heartbeat_round_trips() {
+        let keys = Keys::generate();
+        let stream = Uuid::new_v4();
+        let heartbeat = ServiceHeartbeat {
+            v: TRACKER_VERSION,
+            service_id: "triage-dispatcher".into(),
+            instance_id: Uuid::new_v4(),
+            observed_at: 900,
+            cursor: "1301:abcdef".into(),
+            health: ServiceHealth {
+                status: ServiceHealthStatus::Healthy,
+                detail: None,
+            },
+        };
+        let event = build_service_heartbeat(stream, &heartbeat)
+            .expect("build")
+            .sign_with_keys(&keys)
+            .expect("signed");
+        let parsed = parse_service_heartbeat(&event, event.created_at.as_secs()).expect("parsed");
+        assert_eq!(parsed.heartbeat, heartbeat);
+        assert_eq!(parsed.stream_id, stream);
+
+        let degraded = ServiceHeartbeat {
+            health: ServiceHealth {
+                status: ServiceHealthStatus::Degraded,
+                detail: Some("relay reconnect loop".into()),
+            },
+            ..heartbeat.clone()
+        };
+        let degraded_event = build_service_heartbeat(stream, &degraded)
+            .expect("build")
+            .sign_with_keys(&keys)
+            .expect("signed");
+        let parsed_degraded =
+            parse_service_heartbeat(&degraded_event, degraded_event.created_at.as_secs())
+                .expect("parsed");
+        assert_eq!(parsed_degraded.heartbeat, degraded);
+    }
+
+    #[test]
+    fn service_heartbeat_validates_strictness_rules() {
+        let stream = Uuid::new_v4();
+        let base = ServiceHeartbeat {
+            v: TRACKER_VERSION,
+            service_id: "triage-dispatcher".into(),
+            instance_id: Uuid::new_v4(),
+            observed_at: 900,
+            cursor: String::new(),
+            health: ServiceHealth {
+                status: ServiceHealthStatus::Degraded,
+                detail: None,
+            },
+        };
+        // Degraded without detail is invalid.
+        assert!(build_service_heartbeat(stream, &base).is_err());
+
+        // Bad slug charset.
+        let bad_slug = ServiceHeartbeat {
+            service_id: "Triage Dispatcher".into(),
+            ..base.clone()
+        };
+        assert!(build_service_heartbeat(stream, &bad_slug).is_err());
+
+        // Oversized cursor.
+        let long_cursor = ServiceHeartbeat {
+            cursor: "x".repeat(MAX_CURSOR_BYTES + 1),
+            ..base
+        };
+        assert!(build_service_heartbeat(stream, &long_cursor).is_err());
+    }
+
+    #[test]
+    fn service_heartbeat_parser_rejects_mismatch_unknown_tags_future_observation() {
+        let keys = Keys::generate();
+        let stream = Uuid::new_v4();
+        let heartbeat = ServiceHeartbeat {
+            v: TRACKER_VERSION,
+            service_id: "triage-dispatcher".into(),
+            instance_id: Uuid::new_v4(),
+            observed_at: 100,
+            cursor: String::new(),
+            health: ServiceHealth {
+                status: ServiceHealthStatus::Healthy,
+                detail: None,
+            },
+        };
+        let json = serde_json::to_string(&heartbeat).expect("json");
+        let tags = |service: &str| {
+            vec![
+                Tag::parse(["h", &stream.to_string()]).expect("h"),
+                Tag::parse(["d", service]).expect("d"),
+                Tag::parse(["t", SERVICE_HEARTBEAT_TAG]).expect("t"),
+            ]
+        };
+
+        let mismatch = EventBuilder::new(
+            Kind::Custom(KIND_TRACKER_SERVICE_HEARTBEAT as u16),
+            json.clone(),
+        )
+        .tags(tags("other-service"))
+        .custom_created_at(Timestamp::from(100))
+        .sign_with_keys(&keys)
+        .expect("signed");
+        assert!(parse_service_heartbeat(&mismatch, 100).is_err());
+
+        let mut unknown_tags = tags("triage-dispatcher");
+        unknown_tags.push(Tag::parse(["request", "nope"]).expect("request"));
+        let unknown = EventBuilder::new(Kind::Custom(KIND_TRACKER_SERVICE_HEARTBEAT as u16), json)
+            .tags(unknown_tags)
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .expect("signed");
+        assert!(parse_service_heartbeat(&unknown, 100).is_err());
+
+        let future = ServiceHeartbeat {
+            observed_at: 100 + MAX_FUTURE_SKEW_SECONDS + 1,
+            ..heartbeat
+        };
+        let future_json = serde_json::to_string(&future).expect("json");
+        let future_event = EventBuilder::new(
+            Kind::Custom(KIND_TRACKER_SERVICE_HEARTBEAT as u16),
+            future_json,
+        )
+        .tags(tags("triage-dispatcher"))
+        .custom_created_at(Timestamp::from(100))
+        .sign_with_keys(&keys)
+        .expect("signed");
+        assert!(parse_service_heartbeat(&future_event, 100).is_err());
     }
 }

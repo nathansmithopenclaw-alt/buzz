@@ -365,6 +365,11 @@ test-unit:
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
         cargo nextest run -p buzz-agent --lib
+        # Tracker SDK + triage dispatcher (Dispatch P2): pure unit suites, no
+        # infra. Enumerated for the same reason — workspace membership alone
+        # buys clippy/check, not a single executed test.
+        cargo nextest run -p buzz-sdk --lib
+        cargo nextest run -p buzz-dispatcher --lib
     else
         ./scripts/run-tests.sh unit
     fi

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEMPLATE — heartbeat watchdog (task c6d2bd9d, M17).
+
+  Runs under its OWN identity: a DIFFERENT BUZZ_PRIVATE_KEY from the
+  dispatcher job. A dead process cannot author its own death notice, so the
+  watchdog must not share the watched service key. Install as a separate job:
+
+    cp com.smithcrafts.buzz-dispatcher-watchdog.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.smithcrafts.buzz-dispatcher-watchdog.plist
+
+  Watchdog death is covered by the layer above (disk-guard pattern), not by
+  this job. Surface is message-only — never a canvas mutation.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.smithcrafts.buzz-dispatcher-watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/buzz-dispatcher</string>
+        <string>watchdog</string>
+        <string>--config</string>
+        <string>/path/to/dispatcher.json</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- WATCHDOG key: DIFFERENT from the dispatcher service key.
+             NOTE (M6): `liveness.signer_allowlist` in the dispatcher config
+             must contain the DISPATCHER SERVICE pubkey — the key that signs
+             the kind-40024 heartbeats — NOT this watchdog key. Allowlisting
+             only the watchdog key means zero heartbeats ever count and the
+             watchdog pages false-stale forever. SECURITY: same plaintext
+             caveat as the dispatcher plist — `launchctl print` exposes these
+             values; chmod 600 the installed plist, or use a keychain-backed
+             wrapper (docs/dispatcher.md § "Key exposure (launchd)"). -->
+        <key>BUZZ_PRIVATE_KEY</key>
+        <string>REPLACE_WITH_WATCHDOG_NSEC_OR_HEX</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/path/to/logs/buzz-dispatcher-watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/logs/buzz-dispatcher-watchdog.err.log</string>
+</dict>
+</plist>

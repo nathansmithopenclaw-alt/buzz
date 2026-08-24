@@ -1,0 +1,232 @@
+# Buzz Triage Dispatcher — Operations Guide
+
+`buzz-dispatcher` is the resident automation service for Buzz Tracker triage
+(task c6d2bd9d, plan `PLANS/TRACKER/P2_DISPATCHER_PLAN.md`). It projects the
+tracker stream locally and converts queue state into deterministic actions:
+
+- **Capture** — 📌 reactions in monitored channels become `triage` issues.
+- **Routing** — label-table auto-routing via the dispatch path
+  (task-envelope v2 + kind-40023 sharing one request id).
+- **Escalation** — threshold ladder with at-most-once firing per
+  `(issue, threshold, qualifying-interval epoch)`.
+- **Liveness** — kind-40024 heartbeat every tick; an external watchdog
+  surfaces stale services via channel message only.
+
+All decisions are deterministic (no LLM judgment in the rule path), and all
+effects are idempotent via UUIDv5 request ids plus a fired-request ledger.
+
+## Upgrade notes (release-relevant)
+
+- **BREAKING config change:** `liveness.signer_allowlist` is now REQUIRED
+  with no serde default (M6 signer pinning). Configs authored against
+  earlier builds of this branch fail `check-config` until the dispatcher's
+  SERVICE pubkey (the heartbeat signer — NOT the watchdog key) is added.
+- **Pubkeys must be lowercase hex.** `check-config` now rejects uppercase
+  hex pubkeys everywhere (`roles`, `routing.owner`, `liveness.owner`,
+  `signer_allowlist`): comparisons are against nostr's lowercase `to_hex()`,
+  so an uppercase entry would validate yet never match — a watchdog
+  allowlist that silently trusts nothing, paging false-stale forever.
+- **Pin-capture channel attribution changed (B5).** Real kind-7 reactions
+  carry no `h` tag; the dispatcher now records each reaction's home channel
+  from the per-channel query that fetched it (`reaction_channels.json`) and
+  plans captures from that map. No operator action required; existing state
+  dirs gain the new file on first run.
+
+## Subcommands
+
+| Command | Purpose |
+|---|---|
+| `buzz-dispatcher check-config --config <path>` | Load + validate config; print a redacted summary. No identity required. |
+| `buzz-dispatcher run --config <path>` | Resident capture/route/escalate/heartbeat loop. |
+| `buzz-dispatcher watchdog --config <path>` | External heartbeat watcher. Runs under its OWN identity (separate launchd job). |
+
+## Identity (env, never files)
+
+The service key comes from the environment — the same seam `buzz-cli`
+documents. No key material ever lives in the repo or the config file.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `BUZZ_PRIVATE_KEY` | yes (run/watchdog) | Service key, hex or nsec. |
+| `BUZZ_AUTH_TAG` | no | NIP-OA auth tag JSON, sent as `x-auth-tag` when present. |
+| `BUZZ_RELAY_URL` | fallback | Used when `relay_url` is omitted from config. |
+
+## Config schema (strict JSON, unknown fields rejected)
+
+```jsonc
+{
+  "relay_url": "https://relay.example",        // or omit + set BUZZ_RELAY_URL
+  "service_id": "triage-dispatcher",           // slug; heartbeat d-tag
+  "stream_id": "<tracker stream UUID v4>",
+  "poll_interval_secs": 30,                    // 1..=3600
+  "monitored_channels": ["<uuid>", ...],       // pin-capture channels
+  "pin_emoji": "📌",
+  "default_channel": "<uuid>",                 // fallback notify/route channel
+  "routing": [
+    { "label": "area:payments", "owner": "<64-hex pubkey>", "channel": "<uuid|null>" }
+  ],
+  "thresholds": [
+    {
+      "id": "unassigned_24h",                  // STABLE — part of request id
+      "condition": { "kind": "unassigned" },   // or unassigned_with_label {label}
+                                                // or deadline_passed
+      "window_secs": 86400,
+      "action": "notify_home"                  // or digest | decision_surface
+    }
+  ],
+  "roles": { "<64-hex pubkey>": "maintainer" }, // fold authorization
+  "decision_surface": { "channel": "<uuid>" },
+  "liveness": {
+    "channel": "<uuid>",
+    "owner": "<64-hex pubkey|null>",
+    "stale_after_secs": 300,
+    "signer_allowlist": ["<64-hex pubkey>", ...]  // REQUIRED, non-empty (M6).
+                                                   // DISPATCHER SERVICE pubkey
+                                                   // (heartbeat signer), NOT
+                                                   // the watchdog key; lowercase
+                                                   // hex only
+  },
+  "state_dir": "/absolute/path/outside/repo"   // BINDING: never repo-relative
+}
+```
+
+`roles` maps workspace pubkeys to `member`/`maintainer` for fold
+authorization. The dispatcher's own service pubkey is merged automatically
+with at least `member` so its capture roots fold valid; grant it
+`maintainer` here when it needs terminal/reopen authority (M13).
+
+## State directory (binding amendment 3)
+
+`state_dir` must be **absolute and outside the repo checkout** (validated at
+load). It holds atomically-written files:
+
+| File | Contents |
+|---|---|
+| `events.jsonl` | Event journal (one JSON event per line); rewritten on commit only when new events were ingested. |
+| `cursor.json` | Composite `(created_at, event_id)` high-water cursor. |
+| `requests.json` | Fired dispatch request ids (at-most-once ledger). |
+| `outbox.json` | Signed events pending publication (persist-before-publish, M2), with a persisted retry counter per entry and a bounded `quarantined` list for permanently-rejected entries. |
+| `reaction_channels.json` | Reaction event-id → home-channel map (B5): real reactions carry no `h` tag, so the channel is recorded from the query that fetched each one. |
+| `dispatcher.lock` / `watchdog.lock` | flock(2) single-instance locks (M7). |
+| `watchdog_state.json` | Watchdog episode state (stale edge, never-seen grace anchor). |
+
+A corrupt state file is a **hard error** — the dispatcher never
+silently resets state. Refresh is inclusive (`since = cursor.created_at`)
+with event-id dedupe, so restarts resume with no gaps or duplicate effects;
+a crash between relay accept and ledger commit replays the outbox entry on
+restart (duplicate-tolerant), never re-plans the request. An outbox entry
+that keeps failing past the retry bound is quarantined (reason recorded,
+loop continues) instead of aborting every tick; its request id stays
+unfired, so the rule engine re-plans it with a fresh signature.
+
+## Rule semantics
+
+1. **Capture.** A `<pin_emoji>` reaction in a monitored channel plans one
+   triage issue per pinned message: `request_id = UUIDv5(ns, "pin:"+event)`,
+   `source_event_id` set, home channel = the reaction's channel. Real
+   reactions carry no `h` tag (the relay derives the channel from the
+   reaction's target and indexes by `#h` without materializing the tag), so
+   the home channel is taken from the persisted reaction-channel map,
+   recorded from the per-channel query that fetched each reaction (B5); an
+   explicit `h` tag is honored as a fallback. Each monitored channel is
+   queried separately for this reason. Re-pins and
+   duplicate reactions collapse on the request id + a `source_event_id`
+   pre-check. **Un-pinning is a NO-OP (binding amendment 1):** the ledger is
+   append-only; reaction removal never deletes or transitions a captured
+   issue. Do not "clean up" the triage queue by un-pinning.
+2. **Triage arrival vs routing (exclusive).** An unassigned triage/todo issue
+   matching a routing label is dispatched via envelope-v2 + kind-40023
+   (M18 dispatch path only) — and that **preempts** the arrival notice
+   (Helm 2026-08-24: the envelope is channel-visible and carries the owner
+   wake, so a separate notice would be a second ping for the same fact).
+   Exclusively UNROUTED triage arrivals get one arrival notice per triage
+   entry: the "a human needs to triage this" signal.
+3. **Escalation ladder.** Thresholds carry stable config ids. Firing is
+   at-most-once per `(issue, threshold, epoch)` where
+   `epoch = floor(entry_time / window_secs)`; `entry_time` is
+   `entered_status_at` for unassigned conditions and the due value for
+   `deadline_passed`, so a genuine re-entry legitimately refires.
+4. **Digest batching (R4).** `digest` escalations coalesce into one message
+   per channel per tick; each still records its own kind-40023 action.
+5. **Import suppression (M19).** Issues whose root or any revision carries
+   import provenance never trigger any rule.
+
+Every emission re-checks the fired ledger before submitting and marks it after
+an accepted relay receipt, so replays stay at-most-once.
+
+## Liveness and watchdog (M17, amendment 2, M6)
+
+`run` publishes a kind-40024 heartbeat every tick with
+`service_id`, `instance_id`, `observed_at`, the composite `cursor`, and
+`health` (`Healthy`, or `Degraded` + detail when this tick's emissions
+failed). The `watchdog` subcommand runs under a **separate identity**
+(different `BUZZ_PRIVATE_KEY`, separate launchd job): it reads the newest
+heartbeat per `(stream, signer, service_id)` and, when the configured
+`service_id` is silent past `stale_after_secs`, posts **one channel message**
+per stale episode to the liveness channel (mentioning `liveness.owner` when
+set).
+
+**M6 signer pinning:** only heartbeats signed by a key in
+`liveness.signer_allowlist` count — any channel member can publish a 40024
+carrying the service slug, so the SIGNER, not the content, is the proof of
+life. The allowlist is required and non-empty (`check-config` rejects an
+empty list), and the watchdog's relay query is additionally scoped to those
+authors. Service-key rotation is a config edit: mint the new key, then add
+its pubkey to `signer_allowlist` (and retire the old one) in the same
+change. Episode state (`was_stale`, first-monitor anchor) persists in
+`state_dir/watchdog_state.json`, so a watchdog restart neither re-posts the
+stale notice mid-episode nor extends the never-seen grace window.
+
+**The surface is message-only — never a shared-canvas
+mutation.** A dead process cannot author its own death notice; watchdog death
+is covered by the layer above (disk-guard pattern).
+
+## Key exposure (launchd)
+
+The launchd templates inject `BUZZ_PRIVATE_KEY` via `EnvironmentVariables`.
+launchd persists plist files **in plaintext**, and
+`launchctl print gui/$(id -u)/<label>` displays environment variables to
+anything running as that user — treat an installed plist as key material:
+
+- `chmod 600 ~/Library/LaunchAgents/com.smithcrafts.buzz-dispatcher*.plist`
+- For long-lived deployments, replace the inline value with a keychain-backed
+  wrapper script in `ProgramArguments`:
+
+  ```bash
+  #!/bin/sh
+  export BUZZ_PRIVATE_KEY="$(security find-generic-password \
+    -a buzz-dispatcher -s buzz-service-key -w)"
+  exec /path/to/buzz-dispatcher run --config /path/to/dispatcher.json
+  ```
+
+  (`security add-generic-password -a buzz-dispatcher -s buzz-service-key -w <key>`
+  once, with the key stored in the service user's login keychain.)
+- Suspected compromise: mint a new service key (Nathan-gated), update the
+  plist/wrapper, rotate `liveness.signer_allowlist`, and revoke channel/roster
+  grants for the old pubkey.
+
+## Deploy-time checklist (Helm/Nathan — not done by this crate)
+
+1. Mint the service nsec (Nathan-gated) and inject it via
+   `BUZZ_PRIVATE_KEY` in the launchd environment.
+2. Add the service pubkey to the workspace roster and grant
+   `TrackerRole::Maintainer` (roles config) if terminal/reopen authority is
+   needed; add it to monitored channels + the tracker stream.
+3. Author the config file with routing table, thresholds, monitored channels,
+   decision surface, liveness owner, `liveness.signer_allowlist` (the
+   dispatcher service pubkey — M6), and an out-of-repo `state_dir`.
+4. Validate with `check-config`, then install the launchd jobs
+   (`docs/launchd/com.smithcrafts.buzz-dispatcher.plist` and
+   `docs/launchd/com.smithcrafts.buzz-dispatcher-watchdog.plist`), each with
+   its own identity.
+5. Live-proof on the isolated stack (relay build ≥ `b18d7b07` per amendment 4):
+   pin → one issue; re-pin ×3 → still one; routed issue → envelope + 40023
+   same request id; SIGKILL mid-run → restart resumes from cursor with no
+   duplicate actions; dispatcher stopped past the window → exactly one
+   watchdog mention.
+
+## Protocol impact
+
+None new on the wire. The dispatcher completes adoption of kinds 40023/40024
+exactly per NIP-BT (content fields, tags, idempotency keys). Any gap found
+during build becomes NIP-BT errata in the same PR (UPSTREAM_STANDARD §5).
