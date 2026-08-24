@@ -26,6 +26,7 @@ export const PRESET_LOGOS: Record<string, string> = {
   hermes: "/harness-logos/hermes.png",
   openclaw: "/harness-logos/openclaw.svg",
   prime: "/harness-logos/prime.svg",
+  deepseek: "/harness-logos/deepseek.svg",
 };
 
 function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {

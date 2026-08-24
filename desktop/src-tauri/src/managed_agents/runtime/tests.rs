@@ -1320,3 +1320,36 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
 }
+
+#[test]
+fn dsh_derived_env_redirects_and_sets_idle_default() {
+    let dir = std::path::Path::new("/nest/.dsh-home");
+    let env = super::dsh_derived_env(Some(dir), false, false, None);
+    assert_eq!(
+        env,
+        vec![
+            ("DSH_HOME".to_string(), "/nest/.dsh-home".to_string()),
+            ("BUZZ_ACP_IDLE_TIMEOUT".to_string(), "1800".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn dsh_derived_env_yields_to_operator_and_record() {
+    let dir = std::path::Path::new("/nest/.dsh-home");
+    // Operator already set DSH_HOME in the parent env.
+    let env = super::dsh_derived_env(Some(dir), true, false, None);
+    assert!(!env.iter().any(|(k, _)| k == "DSH_HOME"));
+    assert!(env
+        .iter()
+        .any(|(k, v)| k == "BUZZ_ACP_IDLE_TIMEOUT" && v == "1800"));
+    // Record carries an explicit idle timeout — no default emission.
+    let env = super::dsh_derived_env(Some(dir), true, true, Some(600));
+    assert!(env.is_empty());
+}
+
+#[test]
+fn dsh_derived_env_empty_without_provisioned_profile() {
+    // Non-dsh identities and failed provisioning produce nothing.
+    assert!(super::dsh_derived_env(None, false, false, None).is_empty());
+}

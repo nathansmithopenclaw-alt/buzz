@@ -1,0 +1,11 @@
+{
+  "name": "buzz-acp-profile",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dsh": {
+    "profile": {
+      "bundles": ["@deepseek-ai/dsh-base"]
+    }
+  }
+}
