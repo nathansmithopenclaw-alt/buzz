@@ -4,8 +4,9 @@ use tauri::AppHandle;
 
 use super::{
     append_log_marker, current_instance_id, now_iso, process_belongs_to_us,
-    process_has_buzz_marker, process_is_running, terminate_process, ManagedAgentPairRuntime,
-    ManagedAgentRecord, ManagedAgentRuntimeKey,
+    process_has_buzz_marker, process_is_running, terminate_process,
+    terminate_processes_with_shared_grace, ManagedAgentPairRuntime, ManagedAgentRecord,
+    ManagedAgentRuntimeKey,
 };
 
 pub(crate) fn managed_agent_runtime_keys<T>(
@@ -183,6 +184,116 @@ pub fn stop_managed_agent_process(
             errors.join("; ")
         ))
     }
+}
+
+/// Stop every tracked runtime pair belonging to `records` with one shared
+/// graceful-shutdown window.
+///
+/// This is the fleet-wide counterpart to [`stop_managed_agent_process`]. The
+/// ordinary single-agent command keeps its focused behavior, while switching a
+/// Host to Observer avoids serializing one second of grace per runtime pair.
+#[cfg(unix)]
+pub fn stop_managed_agent_processes<'a>(
+    app: &AppHandle,
+    records: impl IntoIterator<Item = &'a mut ManagedAgentRecord>,
+    runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+) -> Result<(), String> {
+    let mut records = records.into_iter().collect::<Vec<_>>();
+    let mut targets = Vec::new();
+    let mut records_with_pairs = vec![false; records.len()];
+    let mut records_with_failures = vec![false; records.len()];
+
+    for (record_index, record) in records.iter().enumerate() {
+        for key in managed_agent_runtime_keys(runtimes, &record.pubkey) {
+            let Some(runtime) = runtimes.get(&key) else {
+                continue;
+            };
+            records_with_pairs[record_index] = true;
+            targets.push((record_index, key, runtime.child.id()));
+        }
+    }
+
+    let signal_errors = terminate_processes_with_shared_grace(
+        &targets.iter().map(|(_, _, pid)| *pid).collect::<Vec<_>>(),
+    );
+    let signal_errors = signal_errors.into_iter().collect::<HashMap<_, _>>();
+    let mut errors = Vec::new();
+
+    for (record_index, key, pid) in targets {
+        if let Some(error) = signal_errors.get(&pid) {
+            records_with_failures[record_index] = true;
+            errors.push(format!("{}: {error}", key.relay_url));
+            continue;
+        }
+
+        let Some(mut runtime) = runtimes.remove(&key) else {
+            continue;
+        };
+        match runtime.child.wait() {
+            Ok(status) => {
+                let record = &mut records[record_index];
+                record.last_exit_code = status.code();
+                super::super::remove_agent_runtime_receipt(app, &key);
+                if let Err(error) = append_log_marker(
+                    &runtime.log_path,
+                    &format!(
+                        "=== stopped {} ({}) at {} ===",
+                        record.name,
+                        record.pubkey,
+                        now_iso()
+                    ),
+                ) {
+                    eprintln!(
+                        "buzz-desktop: failed to append stop marker for {} on {}: {error}",
+                        record.pubkey, key.relay_url
+                    );
+                }
+            }
+            Err(error) => {
+                records_with_failures[record_index] = true;
+                errors.push(format!(
+                    "{}: failed to wait for agent shutdown: {error}",
+                    key.relay_url
+                ));
+                runtimes.insert(key, runtime);
+            }
+        }
+    }
+
+    for (record_index, record) in records.iter_mut().enumerate() {
+        if records_with_pairs[record_index] && !records_with_failures[record_index] {
+            let now = now_iso();
+            record.runtime_pid = None;
+            record.updated_at = now.clone();
+            record.last_stopped_at = Some(now);
+            record.last_error = None;
+            record.last_error_code = None;
+            super::super::remove_agent_pid_file(app, &record.pubkey);
+        } else if let Err(error) = stop_legacy_scalar_pid(app, record) {
+            errors.push(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to stop one or more managed-agent runtimes: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+pub fn stop_managed_agent_processes<'a>(
+    app: &AppHandle,
+    records: impl IntoIterator<Item = &'a mut ManagedAgentRecord>,
+    runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+) -> Result<(), String> {
+    for record in records {
+        stop_managed_agent_process(app, record, runtimes)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

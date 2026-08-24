@@ -20,6 +20,9 @@ use super::{
 };
 use crate::app_state::AppState;
 
+mod transition;
+pub(crate) use transition::begin as begin_observer_transition;
+
 pub const KIND_HOST_DECLARATION: u32 = 30_180;
 pub const KIND_HOST_STATUS: u32 = 30_181;
 const CONFIG_VERSION: u32 = 1;
@@ -160,13 +163,17 @@ pub fn configure_runtime(
     runtime: &Mutex<FleetVisibilityRuntime>,
     enabled: bool,
 ) -> Result<(), String> {
+    let mut guard = runtime.lock().map_err(|error| error.to_string())?;
     if !enabled {
-        let mut guard = runtime.lock().map_err(|error| error.to_string())?;
+        // Feature-off is a clean rollback: Host authority and launch restore
+        // remain today's behavior, and an abandoned Observer intent must not
+        // spring back when the experiment is enabled again later.
+        transition::clear(app)?;
         guard.enabled = false;
         return Ok(());
     }
-    let config = load_config(app)?;
-    let mut guard = runtime.lock().map_err(|error| error.to_string())?;
+    let mut config = load_config(app)?;
+    transition::recover(app, &mut config)?;
     guard.enabled = enabled;
     guard.config = config;
     Ok(())
@@ -634,6 +641,9 @@ pub fn set_role(
     }
     save_config(app, &config)?;
     guard.config = config;
+    if role == DeviceRole::Observer {
+        transition::clear(app)?;
+    }
     drop(guard);
     settings(&state.fleet_visibility)
 }
