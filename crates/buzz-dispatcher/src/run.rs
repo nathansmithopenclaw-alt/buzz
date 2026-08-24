@@ -308,8 +308,20 @@ const REFRESH_MAX_PAGES: usize = 200;
 
 /// Query one filter backward across bounded pages until the result is
 /// exhausted, newest page first. The base filter carries the inclusive
-/// `since`; each full page advances the composite `(until, before_id)`
+/// `since`; every non-empty page advances the composite `(until, before_id)`
 /// cursor, exactly the shape `buzz-cli query_pages` uses.
+///
+/// Termination is an EMPTY page, not a short one: the bridge documents that
+/// `rows < limit` proves nothing under its post-query filters. This crate's
+/// filters are fully SQL-pushable today, so short pages also terminate in
+/// practice (at the cost of one trailing empty query), but short-page
+/// termination would be a latent gap trap if a future filter gained
+/// post-processing.
+///
+/// Hitting [`REFRESH_MAX_PAGES`] is deliberately NOT an error: the events
+/// already fetched still advance the committed cursor, so the next tick
+/// resumes where this one stopped. A huge first-boot backfill converges over
+/// successive ticks instead of re-erroring at the same cap every tick.
 async fn query_paginated_events(
     relay: &RelayHttp,
     mut filter: Value,
@@ -318,18 +330,18 @@ async fn query_paginated_events(
     for _ in 0..REFRESH_MAX_PAGES {
         filter["limit"] = json!(REFRESH_PAGE_SIZE);
         let page = query_page(relay, &filter).await?;
-        let done = page.len() < REFRESH_PAGE_SIZE;
-        if !done {
-            advance_refresh_cursor(&mut filter, &page)?;
-        }
-        events.extend(page);
-        if done {
+        if page.is_empty() {
             return Ok(events);
         }
+        advance_refresh_cursor(&mut filter, &page)?;
+        events.extend(page);
     }
-    Err(DispatchError::Other(format!(
-        "refresh pagination exceeded {REFRESH_MAX_PAGES} pages; aborting instead of looping"
-    )))
+    warn!(
+        pages = REFRESH_MAX_PAGES,
+        events = events.len(),
+        "refresh hit the page cap; resuming from the advanced cursor next tick"
+    );
+    Ok(events)
 }
 
 /// One `POST /query` page; unparseable events are skipped with a warning.

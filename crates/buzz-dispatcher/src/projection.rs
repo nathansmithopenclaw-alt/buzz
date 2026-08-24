@@ -584,12 +584,20 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DispatchErro
     let tmp = path.with_extension("tmp");
     let mut file = fs::File::create(&tmp)?;
     file.write_all(bytes)?;
-    // fsync the data before the rename so the renamed file is durable, not a
-    // zero-length/torn placeholder the corrupt-state hard-error would trip on
-    // after a power loss.
+    // fsync the data before the rename so the renamed file's CONTENTS are
+    // durable, not a zero-length/torn placeholder the corrupt-state
+    // hard-error would trip on.
     file.sync_all()?;
     drop(file);
     fs::rename(&tmp, path)?;
+    // Best-effort directory fsync so the rename itself survives power loss.
+    // Some platforms/filesystems reject syncing a directory handle; ignore —
+    // the process-crash guarantee (no torn file) holds without it.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
 }
 
