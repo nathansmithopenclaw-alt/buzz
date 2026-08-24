@@ -87,8 +87,9 @@ pub async fn tick(
 
     // M3: fold ingested kind-40023 dispatch actions into the fired ledger —
     // covers external services' dispatches AND our own publications that
-    // reached the relay but not the ledger before a crash.
-    observe_fired_actions(store, now);
+    // reached the relay but not the ledger before a crash. Authorization is
+    // checked before the fold (same TrackerAuthorization the fold uses).
+    observe_fired_actions(store, authorization, now);
 
     let fold = fold_store(store, authorization, now);
 
@@ -166,14 +167,25 @@ async fn replay_outbox(
 }
 
 /// Fold parsed kind-40023 dispatch actions into the fired ledger (M3).
-/// Strict parsing drops malformed or foreign events silently; valid ones may
-/// come from this service or another authorized writer.
-fn observe_fired_actions(store: &mut ProjectionStore, now: u64) {
+/// Strict parsing drops malformed events; the authorization gate drops
+/// everyone else. Request ids are deterministic UUIDv5 over public stream
+/// data and kind-40023 needs only channel write scope, so an unfiltered fold
+/// would let ANY stream-channel member permanently suppress a capture, route,
+/// or escalation by publishing a self-signed 40023 with the victim request
+/// id. Only the service's own key and configured workspace roles pass — the
+/// same [`buzz_sdk::tracker::TrackerAuthorization`] the fold uses, which the
+/// config builds with the service pubkey merged in.
+fn observe_fired_actions(
+    store: &mut ProjectionStore,
+    authorization: &buzz_sdk::tracker::TrackerAuthorization,
+    now: u64,
+) {
     let action_kind = Kind::Custom(buzz_sdk::kind::KIND_TRACKER_DISPATCH_ACTION as u16);
     let observed: Vec<Uuid> = store
         .events()
         .iter()
         .filter(|event| event.kind == action_kind)
+        .filter(|event| authorization.role(&event.pubkey.to_hex()).is_some())
         .filter_map(|event| parse_dispatch_action(event, now).ok())
         .map(|parsed| parsed.action.request_id)
         .collect();
@@ -454,12 +466,17 @@ mod tests {
             .sign_with_keys(&keys)
             .expect("signed");
 
+        let authorization = buzz_sdk::tracker::TrackerAuthorization::new([(
+            keys.public_key().to_hex(),
+            buzz_sdk::tracker::TrackerRole::Member,
+        )]);
+
         assert!(!store.request_fired(&request_id));
         store.ingest(vec![event], TEST_NOW);
-        observe_fired_actions(&mut store, TEST_NOW);
+        observe_fired_actions(&mut store, &authorization, TEST_NOW);
         assert!(
             store.request_fired(&request_id),
-            "valid 40023 must land in the fired ledger"
+            "valid 40023 from an authorized writer must land in the fired ledger"
         );
 
         // Garbage of the same kind is dropped silently, not an error.
@@ -470,6 +487,53 @@ mod tests {
         .sign_with_keys(&keys)
         .expect("signed");
         store.ingest(vec![junk], TEST_NOW);
-        observe_fired_actions(&mut store, TEST_NOW);
+        observe_fired_actions(&mut store, &authorization, TEST_NOW);
+    }
+
+    /// M3 authorization gate: request ids are deterministic UUIDv5 over
+    /// public stream data and kind-40023 needs only channel write scope, so
+    /// a 40023 signed by an UNAUTHORIZED stream member must NOT reach the
+    /// fired ledger — otherwise any member could permanently suppress a
+    /// capture, route, or escalation by spoofing the victim request id.
+    #[test]
+    fn observe_fired_actions_ignores_unauthorized_authors() {
+        use crate::projection::tests::TEST_NOW;
+        use buzz_sdk::tracker::{
+            build_dispatch_action, DispatchAction, DispatchActionKind, TRACKER_VERSION,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+
+        let stream = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let action = DispatchAction {
+            v: TRACKER_VERSION,
+            issue_id: Uuid::new_v4(),
+            root_event: "a".repeat(64),
+            request_id,
+            action: DispatchActionKind::Assign,
+            threshold_id: None,
+            observed_tip: None,
+            result: "spoof".to_string(),
+        };
+        let attacker = Keys::generate();
+        let spoofed = build_dispatch_action(stream, &action)
+            .expect("built")
+            .sign_with_keys(&attacker)
+            .expect("signed");
+
+        // Authorization that does NOT include the attacker's pubkey.
+        let authorization = buzz_sdk::tracker::TrackerAuthorization::new([(
+            "0".repeat(64),
+            buzz_sdk::tracker::TrackerRole::Maintainer,
+        )]);
+
+        store.ingest(vec![spoofed], TEST_NOW);
+        observe_fired_actions(&mut store, &authorization, TEST_NOW);
+        assert!(
+            !store.request_fired(&request_id),
+            "unauthorized 40023 must not poison the fired ledger"
+        );
     }
 }
