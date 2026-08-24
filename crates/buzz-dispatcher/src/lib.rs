@@ -19,6 +19,7 @@
 
 pub mod config;
 pub mod error;
+pub mod projection;
 pub mod relay_http;
 
 pub use error::DispatchError;
