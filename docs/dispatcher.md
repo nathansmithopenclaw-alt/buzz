@@ -15,6 +15,23 @@ tracker stream locally and converts queue state into deterministic actions:
 All decisions are deterministic (no LLM judgment in the rule path), and all
 effects are idempotent via UUIDv5 request ids plus a fired-request ledger.
 
+## Upgrade notes (release-relevant)
+
+- **BREAKING config change:** `liveness.signer_allowlist` is now REQUIRED
+  with no serde default (M6 signer pinning). Configs authored against
+  earlier builds of this branch fail `check-config` until the dispatcher's
+  SERVICE pubkey (the heartbeat signer — NOT the watchdog key) is added.
+- **Pubkeys must be lowercase hex.** `check-config` now rejects uppercase
+  hex pubkeys everywhere (`roles`, `routing.owner`, `liveness.owner`,
+  `signer_allowlist`): comparisons are against nostr's lowercase `to_hex()`,
+  so an uppercase entry would validate yet never match — a watchdog
+  allowlist that silently trusts nothing, paging false-stale forever.
+- **Pin-capture channel attribution changed (B5).** Real kind-7 reactions
+  carry no `h` tag; the dispatcher now records each reaction's home channel
+  from the per-channel query that fetched it (`reaction_channels.json`) and
+  plans captures from that map. No operator action required; existing state
+  dirs gain the new file on first run.
+
 ## Subcommands
 
 | Command | Purpose |
@@ -63,7 +80,11 @@ documents. No key material ever lives in the repo or the config file.
     "channel": "<uuid>",
     "owner": "<64-hex pubkey|null>",
     "stale_after_secs": 300,
-    "signer_allowlist": ["<64-hex pubkey>", ...]  // REQUIRED, non-empty (M6)
+    "signer_allowlist": ["<64-hex pubkey>", ...]  // REQUIRED, non-empty (M6).
+                                                   // DISPATCHER SERVICE pubkey
+                                                   // (heartbeat signer), NOT
+                                                   // the watchdog key; lowercase
+                                                   // hex only
   },
   "state_dir": "/absolute/path/outside/repo"   // BINDING: never repo-relative
 }
@@ -84,7 +105,8 @@ load). It holds atomically-written files:
 | `events.jsonl` | Event journal (one JSON event per line); rewritten on commit only when new events were ingested. |
 | `cursor.json` | Composite `(created_at, event_id)` high-water cursor. |
 | `requests.json` | Fired dispatch request ids (at-most-once ledger). |
-| `outbox.json` | Signed events pending publication (persist-before-publish, M2). |
+| `outbox.json` | Signed events pending publication (persist-before-publish, M2), with a persisted retry counter per entry and a bounded `quarantined` list for permanently-rejected entries. |
+| `reaction_channels.json` | Reaction event-id → home-channel map (B5): real reactions carry no `h` tag, so the channel is recorded from the query that fetched each one. |
 | `dispatcher.lock` / `watchdog.lock` | flock(2) single-instance locks (M7). |
 | `watchdog_state.json` | Watchdog episode state (stale edge, never-seen grace anchor). |
 
@@ -92,13 +114,22 @@ A corrupt state file is a **hard error** — the dispatcher never
 silently resets state. Refresh is inclusive (`since = cursor.created_at`)
 with event-id dedupe, so restarts resume with no gaps or duplicate effects;
 a crash between relay accept and ledger commit replays the outbox entry on
-restart (duplicate-tolerant), never re-plans the request.
+restart (duplicate-tolerant), never re-plans the request. An outbox entry
+that keeps failing past the retry bound is quarantined (reason recorded,
+loop continues) instead of aborting every tick; its request id stays
+unfired, so the rule engine re-plans it with a fresh signature.
 
 ## Rule semantics
 
 1. **Capture.** A `<pin_emoji>` reaction in a monitored channel plans one
    triage issue per pinned message: `request_id = UUIDv5(ns, "pin:"+event)`,
-   `source_event_id` set, home channel = the reaction's channel. Re-pins and
+   `source_event_id` set, home channel = the reaction's channel. Real
+   reactions carry no `h` tag (the relay derives the channel from the
+   reaction's target and indexes by `#h` without materializing the tag), so
+   the home channel is taken from the persisted reaction-channel map,
+   recorded from the per-channel query that fetched each reaction (B5); an
+   explicit `h` tag is honored as a fallback. Each monitored channel is
+   queried separately for this reason. Re-pins and
    duplicate reactions collapse on the request id + a `source_event_id`
    pre-check. **Un-pinning is a NO-OP (binding amendment 1):** the ledger is
    append-only; reaction removal never deletes or transitions a captured

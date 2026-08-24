@@ -372,11 +372,20 @@ pub fn validate_slug(value: &str, field: &str) -> Result<(), DispatchError> {
 }
 
 fn validate_hex_pubkey(value: &str, field: &str) -> Result<(), DispatchError> {
-    if value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit()) {
+    // Strictly LOWERCASE hex (M6 edge): every comparison downstream is
+    // against nostr's lowercase `to_hex()` output. An uppercase entry would
+    // pass validation yet never match — e.g. a watchdog allowlist that
+    // silently trusts nothing, paging forever with zero diagnostic — so it
+    // is rejected here, mirroring `is_event_id_hex` (B2).
+    if value.len() == 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    {
         Ok(())
     } else {
         Err(DispatchError::Config(format!(
-            "{field} must be a 64-char hex pubkey"
+            "{field} must be a 64-char lowercase hex pubkey"
         )))
     }
 }
@@ -575,6 +584,34 @@ mod tests {
         let json = valid_json(tmp.path().join("state").as_path()).replace(&"a".repeat(64), "zz");
         let path = write_config(tmp.path(), &json);
         let error = DispatcherConfig::load(&path).unwrap_err();
-        assert!(error.to_string().contains("64-char hex"));
+        assert!(error.to_string().contains("64-char lowercase hex"));
+    }
+
+    /// M6 edge: uppercase hex passes a lax shape check but never matches
+    /// nostr's lowercase `to_hex()` comparisons downstream — an allowlist
+    /// entry that silently trusts nothing. Reject it at load, mirroring the
+    /// event-id strictness (B2).
+    #[test]
+    fn uppercase_pubkey_is_rejected() {
+        // Direct unit coverage for every field that flows through the same
+        // validator.
+        assert!(validate_hex_pubkey(&"c".repeat(64), "t").is_ok());
+        assert!(validate_hex_pubkey(&"C".repeat(64), "t").is_err());
+        assert!(
+            validate_hex_pubkey(&format!("{}{}", "c".repeat(63), "C"), "t").is_err(),
+            "a single uppercase char anywhere must fail"
+        );
+
+        // End-to-end through the allowlist path that motivated the fix.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let json = valid_json(tmp.path().join("state").as_path())
+            .replace(&"c".repeat(64), &"C".repeat(64));
+        let path = write_config(tmp.path(), &json);
+        let error = DispatcherConfig::load(&path).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("signer_allowlist") && message.contains("lowercase"),
+            "expected allowlist/lowercase diagnostic, got: {message}"
+        );
     }
 }
