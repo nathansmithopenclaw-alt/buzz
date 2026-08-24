@@ -1,16 +1,19 @@
 //! Resident capture/route/escalate/heartbeat loop.
 //!
-//! Each tick: refresh the projection with an inclusive cursor query, fold the
-//! tracker stream with workspace authorization, plan deterministic actions,
-//! emit them (marking the fired ledger), then publish a heartbeat carrying the
-//! advanced cursor. The loop is idempotent: request-ID pre-checks make any
+//! Each tick: replay any pending outbox publications, refresh the projection
+//! with an inclusive cursor query, fold the tracker stream with workspace
+//! authorization, plan deterministic actions, emit them (persist-before-
+//! publish), then publish a heartbeat carrying the advanced cursor and this
+//! tick's health. The loop is idempotent: request-ID pre-checks make any
 //! replayed or duplicate delivery a no-op, and a restart resumes from the
-//! persisted cursor.
+//! persisted cursor + outbox.
 
 use std::time::Duration;
 
-use buzz_sdk::tracker::{fold_tracker_events, parse_tracker_event, TrackerFold};
-use nostr::Event;
+use buzz_sdk::tracker::{
+    fold_tracker_events, parse_dispatch_action, parse_tracker_event, TrackerFold,
+};
+use nostr::{Event, Kind};
 use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -19,7 +22,7 @@ use crate::config::DispatcherConfig;
 use crate::emit::Emitter;
 use crate::error::DispatchError;
 use crate::projection::{InstanceLock, ProjectionStore, DISPATCHER_LOCK_FILE};
-use crate::relay_http::RelayHttp;
+use crate::relay_http::{parse_submit_receipt, RelayHttp};
 use crate::rules;
 
 /// Run the dispatcher until the process is stopped.
@@ -63,6 +66,10 @@ pub async fn tick(
     authorization: &buzz_sdk::tracker::TrackerAuthorization,
     store: &mut ProjectionStore,
 ) -> Result<(), DispatchError> {
+    // M2: replay anything that reached the outbox but not the fired ledger
+    // before a crash. Duplicate-tolerant and idempotent.
+    replay_outbox(store, relay).await?;
+
     let since = store.since();
 
     // Inclusive refresh: query everything at/after the cursor. Event-id dedupe
@@ -75,13 +82,23 @@ pub async fn tick(
         debug!(count = ingested, "ingested new events");
     }
 
+    // M3: fold ingested kind-40023 dispatch actions into the fired ledger —
+    // covers external services' dispatches AND our own publications that
+    // reached the relay but not the ledger before a crash.
+    observe_fired_actions(store, now);
+
     let fold = fold_store(store, authorization, now);
+
+    // Track emission failures for the heartbeat health (no more hardcoded
+    // Healthy when effects failed).
+    let mut degraded: Vec<String> = Vec::new();
 
     // Capture plans first (reactions), then fold-driven plans.
     let captures = rules::plan_captures(config, store);
     for plan in &captures {
         if let Err(error) = emitter.emit_capture(store, plan).await {
             warn!(%error, source = %plan.source_event_id, "capture emission failed");
+            degraded.push(format!("capture({})", short_id(&plan.source_event_id)));
         }
     }
 
@@ -89,17 +106,82 @@ pub async fn tick(
     if !actions.is_empty() {
         if let Err(error) = emitter.emit_rule_actions(store, &actions).await {
             warn!(%error, count = actions.len(), "rule-action emission failed");
+            degraded.push(format!("rule-actions({})", actions.len()));
         }
     }
 
     store.commit()?;
 
     // Heartbeat last so its cursor reflects everything committed this tick.
-    if let Err(error) = emitter.emit_heartbeat(store).await {
+    let detail = if degraded.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{} emission failure(s): {}",
+            degraded.len(),
+            degraded.join("; ")
+        ))
+    };
+    if let Err(error) = emitter.emit_heartbeat(store, detail).await {
         warn!(%error, "heartbeat emission failed");
     }
 
     Ok(())
+}
+
+/// Replay pending outbox publications (M2 persist-before-publish). The relay
+/// answers `accepted:false, "duplicate: …"` for events it already stores,
+/// which counts as success here; anything else aborts the tick and retries
+/// next round.
+async fn replay_outbox(
+    store: &mut ProjectionStore,
+    relay: &RelayHttp,
+) -> Result<(), DispatchError> {
+    let pending = store.pending_outbox().to_vec();
+    for entry in pending {
+        for payload in &entry.events {
+            let event: Event = serde_json::from_value(payload.clone())?;
+            let raw = relay.submit_event(&event).await?;
+            let receipt = parse_submit_receipt(&raw)?;
+            if !receipt.accepted && !receipt.message.starts_with("duplicate") {
+                return Err(DispatchError::Relay(format!(
+                    "outbox replay rejected {}: {}",
+                    event.id.to_hex(),
+                    receipt.message
+                )));
+            }
+        }
+        store.mark_request_fired(entry.request_id);
+        store.persist_ledger()?;
+        store.complete_outbox(&entry.request_id)?;
+        info!(
+            request_id = %entry.request_id,
+            "replayed pending outbox publication"
+        );
+    }
+    Ok(())
+}
+
+/// Fold parsed kind-40023 dispatch actions into the fired ledger (M3).
+/// Strict parsing drops malformed or foreign events silently; valid ones may
+/// come from this service or another authorized writer.
+fn observe_fired_actions(store: &mut ProjectionStore, now: u64) {
+    let action_kind = Kind::Custom(buzz_sdk::kind::KIND_TRACKER_DISPATCH_ACTION as u16);
+    let observed: Vec<Uuid> = store
+        .events()
+        .iter()
+        .filter(|event| event.kind == action_kind)
+        .filter_map(|event| parse_dispatch_action(event, now).ok())
+        .map(|parsed| parsed.action.request_id)
+        .collect();
+    if !observed.is_empty() {
+        store.observe_fired_requests(observed);
+    }
+}
+
+/// First 8 hex chars of an id for log lines.
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
 }
 
 /// Fetch tracker-stream events, monitored-channel reactions, and prior dispatch
@@ -322,5 +404,55 @@ mod tests {
     fn advance_refresh_cursor_rejects_empty_page() {
         let mut filter = json!({ "kinds": [1] });
         assert!(advance_refresh_cursor(&mut filter, &[]).is_err());
+    }
+
+    /// M3 wiring: ingested kind-40023 dispatch actions fold into the fired
+    /// ledger, suppressing re-planning of requests another writer (or our own
+    /// pre-crash publication) already fired.
+    #[test]
+    fn observe_fired_actions_folds_valid_dispatch_actions() {
+        use crate::projection::tests::TEST_NOW;
+        use buzz_sdk::tracker::{
+            build_dispatch_action, DispatchAction, DispatchActionKind, TRACKER_VERSION,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+
+        let stream = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let action = DispatchAction {
+            v: TRACKER_VERSION,
+            issue_id: Uuid::new_v4(),
+            root_event: "a".repeat(64),
+            request_id,
+            action: DispatchActionKind::Assign,
+            threshold_id: None,
+            observed_tip: None,
+            result: "test".to_string(),
+        };
+        let keys = Keys::generate();
+        let event = build_dispatch_action(stream, &action)
+            .expect("built")
+            .sign_with_keys(&keys)
+            .expect("signed");
+
+        assert!(!store.request_fired(&request_id));
+        store.ingest(vec![event], TEST_NOW);
+        observe_fired_actions(&mut store, TEST_NOW);
+        assert!(
+            store.request_fired(&request_id),
+            "valid 40023 must land in the fired ledger"
+        );
+
+        // Garbage of the same kind is dropped silently, not an error.
+        let junk = EventBuilder::new(
+            Kind::Custom(buzz_sdk::kind::KIND_TRACKER_DISPATCH_ACTION as u16),
+            "not-a-dispatch-action",
+        )
+        .sign_with_keys(&keys)
+        .expect("signed");
+        store.ingest(vec![junk], TEST_NOW);
+        observe_fired_actions(&mut store, TEST_NOW);
     }
 }

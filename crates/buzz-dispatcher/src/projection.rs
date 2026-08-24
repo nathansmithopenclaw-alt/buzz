@@ -35,6 +35,7 @@ use crate::error::DispatchError;
 const CURSOR_FILE: &str = "cursor.json";
 const EVENTS_FILE: &str = "events.jsonl";
 const REQUESTS_FILE: &str = "requests.json";
+const OUTBOX_FILE: &str = "outbox.json";
 /// Single-instance lock for the resident loop (M7).
 pub const DISPATCHER_LOCK_FILE: &str = "dispatcher.lock";
 /// Single-instance lock for the watchdog process (M7).
@@ -75,6 +76,25 @@ struct FiredRequests {
     fired: BTreeSet<Uuid>,
 }
 
+/// One pending publication: the signed events for a request id, persisted
+/// BEFORE publish (M2 persist-before-publish). A crash between relay accept
+/// and ledger commit replays from here on restart instead of re-planning from
+/// scratch, so each request stays at-most-once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutboxEntry {
+    /// Request id the publication belongs to.
+    pub request_id: Uuid,
+    /// Signed events (serialized JSON) in publication order.
+    pub events: Vec<serde_json::Value>,
+}
+
+/// Pending publications awaiting relay submission.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct Outbox {
+    #[serde(default)]
+    pending: Vec<OutboxEntry>,
+}
+
 /// Persistent projection store: raw event journal + composite cursor +
 /// fired-request ledger, all under one config-named directory outside the repo.
 #[derive(Debug)]
@@ -84,6 +104,7 @@ pub struct ProjectionStore {
     events: Vec<Event>,
     seen_ids: HashSet<String>,
     fired: FiredRequests,
+    outbox: Outbox,
     /// Journal/cursor changed (new events ingested) — the only condition that
     /// rewrites events.jsonl (M8 cheap win).
     journal_dirty: bool,
@@ -129,12 +150,21 @@ impl ProjectionStore {
             FiredRequests::default()
         };
 
+        let outbox_path = state_dir.join(OUTBOX_FILE);
+        let outbox = if outbox_path.exists() {
+            serde_json::from_str(&fs::read_to_string(&outbox_path)?)
+                .map_err(|error| DispatchError::Other(format!("corrupt outbox file: {error}")))?
+        } else {
+            Outbox::default()
+        };
+
         Ok(Self {
             state_dir: state_dir.to_path_buf(),
             cursor,
             events,
             seen_ids,
             fired,
+            outbox,
             journal_dirty: false,
             ledger_dirty: false,
         })
@@ -278,6 +308,59 @@ impl ProjectionStore {
         }
     }
 
+    /// Persist the fired ledger to disk immediately (the publish pipeline
+    /// needs it durable BEFORE the matching outbox entry is cleared).
+    pub fn persist_ledger(&mut self) -> Result<(), DispatchError> {
+        write_atomic(
+            &self.state_dir.join(REQUESTS_FILE),
+            serde_json::to_string(&self.fired)?.as_bytes(),
+        )?;
+        self.ledger_dirty = false;
+        Ok(())
+    }
+
+    /// Pending outbox entries awaiting replay/publication.
+    pub fn pending_outbox(&self) -> &[OutboxEntry] {
+        &self.outbox.pending
+    }
+
+    /// Persist one pending publication BEFORE it is published (M2). Any
+    /// existing entry for the same request id is replaced (a failed publish
+    /// re-queues, never duplicates).
+    pub fn queue_outbox(
+        &mut self,
+        request_id: Uuid,
+        events: Vec<serde_json::Value>,
+    ) -> Result<(), DispatchError> {
+        self.outbox
+            .pending
+            .retain(|entry| entry.request_id != request_id);
+        self.outbox.pending.push(OutboxEntry { request_id, events });
+        self.write_outbox()
+    }
+
+    /// Remove a completed publication from the outbox and persist. Call this
+    /// only AFTER [`Self::mark_request_fired`] + [`Self::persist_ledger`]:
+    /// a crash in between replays the entry (duplicate-tolerant) rather than
+    /// losing the fired mark.
+    pub fn complete_outbox(&mut self, request_id: &Uuid) -> Result<(), DispatchError> {
+        let before = self.outbox.pending.len();
+        self.outbox
+            .pending
+            .retain(|entry| &entry.request_id != request_id);
+        if self.outbox.pending.len() != before {
+            self.write_outbox()?;
+        }
+        Ok(())
+    }
+
+    fn write_outbox(&self) -> Result<(), DispatchError> {
+        write_atomic(
+            &self.state_dir.join(OUTBOX_FILE),
+            serde_json::to_string(&self.outbox)?.as_bytes(),
+        )
+    }
+
     /// Whether anything changed since open/last commit.
     pub fn is_dirty(&self) -> bool {
         self.journal_dirty || self.ledger_dirty
@@ -378,7 +461,7 @@ fn merge_sorted_events(a: Vec<Event>, b: Vec<Event>) -> Vec<Event> {
     out
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DispatchError> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DispatchError> {
     let tmp = path.with_extension("tmp");
     let mut file = fs::File::create(&tmp)?;
     file.write_all(bytes)?;
@@ -642,5 +725,51 @@ pub(crate) mod tests {
         );
         assert!(dir.path().join(REQUESTS_FILE).exists());
         assert!(!store.is_dirty());
+    }
+
+    /// M2 outbox lifecycle: entries persist across restart until completed,
+    /// re-queueing one request replaces (never duplicates) its entry, and
+    /// completion removes it durably.
+    #[test]
+    fn outbox_round_trip_survives_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let request = Uuid::new_v4();
+        let payload = serde_json::json!({ "id": "signed-event-bytes" });
+
+        {
+            let mut store = ProjectionStore::open(dir.path()).expect("open");
+            assert!(store.pending_outbox().is_empty());
+            store
+                .queue_outbox(request, vec![payload.clone()])
+                .expect("queue");
+            // Re-queue replaces, not duplicates.
+            store
+                .queue_outbox(request, vec![payload.clone()])
+                .expect("requeue");
+            assert_eq!(store.pending_outbox().len(), 1);
+        }
+
+        // Restart: the pending publication must survive for replay.
+        let mut store = ProjectionStore::open(dir.path()).expect("reopen");
+        assert_eq!(store.pending_outbox().len(), 1);
+        assert_eq!(store.pending_outbox()[0].request_id, request);
+        assert_eq!(store.pending_outbox()[0].events, vec![payload]);
+
+        store.mark_request_fired(request);
+        store.persist_ledger().expect("ledger");
+        store.complete_outbox(&request).expect("complete");
+        assert!(store.pending_outbox().is_empty());
+
+        let store = ProjectionStore::open(dir.path()).expect("reopen 2");
+        assert!(store.pending_outbox().is_empty());
+        assert!(store.request_fired(&request));
+    }
+
+    #[test]
+    fn corrupt_outbox_is_a_hard_error_not_a_reset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join(OUTBOX_FILE), "not-json\n").expect("write");
+        let error = ProjectionStore::open(dir.path()).expect_err("must fail");
+        assert!(matches!(error, DispatchError::Other(_)));
     }
 }

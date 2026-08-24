@@ -10,8 +10,13 @@
 //!   kind-40023 action; arrival notices are message-only).
 //! - **Liveness** — kind-40024 heartbeat every tick.
 //!
-//! Every emission re-checks the fired ledger before submitting and marks it
-//! after an accepted receipt, so replays stay at-most-once.
+//! Every recorded emission follows persist-before-publish (M2, per
+//! DESIGN_C_CONSUMERS.md): sign → persist the signed bytes to the outbox →
+//! publish → make the fired ledger durable → clear the outbox entry. A crash
+//! at any point replays the outbox on restart; the fired ledger keeps each
+//! request at-most-once. Digest escalations flush the human-visible message
+//! BEFORE their 40023 fires (M4), so a failed flush leaves the epoch
+//! un-fired and it re-qualifies next tick instead of being lost forever.
 
 use buzz_sdk::tracker::{
     build_dispatch_action, build_service_heartbeat, build_tracker_issue, DispatchAction,
@@ -27,6 +32,10 @@ use crate::error::DispatchError;
 use crate::projection::ProjectionStore;
 use crate::relay_http::{parse_submit_receipt, RelayHttp};
 use crate::rules::{CapturePlan, RuleAction};
+
+/// Bound for degraded-heartbeat details (the SDK caps `detail` at
+/// MAX_CURSOR_BYTES = 512; stay comfortably under).
+const MAX_HEARTBEAT_DETAIL_LEN: usize = 400;
 
 /// Signed-event submission helper bound to one relay + config.
 pub struct Emitter<'a> {
@@ -46,12 +55,20 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Sign and submit one builder; error unless the relay accepts it.
+    /// Sign and submit one builder; error unless the relay accepts it. Used
+    /// for UNRECORDED surfaces (heartbeat, digest flush) that carry no
+    /// request id.
     async fn sign_and_submit(&self, builder: EventBuilder) -> Result<Event, DispatchError> {
         let event = builder
             .sign_with_keys(self.relay.keys())
             .map_err(|error| DispatchError::Identity(format!("signing failed: {error}")))?;
-        let raw = self.relay.submit_event(&event).await?;
+        self.submit_accepted(&event).await?;
+        Ok(event)
+    }
+
+    /// Submit one already-signed event and require an accepted receipt.
+    async fn submit_accepted(&self, event: &Event) -> Result<(), DispatchError> {
+        let raw = self.relay.submit_event(event).await?;
         let receipt = parse_submit_receipt(&raw)?;
         if !receipt.accepted {
             return Err(DispatchError::Relay(format!(
@@ -60,7 +77,40 @@ impl<'a> Emitter<'a> {
                 receipt.message
             )));
         }
-        Ok(event)
+        Ok(())
+    }
+
+    /// Persist-before-publish pipeline for one recorded request (M2): sign
+    /// all builders, persist the signed bytes to the outbox, publish in
+    /// order, then make the fired ledger durable and clear the outbox entry.
+    /// A crash between publish and ledger-commit replays from the outbox on
+    /// restart (duplicate-tolerant), never re-plans the request.
+    async fn publish_recorded(
+        &self,
+        store: &mut ProjectionStore,
+        request_id: Uuid,
+        builders: Vec<EventBuilder>,
+    ) -> Result<(), DispatchError> {
+        let mut signed = Vec::with_capacity(builders.len());
+        for builder in builders {
+            signed.push(
+                builder
+                    .sign_with_keys(self.relay.keys())
+                    .map_err(|error| DispatchError::Identity(format!("signing failed: {error}")))?,
+            );
+        }
+        let mut payloads = Vec::with_capacity(signed.len());
+        for event in &signed {
+            payloads.push(serde_json::to_value(event)?);
+        }
+        store.queue_outbox(request_id, payloads)?;
+        for event in &signed {
+            self.submit_accepted(event).await?;
+        }
+        store.mark_request_fired(request_id);
+        store.persist_ledger()?;
+        store.complete_outbox(&request_id)?;
+        Ok(())
     }
 
     /// Emit one pin-capture root. Re-checks the fired ledger + source
@@ -105,21 +155,31 @@ impl<'a> Emitter<'a> {
             import: None,
         };
         let builder = build_tracker_issue(self.config.stream_id, &root)?;
-        self.sign_and_submit(builder).await?;
-        store.mark_request_fired(plan.request_id);
-        Ok(())
+        self.publish_recorded(store, plan.request_id, vec![builder])
+            .await
     }
 
     /// Emit all planned fold actions. Digest escalations coalesce into one
     /// message per channel (R4 attention budget); each escalation still gets
     /// its own kind-40023 action for the at-most-once ledger.
+    ///
+    /// M4 ordering: the coalesced digest message flushes BEFORE its
+    /// escalations fire the 40023 + mark the ledger. A failed flush leaves
+    /// those requests un-fired, so the epoch re-qualifies on a later tick —
+    /// the escalation is delayed, never lost.
     pub async fn emit_rule_actions(
         &self,
         store: &mut ProjectionStore,
         actions: &[RuleAction],
     ) -> Result<(), DispatchError> {
-        let mut digest_by_channel: std::collections::BTreeMap<Uuid, Vec<String>> =
+        // Digest work staged per channel: human-visible lines plus the
+        // escalation fires that belong to that digest.
+        let mut digest_lines: std::collections::BTreeMap<Uuid, Vec<String>> =
             std::collections::BTreeMap::new();
+        let mut digest_fires: std::collections::BTreeMap<
+            Uuid,
+            Vec<(crate::rules::IssueRef, String, Uuid)>,
+        > = std::collections::BTreeMap::new();
 
         for action in actions {
             match action {
@@ -136,8 +196,8 @@ impl<'a> Emitter<'a> {
                         issue.identifier, issue.title
                     );
                     let builder = build_message(*channel_id, &content, None, &[], false, &[])?;
-                    self.sign_and_submit(builder).await?;
-                    store.mark_request_fired(*request_id);
+                    self.publish_recorded(store, *request_id, vec![builder])
+                        .await?;
                 }
                 RuleAction::RouteAssign {
                     issue,
@@ -149,8 +209,9 @@ impl<'a> Emitter<'a> {
                     if store.request_fired(request_id) {
                         continue;
                     }
-                    self.emit_route(store, issue, label, owner, *channel_id, *request_id)
-                        .await?;
+                    let builders =
+                        self.route_builders(issue, label, owner, *channel_id, *request_id)?;
+                    self.publish_recorded(store, *request_id, builders).await?;
                 }
                 RuleAction::Escalate {
                     issue,
@@ -164,50 +225,79 @@ impl<'a> Emitter<'a> {
                     }
                     match effect {
                         crate::config::ThresholdAction::Digest => {
-                            digest_by_channel
+                            digest_lines
                                 .entry(*channel_id)
                                 .or_default()
                                 .push(format!("- **{}** — {}", issue.identifier, issue.title));
-                            // Fire the 40023 now; the coalesced message goes out below.
-                            self.emit_escalation_action(issue, threshold_id, *request_id)
-                                .await?;
-                            store.mark_request_fired(*request_id);
+                            digest_fires.entry(*channel_id).or_default().push((
+                                issue.clone(),
+                                threshold_id.clone(),
+                                *request_id,
+                            ));
                         }
                         _ => {
                             let content = format!(
                                 "Escalation `{threshold_id}`: **{}** — {}",
                                 issue.identifier, issue.title
                             );
-                            let builder =
+                            let message =
                                 build_message(*channel_id, &content, None, &[], false, &[])?;
-                            self.sign_and_submit(builder).await?;
-                            self.emit_escalation_action(issue, threshold_id, *request_id)
+                            let record = escalation_action_builder(
+                                self.config.stream_id,
+                                issue,
+                                threshold_id,
+                                *request_id,
+                            )?;
+                            // Notice first, then the 40023 record — published
+                            // atomically under one outbox entry.
+                            self.publish_recorded(store, *request_id, vec![message, record])
                                 .await?;
-                            store.mark_request_fired(*request_id);
                         }
                     }
                 }
             }
         }
 
-        for (channel_id, lines) in digest_by_channel {
+        // Flush each channel digest, then fire its escalations (M4).
+        for (channel_id, lines) in digest_lines {
+            let fires = digest_fires.remove(&channel_id).unwrap_or_default();
             let content = format!("Dispatcher digest:\n{}", lines.join("\n"));
             let builder = build_message(channel_id, &content, None, &[], false, &[])?;
-            self.sign_and_submit(builder).await?;
+            if let Err(error) = self.sign_and_submit(builder).await {
+                // Leave this channel's fires un-marked: the epoch
+                // re-qualifies next tick and re-joins the digest.
+                tracing::warn!(
+                    %error,
+                    channel = %channel_id,
+                    count = fires.len(),
+                    "digest flush failed; escalations deferred to next tick"
+                );
+                continue;
+            }
+            for (issue, threshold_id, request_id) in fires {
+                let record = escalation_action_builder(
+                    self.config.stream_id,
+                    &issue,
+                    &threshold_id,
+                    request_id,
+                )?;
+                self.publish_recorded(store, request_id, vec![record])
+                    .await?;
+            }
         }
         Ok(())
     }
 
-    /// Envelope-v2 + kind-40023 pair sharing `request_id` (M18).
-    async fn emit_route(
+    /// Envelope-v2 + kind-40023 builders sharing `request_id` (M18), in
+    /// publication order.
+    fn route_builders(
         &self,
-        store: &mut ProjectionStore,
         issue: &crate::rules::IssueRef,
         label: &str,
         owner: &str,
         channel_id: Uuid,
         request_id: Uuid,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<Vec<EventBuilder>, DispatchError> {
         let envelope = task_envelope::TaskEnvelope {
             v: task_envelope::TASK_ENVELOPE_VERSION,
             task_id: route_task_id(&request_id),
@@ -229,9 +319,8 @@ impl<'a> Emitter<'a> {
             "Auto-routing **{}** to the owner (label `{label}`).",
             issue.identifier
         );
-        let builder =
+        let envelope_builder =
             task_envelope::build_task_message(channel_id, &human, &envelope, None, &[owner])?;
-        self.sign_and_submit(builder).await?;
 
         let action = DispatchAction {
             v: TRACKER_VERSION,
@@ -243,51 +332,63 @@ impl<'a> Emitter<'a> {
             observed_tip: None,
             result: format!("auto-routed by label {label}"),
         };
-        let builder = build_dispatch_action(self.config.stream_id, &action)?;
-        self.sign_and_submit(builder).await?;
-        store.mark_request_fired(request_id);
-        Ok(())
+        let action_builder = build_dispatch_action(self.config.stream_id, &action)?;
+        Ok(vec![envelope_builder, action_builder])
     }
 
-    /// Kind-40023 escalation action (stable threshold_id required).
-    async fn emit_escalation_action(
+    /// Kind-40024 heartbeat carrying the composite cursor. `degraded` names
+    /// emission failures observed this tick — the heartbeat reports them
+    /// instead of a hardcoded Healthy, so liveness consumers see impairment.
+    pub async fn emit_heartbeat(
         &self,
-        issue: &crate::rules::IssueRef,
-        threshold_id: &str,
-        request_id: Uuid,
+        store: &ProjectionStore,
+        degraded: Option<String>,
     ) -> Result<(), DispatchError> {
-        let action = DispatchAction {
-            v: TRACKER_VERSION,
-            issue_id: issue.issue_id,
-            root_event: issue.root_event.clone(),
-            request_id,
-            action: DispatchActionKind::Escalate,
-            threshold_id: Some(threshold_id.to_string()),
-            observed_tip: None,
-            result: format!("threshold {threshold_id} fired"),
+        let health = match degraded {
+            Some(mut detail) => {
+                detail.truncate(MAX_HEARTBEAT_DETAIL_LEN);
+                ServiceHealth {
+                    status: ServiceHealthStatus::Degraded,
+                    detail: Some(detail),
+                }
+            }
+            None => ServiceHealth {
+                status: ServiceHealthStatus::Healthy,
+                detail: None,
+            },
         };
-        let builder = build_dispatch_action(self.config.stream_id, &action)?;
-        self.sign_and_submit(builder).await?;
-        Ok(())
-    }
-
-    /// Kind-40024 heartbeat carrying the composite cursor.
-    pub async fn emit_heartbeat(&self, store: &ProjectionStore) -> Result<(), DispatchError> {
         let heartbeat = ServiceHeartbeat {
             v: TRACKER_VERSION,
             service_id: self.config.service_id.clone(),
             instance_id: self.instance_id,
             observed_at: current_unix_seconds(),
             cursor: store.cursor_payload()?,
-            health: ServiceHealth {
-                status: ServiceHealthStatus::Healthy,
-                detail: None,
-            },
+            health,
         };
         let builder = build_service_heartbeat(self.config.stream_id, &heartbeat)?;
         self.sign_and_submit(builder).await?;
         Ok(())
     }
+}
+
+/// Kind-40023 escalation action builder (stable threshold_id required).
+fn escalation_action_builder(
+    stream_id: Uuid,
+    issue: &crate::rules::IssueRef,
+    threshold_id: &str,
+    request_id: Uuid,
+) -> Result<EventBuilder, DispatchError> {
+    let action = DispatchAction {
+        v: TRACKER_VERSION,
+        issue_id: issue.issue_id,
+        root_event: issue.root_event.clone(),
+        request_id,
+        action: DispatchActionKind::Escalate,
+        threshold_id: Some(threshold_id.to_string()),
+        observed_tip: None,
+        result: format!("threshold {threshold_id} fired"),
+    };
+    Ok(build_dispatch_action(stream_id, &action)?)
 }
 
 /// Deterministic issue UUID for a pin capture.
