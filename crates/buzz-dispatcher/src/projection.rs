@@ -209,6 +209,33 @@ impl ProjectionStore {
         self.fired.fired.contains(request_id)
     }
 
+    /// Issue UUIDs whose root or any revision carries import provenance.
+    /// M19: imported issues never trigger dispatcher rules.
+    pub fn imported_issue_ids(&self) -> HashSet<Uuid> {
+        let root_kind = Kind::Custom(buzz_sdk::kind::KIND_TRACKER_ISSUE as u16);
+        let rev_kind = Kind::Custom(buzz_sdk::kind::KIND_TRACKER_REVISION as u16);
+        let mut suppressed = HashSet::new();
+        for event in &self.events {
+            if event.kind == root_kind {
+                if let Ok(root) =
+                    serde_json::from_str::<buzz_sdk::tracker::IssueRoot>(&event.content)
+                {
+                    if root.import.is_some() {
+                        suppressed.insert(root.issue_id);
+                    }
+                }
+            } else if event.kind == rev_kind {
+                if let Ok(revision) =
+                    serde_json::from_str::<buzz_sdk::tracker::IssueRevision>(&event.content)
+                {
+                    if revision.import.is_some() {
+                        suppressed.insert(revision.issue_id);
+                    }
+                }
+            }
+        }
+        suppressed
+    }
     /// Record a fired dispatch request id.
     pub fn mark_request_fired(&mut self, request_id: Uuid) {
         if self.fired.fired.insert(request_id) {
@@ -266,7 +293,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DispatchError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use buzz_sdk::tracker::{build_tracker_issue, IssueRoot, IssueStatus};
     use nostr::{EventBuilder, Keys, Timestamp};
@@ -279,12 +306,40 @@ mod tests {
             .expect("signed")
     }
 
-    fn sample_root_event(source_event_id: Option<&str>) -> Event {
+    pub(crate) fn sample_root_event(source_event_id: Option<&str>) -> Event {
+        sample_root_event_for(Uuid::new_v4(), source_event_id, false)
+    }
+
+    pub(crate) fn imported_root_event(issue_id: Uuid) -> Event {
+        sample_root_event_for(issue_id, Some(&"e".repeat(64)), true)
+    }
+
+    fn sample_root_event_for(
+        issue_id: Uuid,
+        source_event_id: Option<&str>,
+        imported: bool,
+    ) -> Event {
         let keys = Keys::generate();
+        let import = imported.then(|| buzz_sdk::tracker::ImportProvenance {
+            system: "legacy".to_string(),
+            external_id: "EXT-1".to_string(),
+            source_url: None,
+            imported_at: 1,
+            source_created_at: None,
+            source_updated_at: None,
+            source_completed_at: None,
+            source_cancelled_at: None,
+            archived: None,
+            estimate_points: None,
+            export_sha256: None,
+            importer_version: None,
+            original_author: None,
+            legacy_labels: Vec::new(),
+        });
         let root = IssueRoot {
             v: buzz_sdk::tracker::TRACKER_VERSION,
             op: "create".to_string(),
-            issue_id: Uuid::new_v4(),
+            issue_id,
             identifier: "WS-1".to_string(),
             title: "pinned".to_string(),
             body: "captured from pin".to_string(),
@@ -302,7 +357,7 @@ mod tests {
             request_id: Some(buzz_sdk::tracker::pin_capture_request_id(
                 source_event_id.unwrap_or("none"),
             )),
-            import: None,
+            import,
         };
         let builder = build_tracker_issue(Uuid::new_v4(), &root).expect("built");
         builder.sign_with_keys(&keys).expect("signed")

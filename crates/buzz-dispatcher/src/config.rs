@@ -120,7 +120,7 @@ pub enum ThresholdCondition {
 }
 
 /// Effect when a threshold fires.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThresholdAction {
     /// (Re-)post a notice in the issue's home channel.

@@ -1,0 +1,769 @@
+//! Deterministic rule engine: pure planning with no I/O and no LLM judgment
+//! (plan rule R2). Every decision is table-testable against a fold snapshot.
+//!
+//! Three rule families:
+//!
+//! - **Capture** — pin reactions (config emoji) in monitored channels become
+//!   triage-issue creation plans, collapsed by deterministic UUIDv5 request IDs
+//!   plus a `source_event_id` pre-check. Un-pin/reaction-removal is a NO-OP:
+//!   the store never watches deletions (binding amendment 1, append-only).
+//! - **Triage arrival / label auto-routing** — every unassigned triage issue
+//!   gets one arrival notice per triage entry (routing-table owner wake when a
+//!   label matches); unassigned triage/todo issues matching the routing table
+//!   are additionally dispatched via envelope-v2 + kind-40023 sharing one
+//!   request ID.
+//! - **Escalation ladder** — stable threshold IDs, at-most-once firing per
+//!   `(issue, threshold, qualifying-interval epoch)`.
+//!
+//! M19: issues carrying import provenance never trigger any rule.
+
+use std::collections::HashSet;
+
+use buzz_sdk::tracker::{
+    due_has_passed, pin_capture_request_id, route_request_id, threshold_request_id,
+    IssueProjection, IssueStatus, TrackerFold, DISPATCH_REQUEST_NAMESPACE,
+};
+use nostr::Kind;
+use uuid::Uuid;
+
+use crate::config::{DispatcherConfig, Threshold, ThresholdAction, ThresholdCondition};
+use crate::projection::ProjectionStore;
+
+/// One planned pin-capture issue creation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturePlan {
+    /// Channel where the pin reaction happened; becomes the issue home channel.
+    pub channel_id: Uuid,
+    /// Hex id of the pinned message.
+    pub source_event_id: String,
+    /// Deterministic idempotency request id (`pin:<source>`).
+    pub request_id: Uuid,
+    /// Title for the captured issue.
+    pub title: String,
+}
+
+/// Issue identity carried by every planned fold action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueRef {
+    /// Stable issue UUID.
+    pub issue_id: Uuid,
+    /// Immutable root event id.
+    pub root_event: String,
+    /// Human-facing identifier.
+    pub identifier: String,
+    /// Issue title.
+    pub title: String,
+}
+
+/// One planned fold-driven effect. Emission is the loop's job; planning is
+/// pure so replays with an unchanged fired-set produce identical plans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleAction {
+    /// Arrival notice for a new unassigned triage issue (plan rule 1): one
+    /// notice per triage entry, posted to the home channel with the
+    /// routing-table owner's p-tag when a label matches.
+    NotifyTriage {
+        /// Target issue.
+        issue: IssueRef,
+        /// Channel receiving the notice.
+        channel_id: Uuid,
+        /// Best-effort owner mention (routing-table owner for the best matched
+        /// label); `None` posts the arrival notice without a wake.
+        recipient: Option<String>,
+        /// Idempotency key recorded when the notice is sent.
+        request_id: Uuid,
+    },
+    /// Label auto-routing via the dispatch path (envelope-v2 + kind-40023).
+    RouteAssign {
+        /// Target issue.
+        issue: IssueRef,
+        /// Matched routing label.
+        label: String,
+        /// Owner pubkey receiving the dispatch.
+        owner: String,
+        /// Channel receiving the dispatch message.
+        channel_id: Uuid,
+        /// Request id shared by the envelope and the kind-40023 action.
+        request_id: Uuid,
+    },
+    /// Threshold escalation fire.
+    Escalate {
+        /// Target issue.
+        issue: IssueRef,
+        /// Stable threshold config id.
+        threshold_id: String,
+        /// Channel receiving the escalation.
+        channel_id: Uuid,
+        /// Configured effect (immediate notice, digest coalescing, decision).
+        action: ThresholdAction,
+        /// Deterministic `(issue, threshold, epoch)` request id.
+        request_id: Uuid,
+    },
+}
+
+/// Plan pin captures from persisted reaction events.
+///
+/// A capture plan is emitted once per `(channel, source_event_id)`: duplicate
+/// reactions in the same batch collapse on the request id, and reactions whose
+/// source already has a root (or whose request id was already fired) are
+/// skipped.
+pub fn plan_captures(config: &DispatcherConfig, store: &ProjectionStore) -> Vec<CapturePlan> {
+    let reaction_kind = Kind::Custom(7);
+    let mut plans = Vec::new();
+    let mut planned: HashSet<Uuid> = HashSet::new();
+
+    for event in store.events() {
+        if event.kind != reaction_kind || event.content != config.pin_emoji {
+            continue;
+        }
+        let channel_id = match first_tag_uuid(event, "h") {
+            Some(channel_id) if config.monitored_channels.contains(&channel_id) => channel_id,
+            _ => continue,
+        };
+        let Some(source_event_id) = first_tag_value(event, "e") else {
+            continue;
+        };
+
+        let request_id = pin_capture_request_id(&source_event_id);
+        // Idempotency belt-and-suspenders: fired ledger first, then the
+        // source pre-check that also covers UUIDv5 namespace drift.
+        if store.request_fired(&request_id) || store.has_root_with_source(&source_event_id) {
+            continue;
+        }
+        if !planned.insert(request_id) {
+            continue;
+        }
+        let title = format!("Pin capture: {source_event_id}");
+        plans.push(CapturePlan {
+            channel_id,
+            source_event_id,
+            request_id,
+            title,
+        });
+    }
+    plans
+}
+
+/// Plan fold-driven actions for the current projection snapshot.
+///
+/// Deterministic order: issues by `(stream, issue)` key (BTreeMap iteration),
+/// thresholds in config order. `now` is the evaluation timestamp; `fired`
+/// request ids (own ledger plus observed external 40023s) suppress replays.
+pub fn plan_fold_actions(
+    config: &DispatcherConfig,
+    fold: &TrackerFold,
+    store: &ProjectionStore,
+    now: u64,
+) -> Vec<RuleAction> {
+    let suppressed = store.imported_issue_ids();
+    let mut actions = Vec::new();
+
+    for ((stream_id, _), issue) in &fold.issues {
+        if *stream_id != config.stream_id || suppressed.contains(&issue.issue_id) {
+            continue;
+        }
+        if issue.status.is_terminal() {
+            continue;
+        }
+        let issue_ref = IssueRef {
+            issue_id: issue.issue_id,
+            root_event: issue.root_event.clone(),
+            identifier: issue.identifier.clone(),
+            title: issue.title.clone(),
+        };
+
+        // Arrival notice (plan rule 1): every unassigned triage issue gets
+        // one notice per triage entry. Self-authored mentions are dead, so
+        // the dispatcher signs and the routing-table owner's p-tag carries
+        // the wake; issues with no routing match post without a recipient.
+        if issue.assignee.is_none() && issue.status == IssueStatus::Triage {
+            let recipient = best_route_owner(config, issue);
+            let request_id = triage_notify_request_id(issue.issue_id, issue.entered_status_at);
+            if !store.request_fired(&request_id) {
+                if let Some(channel_id) = issue.home_channel_id.or(config.default_channel) {
+                    actions.push(RuleAction::NotifyTriage {
+                        issue: issue_ref.clone(),
+                        channel_id,
+                        recipient,
+                        request_id,
+                    });
+                }
+            }
+        }
+
+        // Label auto-routing (plan rule 2): dispatch path only (M18),
+        // envelope-v2 + kind-40023 sharing one request id.
+        if issue.assignee.is_none()
+            && matches!(issue.status, IssueStatus::Triage | IssueStatus::Todo)
+        {
+            if let Some(route) = matching_route(config, issue) {
+                let request_id = route_request_id(issue.issue_id, &route.label);
+                if !store.request_fired(&request_id) {
+                    if let Some(channel_id) = route.channel.or(config.default_channel) {
+                        actions.push(RuleAction::RouteAssign {
+                            issue: issue_ref.clone(),
+                            label: route.label.clone(),
+                            owner: route.owner.clone(),
+                            channel_id,
+                            request_id,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Escalation ladder.
+        for threshold in &config.thresholds {
+            let Some(entry_time) = qualifies(issue, threshold, now) else {
+                continue;
+            };
+            let epoch = entry_time / threshold.window_secs.max(1);
+            let request_id = threshold_request_id(issue.issue_id, &threshold.id, epoch);
+            if store.request_fired(&request_id) {
+                continue;
+            }
+            let channel_id = match threshold.action {
+                ThresholdAction::DecisionSurface => Some(config.decision_surface.channel),
+                ThresholdAction::NotifyHome | ThresholdAction::Digest => {
+                    issue.home_channel_id.or(config.default_channel)
+                }
+            };
+            let Some(channel_id) = channel_id else {
+                continue;
+            };
+            actions.push(RuleAction::Escalate {
+                issue: issue_ref.clone(),
+                threshold_id: threshold.id.clone(),
+                channel_id,
+                action: threshold.action,
+                request_id,
+            });
+        }
+    }
+    actions
+}
+
+/// First routing rule (config order) whose label the issue carries.
+fn matching_route<'a>(
+    config: &'a DispatcherConfig,
+    issue: &IssueProjection,
+) -> Option<&'a crate::config::RouteRule> {
+    config
+        .routing
+        .iter()
+        .find(|rule| issue.labels.contains(&rule.label))
+}
+
+/// Recipient for a triage arrival notice: routing-table owner for the best
+/// matched label, preferring `area:*` labels, then first config-order match.
+fn best_route_owner(config: &DispatcherConfig, issue: &IssueProjection) -> Option<String> {
+    let mut fallback: Option<&str> = None;
+    for rule in &config.routing {
+        if !issue.labels.contains(&rule.label) {
+            continue;
+        }
+        if rule.label.starts_with("area:") {
+            return Some(rule.owner.clone());
+        }
+        if fallback.is_none() {
+            fallback = Some(&rule.owner);
+        }
+    }
+    fallback.map(str::to_string)
+}
+
+/// Entry time when `threshold` qualifies `issue`, else `None`.
+fn qualifies(issue: &IssueProjection, threshold: &Threshold, now: u64) -> Option<u64> {
+    match &threshold.condition {
+        ThresholdCondition::Unassigned => {
+            (issue.assignee.is_none()).then_some(issue.entered_status_at)
+        }
+        ThresholdCondition::UnassignedWithLabel { label } => (issue.assignee.is_none()
+            && issue.labels.contains(label))
+        .then_some(issue.entered_status_at),
+        ThresholdCondition::DeadlinePassed => issue
+            .due
+            .as_ref()
+            .filter(|due| issue.assignee.is_some() && due_has_passed(due, now))
+            .map(|due| due.value),
+    }
+}
+
+/// Idempotency key for triage arrival notices: distinct per genuine entry
+/// into triage (re-entry carries a new `entered_status_at`).
+fn triage_notify_request_id(issue_id: Uuid, entered_status_at: u64) -> Uuid {
+    Uuid::new_v5(
+        &DISPATCH_REQUEST_NAMESPACE,
+        format!("triage:{issue_id}:{entered_status_at}").as_bytes(),
+    )
+}
+
+fn first_tag_value(event: &nostr::Event, name: &str) -> Option<String> {
+    event.tags.iter().find_map(|tag| {
+        let slice = tag.as_slice();
+        if slice.first().is_some_and(|first| first == name) {
+            slice.get(1).cloned()
+        } else {
+            None
+        }
+    })
+}
+
+fn first_tag_uuid(event: &nostr::Event, name: &str) -> Option<Uuid> {
+    first_tag_value(event, name).and_then(|value| Uuid::parse_str(&value).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{DecisionSurface, LivenessConfig, RouteRule};
+    use buzz_sdk::tracker::{Due, DuePrecision};
+    use nostr::{Event, EventBuilder, Keys, Tag, Timestamp};
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+
+    const OWNER_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const OTHER_HEX: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+    fn stream_id() -> Uuid {
+        Uuid::new_v4()
+    }
+
+    fn channel() -> Uuid {
+        Uuid::new_v4()
+    }
+
+    fn base_config(state_dir: PathBuf, stream: Uuid, home: Uuid) -> DispatcherConfig {
+        DispatcherConfig {
+            relay_url: Some("http://localhost:3000".to_string()),
+            service_id: "triage-dispatcher".to_string(),
+            stream_id: stream,
+            poll_interval_secs: 30,
+            monitored_channels: vec![home],
+            pin_emoji: "\u{1F4CC}".to_string(),
+            default_channel: Some(home),
+            routing: vec![RouteRule {
+                label: "area:payments".to_string(),
+                owner: OWNER_HEX.to_string(),
+                channel: None,
+            }],
+            thresholds: Vec::new(),
+            decision_surface: DecisionSurface { channel: home },
+            liveness: LivenessConfig {
+                channel: home,
+                owner: None,
+                stale_after_secs: 300,
+            },
+            state_dir,
+        }
+    }
+
+    fn issue(stream: Uuid, status: IssueStatus, labels: &[&str]) -> IssueProjection {
+        let mut set = BTreeSet::new();
+        for label in labels {
+            set.insert((*label).to_string());
+        }
+        IssueProjection {
+            stream_id: stream,
+            issue_id: Uuid::new_v4(),
+            root_event: "a".repeat(64),
+            root_created_at: 100,
+            tip_event: "a".repeat(64),
+            tip_created_at: 100,
+            revision: 0,
+            entered_status_at: 100,
+            identifier: "WS-1".to_string(),
+            title: "issue".to_string(),
+            body: String::new(),
+            status,
+            priority: None,
+            assignee: None,
+            project_id: None,
+            due: None,
+            estimate_minutes: None,
+            home_channel_id: None,
+            workflow: "default".to_string(),
+            labels: set,
+            external_refs: BTreeSet::new(),
+            relations: BTreeSet::new(),
+        }
+    }
+
+    fn fold_with(stream: Uuid, issue: IssueProjection) -> TrackerFold {
+        let mut fold = TrackerFold::default();
+        fold.issues.insert((stream, issue.issue_id), issue);
+        fold
+    }
+
+    fn reaction(channel_id: Uuid, source_event_id: &str, emoji: &str) -> Event {
+        let keys = Keys::generate();
+        let tags = vec![
+            Tag::parse(["e", source_event_id]).expect("tag"),
+            Tag::parse(["h", &channel_id.to_string()]).expect("tag"),
+        ];
+        EventBuilder::new(Kind::Custom(7), emoji)
+            .tags(tags)
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&keys)
+            .expect("signed")
+    }
+
+    #[test]
+    fn pin_reactions_collapse_to_one_capture_per_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let config = base_config(dir.path().to_path_buf(), stream_id(), home);
+        let source = "c".repeat(64);
+
+        // Three reactions (initial pin + two re-pins) on the same message,
+        // plus one reaction in an unmonitored channel and one wrong emoji.
+        store.ingest(vec![
+            reaction(home, &source, &config.pin_emoji),
+            reaction(home, &source, &config.pin_emoji),
+            reaction(home, &source, &config.pin_emoji),
+            reaction(channel(), &source, &config.pin_emoji),
+            reaction(home, &source, "\u{1F44D}"),
+        ]);
+
+        let plans = plan_captures(&config, &store);
+        assert_eq!(plans.len(), 1, "duplicates and unmonitored collapse");
+        assert_eq!(plans[0].source_event_id, source);
+        assert_eq!(plans[0].channel_id, home);
+
+        // Fired ledger suppresses re-planning across restarts.
+        store.mark_request_fired(plans[0].request_id);
+        assert!(plan_captures(&config, &store).is_empty());
+    }
+
+    #[test]
+    fn root_precheck_suppresses_capture_even_without_fired_ledger() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let config = base_config(dir.path().to_path_buf(), stream_id(), home);
+        let source = "d".repeat(64);
+
+        store.ingest(vec![reaction(home, &source, &config.pin_emoji)]);
+        assert_eq!(plan_captures(&config, &store).len(), 1);
+
+        // A root already exists for this source (e.g. namespace drift): no plan.
+        let root = crate::projection::tests::sample_root_event(Some(&source));
+        store.ingest(vec![root]);
+        assert!(plan_captures(&config, &store).is_empty());
+    }
+
+    #[test]
+    fn routed_issue_gets_dispatch_plan_plus_owner_notice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let config = base_config(dir.path().to_path_buf(), stream, home);
+
+        let fold = fold_with(
+            stream,
+            issue(stream, IssueStatus::Triage, &["area:payments"]),
+        );
+        let plans = plan_fold_actions(&config, &fold, &store, 1_000);
+
+        let routes: Vec<_> = plans
+            .iter()
+            .filter(|action| matches!(action, RuleAction::RouteAssign { .. }))
+            .collect();
+        assert_eq!(routes.len(), 1);
+        match routes[0] {
+            RuleAction::RouteAssign {
+                label,
+                owner,
+                channel_id,
+                request_id,
+                ..
+            } => {
+                assert_eq!(label, "area:payments");
+                assert_eq!(owner, OWNER_HEX);
+                assert_eq!(*channel_id, home);
+                assert_eq!(
+                    *request_id,
+                    route_request_id(plans_issue_id(&plans), "area:payments")
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // Rule 1 still fires: the arrival notice carries the owner wake.
+        let notices: Vec<_> = plans
+            .iter()
+            .filter(|action| matches!(action, RuleAction::NotifyTriage { .. }))
+            .collect();
+        assert_eq!(notices.len(), 1);
+        match notices[0] {
+            RuleAction::NotifyTriage { recipient, .. } => {
+                assert_eq!(recipient, &Some(OWNER_HEX.to_string()));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn unroutable_triage_gets_one_arrival_notice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let config = base_config(dir.path().to_path_buf(), stream, home);
+
+        // No routing label matches: arrival notice, no recipient to wake.
+        let fold = fold_with(stream, issue(stream, IssueStatus::Triage, &["bug"]));
+        let plans = plan_fold_actions(&config, &fold, &store, 1_000);
+
+        assert_eq!(plans.len(), 1);
+        match &plans[0] {
+            RuleAction::NotifyTriage {
+                recipient,
+                channel_id,
+                ..
+            } => {
+                assert_eq!(recipient, &None);
+                assert_eq!(*channel_id, home);
+            }
+            other => panic!("expected NotifyTriage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn todo_status_gets_routing_but_no_arrival_notice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let config = base_config(dir.path().to_path_buf(), stream, home);
+
+        let fold = fold_with(stream, issue(stream, IssueStatus::Todo, &["area:payments"]));
+        let plans = plan_fold_actions(&config, &fold, &store, 1_000);
+        assert_eq!(plans.len(), 1, "routing yes, arrival notice is triage-only");
+        assert!(matches!(plans[0], RuleAction::RouteAssign { .. }));
+    }
+
+    #[test]
+    fn non_area_label_routes_and_notifies_fallback_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let mut config = base_config(dir.path().to_path_buf(), stream, home);
+        config.routing.push(RouteRule {
+            label: "misc".to_string(),
+            owner: OTHER_HEX.to_string(),
+            channel: None,
+        });
+
+        let fold = fold_with(stream, issue(stream, IssueStatus::Triage, &["misc"]));
+        let plans = plan_fold_actions(&config, &fold, &store, 1_000);
+
+        let routes: Vec<_> = plans
+            .iter()
+            .filter(|action| matches!(action, RuleAction::RouteAssign { .. }))
+            .collect();
+        assert_eq!(routes.len(), 1);
+        match routes[0] {
+            RuleAction::RouteAssign { owner, label, .. } => {
+                assert_eq!(owner, OTHER_HEX);
+                assert_eq!(label, "misc");
+            }
+            _ => unreachable!(),
+        }
+        let notices: Vec<_> = plans
+            .iter()
+            .filter(|action| matches!(action, RuleAction::NotifyTriage { .. }))
+            .collect();
+        assert_eq!(notices.len(), 1);
+        match notices[0] {
+            RuleAction::NotifyTriage { recipient, .. } => {
+                assert_eq!(recipient, &Some(OTHER_HEX.to_string()));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn threshold_fires_once_per_interval_and_refires_on_reentry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let mut config = base_config(dir.path().to_path_buf(), stream, home);
+        config.thresholds.push(Threshold {
+            id: "unassigned_24h".to_string(),
+            condition: ThresholdCondition::Unassigned,
+            window_secs: 24 * 3600,
+            action: ThresholdAction::NotifyHome,
+        });
+
+        let mut first = issue(stream, IssueStatus::Triage, &[]);
+        first.entered_status_at = 1_000;
+        first.home_channel_id = Some(home);
+        let fold = fold_with(stream, first.clone());
+
+        let plans = plan_fold_actions(&config, &fold, &store, 1_000);
+        let escalations: Vec<_> = plans
+            .iter()
+            .filter(|action| matches!(action, RuleAction::Escalate { .. }))
+            .collect();
+        assert_eq!(escalations.len(), 1);
+
+        // Mark fired: the same snapshot produces no escalation.
+        if let RuleAction::Escalate { request_id, .. } = &escalations[0] {
+            store.mark_request_fired(*request_id);
+        }
+        let replay = plan_fold_actions(&config, &fold, &store, 2_000);
+        assert!(replay
+            .iter()
+            .all(|action| !matches!(action, RuleAction::Escalate { .. })));
+
+        // Genuine re-entry: new entered_status_at in a later interval epoch.
+        let mut reentered = first.clone();
+        reentered.issue_id = first.issue_id;
+        reentered.entered_status_at = 1_000 + 25 * 3600; // next epoch
+        let fold2 = fold_with(stream, reentered);
+        let plans2 = plan_fold_actions(&config, &fold2, &store, 2_000);
+        assert_eq!(
+            plans2
+                .iter()
+                .filter(|action| matches!(action, RuleAction::Escalate { .. }))
+                .count(),
+            1,
+            "re-entry refires"
+        );
+    }
+
+    #[test]
+    fn deadline_threshold_uses_due_value_and_fires_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let mut config = base_config(dir.path().to_path_buf(), stream, home);
+        config.thresholds.push(Threshold {
+            id: "deadline_breach".to_string(),
+            condition: ThresholdCondition::DeadlinePassed,
+            window_secs: 3600,
+            action: ThresholdAction::DecisionSurface,
+        });
+
+        let mut assigned = issue(stream, IssueStatus::InProgress, &[]);
+        assigned.assignee = Some(OWNER_HEX.to_string());
+        assigned.home_channel_id = Some(home);
+        assigned.due = Some(Due {
+            value: 5_000,
+            precision: DuePrecision::Instant,
+            timezone: "UTC".to_string(),
+        });
+        let fold = fold_with(stream, assigned);
+
+        // Before the due instant: no fire.
+        assert!(plan_fold_actions(&config, &fold, &store, 4_999)
+            .iter()
+            .all(|action| !matches!(action, RuleAction::Escalate { .. })));
+
+        let plans = plan_fold_actions(&config, &fold, &store, 5_001);
+        let escalations: Vec<_> = plans
+            .iter()
+            .filter(|action| matches!(action, RuleAction::Escalate { .. }))
+            .collect();
+        assert_eq!(escalations.len(), 1);
+        match &escalations[0] {
+            RuleAction::Escalate {
+                channel_id, action, ..
+            } => {
+                assert_eq!(*channel_id, home, "decision surface channel from config");
+                assert_eq!(*action, ThresholdAction::DecisionSurface);
+            }
+            _ => unreachable!(),
+        }
+
+        if let RuleAction::Escalate { request_id, .. } = &escalations[0] {
+            store.mark_request_fired(*request_id);
+        }
+        assert!(plan_fold_actions(&config, &fold, &store, 9_999)
+            .iter()
+            .all(|action| !matches!(action, RuleAction::Escalate { .. })));
+    }
+
+    #[test]
+    fn digest_thresholds_are_flagged_for_coalescing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let mut config = base_config(dir.path().to_path_buf(), stream, home);
+        config.thresholds.push(Threshold {
+            id: "unassigned_24h_digest".to_string(),
+            condition: ThresholdCondition::Unassigned,
+            window_secs: 24 * 3600,
+            action: ThresholdAction::Digest,
+        });
+
+        let mut target = issue(stream, IssueStatus::Todo, &[]);
+        target.home_channel_id = Some(home);
+        let fold = fold_with(stream, target);
+        let plans = plan_fold_actions(&config, &fold, &store, 1_000);
+        match &plans[0] {
+            RuleAction::Escalate { action, .. } => assert_eq!(*action, ThresholdAction::Digest),
+            other => panic!("expected digest Escalate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn imported_issues_never_trigger_rules() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let mut config = base_config(dir.path().to_path_buf(), stream, home);
+        config.thresholds.push(Threshold {
+            id: "unassigned_24h".to_string(),
+            condition: ThresholdCondition::Unassigned,
+            window_secs: 24 * 3600,
+            action: ThresholdAction::NotifyHome,
+        });
+
+        let imported = issue(stream, IssueStatus::Triage, &["area:payments"]);
+        let root = crate::projection::tests::imported_root_event(imported.issue_id);
+        store.ingest(vec![root]);
+
+        let fold = fold_with(stream, imported);
+        assert!(
+            plan_fold_actions(&config, &fold, &store, 1_000).is_empty(),
+            "M19 import suppression"
+        );
+        assert!(plan_captures(&config, &store).is_empty());
+    }
+
+    #[test]
+    fn assigned_and_terminal_issues_get_no_actions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let config = base_config(dir.path().to_path_buf(), stream, home);
+
+        let mut assigned = issue(stream, IssueStatus::Triage, &["area:payments"]);
+        assigned.assignee = Some(OWNER_HEX.to_string());
+        let mut done = issue(stream, IssueStatus::Done, &["area:payments"]);
+        done.assignee = None;
+
+        for candidate in [assigned, done] {
+            let fold = fold_with(stream, candidate);
+            assert!(plan_fold_actions(&config, &fold, &store, 1_000).is_empty());
+        }
+    }
+
+    fn plans_issue_id(plans: &[RuleAction]) -> Uuid {
+        match &plans[0] {
+            RuleAction::RouteAssign { issue, .. }
+            | RuleAction::NotifyTriage { issue, .. }
+            | RuleAction::Escalate { issue, .. } => issue.issue_id,
+        }
+    }
+}

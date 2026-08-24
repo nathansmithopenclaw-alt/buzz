@@ -21,5 +21,6 @@ pub mod config;
 pub mod error;
 pub mod projection;
 pub mod relay_http;
+pub mod rules;
 
 pub use error::DispatchError;

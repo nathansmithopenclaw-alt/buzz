@@ -1279,6 +1279,51 @@ pub fn threshold_request_id(issue_id: Uuid, threshold_id: &str, interval_epoch: 
     )
 }
 
+/// Deterministic request ID for label auto-routing of one issue by one label.
+/// Stable per `(issue, label)`, so a retried or re-observed dispatch collapses
+/// to at-most-once assignment effects.
+pub fn route_request_id(issue_id: Uuid, label: &str) -> Uuid {
+    Uuid::new_v5(
+        &DISPATCH_REQUEST_NAMESPACE,
+        format!("route:{issue_id}:{label}").as_bytes(),
+    )
+}
+
+/// Whether a due value has passed at `now` (unix seconds).
+///
+/// `Instant` precision passes once `now >= value`. `Date` precision passes once
+/// the whole local calendar date has elapsed (i.e. at the next local midnight).
+/// Ambiguous or unrepresentable zone transitions fail closed (not passed) so a
+/// malformed due value never triggers an escalation.
+pub fn due_has_passed(due: &Due, now: u64) -> bool {
+    let Ok(timezone) = Tz::from_str(&due.timezone) else {
+        return false;
+    };
+    match due.precision {
+        DuePrecision::Instant => now >= due.value,
+        DuePrecision::Date => {
+            let Ok(value) = i64::try_from(due.value) else {
+                return false;
+            };
+            let Some(local) = timezone.timestamp_opt(value, 0).single() else {
+                return false;
+            };
+            let Some(next_midnight) =
+                (local.date_naive() + chrono::Duration::days(1)).and_hms_opt(0, 0, 0)
+            else {
+                return false;
+            };
+            let Some(end) = timezone.from_local_datetime(&next_midnight).single() else {
+                return false;
+            };
+            let Ok(end_ts) = u64::try_from(end.timestamp()) else {
+                return false;
+            };
+            now >= end_ts
+        }
+    }
+}
+
 /// Action taken by a dispatch automation event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -4336,6 +4381,53 @@ mod tests {
             threshold_request_id(issue, "p0_unassigned_4h", 42),
             threshold_request_id(issue, "deadline_breach", 42)
         );
+        assert_eq!(
+            route_request_id(issue, "area:payments"),
+            route_request_id(issue, "area:payments")
+        );
+        assert_ne!(
+            route_request_id(issue, "area:payments"),
+            route_request_id(issue, "area:risk")
+        );
+        assert_ne!(
+            route_request_id(issue, "area:payments"),
+            threshold_request_id(issue, "area:payments", 0),
+            "request-id families must not collide across dimensions"
+        );
+    }
+
+    #[test]
+    fn due_has_passed_instant_and_date_semantics() {
+        let instant = Due {
+            value: 1_000,
+            precision: DuePrecision::Instant,
+            timezone: "UTC".to_string(),
+        };
+        assert!(!due_has_passed(&instant, 999));
+        assert!(due_has_passed(&instant, 1_000));
+        assert!(due_has_passed(&instant, 1_001));
+
+        // Date precision: value is local midnight; the date passes at the next
+        // local midnight (86_400s later for fixed-offset UTC).
+        let date = Due {
+            value: 86_400,
+            precision: DuePrecision::Date,
+            timezone: "UTC".to_string(),
+        };
+        assert!(
+            !due_has_passed(&date, 86_400),
+            "midnight itself is not passed"
+        );
+        assert!(!due_has_passed(&date, 86_400 + 86_399));
+        assert!(due_has_passed(&date, 86_400 + 86_400));
+
+        // Unknown zone fails closed: never passed.
+        let bad_zone = Due {
+            value: 1,
+            precision: DuePrecision::Instant,
+            timezone: "Not/AZone".to_string(),
+        };
+        assert!(!due_has_passed(&bad_zone, u64::MAX));
     }
 
     #[test]
