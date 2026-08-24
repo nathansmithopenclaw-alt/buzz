@@ -338,6 +338,7 @@ fn is_event_id_hex(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::{DecisionSurface, LivenessConfig, RouteRule};
+    use crate::projection::tests::TEST_NOW;
     use buzz_sdk::tracker::{Due, DuePrecision};
     use nostr::{Event, EventBuilder, Keys, Tag, Timestamp};
     use std::collections::BTreeSet;
@@ -440,13 +441,16 @@ mod tests {
 
         // Three reactions (initial pin + two re-pins) on the same message,
         // plus one reaction in an unmonitored channel and one wrong emoji.
-        store.ingest(vec![
-            reaction(home, &source, &config.pin_emoji),
-            reaction(home, &source, &config.pin_emoji),
-            reaction(home, &source, &config.pin_emoji),
-            reaction(channel(), &source, &config.pin_emoji),
-            reaction(home, &source, "\u{1F44D}"),
-        ]);
+        store.ingest(
+            vec![
+                reaction(home, &source, &config.pin_emoji),
+                reaction(home, &source, &config.pin_emoji),
+                reaction(home, &source, &config.pin_emoji),
+                reaction(channel(), &source, &config.pin_emoji),
+                reaction(home, &source, "\u{1F44D}"),
+            ],
+            TEST_NOW,
+        );
 
         let plans = plan_captures(&config, &store);
         assert_eq!(plans.len(), 1, "duplicates and unmonitored collapse");
@@ -466,12 +470,12 @@ mod tests {
         let config = base_config(dir.path().to_path_buf(), stream_id(), home);
         let source = "d".repeat(64);
 
-        store.ingest(vec![reaction(home, &source, &config.pin_emoji)]);
+        store.ingest(vec![reaction(home, &source, &config.pin_emoji)], TEST_NOW);
         assert_eq!(plan_captures(&config, &store).len(), 1);
 
         // A root already exists for this source (e.g. namespace drift): no plan.
         let root = crate::projection::tests::sample_root_event(Some(&source));
-        store.ingest(vec![root]);
+        store.ingest(vec![root], TEST_NOW);
         assert!(plan_captures(&config, &store).is_empty());
     }
 
@@ -815,13 +819,16 @@ mod tests {
         let home = channel();
         let config = base_config(dir.path().to_path_buf(), stream_id(), home);
 
-        store.ingest(vec![
-            reaction(home, "short", &config.pin_emoji),
-            reaction(home, "", &config.pin_emoji),
-            reaction(home, &"F".repeat(64), &config.pin_emoji), // uppercase
-            reaction(home, &"z".repeat(64), &config.pin_emoji), // non-hex
-            reaction(home, &"é".repeat(32), &config.pin_emoji), // multibyte
-        ]);
+        store.ingest(
+            vec![
+                reaction(home, "short", &config.pin_emoji),
+                reaction(home, "", &config.pin_emoji),
+                reaction(home, &"F".repeat(64), &config.pin_emoji), // uppercase
+                reaction(home, &"z".repeat(64), &config.pin_emoji), // non-hex
+                reaction(home, &"é".repeat(32), &config.pin_emoji), // multibyte
+            ],
+            TEST_NOW,
+        );
         assert!(
             plan_captures(&config, &store).is_empty(),
             "no capture plan from malformed e-tags"
@@ -838,11 +845,14 @@ mod tests {
         let config = base_config(dir.path().to_path_buf(), stream_id(), home);
         let source = "c".repeat(64);
 
-        store.ingest(vec![reaction(
-            home,
-            &source,
-            &format!("{}\u{FE0F}", config.pin_emoji),
-        )]);
+        store.ingest(
+            vec![reaction(
+                home,
+                &source,
+                &format!("{}\u{FE0F}", config.pin_emoji),
+            )],
+            TEST_NOW,
+        );
         let plans = plan_captures(&config, &store);
         assert_eq!(plans.len(), 1, "FE0F variant of the pin emoji captures");
         assert_eq!(plans[0].source_event_id, source);
@@ -864,7 +874,7 @@ mod tests {
 
         let imported = issue(stream, IssueStatus::Triage, &["area:payments"]);
         let root = crate::projection::tests::imported_root_event(imported.issue_id);
-        store.ingest(vec![root]);
+        store.ingest(vec![root], TEST_NOW);
 
         let fold = fold_with(stream, imported);
         assert!(

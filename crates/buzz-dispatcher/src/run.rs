@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::config::DispatcherConfig;
 use crate::emit::Emitter;
 use crate::error::DispatchError;
-use crate::projection::ProjectionStore;
+use crate::projection::{InstanceLock, ProjectionStore, DISPATCHER_LOCK_FILE};
 use crate::relay_http::RelayHttp;
 use crate::rules;
 
@@ -28,6 +28,10 @@ pub async fn run(
     relay: RelayHttp,
     instance_id: Uuid,
 ) -> Result<(), DispatchError> {
+    // M7: single-instance guard — a second process (manual run + launchd, or
+    // a respawn during a wedge) rename-clobbers the state files and loses
+    // fired-ledger entries, so fail fast instead.
+    let _lock = InstanceLock::acquire(&config.state_dir, DISPATCHER_LOCK_FILE)?;
     let mut store = ProjectionStore::open(&config.state_dir)?;
     let emitter = Emitter::new(&relay, &config, instance_id);
     let authorization = config.authorization(&relay.pubkey_hex());
@@ -62,14 +66,15 @@ pub async fn tick(
     let since = store.since();
 
     // Inclusive refresh: query everything at/after the cursor. Event-id dedupe
-    // in the store absorbs the boundary overlap.
+    // in the store absorbs the boundary overlap. `now` is computed BEFORE
+    // ingest so the cursor clamp (M1) bounds advancement at local time.
     let fresh = fetch_new_events(config, relay, since).await?;
-    let ingested = store.ingest(fresh);
+    let now = current_unix_seconds();
+    let ingested = store.ingest(fresh, now);
     if ingested > 0 {
         debug!(count = ingested, "ingested new events");
     }
 
-    let now = current_unix_seconds();
     let fold = fold_store(store, authorization, now);
 
     // Capture plans first (reactions), then fold-driven plans.

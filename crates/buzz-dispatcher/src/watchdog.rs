@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::DispatcherConfig;
 use crate::error::DispatchError;
+use crate::projection::{InstanceLock, WATCHDOG_LOCK_FILE};
 use crate::relay_http::{parse_submit_receipt, RelayHttp};
 
 /// Latest observed heartbeat for one `(signer, service_id)` pair.
@@ -131,6 +132,8 @@ struct Episode {
 /// must not blind the watchdog), so any signer for that service counts and is
 /// reported when stale.
 pub async fn watch(config: DispatcherConfig, relay: RelayHttp) -> Result<(), DispatchError> {
+    // M7: single-instance guard, matching the resident loop.
+    let _lock = InstanceLock::acquire(&config.state_dir, WATCHDOG_LOCK_FILE)?;
     let interval = Duration::from_secs(config.poll_interval_secs);
     let mut episode = Episode {
         monitoring_since: current_unix_seconds(),

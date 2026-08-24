@@ -1,8 +1,8 @@
 //! Persistent local projection state for the dispatcher.
 //!
 //! The dispatcher keeps a resident local store instead of refetching the full
-//! stream per command (plan: M15 ban). One append-only JSONL file holds every
-//! raw relay event the dispatcher has ingested (tracker stream events, pin
+//! stream per command (plan: M15 ban). One JSONL journal file holds every raw
+//! relay event the dispatcher has ingested (tracker stream events, pin
 //! reactions, dispatch actions); a single composite `(created_at, event_id)`
 //! cursor marks the high-water point across all watched families.
 //!
@@ -11,12 +11,21 @@
 //! twice; [`ProjectionStore::ingest`] dedupes by event id and keeps the store
 //! sorted by `(created_at, event_id)`. A restart re-opens the store from disk
 //! and resumes from the persisted cursor with no gaps or duplicate effects.
+//!
+//! Durability contract: state files are written to a temp sibling, `fsync`ed,
+//! and renamed, so a crash mid-write never leaves a torn file. A corrupt state
+//! file is a HARD ERROR at open, never a silent reset. Recovery from a corrupt
+//! (or lost) state dir: stop the service, move the whole `state_dir` aside,
+//! restart — the dispatcher re-ingests from the relay's retained history and
+//! its request-ID pre-checks keep replays idempotent (see docs/dispatcher.md).
 
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use nostr::{Event, JsonUtil, Kind};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -26,6 +35,10 @@ use crate::error::DispatchError;
 const CURSOR_FILE: &str = "cursor.json";
 const EVENTS_FILE: &str = "events.jsonl";
 const REQUESTS_FILE: &str = "requests.json";
+/// Single-instance lock for the resident loop (M7).
+pub const DISPATCHER_LOCK_FILE: &str = "dispatcher.lock";
+/// Single-instance lock for the watchdog process (M7).
+pub const WATCHDOG_LOCK_FILE: &str = "watchdog.lock";
 
 /// Composite `(created_at, event_id)` high-water cursor.
 ///
@@ -71,7 +84,11 @@ pub struct ProjectionStore {
     events: Vec<Event>,
     seen_ids: HashSet<String>,
     fired: FiredRequests,
-    dirty: bool,
+    /// Journal/cursor changed (new events ingested) — the only condition that
+    /// rewrites events.jsonl (M8 cheap win).
+    journal_dirty: bool,
+    /// Fired-request ledger changed.
+    ledger_dirty: bool,
 }
 
 impl ProjectionStore {
@@ -118,7 +135,8 @@ impl ProjectionStore {
             events,
             seen_ids,
             fired,
-            dirty: false,
+            journal_dirty: false,
+            ledger_dirty: false,
         })
     }
 
@@ -151,10 +169,16 @@ impl ProjectionStore {
     }
 
     /// Ingest a batch from one inclusive refresh. Events already in the store
-    /// (event-id dedupe) or not strictly newer than the cursor are dropped.
-    /// Returns the number of events newly accepted. Nothing touches disk until
-    /// [`ProjectionStore::commit`].
-    pub fn ingest(&mut self, batch: Vec<Event>) -> usize {
+    /// (event-id dedupe) are dropped. Returns the number of events newly
+    /// accepted. Nothing touches disk until [`ProjectionStore::commit`].
+    ///
+    /// M1: cursor advancement is clamped to `min(created_at, now)`. The relay
+    /// accepts ~15 minutes of future skew, and an unclamped publisher-supplied
+    /// timestamp would advance the cursor into the future, blinding the
+    /// refresh window until local time caught up (repeatably). The clamped
+    /// event is still journaled and id-deduped — only the high-water mark is
+    /// bounded by local time.
+    pub fn ingest(&mut self, batch: Vec<Event>, now: u64) -> usize {
         let mut accepted = Vec::new();
         for event in batch {
             let id = event.id.to_hex();
@@ -169,7 +193,8 @@ impl ProjectionStore {
         let newly = accepted.len();
         for event in &accepted {
             self.seen_ids.insert(event.id.to_hex());
-            let created_at = event.created_at.as_secs();
+            // M1 clamp: never advance past local time.
+            let created_at = event.created_at.as_secs().min(now);
             let id = event.id.to_hex();
             if self.cursor.precedes(created_at, &id) {
                 self.cursor = Cursor {
@@ -178,12 +203,12 @@ impl ProjectionStore {
                 };
             }
         }
-        self.events.append(&mut accepted);
-        // Maintain the global (created_at, event_id) order invariant.
-        self.events.sort_by(|a, b| {
-            (a.created_at.as_secs(), a.id.to_hex()).cmp(&(b.created_at.as_secs(), b.id.to_hex()))
-        });
-        self.dirty = true;
+        // M8 cheap win: incremental sorted merge instead of a full re-sort of
+        // the whole journal per ingest.
+        accepted.sort_unstable_by_key(event_key);
+        let existing = std::mem::take(&mut self.events);
+        self.events = merge_sorted_events(existing, accepted);
+        self.journal_dirty = true;
         newly
     }
 
@@ -239,7 +264,7 @@ impl ProjectionStore {
     /// Record a fired dispatch request id.
     pub fn mark_request_fired(&mut self, request_id: Uuid) {
         if self.fired.fired.insert(request_id) {
-            self.dirty = true;
+            self.ledger_dirty = true;
         }
     }
 
@@ -248,46 +273,120 @@ impl ProjectionStore {
     pub fn observe_fired_requests(&mut self, request_ids: impl IntoIterator<Item = Uuid>) {
         for id in request_ids {
             if self.fired.fired.insert(id) {
-                self.dirty = true;
+                self.ledger_dirty = true;
             }
         }
     }
 
     /// Whether anything changed since open/last commit.
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.journal_dirty || self.ledger_dirty
     }
 
-    /// Flush journal, cursor, and fired-request ledger to disk. Each file is
-    /// written to a temp sibling and renamed, so a crash mid-write never
-    /// leaves a torn state file.
+    /// Flush changed state to disk. The journal + cursor are rewritten ONLY
+    /// when new events were ingested, and the fired-request ledger ONLY when
+    /// it changed (M8 cheap win: a ledger-only tick no longer rewrites the
+    /// whole journal). Each file is written to a temp sibling, fsynced, and
+    /// renamed, so a crash mid-write never leaves a torn state file.
     pub fn commit(&mut self) -> Result<(), DispatchError> {
-        if !self.dirty {
-            return Ok(());
+        if self.journal_dirty {
+            let mut journal = String::new();
+            for event in &self.events {
+                journal.push_str(&event.as_json());
+                journal.push('\n');
+            }
+            write_atomic(&self.state_dir.join(EVENTS_FILE), journal.as_bytes())?;
+            write_atomic(
+                &self.state_dir.join(CURSOR_FILE),
+                serde_json::to_string_pretty(&self.cursor)?.as_bytes(),
+            )?;
+            self.journal_dirty = false;
         }
-
-        let mut journal = String::new();
-        for event in &self.events {
-            journal.push_str(&event.as_json());
-            journal.push('\n');
+        if self.ledger_dirty {
+            write_atomic(
+                &self.state_dir.join(REQUESTS_FILE),
+                serde_json::to_string(&self.fired)?.as_bytes(),
+            )?;
+            self.ledger_dirty = false;
         }
-        write_atomic(&self.state_dir.join(EVENTS_FILE), journal.as_bytes())?;
-        write_atomic(
-            &self.state_dir.join(CURSOR_FILE),
-            serde_json::to_string_pretty(&self.cursor)?.as_bytes(),
-        )?;
-        write_atomic(
-            &self.state_dir.join(REQUESTS_FILE),
-            serde_json::to_string(&self.fired)?.as_bytes(),
-        )?;
-        self.dirty = false;
         Ok(())
     }
 }
 
+/// Single-instance advisory lock over one file in the state dir (M7).
+///
+/// Two dispatcher processes rename-clobbering `events.jsonl`/`requests.json`
+/// last-writer-wins would silently lose fired-ledger entries and produce
+/// duplicate emissions. The resident loop and the watchdog each hold their
+/// own lock file, so a second instance (manual run + launchd, or a respawn
+/// during a wedge) fails fast instead of corrupting state. Released on drop.
+///
+/// Uses flock via the `fs2` crate (exclusive, non-blocking). The only
+/// Cargo.lock delta is the fs2 entry itself — the lock was hand-pinned so no
+/// unrelated resolution moved.
+pub struct InstanceLock {
+    _file: fs::File,
+}
+
+impl InstanceLock {
+    /// Acquire an exclusive non-blocking lock on `state_dir/lock_name`.
+    pub fn acquire(state_dir: &Path, lock_name: &str) -> Result<Self, DispatchError> {
+        fs::create_dir_all(state_dir)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(state_dir.join(lock_name))?;
+        file.try_lock_exclusive().map_err(|error| {
+            DispatchError::Other(format!(
+                "another instance holds {} in {}: {error}",
+                lock_name,
+                state_dir.display()
+            ))
+        })?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// `(created_at, id)` sort key shared by ingest ordering and the merge.
+fn event_key(event: &Event) -> (u64, String) {
+    (event.created_at.as_secs(), event.id.to_hex())
+}
+
+/// Merge two `(created_at, event_id)`-sorted event vectors in one pass.
+fn merge_sorted_events(a: Vec<Event>, b: Vec<Event>) -> Vec<Event> {
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let mut a_iter = a.into_iter().peekable();
+    let mut b_iter = b.into_iter().peekable();
+    loop {
+        let take_a = match (a_iter.peek(), b_iter.peek()) {
+            (Some(left), Some(right)) => event_key(left) <= event_key(right),
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if let Some(event) = if take_a { a_iter.next() } else { b_iter.next() } {
+            out.push(event);
+        }
+    }
+    out
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DispatchError> {
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(bytes)?;
+    // fsync the data before the rename so the renamed file is durable, not a
+    // zero-length/torn placeholder the corrupt-state hard-error would trip on
+    // after a power loss.
+    file.sync_all()?;
+    drop(file);
     fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -297,6 +396,9 @@ pub(crate) mod tests {
     use super::*;
     use buzz_sdk::tracker::{build_tracker_issue, IssueRoot, IssueStatus};
     use nostr::{EventBuilder, Keys, Timestamp};
+
+    /// Test clock: comfortably above every fixture created_at.
+    pub(crate) const TEST_NOW: u64 = 2_000_000_000;
 
     fn signed_event(created_at: u64, content: &str) -> Event {
         let keys = Keys::generate();
@@ -373,7 +475,7 @@ pub(crate) mod tests {
         let b = signed_event(100, "b");
         let c = signed_event(101, "c");
 
-        store.ingest(vec![c.clone(), b.clone(), a.clone()]);
+        store.ingest(vec![c.clone(), b.clone(), a.clone()], TEST_NOW);
         let ids: Vec<String> = store.events().iter().map(|e| e.id.to_hex()).collect();
         let mut expected: Vec<(u64, String)> = vec![
             (a.created_at.as_secs(), a.id.to_hex()),
@@ -389,7 +491,7 @@ pub(crate) mod tests {
 
         // Duplicate batch: nothing accepted, cursor unchanged.
         let before = (store.cursor().0, store.cursor().1.to_string());
-        let accepted = store.ingest(vec![a, b, c]);
+        let accepted = store.ingest(vec![a, b, c], TEST_NOW);
         assert_eq!(accepted, 0);
         assert_eq!((store.cursor().0, store.cursor().1.to_string()), before);
     }
@@ -403,7 +505,10 @@ pub(crate) mod tests {
 
         {
             let mut store = ProjectionStore::open(dir.path()).expect("open");
-            assert_eq!(store.ingest(vec![first.clone(), second.clone()]), 2);
+            assert_eq!(
+                store.ingest(vec![first.clone(), second.clone()], TEST_NOW),
+                2
+            );
             store.mark_request_fired(Uuid::new_v4());
             store.commit().expect("commit");
         }
@@ -415,7 +520,7 @@ pub(crate) mod tests {
         assert_eq!(store.events().len(), 2, "journal survives restart");
         assert!(store.cursor().0 == 60, "cursor survives restart");
 
-        let accepted = store.ingest(vec![second.clone(), third.clone()]);
+        let accepted = store.ingest(vec![second.clone(), third.clone()], TEST_NOW);
         assert_eq!(accepted, 1, "boundary duplicate deduped, new event taken");
         assert_eq!(store.events().len(), 3);
         assert_eq!(store.cursor().0, 70);
@@ -434,7 +539,7 @@ pub(crate) mod tests {
         let source = "a".repeat(64);
         let other = "b".repeat(64);
         assert!(!store.has_root_with_source(&source));
-        store.ingest(vec![sample_root_event(Some(&source))]);
+        store.ingest(vec![sample_root_event(Some(&source))], TEST_NOW);
         assert!(store.has_root_with_source(&source));
         assert!(!store.has_root_with_source(&other));
     }
@@ -443,7 +548,7 @@ pub(crate) mod tests {
     fn cursor_payload_is_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut store = ProjectionStore::open(dir.path()).expect("open");
-        store.ingest(vec![signed_event(42, "x")]);
+        store.ingest(vec![signed_event(42, "x")], TEST_NOW);
         let payload = store.cursor_payload().expect("payload");
         assert!(payload.len() <= buzz_sdk::tracker::MAX_CURSOR_BYTES);
         assert!(payload.contains("42"));
@@ -469,5 +574,73 @@ pub(crate) mod tests {
         fs::write(dir.path().join(EVENTS_FILE), "not-json\n").expect("write");
         let error = ProjectionStore::open(dir.path()).expect_err("must fail");
         assert!(matches!(error, DispatchError::Other(_)));
+    }
+
+    /// M1 regression guard: publisher-controlled `created_at` may run up to
+    /// ~15 minutes ahead (relay skew tolerance). The cursor must clamp to
+    /// local `now` so one future-stamped event cannot blind the refresh
+    /// window; the event itself is still journaled and deduped.
+    #[test]
+    fn cursor_advancement_is_clamped_to_now() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+
+        let future = signed_event(9_999_999, "future-stamped");
+        let local_now = 1_000;
+        assert_eq!(store.ingest(vec![future.clone()], local_now), 1);
+        assert_eq!(
+            store.cursor().0,
+            local_now,
+            "cursor clamps future created_at to local now"
+        );
+        assert_eq!(store.events().len(), 1, "event still journaled");
+
+        // Re-delivery dedupes by id even though the cursor is clamped.
+        assert_eq!(store.ingest(vec![future], local_now + 10), 0);
+
+        // A genuinely newer (but still clamped) event advances within bounds.
+        let normal = signed_event(1_500, "normal");
+        assert_eq!(store.ingest(vec![normal], 2_000), 1);
+        assert_eq!(store.cursor().0, 1_500);
+    }
+
+    /// M7 regression guard: a second instance against the same state dir
+    /// fails fast instead of clobbering state files last-writer-wins.
+    #[test]
+    fn instance_lock_blocks_second_acquisition() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = InstanceLock::acquire(dir.path(), DISPATCHER_LOCK_FILE).expect("first lock");
+        let second = InstanceLock::acquire(dir.path(), DISPATCHER_LOCK_FILE);
+        assert!(
+            second.is_err(),
+            "second instance must not acquire the same lock"
+        );
+        drop(first);
+        InstanceLock::acquire(dir.path(), DISPATCHER_LOCK_FILE).expect("lock released on drop");
+        // The watchdog lock is independent of the dispatcher lock.
+        InstanceLock::acquire(dir.path(), WATCHDOG_LOCK_FILE).expect("watchdog lock");
+    }
+
+    /// M8 cheap win: a ledger-only change must not rewrite events.jsonl.
+    #[test]
+    fn commit_skips_journal_rewrite_when_only_ledger_changed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        store.ingest(vec![signed_event(100, "x")], TEST_NOW);
+        store.commit().expect("commit");
+
+        // Prove the skip deterministically: remove the journal, then a
+        // ledger-only commit must not recreate it.
+        let journal_path = dir.path().join(EVENTS_FILE);
+        fs::remove_file(&journal_path).expect("remove journal");
+        store.mark_request_fired(Uuid::new_v4());
+        assert!(store.is_dirty());
+        store.commit().expect("ledger commit");
+        assert!(
+            !journal_path.exists(),
+            "ledger-only commit must not rewrite the journal"
+        );
+        assert!(dir.path().join(REQUESTS_FILE).exists());
+        assert!(!store.is_dirty());
     }
 }
