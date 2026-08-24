@@ -665,11 +665,11 @@ pub fn spawn_agent_child(
     // the nest and derive its environment (DSH_HOME redirect + idle-timeout
     // default). Runs only for the dsh identity; every entry yields to an
     // operator- or record-set value.
-    let dsh_profile_dir = dsh_provision_profile(
+    let dsh_home_dir = dsh_provision_profile(
         super::discovery::normalize_command_identity(effective_command).as_str(),
     );
     for (key, value) in dsh_derived_env(
-        dsh_profile_dir.as_deref(),
+        dsh_home_dir.as_deref(),
         std::env::var_os("DSH_HOME").is_some(),
         std::env::var_os("BUZZ_ACP_IDLE_TIMEOUT").is_some(),
         record.idle_timeout_seconds,
@@ -1022,8 +1022,18 @@ fn dsh_provision_profile(command_identity: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     let workdir = super::default_agent_workdir()?;
-    match super::dsh_profile::provision(&workdir.join(".dsh-home")) {
-        Ok(profile_home) => Some(profile_home),
+    dsh_provision_profile_in(&workdir)
+}
+
+/// Provision into `<workdir>/.dsh-home` and return the DSH home ROOT — never
+/// the profile directory itself: dsh resolves `--profile <name>` at
+/// `$DSH_HOME/profiles/<name>` (dsh-app-boot contract), so a DSH_HOME pointing
+/// at the profile dir makes dsh look for
+/// `.dsh-home/profiles/buzz-acp/profiles/buzz-acp` and fail boot.
+fn dsh_provision_profile_in(workdir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dsh_home = workdir.join(".dsh-home");
+    match super::dsh_profile::provision(&dsh_home) {
+        Ok(_) => Some(dsh_home),
         Err(error) => {
             eprintln!(
                 "buzz-desktop: dsh profile provisioning failed ({error}); leaving DSH_HOME to operator setup"

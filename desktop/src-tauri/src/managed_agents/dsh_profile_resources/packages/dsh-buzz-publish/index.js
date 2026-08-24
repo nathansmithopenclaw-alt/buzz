@@ -21,12 +21,14 @@
  *
  * DUPLICATE-PUBLISH GUARD (binding, Helm 2026-08-24): a relay returning an
  * unexpected receipt shape once made local-v4 retry-storm six identical
- * publishes. This plugin therefore remembers the last SUCCESSFUL publish per
- * agent session; an identical (channel, content, reply-to) request returns the
- * prior event id without invoking the CLI again. Scope note: dsh's tool
- * execution context exposes no turn token, so the guard keys on "most recent
- * successful publish of this session" — which is precisely the consecutive-
- * retry storm class; a genuinely new publish (different args) always passes.
+ * publishes — the storm happened precisely because the receipt did not parse,
+ * so the guard records on ANY exit-0 CLI completion (parseable event id or
+ * not) and replays the prior result on an identical resend. Scope notes: dsh's
+ * tool execution context exposes no turn token, so the guard keys on "most
+ * recent exit-0 publish of this session" — exactly the consecutive-retry
+ * storm class; mentions participate in the identity so a resend that ADDS a
+ * mention is never suppressed; nonzero-exit retries are deliberately never
+ * deduped, because there the publish may genuinely not have happened.
  * Everything else stays fail-loud verbatim.
  *
  * Contract (Helm plan-gate 2026-08-24): args mirror the CLI surface the Buzz
@@ -95,12 +97,18 @@ export const _internals = {
 let internalsRunner = runCli
 
 /**
- * Stable fingerprint of one publish request (guard input).
- * @param {{channel: string, content: string, reply_to?: string}} args - validated tool args.
+ * Stable fingerprint of one publish request (guard input). Mentions are
+ * normalized (trimmed, lowercased, order-insensitive) and included: an
+ * identical resend that ADDS a mention is a different publish — suppressing
+ * it would silently drop the notification.
+ * @param {{channel: string, content: string, reply_to?: string, mentions?: string[]}} args - validated tool args.
  * @returns {string} fingerprint key.
  */
 function fingerprint(args) {
-  return JSON.stringify([args.channel.trim(), args.content.trim(), args.reply_to?.trim() ?? ''])
+  const mentions = [...(args.mentions ?? [])]
+    .map((mention) => String(mention).trim().toLowerCase())
+    .sort()
+  return JSON.stringify([args.channel.trim(), args.content.trim(), args.reply_to?.trim() ?? '', mentions])
 }
 
 /**
@@ -159,7 +167,9 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.duplicate_of_prior_publish === true
-          ? `Not sent again — identical message already published as ${value.event_id}.`
+          ? value.event_id
+            ? `Not sent again — identical message already published as ${value.event_id}.`
+            : 'Not sent again — identical message already published this session.'
           : value.event_id
             ? `Published event ${value.event_id}${Array.isArray(value.mention_pubkeys) && value.mention_pubkeys.length > 0 ? ` (notified ${value.mention_pubkeys.length})` : ''}.`
             : `Publish result: ${String(value.raw ?? '').slice(0, 400)}`,
@@ -172,10 +182,10 @@ export function apply(ctx, config) {
       if (content.length === 0) throw new Error('invalid arguments: `content` must be a non-empty message body')
 
       const sessionKey = exec?.agent ? String(exec.agent.session.header.id) : '(no-session)'
-      const print = fingerprint({ channel, content, reply_to: args.reply_to })
+      const print = fingerprint({ channel, content, reply_to: args.reply_to, mentions: args.mentions })
       const prior = lastPublish.get(sessionKey)
       if (prior && prior.print === print) {
-        return { accepted: true, event_id: prior.eventId, duplicate_of_prior_publish: true }
+        return { ...prior.result, duplicate_of_prior_publish: true }
       }
 
       if (!process.env.BUZZ_PRIVATE_KEY) {
@@ -200,9 +210,13 @@ export function apply(ctx, config) {
         // CLI printed non-JSON (banner, warning, or older format) — hand the raw text back.
         result = { accepted: true, raw: stdout.trim() }
       }
-      if (result.accepted && typeof result.event_id === 'string') {
-        lastPublish.set(sessionKey, { print, eventId: result.event_id })
-      }
+      // Record on ANY exit-0 completion — parseable receipt or not. The
+      // motivating storm was exactly "publish reached the relay but the
+      // receipt shape surprised us": recording only parsed event ids left
+      // every identical retry re-invoking the CLI. Residual class, deliberate:
+      // nonzero-exit retries are never deduped, because there the publish may
+      // genuinely not have happened; those stay fail-loud verbatim.
+      lastPublish.set(sessionKey, { print, result })
       return result
     },
     presentCall: args => ({ card: 'generic', title: 'Publish to Buzz channel', kind: 'other', rawInput: args }),

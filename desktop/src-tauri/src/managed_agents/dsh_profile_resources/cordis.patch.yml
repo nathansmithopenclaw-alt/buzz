@@ -17,7 +17,12 @@
     thinking: enabled
     reasoningEffort: high
     apiKeyEnv: DSH_API_KEY
-    baseURL: http://100.80.202.75:4000/v1
+    # Deployment-varying LLM endpoint. Defaults to the Smith Crafts Spark
+    # router (internal-only topology); operators override with DSH_LLM_BASE_URL.
+    # The default literal is a Smith Crafts deployment fact, not a Buzz
+    # dependency — swap it out before any upstream-facing packaging of this
+    # profile.
+    baseURL: !!js process.env.DSH_LLM_BASE_URL || 'http://100.80.202.75:4000/v1'
     models:
       - id: local-v4
         name: DeepSeek-V4-Flash (Spark local-v4)
@@ -63,7 +68,9 @@
       config:
         provider: deepseek-official
         model: local-v4
-        persistenceRoot: ./sessions
+        # Session data lives under the redirected DSH home, not the workspace
+        # root (cwd-relative paths would drop a stray sessions/ dir there).
+        persistenceRoot: ./.dsh-home/sessions
         persistenceCompression: zstd
         workspaceContext:
           maxBytes: 65536
