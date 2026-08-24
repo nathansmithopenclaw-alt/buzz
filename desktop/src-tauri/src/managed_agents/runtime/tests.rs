@@ -1320,3 +1320,84 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
 }
+
+#[test]
+fn dsh_derived_env_redirects_and_sets_idle_default() {
+    let dir = std::path::Path::new("/nest/.dsh-home");
+    let env = super::dsh_derived_env(Some(dir), false, false, None);
+    assert_eq!(
+        env,
+        vec![
+            ("DSH_HOME".to_string(), "/nest/.dsh-home".to_string()),
+            ("BUZZ_ACP_IDLE_TIMEOUT".to_string(), "1800".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn dsh_derived_env_yields_to_operator_and_record() {
+    let dir = std::path::Path::new("/nest/.dsh-home");
+    // Operator already set DSH_HOME in the parent env.
+    let env = super::dsh_derived_env(Some(dir), true, false, None);
+    assert!(!env.iter().any(|(k, _)| k == "DSH_HOME"));
+    assert!(env
+        .iter()
+        .any(|(k, v)| k == "BUZZ_ACP_IDLE_TIMEOUT" && v == "1800"));
+    // Record carries an explicit idle timeout — no default emission.
+    let env = super::dsh_derived_env(Some(dir), true, true, Some(600));
+    assert!(env.is_empty());
+}
+
+#[test]
+fn dsh_derived_env_empty_without_provisioned_profile() {
+    // Non-dsh identities and failed provisioning produce nothing.
+    assert!(super::dsh_derived_env(None, false, false, None).is_empty());
+}
+
+#[test]
+fn dsh_provisions_real_path_and_dsh_home_resolves_the_profile() {
+    // The REAL seam path, end to end: provisioning through the actual
+    // function into a nest root, DSH_HOME derived from ITS output, then dsh's
+    // resolution rule ($DSH_HOME/profiles/<name>) must find the profile.
+    // Regression guard for the P0 class: a seam that returns the profile dir
+    // instead of the home root passes value-shaped unit tests but never boots.
+    //
+    // BUZZ_TEST_DSH_NEST optionally redirects the root so the live prod-smoke
+    // driver can consume the seam's own output; when unset this is a fully
+    // self-contained temp-dir run with cleanup.
+    let owned_root = std::env::temp_dir().join(format!("buzz-dsh-seam-{}", std::process::id()));
+    let smoke_root = std::env::var("BUZZ_TEST_DSH_NEST")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let root = match &smoke_root {
+        Some(path) => path.clone(),
+        None => owned_root.clone(),
+    };
+    let derived_home = super::dsh_provision_profile_in(&root)
+        .expect("provisioning succeeds through the real seam");
+    println!("DSH_SEAM_HOME={}", derived_home.display());
+    assert!(
+        derived_home.ends_with(".dsh-home"),
+        "DSH_HOME must be the home root, got {derived_home:?}"
+    );
+    let resolved = derived_home
+        .join("profiles")
+        .join("buzz-acp")
+        .join("cordis.patch.yml");
+    assert!(
+        resolved.exists(),
+        "dsh --profile buzz-acp must resolve under DSH_HOME ({})",
+        resolved.display()
+    );
+
+    if smoke_root.is_none() {
+        std::fs::remove_dir_all(&owned_root).ok();
+    }
+}
+
+#[test]
+fn dsh_provision_profile_gates_on_identity() {
+    // Only the dsh identity provisions; other harnesses keep their own setup.
+    assert!(super::dsh_provision_profile("goose").is_none());
+    assert!(super::dsh_provision_profile("prime-agent").is_none());
+}

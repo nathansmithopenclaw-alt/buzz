@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="DeepSeek Harness">
+  <!-- Original Smith Crafts geometric mark for the deepseek runtime preset:
+       three composition inputs converging on one node (the harness spine).
+       Not a copy of any DeepSeek brand asset; the vendor's whale mark and
+       wordmark are deliberately not used. -->
+  <rect width="64" height="64" rx="14" fill="#101418"/>
+  <g stroke="#4D6BFE" stroke-width="4.5" stroke-linecap="round" fill="none">
+    <path d="M14 20 L28 32"/>
+    <path d="M14 44 L28 32"/>
+    <path d="M50 18 L36 30"/>
+    <path d="M50 46 L36 34"/>
+  </g>
+  <circle cx="32" cy="32" r="7.5" fill="#4D6BFE"/>
+</svg>

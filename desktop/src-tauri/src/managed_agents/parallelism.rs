@@ -30,6 +30,13 @@ pub const OPENCLAW_MAX_PARALLELISM: u32 = 5;
 /// than sharing a kernel.
 pub const PRIME_MAX_PARALLELISM: u32 = 3;
 
+/// Maximum parallelism for the DeepSeek Harness (`dsh`).
+///
+/// Like Prime, the harness holds one ACP conversation per process, so Buzz
+/// spawns one `dsh` subprocess per channel; three concurrent workers is the
+/// starting cap (mirrors [`PRIME_MAX_PARALLELISM`]).
+pub const DSH_MAX_PARALLELISM: u32 = 3;
+
 /// Return the maximum allowed parallelism for the given harness command, or
 /// `None` when the harness has no cap.
 ///
@@ -39,6 +46,7 @@ pub fn harness_max_parallelism(command: &str) -> Option<u32> {
     match super::discovery::normalize_command_identity(command).as_str() {
         "openclaw" => Some(OPENCLAW_MAX_PARALLELISM),
         "prime-agent" | "primeagent" => Some(PRIME_MAX_PARALLELISM),
+        "dsh" => Some(DSH_MAX_PARALLELISM),
         _ => None,
     }
 }

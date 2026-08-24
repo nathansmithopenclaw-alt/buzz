@@ -661,6 +661,21 @@ pub fn spawn_agent_child(
     if let Some(max_dur) = record.max_turn_duration_seconds {
         command.env("BUZZ_ACP_MAX_TURN_DURATION", max_dur.to_string());
     }
+    // DeepSeek Harness composition: provision the owned buzz-acp profile into
+    // the nest and derive its environment (DSH_HOME redirect + idle-timeout
+    // default). Runs only for the dsh identity; every entry yields to an
+    // operator- or record-set value.
+    let dsh_home_dir = dsh_provision_profile(
+        super::discovery::normalize_command_identity(effective_command).as_str(),
+    );
+    for (key, value) in dsh_derived_env(
+        dsh_home_dir.as_deref(),
+        std::env::var_os("DSH_HOME").is_some(),
+        std::env::var_os("BUZZ_ACP_IDLE_TIMEOUT").is_some(),
+        record.idle_timeout_seconds,
+    ) {
+        command.env(key, value);
+    }
     let acp_n = super::acp_agents_value(effective_command, record.parallelism);
     command.env("BUZZ_ACP_AGENTS", acp_n);
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
@@ -966,6 +981,68 @@ pub fn spawn_agent_child(
 /// exact workspace-relay read the caller's scope assertion passed on; it never
 /// re-reads the mutable override (see `relay::scope`). The key comes from
 /// [`bound_runtime_key`] — the seam the spawn-key regressions exercise.
+/// Derived environment entries for the DeepSeek Harness (`dsh`) identity.
+///
+/// `dsh_profile_dir` is `Some` only for dsh identities whose owned composition
+/// provisioned successfully (see [`dsh_provision_profile`]); the redirect then
+/// yields to an operator-set `DSH_HOME`. The idle-timeout default exists
+/// because dsh's ACP leaf emits committed text only — silence equals whole-turn
+/// latency, and high-reasoning turns measured in the D0 spike can outlast the
+/// harness's 900 s default — and yields to a record- or operator-set value.
+pub(crate) fn dsh_derived_env(
+    dsh_profile_dir: Option<&std::path::Path>,
+    parent_has_dsh_home: bool,
+    parent_has_idle_timeout: bool,
+    record_idle_timeout: Option<u64>,
+) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(dir) = dsh_profile_dir {
+        if !parent_has_dsh_home {
+            env.push(("DSH_HOME".to_string(), dir.display().to_string()));
+        }
+        if record_idle_timeout.is_none() && !parent_has_idle_timeout {
+            env.push((
+                "BUZZ_ACP_IDLE_TIMEOUT".to_string(),
+                DSH_DEFAULT_IDLE_TIMEOUT_SECS.to_string(),
+            ));
+        }
+    }
+    env
+}
+
+const DSH_DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1800;
+
+/// Provision the owned buzz-acp profile for a dsh agent into the nest's
+/// `.dsh-home`, returning the profile home on success. Non-dsh identities skip
+/// entirely; provisioning failure is logged and reported as `None` so the
+/// spawn proceeds under whatever operator-provided setup exists (the dsh boot
+/// will fail loud there if the profile is genuinely missing).
+fn dsh_provision_profile(command_identity: &str) -> Option<std::path::PathBuf> {
+    if command_identity != "dsh" {
+        return None;
+    }
+    let workdir = super::default_agent_workdir()?;
+    dsh_provision_profile_in(&workdir)
+}
+
+/// Provision into `<workdir>/.dsh-home` and return the DSH home ROOT — never
+/// the profile directory itself: dsh resolves `--profile <name>` at
+/// `$DSH_HOME/profiles/<name>` (dsh-app-boot contract), so a DSH_HOME pointing
+/// at the profile dir makes dsh look for
+/// `.dsh-home/profiles/buzz-acp/profiles/buzz-acp` and fail boot.
+fn dsh_provision_profile_in(workdir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dsh_home = workdir.join(".dsh-home");
+    match super::dsh_profile::provision(&dsh_home) {
+        Ok(_) => Some(dsh_home),
+        Err(error) => {
+            eprintln!(
+                "buzz-desktop: dsh profile provisioning failed ({error}); leaving DSH_HOME to operator setup"
+            );
+            None
+        }
+    }
+}
+
 pub fn start_managed_agent_process(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,

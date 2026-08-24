@@ -195,6 +195,36 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             Spark V4 or the MBP Qwen lane — there is no API key required for those.",
         underlying_cli: None,
     },
+    PresetHarness {
+        id: "deepseek",
+        label: "DeepSeek Harness",
+        command: "dsh",
+        args: &["--profile", "buzz-acp"],
+        install_instructions_url: "https://github.com/deepseek-ai/deepseek-harness",
+        install_hint: "⚠️  DEVELOPER PREVIEW — pinned to upstream @deepseek-ai/dsh 0.1.1-rc.2; \
+            expect breaking churn between pins. Install the pinned CLI plus its two ACP \
+            companion packages (the CLI alone does not pull them) into Buzz's dsh home — \
+            profile plugins resolve up-chain from the profile directory, so they must live \
+            under `~/.buzz/.dsh-home`, not the npm global root (never auto-installed):\n\n\
+            mkdir -p ~/.buzz/.dsh-home && cd ~/.buzz/.dsh-home\n\
+            npm install @deepseek-ai/dsh@0.1.1-rc.2 @deepseek-ai/dsh-acp@0.1.1-rc.2 \
+            @deepseek-ai/dsh-acp-demo@0.1.1-rc.2\n\
+            mkdir -p ~/.local/bin && ln -sf ~/.buzz/.dsh-home/node_modules/.bin/dsh \
+            ~/.local/bin/dsh\n\
+            (Node 22.19+ / 24).\n\n\
+            Buzz runs `dsh --profile buzz-acp` — an owned profile Buzz provisions \
+            into the nest `.dsh-home` on first spawn (LLM route to the Smith Crafts \
+            Spark router, workspace-write sandbox, and an owned `buzz_publish` tool: \
+            dsh scrubs credential-shaped env vars out of model shells, so publishing \
+            goes through that tool rather than raw CLI calls). Set `DSH_HOME` to \
+            override the provisioned home; publish credentials flow only through \
+            the harness process environment — nothing is written to disk. To override \
+            the model or provider per deployment, pass a Cordis patch (`dsh --patch \
+            <file>`): each patch row REPLACES that plugin's entire config block, so \
+            repeat every field you want to keep.\n\n\
+            Like Prime, one conversation per process — capped at 3 concurrent workers.",
+        underlying_cli: None,
+    },
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
@@ -311,6 +341,45 @@ mod tests {
         install_hint: "Install the amp-acp npm adapter.",
         underlying_cli: Some("amp"),
     };
+
+    #[test]
+    fn deepseek_preset_pins_owned_buzz_acp_profile() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "deepseek")
+            .expect("DeepSeek preset should be present");
+
+        assert_eq!(preset.label, "DeepSeek Harness");
+        assert_eq!(preset.command, "dsh");
+        assert_eq!(preset.args, &["--profile", "buzz-acp"]);
+        assert_eq!(preset.underlying_cli, None);
+        // Loud developer-preview pin hint (D1 plan-gate): the pin version must
+        // appear so operators can see what they are opting into.
+        assert!(preset.install_hint.contains("DEVELOPER PREVIEW"));
+        assert!(preset.install_hint.contains("0.1.1-rc.2"));
+        // Round 3: all three pins in one command, installed where the
+        // profile's up-chain resolution actually reaches (the dsh home), and
+        // the --patch wholesale-replace caveat stated for overlay authors.
+        assert!(preset.install_hint.contains(
+            "npm install @deepseek-ai/dsh@0.1.1-rc.2 \
+             @deepseek-ai/dsh-acp@0.1.1-rc.2 @deepseek-ai/dsh-acp-demo@0.1.1-rc.2"
+        ));
+        assert!(preset
+            .install_hint
+            .contains("mkdir -p ~/.buzz/.dsh-home && cd ~/.buzz/.dsh-home"));
+        assert!(preset.install_hint.contains("REPLACES"));
+
+        let entry = preset_catalog_entry(preset, |command| {
+            (command == "dsh").then(|| PathBuf::from("/usr/local/bin/dsh"))
+        });
+        assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
+        assert_eq!(entry.default_args, vec!["--profile", "buzz-acp"]);
+        assert_eq!(entry.source, HarnessSource::Preset);
+        assert_eq!(
+            entry.max_parallelism,
+            Some(crate::managed_agents::parallelism::DSH_MAX_PARALLELISM)
+        );
+    }
 
     #[test]
     fn devin_preset_uses_official_native_acp_invocation() {

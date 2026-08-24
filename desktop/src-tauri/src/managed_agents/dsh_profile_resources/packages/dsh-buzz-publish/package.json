@@ -1,0 +1,8 @@
+{
+  "name": "@smith-crafts/dsh-buzz-publish",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "description": "Owned Buzz publish tool plugin for the Smith Crafts deepseek (dsh) buzz-acp profile."
+}
