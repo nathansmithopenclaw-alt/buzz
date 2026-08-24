@@ -79,7 +79,12 @@ impl<'a> Emitter<'a> {
             v: TRACKER_VERSION,
             op: "create".to_string(),
             issue_id: capture_issue_id(&plan.source_event_id),
-            identifier: format!("PIN-{}", &plan.source_event_id[..8]),
+            identifier: format!(
+                "PIN-{}",
+                plan.source_event_id
+                    .get(..8)
+                    .unwrap_or(&plan.source_event_id)
+            ),
             title: plan.title.clone(),
             body: format!(
                 "Captured from a pin reaction. Source event: `{}`.",

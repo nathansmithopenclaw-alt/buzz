@@ -110,7 +110,7 @@ pub fn plan_captures(config: &DispatcherConfig, store: &ProjectionStore) -> Vec<
     let mut planned: HashSet<Uuid> = HashSet::new();
 
     for event in store.events() {
-        if event.kind != reaction_kind || event.content != config.pin_emoji {
+        if event.kind != reaction_kind || !emoji_matches(&event.content, &config.pin_emoji) {
             continue;
         }
         let channel_id = match first_tag_uuid(event, "h") {
@@ -120,6 +120,12 @@ pub fn plan_captures(config: &DispatcherConfig, store: &ProjectionStore) -> Vec<
         let Some(source_event_id) = first_tag_value(event, "e") else {
             continue;
         };
+        // B2: e-tags are publisher-controlled. Only a 64-char lowercase-hex
+        // event id may become a capture source; anything else is skipped
+        // here (never sliced, never warned about per tick).
+        if !is_event_id_hex(&source_event_id) {
+            continue;
+        }
 
         let request_id = pin_capture_request_id(&source_event_id);
         // Idempotency belt-and-suspenders: fired ledger first, then the
@@ -254,14 +260,28 @@ fn matching_route<'a>(
 }
 
 /// Entry time when `threshold` qualifies `issue`, else `None`.
+///
+/// B3: unassigned conditions qualify ONLY once the full window has elapsed
+/// since status entry (`now >= entered_status_at + window_secs`). The window
+/// is the qualification period, not just the dedup epoch — a fresh triage
+/// issue must NOT fire `unassigned_24h` at T+0 (plan: "unassigned:T+24h").
 fn qualifies(issue: &IssueProjection, threshold: &Threshold, now: u64) -> Option<u64> {
     match &threshold.condition {
         ThresholdCondition::Unassigned => {
-            (issue.assignee.is_none()).then_some(issue.entered_status_at)
+            let window_elapsed = now
+                >= issue
+                    .entered_status_at
+                    .saturating_add(threshold.window_secs);
+            (issue.assignee.is_none() && window_elapsed).then_some(issue.entered_status_at)
         }
-        ThresholdCondition::UnassignedWithLabel { label } => (issue.assignee.is_none()
-            && issue.labels.contains(label))
-        .then_some(issue.entered_status_at),
+        ThresholdCondition::UnassignedWithLabel { label } => {
+            let window_elapsed = now
+                >= issue
+                    .entered_status_at
+                    .saturating_add(threshold.window_secs);
+            (issue.assignee.is_none() && issue.labels.contains(label) && window_elapsed)
+                .then_some(issue.entered_status_at)
+        }
         ThresholdCondition::DeadlinePassed => issue
             .due
             .as_ref()
@@ -292,6 +312,26 @@ fn first_tag_value(event: &nostr::Event, name: &str) -> Option<String> {
 
 fn first_tag_uuid(event: &nostr::Event, name: &str) -> Option<Uuid> {
     first_tag_value(event, name).and_then(|value| Uuid::parse_str(&value).ok())
+}
+
+/// Reaction-emoji match tolerant of the U+FE0F variation selector that real
+/// clients append to emoji-presentation reactions (📌 vs 📌️). Both sides are
+/// normalized before comparison.
+fn emoji_matches(content: &str, pin_emoji: &str) -> bool {
+    normalize_reaction(content) == normalize_reaction(pin_emoji)
+}
+
+fn normalize_reaction(value: &str) -> String {
+    value.chars().filter(|c| *c != '\u{FE0F}').collect()
+}
+
+/// Strict event-id shape: exactly 64 lowercase hex chars. Publisher-controlled
+/// e-tags must pass this before they are sliced or persisted (B2).
+fn is_event_id_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 #[cfg(test)]
@@ -541,6 +581,96 @@ mod tests {
     }
 
     #[test]
+    fn unassigned_threshold_qualifies_only_after_window_not_at_t0() {
+        // B3 contract (Helm round 1): the window is the qualification
+        // period. NO fire at T+0, fire once at T+window.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let mut config = base_config(dir.path().to_path_buf(), stream, home);
+        config.thresholds.push(Threshold {
+            id: "unassigned_24h".to_string(),
+            condition: ThresholdCondition::Unassigned,
+            window_secs: 24 * 3600,
+            action: ThresholdAction::NotifyHome,
+        });
+
+        let mut target = issue(stream, IssueStatus::Triage, &[]);
+        target.entered_status_at = 1_000;
+        target.home_channel_id = Some(home);
+        let fold = fold_with(stream, target);
+
+        fn escalation_count(plans: &[RuleAction]) -> usize {
+            plans
+                .iter()
+                .filter(|action| matches!(action, RuleAction::Escalate { .. }))
+                .count()
+        }
+
+        // T+0: arrival may notice, but the threshold must NOT fire.
+        assert_eq!(
+            escalation_count(&plan_fold_actions(&config, &fold, &store, 1_000)),
+            0
+        );
+        // Window minus one second: still nothing.
+        assert_eq!(
+            escalation_count(&plan_fold_actions(&config, &fold, &store, 1_000 + 86_399)),
+            0
+        );
+        // Exactly T+window: qualifies.
+        assert_eq!(
+            escalation_count(&plan_fold_actions(&config, &fold, &store, 1_000 + 86_400)),
+            1
+        );
+    }
+
+    #[test]
+    fn labeled_threshold_qualifies_only_after_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let stream = stream_id();
+        let mut config = base_config(dir.path().to_path_buf(), stream, home);
+        config.thresholds.push(Threshold {
+            id: "p0_unassigned_4h".to_string(),
+            condition: ThresholdCondition::UnassignedWithLabel {
+                label: "priority:p0".to_string(),
+            },
+            window_secs: 4 * 3600,
+            action: ThresholdAction::DecisionSurface,
+        });
+
+        let mut target = issue(stream, IssueStatus::Triage, &["priority:p0"]);
+        target.entered_status_at = 1_000;
+        target.home_channel_id = Some(home);
+        let fold = fold_with(stream, target);
+
+        // T+0 must not page the decision surface (B3). The arrival notice
+        // still fires — it is the threshold that must wait out the window.
+        assert!(plan_fold_actions(&config, &fold, &store, 1_000)
+            .iter()
+            .all(|action| !matches!(action, RuleAction::Escalate { .. })));
+        let plans = plan_fold_actions(&config, &fold, &store, 1_000 + 4 * 3600);
+        let escalations: Vec<_> = plans
+            .iter()
+            .filter(|action| matches!(action, RuleAction::Escalate { .. }))
+            .collect();
+        assert_eq!(escalations.len(), 1);
+        match escalations[0] {
+            RuleAction::Escalate {
+                threshold_id,
+                action,
+                ..
+            } => {
+                assert_eq!(threshold_id, "p0_unassigned_4h");
+                assert_eq!(*action, ThresholdAction::DecisionSurface);
+            }
+            other => panic!("expected Escalate, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn threshold_fires_once_per_interval_and_refires_on_reentry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut store = ProjectionStore::open(dir.path()).expect("open");
@@ -558,8 +688,9 @@ mod tests {
         first.entered_status_at = 1_000;
         first.home_channel_id = Some(home);
         let fold = fold_with(stream, first.clone());
+        let qualified_now = 1_000 + 24 * 3600;
 
-        let plans = plan_fold_actions(&config, &fold, &store, 1_000);
+        let plans = plan_fold_actions(&config, &fold, &store, qualified_now);
         let escalations: Vec<_> = plans
             .iter()
             .filter(|action| matches!(action, RuleAction::Escalate { .. }))
@@ -570,7 +701,7 @@ mod tests {
         if let RuleAction::Escalate { request_id, .. } = &escalations[0] {
             store.mark_request_fired(*request_id);
         }
-        let replay = plan_fold_actions(&config, &fold, &store, 2_000);
+        let replay = plan_fold_actions(&config, &fold, &store, qualified_now + 1_000);
         assert!(replay
             .iter()
             .all(|action| !matches!(action, RuleAction::Escalate { .. })));
@@ -580,7 +711,12 @@ mod tests {
         reentered.issue_id = first.issue_id;
         reentered.entered_status_at = 1_000 + 25 * 3600; // next epoch
         let fold2 = fold_with(stream, reentered);
-        let plans2 = plan_fold_actions(&config, &fold2, &store, 2_000);
+        let plans2 = plan_fold_actions(
+            &config,
+            &fold2,
+            &store,
+            1_000 + 25 * 3600 + 24 * 3600, // past the re-entry window
+        );
         assert_eq!(
             plans2
                 .iter()
@@ -661,11 +797,55 @@ mod tests {
         let mut target = issue(stream, IssueStatus::Todo, &[]);
         target.home_channel_id = Some(home);
         let fold = fold_with(stream, target);
-        let plans = plan_fold_actions(&config, &fold, &store, 1_000);
+        // Past the qualification window (entered_status_at 100 + 24h).
+        let plans = plan_fold_actions(&config, &fold, &store, 100 + 24 * 3600);
         match &plans[0] {
             RuleAction::Escalate { action, .. } => assert_eq!(*action, ThresholdAction::Digest),
             other => panic!("expected digest Escalate, got {other:?}"),
         }
+    }
+
+    /// B2 regression guard: publisher-controlled e-tags that are not 64-char
+    /// lowercase hex are skipped, not sliced — a short or multibyte e-tag
+    /// used to panic the emitter and crash-loop the process.
+    #[test]
+    fn invalid_e_tags_are_skipped_not_panicked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let config = base_config(dir.path().to_path_buf(), stream_id(), home);
+
+        store.ingest(vec![
+            reaction(home, "short", &config.pin_emoji),
+            reaction(home, "", &config.pin_emoji),
+            reaction(home, &"F".repeat(64), &config.pin_emoji), // uppercase
+            reaction(home, &"z".repeat(64), &config.pin_emoji), // non-hex
+            reaction(home, &"é".repeat(32), &config.pin_emoji), // multibyte
+        ]);
+        assert!(
+            plan_captures(&config, &store).is_empty(),
+            "no capture plan from malformed e-tags"
+        );
+    }
+
+    /// Real clients emit the pin emoji with the U+FE0F variation selector;
+    /// matching normalizes both sides.
+    #[test]
+    fn pin_emoji_with_variation_selector_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ProjectionStore::open(dir.path()).expect("open");
+        let home = channel();
+        let config = base_config(dir.path().to_path_buf(), stream_id(), home);
+        let source = "c".repeat(64);
+
+        store.ingest(vec![reaction(
+            home,
+            &source,
+            &format!("{}\u{FE0F}", config.pin_emoji),
+        )]);
+        let plans = plan_captures(&config, &store);
+        assert_eq!(plans.len(), 1, "FE0F variant of the pin emoji captures");
+        assert_eq!(plans[0].source_event_id, source);
     }
 
     #[test]
