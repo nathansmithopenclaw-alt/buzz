@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEMPLATE — triage dispatcher resident loop (task c6d2bd9d).
+  Replace every /path/to/... and the key material before installing:
+
+    cp com.smithcrafts.buzz-dispatcher.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.smithcrafts.buzz-dispatcher.plist
+
+  Deploy-time checklist: docs/dispatcher.md. The service nsec is
+  Nathan-gated; it must be injected here, never stored in the repo.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.smithcrafts.buzz-dispatcher</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/buzz-dispatcher</string>
+        <string>run</string>
+        <string>--config</string>
+        <string>/path/to/dispatcher.json</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Service key: hex or nsec. Mint is Nathan-gated. -->
+        <key>BUZZ_PRIVATE_KEY</key>
+        <string>REPLACE_WITH_SERVICE_NSEC_OR_HEX</string>
+        <!-- Optional NIP-OA auth tag JSON; delete when unused.
+        <key>BUZZ_AUTH_TAG</key>
+        <string>{...}</string>
+        -->
+        <!-- Optional relay fallback when config omits relay_url.
+        <key>BUZZ_RELAY_URL</key>
+        <string>https://relay.example</string>
+        -->
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/path/to/logs/buzz-dispatcher.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/logs/buzz-dispatcher.err.log</string>
+</dict>
+</plist>
