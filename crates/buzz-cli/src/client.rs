@@ -828,6 +828,41 @@ impl BuzzClient {
         .await
     }
 
+    /// POST a JSON value to an authenticated, idempotent read endpoint.
+    ///
+    /// Each retry signs a fresh NIP-98 event over identical body bytes. This is
+    /// reserved for read-only surfaces such as Buzz Memory status/query.
+    pub(crate) async fn post_authed_json(
+        &self,
+        path: &str,
+        value: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(value)
+                .map_err(|e| CliError::Other(format!("request serialization failed: {e}")))?,
+        );
+        self.with_retry_body(|| {
+            let body = body.clone();
+            let url = url.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                let response = self
+                    .with_auth_tag(
+                        self.http
+                            .post(&url)
+                            .header("Authorization", auth)
+                            .header("Content-Type", "application/json")
+                            .body(body),
+                    )
+                    .send()
+                    .await?;
+                self.handle_response(response).await
+            }
+        })
+        .await
+    }
+
     /// Execute a one-shot count via the HTTP bridge.
     /// Returns the count as a JSON string.
     #[allow(dead_code)]

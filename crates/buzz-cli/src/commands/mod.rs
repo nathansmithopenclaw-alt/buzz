@@ -6,6 +6,7 @@ pub mod emoji;
 pub mod feed;
 pub mod issues;
 pub mod mem;
+pub mod memory;
 pub mod messages;
 pub mod moderation;
 pub mod notes;

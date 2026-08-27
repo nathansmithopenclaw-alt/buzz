@@ -245,6 +245,9 @@ enum Cmd {
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
     Mem(MemCmd),
+    /// Shared workspace memory reads with Truth Receipts
+    #[command(subcommand)]
+    Memory(MemoryCmd),
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
@@ -2488,6 +2491,78 @@ pub enum MemCmd {
     },
 }
 
+/// Explicit output context shared by all `buzz memory` reads.
+#[derive(Args, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("memory_context")
+        .required(true)
+        .multiple(false)
+        .args(["channel", "dm", "workspace_public"])
+))]
+pub struct MemoryContextArgs {
+    /// Stream/forum channel UUID in which the answer will be used.
+    #[arg(long)]
+    channel: Option<Uuid>,
+    /// DM channel UUID in which the answer will be used.
+    #[arg(long)]
+    dm: Option<Uuid>,
+    /// Use the workspace-public projection.
+    #[arg(long, default_value_t = false)]
+    workspace_public: bool,
+}
+
+/// Subcommands for the shared Buzz Memory read plane.
+#[derive(Subcommand)]
+pub enum MemoryCmd {
+    /// Show provider health, policy, and generation high-water.
+    Status {
+        #[command(flatten)]
+        context: MemoryContextArgs,
+    },
+    /// Read exact current slot winners.
+    Current {
+        #[command(flatten)]
+        context: MemoryContextArgs,
+        /// Optional exact slot.
+        #[arg(long)]
+        slot: Option<String>,
+        /// Optional full-text query.
+        #[arg(long)]
+        query: Option<String>,
+        /// Maximum records (1..=100).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Explain why a record is the current winner.
+    Why {
+        #[command(flatten)]
+        context: MemoryContextArgs,
+        /// Exact slot to explain.
+        #[arg(long)]
+        slot: String,
+        /// Optional full-text query.
+        #[arg(long)]
+        query: Option<String>,
+        /// Maximum records (1..=100).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Read append-only history, including superseded records.
+    History {
+        #[command(flatten)]
+        context: MemoryContextArgs,
+        /// Optional exact slot.
+        #[arg(long)]
+        slot: Option<String>,
+        /// Optional full-text query.
+        #[arg(long)]
+        query: Option<String>,
+        /// Maximum records (1..=100).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
 /// Subcommands for `buzz pack`.
 #[derive(Subcommand)]
 pub enum PackCmd {
@@ -2706,6 +2781,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
+        Cmd::Memory(sub) => commands::memory::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
@@ -2959,6 +3035,7 @@ mod tests {
             "issues",
             "media",
             "mem",
+            "memory",
             "messages",
             "moderation",
             "notes",
@@ -3116,6 +3193,10 @@ mod tests {
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
+            names(&cmd, "memory"),
+            vec!["current", "history", "status", "why"]
+        );
+        assert_eq!(
             names(&cmd, "social"),
             vec![
                 "contacts",
@@ -3229,6 +3310,7 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
+            ("memory", 4),
             ("messages", 8),
             ("pack", 2),
             ("patches", 4),

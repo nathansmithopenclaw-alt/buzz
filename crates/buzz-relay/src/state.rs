@@ -642,6 +642,9 @@ pub struct AppState {
     pub auth: Arc<AuthService>,
     /// Full-text search service.
     pub search: Arc<SearchService>,
+    /// Provider-neutral shared-memory engine. The upstream default is the
+    /// transparent naive provider; deployments may replace it behind the trait.
+    pub memory_provider: Arc<dyn buzz_memory::MemoryProvider>,
     /// Registry of active client subscriptions.
     pub sub_registry: Arc<SubscriptionRegistry>,
     /// Registry of active WebSocket connections.
@@ -862,6 +865,7 @@ impl AppState {
             pubsub,
             auth: Arc::new(auth),
             search: search_arc,
+            memory_provider: Arc::new(buzz_memory::NaiveProvider::new()),
             sub_registry: Arc::new(SubscriptionRegistry::new()),
             conn_manager: Arc::new(ConnectionManager::new()),
             community_connections: Arc::new(CommunityConnectionRegistry::new()),
@@ -948,6 +952,15 @@ impl AppState {
                 handle: audit_worker_handle,
             },
         )
+    }
+
+    /// Replace the bundled naive provider before wrapping state in `Arc`.
+    ///
+    /// External governance engines implement the generic provider trait; no
+    /// engine name or storage assumption crosses into Buzz.
+    pub fn with_memory_provider(mut self, provider: Arc<dyn buzz_memory::MemoryProvider>) -> Self {
+        self.memory_provider = provider;
+        self
     }
 
     /// Inter-relay mesh handle. `None` ⇒ mesh-off / single-instance: callers

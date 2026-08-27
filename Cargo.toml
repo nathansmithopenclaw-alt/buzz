@@ -8,6 +8,7 @@ members = [
     "crates/buzz-pubsub",
     "crates/buzz-auth",
     "crates/buzz-search",
+    "crates/buzz-memory",
     "crates/buzz-audit",
     "crates/buzz-acp",
     "crates/buzz-agent",
@@ -142,6 +143,7 @@ buzz-deletion = { path = "crates/buzz-deletion" }
 buzz-auth = { path = "crates/buzz-auth" }
 buzz-pubsub = { path = "crates/buzz-pubsub" }
 buzz-search = { path = "crates/buzz-search" }
+buzz-memory = { path = "crates/buzz-memory" }
 buzz-audit = { path = "crates/buzz-audit" }
 buzz-workflow = { path = "crates/buzz-workflow" }
 buzz-media = { path = "crates/buzz-media" }

@@ -1175,6 +1175,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-pair-relay"
 version = "0.1.0"
 dependencies = [
@@ -1290,6 +1301,7 @@ dependencies = [
  "buzz-db",
  "buzz-deletion",
  "buzz-media",
+ "buzz-memory",
  "buzz-pubsub",
  "buzz-relay-mesh",
  "buzz-sdk",

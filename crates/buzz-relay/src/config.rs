@@ -49,6 +49,23 @@ pub struct JoinPolicyConfig {
     pub version: String,
 }
 
+/// Experiments-gated Buzz Memory read-plane configuration.
+///
+/// Every setting intentionally uses the `BUZZ_MEMORY_` workspace/deployment
+/// prefix so upstream operators can opt in without product-specific hardcodes.
+#[derive(Debug, Clone)]
+pub struct MemoryConfig {
+    /// Whether `/memory/v1/*` is available. Defaults off.
+    pub enabled: bool,
+    /// Policy revision copied into every Truth Receipt.
+    pub policy_id: String,
+    /// Hard provider deadline. A miss returns an explicit unavailable marker.
+    pub provider_timeout: Duration,
+    /// Separate hard gate for green `current` rendering. Defaults off until
+    /// the deployment's oracle conformance gate has been independently accepted.
+    pub current_rendering_enabled: bool,
+}
+
 /// Maximum configured jitter, leaving ten seconds of the hard-drain budget for
 /// WebSocket close-frame delivery after the final delayed cancellation.
 pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
@@ -231,6 +248,9 @@ pub struct Config {
     ///
     /// Default: `false`. Set via `BUZZ_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
+
+    /// Shared-memory read plane. Opt-in under the Experiments contract.
+    pub memory: MemoryConfig,
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
@@ -691,6 +711,29 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
+        // Buzz Memory is an upstream-facing experiment: absent or mistyped
+        // values stay off. All deployment controls share one BUZZ_MEMORY_
+        // prefix so workspace configuration can expose them as one feature.
+        let memory_enabled = std::env::var("BUZZ_MEMORY_ENABLED")
+            .map(|v| v.eq_ignore_ascii_case("on") || v == "true" || v == "1")
+            .unwrap_or(false);
+        let memory_policy_id = std::env::var("BUZZ_MEMORY_POLICY_ID")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "buzz-memory-default-v1".to_string());
+        let memory_timeout_ms = positive_u64_from_env("BUZZ_MEMORY_TIMEOUT_MS", 750)?;
+        let memory_current_rendering_enabled =
+            std::env::var("BUZZ_MEMORY_CURRENT_RENDERING_ENABLED")
+                .map(|v| v.eq_ignore_ascii_case("on") || v == "true" || v == "1")
+                .unwrap_or(false);
+        let memory = MemoryConfig {
+            enabled: memory_enabled,
+            policy_id: memory_policy_id,
+            provider_timeout: Duration::from_millis(memory_timeout_ms.min(5_000)),
+            current_rendering_enabled: memory_current_rendering_enabled,
+        };
+
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
         let relay_owner_pubkey = std::env::var("RELAY_OWNER_PUBKEY")
@@ -1084,6 +1127,7 @@ impl Config {
             relay_operator_api_origin,
             relay_operator_pubkeys,
             allow_nip_oa_auth,
+            memory,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
