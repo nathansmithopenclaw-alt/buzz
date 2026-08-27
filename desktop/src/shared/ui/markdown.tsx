@@ -1542,8 +1542,10 @@ export function createMarkdownComponents(
     },
     input: MarkdownInput,
     li: ({ children }) => <li className={listItemClassName}>{children}</li>,
-    ol: ({ children }) => (
-      <ol className={cn("list-decimal", listClassName)}>{children}</ol>
+    ol: ({ children, start }) => (
+      <ol className={cn("list-decimal", listClassName)} start={start}>
+        {children}
+      </ol>
     ),
     p: function MarkdownParagraph({ children }) {
       // Detect media-only paragraphs (images + <br> from remarkBreaks).
@@ -1707,7 +1709,7 @@ export function createMarkdownComponents(
  * eight instances ever exist. Module-stable maps mean cached markdown element
  * trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
  */
-const MARKDOWN_COMPONENT_SCHEMA_VERSION = "8";
+const MARKDOWN_COMPONENT_SCHEMA_VERSION = "9";
 const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 
 type MarkdownComponentSet = { components: Components; variant: string };
