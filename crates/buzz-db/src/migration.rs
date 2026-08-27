@@ -49,6 +49,20 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await
 }
 
+#[cfg(test)]
+pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result<()> {
+    with_exclusive_schema_destruction_lock(pool, |mut conn| async move {
+        let outcome = async {
+            reject_legacy_nip_rs_cardinality_ambiguity(&mut conn).await?;
+            MIGRATOR.run_to(target, &mut conn).await?;
+            Ok(())
+        }
+        .await;
+        (conn, outcome)
+    })
+    .await
+}
+
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reconcile_fold_migration_collisions(conn).await?;
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
@@ -62,6 +76,7 @@ async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     // guard, so migration fails closed if any is missing. (The fence probe
     // re-runs this same check at startup on non-migrating relays.)
     crate::replica_fence::verify_floor_guard_catalog(&mut *conn).await?;
+    crate::channel::verify_channel_roster_fence_catalog(&mut *conn).await?;
     Ok(())
 }
 
@@ -317,11 +332,16 @@ where
     F: FnOnce(PgConnection) -> Fut,
     Fut: Future<Output = (PgConnection, Result<T>)>,
 {
-    let mut lock_conn = pool.acquire().await?.detach();
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
-        .execute(&mut lock_conn)
-        .await?;
+    let mut lock_conn = crate::observability::acquire(pool, crate::observability::PoolRole::Writer)
+        .await?
+        .detach();
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::MigrationSchemaSafety,
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
+            .execute(&mut lock_conn),
+    )
+    .await?;
     let (mut lock_conn, outcome) = op(lock_conn).await;
     let unlock = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
@@ -406,7 +426,11 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
@@ -877,7 +901,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 34);
+        assert_eq!(migrations.len(), 37);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1075,6 +1099,12 @@ mod tests {
         assert!(migrations[13].sql.as_str().contains("30350"));
         assert!(migrations[13].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30350"));
+
+        // NIP-PMA kind:30179 FTS exclusion is asserted at its renumbered 0036
+        // position below. Fresh desired state must carry the same exclusion.
+        assert!(!migrations[0].sql.as_str().contains("30179"));
+        assert!(include_str!("../../../schema/schema.sql")
+            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
 
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be
@@ -1306,6 +1336,130 @@ mod tests {
         assert!(nip09_tombstones.contains("deleted_through TIMESTAMPTZ NOT NULL"));
         assert!(nip09_tombstones
             .contains("SELECT attach_community_write_fence('addressable_event_tombstones')"));
+
+        // Smith Crafts production has already applied the relay journal at
+        // 0034. It remains at that version so the ledger and checksum stay
+        // stable across this fold.
+        assert_eq!(migrations[33].version, 34);
+        let relay_journal = migrations[33].sql.as_str();
+        assert!(relay_journal.contains("CREATE TABLE relay_event_journal"));
+        assert!(relay_journal.contains("CREATE TRIGGER trg_events_append_relay_journal"));
+
+        // Mixed-version channel-roster fence: old canonical replacement writers
+        // acquire their replacement key before INSERT; this trigger then takes
+        // the membership key and validates the exact active pubkey/role p-tag set.
+        assert_eq!(migrations[34].version, 35);
+        let roster_fence = migrations[34].sql.as_str();
+        assert!(roster_fence.contains("CREATE TRIGGER trg_events_guard_channel_roster_snapshot"));
+        assert!(roster_fence.contains("NEW.kind <> 39002"));
+        assert!(roster_fence.contains("'buzz_channel_membership:'"));
+        assert!(roster_fence.contains("cm.removed_at IS NULL"));
+        assert!(roster_fence.contains("cm.role::text"));
+        assert!(roster_fence.contains("jsonb_array_length(roster_tag.tag_json) <> 4"));
+        assert!(roster_fence.contains("roster_tag.tag_json->>3"));
+        assert!(roster_fence.contains("snapshot_members IS DISTINCT FROM canonical_members"));
+        assert!(roster_fence.contains("ERRCODE = '23514'"));
+
+        // Fresh desired-state bootstrap must install the identical executable
+        // fence as migration 0032. CI and isolated relay startup use schema.sql
+        // without running migrations, so drift reopens rolling-deploy races.
+        fn extract_roster_fence(sql: &str) -> &str {
+            let fence_start = "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()";
+            let fence_end = "    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();";
+            let start = sql.find(fence_start).expect("roster fence function");
+            let relative_end = sql[start..].find(fence_end).expect("roster fence trigger");
+            &sql[start..start + relative_end + fence_end.len()]
+        }
+        assert_eq!(
+            extract_roster_fence(roster_fence),
+            extract_roster_fence(desired_schema)
+        );
+
+        // Brownfield search hardening follows at 0036; fresh desired state
+        // carries the same kind:30179 exclusion.
+        assert_eq!(migrations[35].version, 36);
+        let private_managed_agent_fts = migrations[35].sql.as_str();
+        assert!(private_managed_agent_fts.contains("kind = 30179"));
+        assert!(desired_schema.contains("kind IN (1059, 30179"));
+
+        // The single-row heartbeat table is updated continuously. Prevent
+        // autovacuum from truncating its heap so standby queries are not
+        // cancelled by the ACCESS EXCLUSIVE truncation lock replay.
+        assert_eq!(migrations[36].version, 37);
+        let heartbeat_vacuum = migrations[36].sql.as_str();
+        assert!(heartbeat_vacuum.contains("ALTER TABLE replica_heartbeat"));
+        assert!(heartbeat_vacuum.contains("vacuum_truncate = false"));
+        assert!(desired_schema.contains("vacuum_truncate = false"));
+
+        // pgschema intentionally reconciles DDL, not seed DML or table storage
+        // parameters. Its post-apply reconciliation must restore and verify
+        // both parts of the live heartbeat contract for fresh bootstraps.
+        let pgschema_reconciliation =
+            include_str!("../../../scripts/reconcile-schema-after-pgschema.sql");
+        assert!(pgschema_reconciliation
+            .contains("ALTER TABLE replica_heartbeat SET (vacuum_truncate = false)"));
+        assert!(pgschema_reconciliation.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
+        assert!(pgschema_reconciliation.contains("ON CONFLICT (id) DO NOTHING"));
+        assert!(pgschema_reconciliation.contains("pg_class"));
+        assert!(pgschema_reconciliation.contains("reloptions"));
+    }
+
+    #[test]
+    fn every_pgschema_apply_runs_post_apply_reconciliation() {
+        fn files_under(root: &Path) -> Vec<PathBuf> {
+            let mut pending = vec![root.to_owned()];
+            let mut files = Vec::new();
+
+            while let Some(path) = pending.pop() {
+                for entry in fs::read_dir(&path)
+                    .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()))
+                {
+                    let path = entry.expect("directory entry").path();
+                    if path.is_dir() {
+                        pending.push(path);
+                    } else {
+                        files.push(path);
+                    }
+                }
+            }
+
+            files
+        }
+
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let roots = [
+            repo_root.join("scripts"),
+            repo_root.join(".github/workflows"),
+        ];
+        let mut apply_count = 0;
+
+        for path in roots.iter().flat_map(|root| files_under(root)) {
+            let Ok(contents) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let lines: Vec<_> = contents.lines().collect();
+
+            for (index, line) in lines.iter().enumerate() {
+                if !line.contains("./bin/pgschema apply") {
+                    continue;
+                }
+
+                apply_count += 1;
+                let following_lines = &lines[index + 1..(index + 7).min(lines.len())];
+                assert!(
+                    following_lines.iter().any(|line| line.contains(
+                        "scripts/reconcile-schema-after-pgschema.sql"
+                    )),
+                    "{} must run scripts/reconcile-schema-after-pgschema.sql immediately after pgschema apply",
+                    path.display()
+                );
+            }
+        }
+
+        assert!(
+            apply_count > 0,
+            "expected at least one pgschema apply caller"
+        );
     }
 
     #[test]
@@ -1494,6 +1648,7 @@ mod tests {
         // Build the needles so this test's own source never matches them.
         let migrate_macro = ["sqlx", "::migrate!"].concat();
         let migrator_run = ["MIGRATOR", ".run("].concat();
+        let migrator_run_to = ["MIGRATOR", ".run_to("].concat();
 
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let this_file = manifest_dir.join("src/migration.rs");
@@ -1520,23 +1675,24 @@ mod tests {
         rust_sources(crates_dir, &mut files);
         for path in &files {
             let source = std::fs::read_to_string(path).expect("read rust source");
-            let (macro_hits, run_hits) = (
+            let (macro_hits, run_hits, run_to_hits) = (
                 count(&source, &migrate_macro),
                 count(&source, &migrator_run),
+                count(&source, &migrator_run_to),
             );
             if *path == this_file {
                 assert_eq!(
-                    (macro_hits, run_hits),
-                    (1, 1),
-                    "migration.rs must embed the migrator once and run it exactly once, \
-                     inside the locked wrapper"
+                    (macro_hits, run_hits, run_to_hits),
+                    (1, 1, 1),
+                    "migration.rs must embed the migrator once, run it once in production, \
+                     and expose exactly one test-only bounded run"
                 );
             } else if *path == push_gateway_exception {
                 continue;
             } else {
                 assert_eq!(
-                    (macro_hits, run_hits),
-                    (0, 0),
+                    (macro_hits, run_hits, run_to_hits),
+                    (0, 0, 0),
                     "{} embeds or runs a SQLx migrator outside the schema/destruction \
                      lock contract; route migration execution through \
                      buzz_db migration::run_migrations",
@@ -1559,13 +1715,23 @@ mod tests {
             .find("async fn with_exclusive_schema_destruction_lock")
             .expect("exclusive lock wrapper");
         let run_site = source.find(&migrator_run).expect("migrator run site");
+        let run_to_site = source
+            .find(&migrator_run_to)
+            .expect("bounded test migrator run site");
         assert!(
             source[entry..locked].contains("with_exclusive_schema_destruction_lock("),
             "run_migrations must delegate through the exclusive schema/destruction lock"
         );
         assert!(
             run_site > locked && run_site < wrapper,
-            "the migrator run site must live inside run_migrations_locked"
+            "the production migrator run site must live inside run_migrations_locked"
+        );
+        assert!(
+            run_to_site > entry
+                && run_to_site < locked
+                && source[entry..run_to_site].contains("#[cfg(test)]")
+                && source[entry..run_to_site].contains("with_exclusive_schema_destruction_lock("),
+            "the bounded migrator run must remain test-only and use the exclusive lock wrapper"
         );
         assert!(
             source[wrapper..].contains("pg_advisory_lock($1)")
@@ -2179,7 +2345,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn populated_upgrade_preserves_search_policy_except_for_push_leases() {
+    async fn populated_upgrade_preserves_search_policy_except_for_private_kinds() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
@@ -2195,7 +2361,7 @@ mod tests {
             .await
             .expect("insert community");
 
-        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32)] {
+        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32), (3_u8, 30_179_i32)] {
             sqlx::query(
                 "INSERT INTO events \
                  (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
@@ -2222,19 +2388,37 @@ mod tests {
         .fetch_all(&pool)
         .await
         .expect("read pre-push search behavior");
-        assert_eq!(before, vec![(1, true), (30_350, true)]);
+        assert_eq!(before, vec![(1, true), (30_179, true), (30_350, true)]);
+
+        // 0014 fixes 30350 only. A brownfield database that stopped here still
+        // tokenized kind:30179 ciphertext — the gap 0033 closes.
+        MIGRATOR
+            .run_to(32, &pool)
+            .await
+            .expect("apply migrations through 32");
+        let pre_0033: Vec<(i32, Option<bool>)> = sqlx::query_as(
+            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
+             FROM events ORDER BY kind",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read pre-0033 search behavior");
+        assert_eq!(
+            pre_0033,
+            vec![(1, Some(true)), (30_179, Some(true)), (30_350, None)]
+        );
 
         run_migrations(&pool)
             .await
-            .expect("apply push migrations to populated database");
+            .expect("apply remaining migrations to populated database");
         let after: Vec<(i32, Option<bool>)> = sqlx::query_as(
             "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
              FROM events ORDER BY kind",
         )
         .fetch_all(&pool)
         .await
-        .expect("read post-push search behavior");
-        assert_eq!(after, vec![(1, Some(true)), (30_350, None)]);
+        .expect("read post-upgrade search behavior");
+        assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
     }
 
     #[tokio::test]

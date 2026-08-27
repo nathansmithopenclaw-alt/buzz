@@ -3,13 +3,16 @@ import { type ReactNode, useState } from "react";
 
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Checkbox } from "@/shared/ui/checkbox";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
+import { WorkflowTemplateTextarea } from "./WorkflowTemplateTextarea";
 import { WorkflowDurationField } from "./WorkflowDurationField";
 import { WorkflowMessageTextCondition } from "./WorkflowMessageTextConditionEditor";
 import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
 import { WorkflowWebhookHeadersEditor } from "./WorkflowWebhookHeadersEditor";
 import {
+  isThreadReplyEligibleTrigger,
   supportsMessageTextCondition,
   type StepFormState,
   type TriggerType,
@@ -100,6 +103,7 @@ function StepConfigFields({
   step,
   prefix,
   disabled,
+  previousSteps,
   triggerType,
   workflowChannelId,
   onUpdate,
@@ -107,6 +111,7 @@ function StepConfigFields({
   step: StepFormState;
   prefix: string;
   disabled?: boolean;
+  previousSteps: StepFormState[];
   triggerType: TriggerType;
   workflowChannelId?: string | null;
   onUpdate: (step: StepFormState) => void;
@@ -133,15 +138,15 @@ function StepConfigFields({
         <div className="space-y-2">
           <div className="space-y-1.5">
             <FieldLabel htmlFor={`${prefix}-text`}>Message text</FieldLabel>
-            <Textarea
+            <WorkflowTemplateTextarea
               autoCapitalize="off"
               className="min-h-[60px] resize-y text-xs"
               disabled={disabled}
               id={`${prefix}-text`}
-              onChange={(event) =>
-                onUpdate({ ...step, text: event.target.value })
-              }
+              onValueChange={(text) => onUpdate({ ...step, text })}
               placeholder="e.g. Deployment started by {{trigger.author}}"
+              previousSteps={previousSteps}
+              triggerType={triggerType}
               value={step.text ?? ""}
             />
           </div>
@@ -176,6 +181,21 @@ function StepConfigFields({
               ) : null}
             </div>
           )}
+          {isThreadReplyEligibleTrigger(triggerType) ? (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                checked={step.replyInThread === true}
+                disabled={disabled}
+                id={`${prefix}-reply-in-thread`}
+                onCheckedChange={(checked) =>
+                  onUpdate({ ...step, replyInThread: checked === true })
+                }
+              />
+              <label className="text-xs" htmlFor={`${prefix}-reply-in-thread`}>
+                Reply to triggering message in thread
+              </label>
+            </div>
+          ) : null}
         </div>
       );
     case "send_dm":
@@ -366,6 +386,7 @@ export function WorkflowStepCard({
   onRemove,
   onUpdate,
   step,
+  previousSteps = [],
   triggerType,
   workflowChannelId,
 }: {
@@ -376,6 +397,7 @@ export function WorkflowStepCard({
   onRemove: () => void;
   onUpdate: (step: StepFormState) => void;
   step: StepFormState;
+  previousSteps?: StepFormState[];
   triggerType: TriggerType;
   workflowChannelId?: string | null;
 }) {
@@ -419,6 +441,7 @@ export function WorkflowStepCard({
           disabled={disabled}
           onUpdate={onUpdate}
           prefix={prefix}
+          previousSteps={previousSteps}
           step={step}
           triggerType={triggerType}
           workflowChannelId={workflowChannelId}

@@ -461,3 +461,55 @@ fn starter_match_requires_open_unarchived_stream_by_normalized_name() {
     channel.archived_at = Some("2026-07-16T00:00:00Z".to_string());
     assert!(!is_matching_starter_channel(&channel, spec));
 }
+
+#[test]
+fn last_message_filter_covers_all_human_visible_activity_kinds() {
+    let filter = last_message_filter("forum-1");
+
+    assert_eq!(
+        filter,
+        serde_json::json!({
+            "kinds": [9, 40002, 45001, 45003],
+            "#h": ["forum-1"],
+            "limit": 1
+        })
+    );
+}
+
+#[test]
+fn last_message_filters_stay_within_relay_channel_cap() {
+    let filters: Vec<serde_json::Value> = (0..257)
+        .map(|index| serde_json::json!({"#h": [format!("channel-{index}")]}))
+        .collect();
+
+    let batches = last_message_filter_batches(&filters);
+
+    assert_eq!(
+        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+        [128, 128, 1]
+    );
+    assert_eq!(batches.concat(), filters);
+}
+
+fn member(pubkey: &str) -> crate::models::ChannelMemberInfo {
+    crate::models::ChannelMemberInfo {
+        pubkey: pubkey.to_string(),
+        role: "member".to_string(),
+        is_agent: false,
+        joined_at: None,
+        display_name: None,
+    }
+}
+
+#[test]
+fn profile_join_pubkeys_caps_in_roster_order() {
+    let members = vec![member(PK_A), member(PK_B), member(PK_C)];
+
+    assert_eq!(
+        profile_join_pubkeys(&members, 2),
+        vec![PK_A.to_string(), PK_B.to_string()]
+    );
+    assert_eq!(profile_join_pubkeys(&members, 3).len(), 3);
+    assert_eq!(profile_join_pubkeys(&members, 10).len(), 3);
+    assert!(profile_join_pubkeys(&[], 10).is_empty());
+}

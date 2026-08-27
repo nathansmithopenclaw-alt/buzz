@@ -140,7 +140,7 @@ export PGSCHEMA_PLAN_HOST=localhost PGSCHEMA_PLAN_PORT=${PG_PORT}
 export PGSCHEMA_PLAN_DB="${DB_NAME}" PGSCHEMA_PLAN_USER=buzz PGSCHEMA_PLAN_PASSWORD=buzz_dev
 export PGHOST=localhost PGPORT=${PG_PORT} PGUSER=buzz PGDATABASE="${DB_NAME}"
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
-psql_h < scripts/attach-schema-partitions.sql
+psql_h < scripts/reconcile-schema-after-pgschema.sql
 ok "Schema applied"
 
 # ── Deployment community + channels + members ────────────────────────────────
@@ -182,6 +182,7 @@ else
 fi
 RELAY_LOG="${RELAY_LOG:-${DEFAULT_RELAY_LOG}}"
 TMUX_SESSION="${TMUX_SESSION:-${DEFAULT_TMUX_SESSION}}"
+RELAY_PRIVATE_KEY="$(openssl rand -hex 32)"
 tmux kill-session -t "${TMUX_SESSION}" 2>/dev/null || true
 if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"${RELAY_MAIN}" -sTCP:LISTEN >/dev/null 2>&1; then
   err "Port ${RELAY_MAIN} is already in use; refusing to report a stale relay as this harness."
@@ -200,6 +201,7 @@ tmux new-session -d -s "${TMUX_SESSION}" "cd '${REPO_ROOT}' && env \
   BUZZ_S3_ACCESS_KEY=buzz_dev \
   BUZZ_S3_SECRET_KEY=buzz_dev_secret \
   BUZZ_S3_BUCKET=buzz-media \
+  BUZZ_RELAY_PRIVATE_KEY=${RELAY_PRIVATE_KEY} \
   BUZZ_REQUIRE_AUTH_TOKEN=false \
   BUZZ_RECONCILE_CHANNELS=true \
   './target/${CARGO_TARGET_PROFILE}/buzz-relay' > '${RELAY_LOG}' 2>&1"
