@@ -877,7 +877,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 33);
+        assert_eq!(migrations.len(), 34);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1760,6 +1760,9 @@ mod tests {
         // explicit fence pass. Its own migration attaches the fence, while the
         // desired-state schema declares the complete final target set.
         expected_fences.insert("addressable_event_tombstones".to_owned());
+        expected_fences.insert("relay_event_journal".to_owned());
+        expected_fences.insert("relay_journal_checkpoints".to_owned());
+        expected_fences.insert("relay_journal_state".to_owned());
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"

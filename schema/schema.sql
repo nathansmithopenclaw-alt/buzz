@@ -1173,6 +1173,112 @@ FOR EACH ROW EXECUTE FUNCTION sync_community_canonical_host();
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('community_hosts', 'operator-global host routing registry; community_id is the mapped tenant');
 
+-- ── Per-community relay event journal ───────────────────────────────────────
+
+CREATE TABLE relay_journal_state (
+    community_id UUID NOT NULL PRIMARY KEY REFERENCES communities(id),
+    relay_epoch UUID NOT NULL,
+    tail_sequence BIGINT NOT NULL DEFAULT 0 CHECK (tail_sequence >= 0),
+    tail_hash BYTEA NOT NULL CHECK (length(tail_hash) = 32),
+    health TEXT NOT NULL DEFAULT 'healthy'
+        CHECK (health IN ('healthy', 'degraded_split_brain')),
+    degraded_reason TEXT,
+    degraded_at TIMESTAMPTZ,
+    legacy_unproven_event_count BIGINT NOT NULL DEFAULT 0
+        CHECK (legacy_unproven_event_count >= 0),
+    legacy_unproven_before_received_at TIMESTAMPTZ,
+    legacy_unproven_before_event_id BYTEA,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (community_id, relay_epoch),
+    CHECK ((health = 'healthy' AND degraded_reason IS NULL AND degraded_at IS NULL)
+        OR (health = 'degraded_split_brain' AND degraded_reason IS NOT NULL AND degraded_at IS NOT NULL))
+);
+
+CREATE TABLE relay_event_journal (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    relay_epoch UUID NOT NULL,
+    sequence BIGINT NOT NULL CHECK (sequence > 0),
+    event_id BYTEA NOT NULL CHECK (length(event_id) = 32),
+    previous_hash BYTEA NOT NULL CHECK (length(previous_hash) = 32),
+    rolling_hash BYTEA NOT NULL CHECK (length(rolling_hash) = 32),
+    appended_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, relay_epoch, sequence),
+    UNIQUE (community_id, event_id)
+);
+
+CREATE TABLE relay_journal_checkpoints (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    checkpoint_id UUID NOT NULL DEFAULT gen_random_uuid(),
+    engine_id TEXT NOT NULL CHECK (length(engine_id) BETWEEN 1 AND 255),
+    engine_generation TEXT NOT NULL CHECK (length(engine_generation) BETWEEN 1 AND 255),
+    relay_epoch UUID NOT NULL,
+    sequence BIGINT NOT NULL CHECK (sequence >= 0),
+    tail_hash BYTEA NOT NULL CHECK (length(tail_hash) = 32),
+    payload_hash BYTEA NOT NULL CHECK (length(payload_hash) = 32),
+    signer_pubkey BYTEA NOT NULL CHECK (length(signer_pubkey) = 32),
+    signature BYTEA NOT NULL CHECK (length(signature) = 64),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, checkpoint_id),
+    UNIQUE (community_id, engine_id, engine_generation)
+);
+
+CREATE FUNCTION append_relay_event_journal() RETURNS TRIGGER AS $$
+DECLARE
+    journal_state relay_journal_state%ROWTYPE;
+    next_sequence BIGINT;
+    next_hash BYTEA;
+    new_epoch UUID;
+BEGIN
+    new_epoch := gen_random_uuid();
+    INSERT INTO relay_journal_state (
+        community_id, relay_epoch, tail_hash, legacy_unproven_event_count
+    ) VALUES (
+        NEW.community_id,
+        new_epoch,
+        digest(convert_to('buzz-relay-journal-v1', 'UTF8') || uuid_send(NEW.community_id) || uuid_send(new_epoch), 'sha256'),
+        0
+    ) ON CONFLICT (community_id) DO NOTHING;
+
+    SELECT * INTO STRICT journal_state
+    FROM relay_journal_state
+    WHERE community_id = NEW.community_id
+    FOR UPDATE;
+
+    IF journal_state.health <> 'healthy' THEN
+        RAISE EXCEPTION 'relay journal degraded_split_brain for community %: %',
+            NEW.community_id, journal_state.degraded_reason
+            USING ERRCODE = '55000';
+    END IF;
+
+    next_sequence := journal_state.tail_sequence + 1;
+    next_hash := digest(
+        journal_state.tail_hash
+        || uuid_send(NEW.community_id)
+        || uuid_send(journal_state.relay_epoch)
+        || int8send(next_sequence)
+        || NEW.id,
+        'sha256'
+    );
+
+    INSERT INTO relay_event_journal (
+        community_id, relay_epoch, sequence, event_id, previous_hash, rolling_hash
+    ) VALUES (
+        NEW.community_id, journal_state.relay_epoch, next_sequence,
+        NEW.id, journal_state.tail_hash, next_hash
+    );
+
+    UPDATE relay_journal_state
+    SET tail_sequence = next_sequence, tail_hash = next_hash
+    WHERE community_id = NEW.community_id;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_events_append_relay_journal
+    AFTER INSERT ON events
+    FOR EACH ROW EXECUTE FUNCTION append_relay_event_journal();
+
 -- ── Whole-community deletion control plane (migration 0029) ─────────────────
 CREATE TABLE community_deletion_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1707,7 +1813,10 @@ SELECT attach_community_write_fence('push_leases');
 SELECT attach_community_write_fence('push_match_queue');
 SELECT attach_community_write_fence('push_wake_outbox');
 SELECT attach_community_write_fence('reactions');
+SELECT attach_community_write_fence('relay_event_journal');
 SELECT attach_community_write_fence('relay_invites');
+SELECT attach_community_write_fence('relay_journal_checkpoints');
+SELECT attach_community_write_fence('relay_journal_state');
 SELECT attach_community_write_fence('relay_members');
 SELECT attach_community_write_fence('scheduled_workflow_fires');
 SELECT attach_community_write_fence('subscriptions');
