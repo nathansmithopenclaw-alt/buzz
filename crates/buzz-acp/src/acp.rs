@@ -36,6 +36,10 @@ pub(crate) const CLAUDE_AGENT_ACP_NAME: &str = "@agentclientprotocol/claude-agen
 const MAX_BACKGROUND_TASK_SESSIONS: usize = 256;
 const MAX_BACKGROUND_TASKS_PER_SESSION: usize = 64;
 const MAX_BACKGROUND_TASK_FIELD_CHARS: usize = 240;
+/// Fallback for an id-less task in a degraded snapshot. Every such task
+/// collapses to this one string, so it must never key timestamp inheritance:
+/// two different id-less tasks across snapshots would otherwise swap ages.
+const UNKNOWN_BACKGROUND_TASK_ID: &str = "unknown";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BackgroundTask {
@@ -2325,7 +2329,7 @@ impl AcpClient {
             .iter()
             .take(MAX_BACKGROUND_TASKS_PER_SESSION)
             .map(|task| BackgroundTask {
-                task_id: bounded_background_field(task.get("taskId"), "unknown"),
+                task_id: bounded_background_field(task.get("taskId"), UNKNOWN_BACKGROUND_TASK_ID),
                 task_type: bounded_background_field(task.get("taskType"), "unknown"),
                 description: bounded_background_field(task.get("description"), "background task"),
                 first_observed_at: now,
@@ -2367,8 +2371,10 @@ impl AcpClient {
                     .iter()
                     .map(|task| {
                         let mut task = task.clone();
-                        if let Some(prior) = prev.iter().find(|p| p.task_id == task.task_id) {
-                            task.first_observed_at = prior.first_observed_at;
+                        if task.task_id != UNKNOWN_BACKGROUND_TASK_ID {
+                            if let Some(prior) = prev.iter().find(|p| p.task_id == task.task_id) {
+                                task.first_observed_at = prior.first_observed_at;
+                            }
                         }
                         task
                     })
@@ -2421,7 +2427,7 @@ impl AcpClient {
             .iter()
             .take(MAX_BACKGROUND_TASKS_PER_SESSION)
             .map(|task| BackgroundTask {
-                task_id: bounded_background_field(task.get("task_id"), "unknown"),
+                task_id: bounded_background_field(task.get("task_id"), UNKNOWN_BACKGROUND_TASK_ID),
                 task_type: bounded_background_field(task.get("task_type"), "unknown"),
                 description: bounded_background_field(task.get("description"), "background task"),
                 first_observed_at: now,
@@ -4739,6 +4745,41 @@ mod tests {
             new.first_observed_at,
             t0 + std::time::Duration::from_secs(600),
             "new task in a rolling chain gets its own timestamp, not the anchor"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idless_tasks_never_inherit_each_others_age() {
+        // Two DIFFERENT id-less tasks across snapshots both collapse to the
+        // "unknown" sentinel; the second must not inherit the first's age.
+        let mut client = spawn_inert_client().await;
+        client.background_mode = BackgroundMode::ConfirmedTyped;
+        let t0 = tokio::time::Instant::now();
+        client.handle_session_update(&typed_session_update(
+            "sess-idless",
+            serde_json::json!({"readiness": "confirmed", "tasks": [
+                {"taskType": "local_bash", "description": "Watch A"}
+            ]}),
+        ));
+        tokio::time::advance(std::time::Duration::from_secs(600)).await;
+        client.handle_session_update(&typed_session_update(
+            "sess-idless",
+            serde_json::json!({"readiness": "confirmed", "tasks": [
+                {"taskType": "local_bash", "description": "Watch B"}
+            ]}),
+        ));
+        let pending = client.pending_background_tasks();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].tasks.len(), 1);
+        assert_eq!(pending[0].tasks[0].task_id, "unknown");
+        assert_eq!(
+            pending[0].tasks[0].first_observed_at,
+            t0 + std::time::Duration::from_secs(600),
+            "a fresh id-less task must carry its own timestamp, not Watch A's"
+        );
+        assert_eq!(
+            pending[0].first_observed_at, t0,
+            "session anchor still never refreshes while the set is non-empty"
         );
     }
 

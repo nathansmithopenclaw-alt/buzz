@@ -1818,10 +1818,20 @@ fn background_task_termination_notice(
     // Each task carries its own first-observed timestamp: the hold in
     // reason_text is the SESSION's anti-pinning anchor, which a rolling task
     // chain keeps pinned — without per-task ages the notice would imply a
-    // 30-second-old task had been pending the whole hold.
-    let mut descriptions = pending
+    // 30-second-old task had been pending the whole hold. Oldest first, so
+    // the task that actually pinned the hold survives the 5-line cut.
+    let mut tasks_by_age = pending
         .iter()
         .flat_map(|state| state.tasks.iter())
+        .collect::<Vec<_>>();
+    tasks_by_age.sort_by(|a, b| {
+        a.first_observed_at
+            .cmp(&b.first_observed_at)
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
+    let descriptions = tasks_by_age
+        .iter()
+        .take(5)
         .map(|task| {
             format!(
                 "{} ({}; pending {})",
@@ -1830,11 +1840,16 @@ fn background_task_termination_notice(
                 format_background_task_age(now.saturating_duration_since(task.first_observed_at))
             )
         })
-        .take(5)
         .collect::<Vec<_>>();
-    descriptions.sort();
     let detail = if descriptions.is_empty() {
         String::new()
+    } else if task_count > descriptions.len() {
+        format!(
+            " Pending (showing {} of {}, oldest first): {}.",
+            descriptions.len(),
+            task_count,
+            descriptions.join("; ")
+        )
     } else {
         format!(" Pending: {}.", descriptions.join("; "))
     };
@@ -2111,6 +2126,54 @@ mod idle_pool_sleep_tests {
         );
         assert!(notice.contains("Original watch (task-old; pending 2h00m)"));
         assert!(notice.contains("Fresh poll (task-new; pending 30s)"));
+    }
+
+    #[test]
+    fn truncated_notice_keeps_oldest_tasks_and_says_it_was_cut() {
+        // 7 tasks, adapter-snapshot order YOUNGEST first — the pre-fix
+        // take(5) would have dropped the two oldest, i.e. the very tasks
+        // that pinned the hold.
+        let anchor = tokio::time::Instant::now();
+        let now = anchor + Duration::from_secs(7200);
+        let tasks = (0..7)
+            .map(|i| BackgroundTask {
+                task_id: format!("task-{i}"),
+                task_type: "local_bash".to_string(),
+                description: format!("Watch {i}"),
+                // task-0 youngest (10s old), task-6 oldest (7000s old).
+                first_observed_at: now - Duration::from_secs(10 + i * 1165),
+            })
+            .collect::<Vec<_>>();
+        let state = ChannelPendingBackgroundTasks {
+            channel_id: Some(Uuid::nil()),
+            session_id: "sess-cut".to_string(),
+            first_observed_at: anchor,
+            monitoring_state: "typed-confirmed",
+            tasks,
+        };
+        let states = [&state];
+        let notice = background_task_termination_notice(
+            &states,
+            BackgroundTaskTerminationReason::HoldBoundExpired,
+            Duration::from_secs(7200),
+            now,
+        );
+        assert!(notice.contains("showing 5 of 7, oldest first"));
+        assert!(
+            notice.contains("Watch 6 (task-6"),
+            "oldest task must survive the cut: {notice}"
+        );
+        assert!(
+            notice.contains("Watch 2 (task-2"),
+            "5th-oldest still shown: {notice}"
+        );
+        assert!(
+            !notice.contains("task-0") && !notice.contains("task-1"),
+            "youngest two are the ones cut: {notice}"
+        );
+        let oldest_pos = notice.find("task-6").expect("oldest rendered");
+        let fifth_pos = notice.find("task-2").expect("5th-oldest rendered");
+        assert!(oldest_pos < fifth_pos, "oldest must render first: {notice}");
     }
 
     #[test]
