@@ -1787,10 +1787,23 @@ fn pending_background_tasks_within_bound(
         .any(|state| now.saturating_duration_since(state.first_observed_at) < hold_bound)
 }
 
+/// Compact human age for a pending background task ("2h13m", "9m05s", "42s").
+fn format_background_task_age(age: Duration) -> String {
+    let secs = age.as_secs();
+    if secs >= 3600 {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 fn background_task_termination_notice(
     pending: &[&ChannelPendingBackgroundTasks],
     reason: BackgroundTaskTerminationReason,
     hold_bound: Duration,
+    now: tokio::time::Instant,
 ) -> String {
     let task_count = pending.iter().map(|state| state.tasks.len()).sum::<usize>();
     let reason_text = match reason {
@@ -1802,15 +1815,41 @@ fn background_task_termination_notice(
             "the agent harness was explicitly shut down".to_string()
         }
     };
-    let mut descriptions = pending
+    // Each task carries its own first-observed timestamp: the hold in
+    // reason_text is the SESSION's anti-pinning anchor, which a rolling task
+    // chain keeps pinned — without per-task ages the notice would imply a
+    // 30-second-old task had been pending the whole hold. Oldest first, so
+    // the task that actually pinned the hold survives the 5-line cut.
+    let mut tasks_by_age = pending
         .iter()
         .flat_map(|state| state.tasks.iter())
-        .map(|task| format!("{} ({})", task.description, task.task_id))
-        .take(5)
         .collect::<Vec<_>>();
-    descriptions.sort();
+    tasks_by_age.sort_by(|a, b| {
+        a.first_observed_at
+            .cmp(&b.first_observed_at)
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
+    let descriptions = tasks_by_age
+        .iter()
+        .take(5)
+        .map(|task| {
+            format!(
+                "{} ({}; pending {})",
+                task.description,
+                task.task_id,
+                format_background_task_age(now.saturating_duration_since(task.first_observed_at))
+            )
+        })
+        .collect::<Vec<_>>();
     let detail = if descriptions.is_empty() {
         String::new()
+    } else if task_count > descriptions.len() {
+        format!(
+            " Pending (showing {} of {}, oldest first): {}.",
+            descriptions.len(),
+            task_count,
+            descriptions.join("; ")
+        )
     } else {
         format!(" Pending: {}.", descriptions.join("; "))
     };
@@ -1849,8 +1888,9 @@ async fn post_background_task_termination_notices(
             );
         }
     }
+    let now = tokio::time::Instant::now();
     for (channel_id, states) in by_channel {
-        let content = background_task_termination_notice(&states, reason, hold_bound);
+        let content = background_task_termination_notice(&states, reason, hold_bound, now);
         pool::post_failure_notice(
             &ctx.rest_client,
             channel_id,
@@ -1997,6 +2037,7 @@ mod idle_pool_sleep_tests {
                 task_id: "task-1".to_string(),
                 task_type: "local_bash".to_string(),
                 description: "Long build".to_string(),
+                first_observed_at: started,
             }],
         }];
         let bound = Duration::from_secs(120);
@@ -2014,15 +2055,18 @@ mod idle_pool_sleep_tests {
 
     #[test]
     fn cap_and_shutdown_notices_are_loud_and_actionable() {
+        let started = tokio::time::Instant::now();
+        let now = started + Duration::from_secs(2 * 3600 + 13 * 60);
         let state = ChannelPendingBackgroundTasks {
             channel_id: Some(Uuid::nil()),
             session_id: "sess-1".to_string(),
-            first_observed_at: tokio::time::Instant::now(),
+            first_observed_at: started,
             monitoring_state: "typed-confirmed",
             tasks: vec![BackgroundTask {
                 task_id: "task-1".to_string(),
                 task_type: "local_bash".to_string(),
                 description: "Remote sign".to_string(),
+                first_observed_at: started,
             }],
         };
         let states = [&state];
@@ -2030,18 +2074,120 @@ mod idle_pool_sleep_tests {
             &states,
             BackgroundTaskTerminationReason::HoldBoundExpired,
             Duration::from_secs(7200),
+            now,
         );
         assert!(cap.contains("background_tasks_terminated"));
         assert!(cap.contains("7200 seconds"));
-        assert!(cap.contains("Remote sign (task-1)"));
+        assert!(cap.contains("Remote sign (task-1; pending 2h13m)"));
 
         let shutdown = background_task_termination_notice(
             &states,
             BackgroundTaskTerminationReason::HarnessShutdown,
             Duration::from_secs(7200),
+            now,
         );
         assert!(shutdown.contains("explicitly shut down"));
         assert!(shutdown.contains("restart the commitment"));
+    }
+
+    #[test]
+    fn notice_reports_each_tasks_own_age_not_the_session_anchor() {
+        // Rolling task chain: the session anchor is 2h old (hold expired) but
+        // the youngest task started 30s ago. The notice must say 30s for it —
+        // the anchor's age is the hold's business, not the task's.
+        let anchor = tokio::time::Instant::now();
+        let now = anchor + Duration::from_secs(7200);
+        let state = ChannelPendingBackgroundTasks {
+            channel_id: Some(Uuid::nil()),
+            session_id: "sess-roll".to_string(),
+            first_observed_at: anchor,
+            monitoring_state: "typed-confirmed",
+            tasks: vec![
+                BackgroundTask {
+                    task_id: "task-old".to_string(),
+                    task_type: "local_bash".to_string(),
+                    description: "Original watch".to_string(),
+                    first_observed_at: anchor,
+                },
+                BackgroundTask {
+                    task_id: "task-new".to_string(),
+                    task_type: "local_bash".to_string(),
+                    description: "Fresh poll".to_string(),
+                    first_observed_at: now - Duration::from_secs(30),
+                },
+            ],
+        };
+        let states = [&state];
+        let notice = background_task_termination_notice(
+            &states,
+            BackgroundTaskTerminationReason::HoldBoundExpired,
+            Duration::from_secs(7200),
+            now,
+        );
+        assert!(notice.contains("Original watch (task-old; pending 2h00m)"));
+        assert!(notice.contains("Fresh poll (task-new; pending 30s)"));
+    }
+
+    #[test]
+    fn truncated_notice_keeps_oldest_tasks_and_says_it_was_cut() {
+        // 7 tasks, adapter-snapshot order YOUNGEST first — the pre-fix
+        // take(5) would have dropped the two oldest, i.e. the very tasks
+        // that pinned the hold.
+        let anchor = tokio::time::Instant::now();
+        let now = anchor + Duration::from_secs(7200);
+        let tasks = (0..7)
+            .map(|i| BackgroundTask {
+                task_id: format!("task-{i}"),
+                task_type: "local_bash".to_string(),
+                description: format!("Watch {i}"),
+                // task-0 youngest (10s old), task-6 oldest (7000s old).
+                first_observed_at: now - Duration::from_secs(10 + i * 1165),
+            })
+            .collect::<Vec<_>>();
+        let state = ChannelPendingBackgroundTasks {
+            channel_id: Some(Uuid::nil()),
+            session_id: "sess-cut".to_string(),
+            first_observed_at: anchor,
+            monitoring_state: "typed-confirmed",
+            tasks,
+        };
+        let states = [&state];
+        let notice = background_task_termination_notice(
+            &states,
+            BackgroundTaskTerminationReason::HoldBoundExpired,
+            Duration::from_secs(7200),
+            now,
+        );
+        assert!(notice.contains("showing 5 of 7, oldest first"));
+        assert!(
+            notice.contains("Watch 6 (task-6"),
+            "oldest task must survive the cut: {notice}"
+        );
+        assert!(
+            notice.contains("Watch 2 (task-2"),
+            "5th-oldest still shown: {notice}"
+        );
+        assert!(
+            !notice.contains("task-0") && !notice.contains("task-1"),
+            "youngest two are the ones cut: {notice}"
+        );
+        let oldest_pos = notice.find("task-6").expect("oldest rendered");
+        let fifth_pos = notice.find("task-2").expect("5th-oldest rendered");
+        assert!(oldest_pos < fifth_pos, "oldest must render first: {notice}");
+    }
+
+    #[test]
+    fn background_task_age_formats_compactly() {
+        assert_eq!(format_background_task_age(Duration::from_secs(42)), "42s");
+        assert_eq!(
+            format_background_task_age(Duration::from_secs(9 * 60 + 5)),
+            "9m05s"
+        );
+        assert_eq!(
+            format_background_task_age(Duration::from_secs(2 * 3600 + 13 * 60)),
+            "2h13m"
+        );
+        assert_eq!(format_background_task_age(Duration::from_secs(0)), "0s");
     }
 
     #[test]
