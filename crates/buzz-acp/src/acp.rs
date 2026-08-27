@@ -42,6 +42,12 @@ pub(crate) struct BackgroundTask {
     pub task_id: String,
     pub task_type: String,
     pub description: String,
+    /// When THIS task id was first seen pending, independent of the
+    /// session-level hold anchor. The session anchor deliberately never
+    /// refreshes while the set stays non-empty (anti-pinning cap); this
+    /// per-task timestamp exists so termination notices can report each
+    /// task's real age instead of implying the anchor is the task's age.
+    pub first_observed_at: tokio::time::Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -2314,6 +2320,7 @@ impl AcpClient {
             tracing::info!(target: "acp::background", session_id, "background tasks cleared (typed)");
             return;
         }
+        let now = tokio::time::Instant::now();
         let tasks = raw_tasks
             .iter()
             .take(MAX_BACKGROUND_TASKS_PER_SESSION)
@@ -2321,8 +2328,24 @@ impl AcpClient {
                 task_id: bounded_background_field(task.get("taskId"), "unknown"),
                 task_type: bounded_background_field(task.get("taskType"), "unknown"),
                 description: bounded_background_field(task.get("description"), "background task"),
+                first_observed_at: now,
             })
             .collect::<Vec<_>>();
+        self.record_background_tasks(session_id, tasks, now);
+    }
+
+    /// Shared bounded upsert for both snapshot carriers. The session-level
+    /// `first_observed_at` anchor keeps its original semantics exactly: set
+    /// once when the set becomes non-empty, cleared only when it empties —
+    /// the absolute anti-pinning cap on the idle-sleep hold. On top of that,
+    /// each task whose id survives from the previous snapshot keeps its own
+    /// first-observed timestamp so teardown notices can report per-task ages.
+    fn record_background_tasks(
+        &mut self,
+        session_id: &str,
+        tasks: Vec<BackgroundTask>,
+        now: tokio::time::Instant,
+    ) {
         if !self.background_tasks.contains_key(session_id)
             && self.background_tasks.len() >= MAX_BACKGROUND_TASK_SESSIONS
         {
@@ -2336,10 +2359,21 @@ impl AcpClient {
                 tracing::warn!(target: "acp::background", evicted_session_id = oldest, "background task session bound reached; evicted oldest entry");
             }
         }
-        let now = tokio::time::Instant::now();
         self.background_tasks
             .entry(session_id.to_owned())
-            .and_modify(|state| state.tasks.clone_from(&tasks))
+            .and_modify(|state| {
+                let prev = std::mem::take(&mut state.tasks);
+                state.tasks = tasks
+                    .iter()
+                    .map(|task| {
+                        let mut task = task.clone();
+                        if let Some(prior) = prev.iter().find(|p| p.task_id == task.task_id) {
+                            task.first_observed_at = prior.first_observed_at;
+                        }
+                        task
+                    })
+                    .collect();
+            })
             .or_insert(SessionBackgroundTasks {
                 first_observed_at: now,
                 tasks,
@@ -2382,6 +2416,7 @@ impl AcpClient {
             return;
         }
 
+        let now = tokio::time::Instant::now();
         let tasks = raw_tasks
             .iter()
             .take(MAX_BACKGROUND_TASKS_PER_SESSION)
@@ -2389,30 +2424,10 @@ impl AcpClient {
                 task_id: bounded_background_field(task.get("task_id"), "unknown"),
                 task_type: bounded_background_field(task.get("task_type"), "unknown"),
                 description: bounded_background_field(task.get("description"), "background task"),
+                first_observed_at: now,
             })
             .collect::<Vec<_>>();
-
-        if !self.background_tasks.contains_key(session_id)
-            && self.background_tasks.len() >= MAX_BACKGROUND_TASK_SESSIONS
-        {
-            if let Some(oldest) = self
-                .background_tasks
-                .iter()
-                .min_by_key(|(_, state)| state.first_observed_at)
-                .map(|(id, _)| id.clone())
-            {
-                self.background_tasks.remove(&oldest);
-                tracing::warn!(target: "acp::background", evicted_session_id = oldest, "background task session bound reached; evicted oldest entry");
-            }
-        }
-        let now = tokio::time::Instant::now();
-        self.background_tasks
-            .entry(session_id.to_owned())
-            .and_modify(|state| state.tasks.clone_from(&tasks))
-            .or_insert(SessionBackgroundTasks {
-                first_observed_at: now,
-                tasks,
-            });
+        self.record_background_tasks(session_id, tasks, now);
         tracing::info!(
             target: "acp::background",
             session_id,
@@ -4678,6 +4693,52 @@ mod tests {
         assert!(
             client.pending_background_tasks().is_empty(),
             "empty tasks array is the only clear signal"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_updates_preserve_per_task_first_observed() {
+        let mut client = spawn_inert_client().await;
+        client.background_mode = BackgroundMode::ConfirmedTyped;
+        let t0 = tokio::time::Instant::now();
+        client.handle_session_update(&typed_session_update(
+            "sess-age",
+            serde_json::json!({"readiness": "confirmed", "tasks": [
+                {"taskId": "old-1", "taskType": "local_bash", "description": "Original watch"}
+            ]}),
+        ));
+        tokio::time::advance(std::time::Duration::from_secs(600)).await;
+        client.handle_session_update(&typed_session_update(
+            "sess-age",
+            serde_json::json!({"readiness": "confirmed", "tasks": [
+                {"taskId": "old-1", "taskType": "local_bash", "description": "Original watch"},
+                {"taskId": "new-1", "taskType": "local_bash", "description": "Fresh poll"}
+            ]}),
+        ));
+        let pending = client.pending_background_tasks();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].first_observed_at, t0,
+            "session hold anchor must NOT refresh while the set stays non-empty"
+        );
+        let old = pending[0]
+            .tasks
+            .iter()
+            .find(|t| t.task_id == "old-1")
+            .expect("surviving task present");
+        let new = pending[0]
+            .tasks
+            .iter()
+            .find(|t| t.task_id == "new-1")
+            .expect("new task present");
+        assert_eq!(
+            old.first_observed_at, t0,
+            "surviving task keeps its original first-observed timestamp"
+        );
+        assert_eq!(
+            new.first_observed_at,
+            t0 + std::time::Duration::from_secs(600),
+            "new task in a rolling chain gets its own timestamp, not the anchor"
         );
     }
 
