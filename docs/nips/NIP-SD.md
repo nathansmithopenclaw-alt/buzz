@@ -16,11 +16,14 @@ The current capability vocabulary is:
 - `global_config`
 - `env_vars`
 - `teams`
+- `memory_promotion`
 
 `agent_config` covers updates to an existing personal agent. `global_config`
-covers a narrow patch to global agent defaults. Neither capability permits key
-export, deletion, lifecycle controls, relay configuration, grant mutation, or
-creation of a new standing grant.
+covers a narrow patch to global agent defaults. `memory_promotion` covers
+casting delegated review verdicts on memory promotion candidates, limited to
+the claim types the grant names. No capability permits key export, deletion,
+lifecycle controls, relay configuration, grant mutation, promotion-policy
+writes, or creation of a new standing grant.
 
 ## Owner-signed grant
 
@@ -53,13 +56,15 @@ A grant with no `version` field is v1: one grantee and boolean bits.
 ```
 
 v1 grants keep verifying. Desktop does not auto-upgrade them on read. The next
-owner save of the delegation card re-signs as v2.
+owner save of the delegation card re-signs as the current version — v2 on
+builds that predate the `memory_promotion` capability, v3 on builds that ship
+it.
 
 ### Unknown versions
 
-A grant whose `version` field is present and not `2` fails validation loud. It
-is not treated as "no grant" and must not fall back to owner-review. A v1 grant
-has no `version` field. Desktop refuses to load a `global-agent-config.json`
+A grant whose `version` field is present and not `2` or `3` fails validation
+loud. It is not treated as "no grant" and must not fall back to owner-review. A
+v1 grant has no `version` field. Desktop refuses to load a `global-agent-config.json`
 that cannot deserialize for this reason; restoring a pre-v2 copy of that file
 is the rollback path.
 
@@ -137,6 +142,77 @@ is not sufficient: `scope: "set"` must still contain this source, and
 `scope: "all"` still requires origin classification. Reserved Buzz identity
 and control variables are rejected before a side effect. Public receipts
 include key names and value hashes, never raw values.
+
+### v3 payload
+
+v3 adds the `memory_promotion` capability and the fail-closed state a grant
+carrying it must establish. Everything else about v2 — per-capability
+subjects, canonicalization, the audit channel — is unchanged.
+
+```json
+{
+  "version": 3,
+  "auditChannelId": "<channel UUID>",
+  "humanFallbackAllowlist": ["<hex>"],
+  "capabilities": {
+    "agent_config": { "scope": "none" },
+    "global_config": { "scope": "none" },
+    "env_vars": { "scope": "none" },
+    "teams": { "scope": "none" },
+    "agent_creation": { "scope": "none" },
+    "memory_promotion": {
+      "scope": "set",
+      "grantees": ["<hex>"],
+      "claimTypes": ["fact_proposal", "verified_working"]
+    }
+  }
+}
+```
+
+`memory_promotion` authorizes its grantees to cast delegated review verdicts —
+approve, reject, or escalate — on memory promotion candidates whose claim type
+is listed in `claimTypes`. It conveys permission to act under the governing
+memory policy; it does not convey authority over what becomes canonical truth.
+Unlike the other capabilities, which Desktop itself consumes on the request
+path, `memory_promotion` is checked by the consuming promotion engine: the
+engine MUST re-validate the live owner-signed grant in its own process at use
+time, so revocation takes effect at the engine's next check rather than at the
+next client save. A grant evaluated only in the client is a suggestion.
+
+`claimTypes` is required whenever the `memory_promotion` scope is not `none`,
+and MUST be a non-empty, deduplicated, sorted subset of the delegable claim
+type vocabulary:
+
+- `fact_proposal`
+- `verified_working`
+
+Claim types outside this vocabulary are not delegable: corrections and
+supersessions of promoted facts, restricted-realm facts, identity-mapping
+changes, and anything a workspace policy marks always-human are reviewed by a
+human regardless of any grant. A grant naming a claim type outside the
+vocabulary fails validation loud rather than narrowing to the known subset —
+the same lesson as the unknown-version rule, because a reader that silently
+ignored an unrecognized claim type would widen the grant to claim types its
+author never saw.
+
+`humanFallbackAllowlist` is required whenever the `memory_promotion` scope is
+not `none`. It names the pubkeys an escalated review falls back to when the
+delegated reviewer cannot verify, and MUST be a non-empty, deduplicated,
+sorted list of canonical lowercase 32-byte hex pubkeys. It lives in the signed
+grant because it cannot be inferred: the absence of an agent attestation
+proves nothing about who is a person, and a fallback set that cannot be
+established is a delegation whose failure mode is an unowned review queue.
+Grant persist fails closed when the allowlist cannot be established — the
+delegation is not signed.
+
+No capability, `memory_promotion` included, permits writing the memory
+promotion policy. Policy writes are the rules a delegated reviewer would
+otherwise be judged by: a grantee that could edit its own review rules could
+widen its grant's effect without ever touching the grant. Promotion-policy
+changes remain owner-reviewed regardless of any standing grant.
+
+A v2 Desktop cannot deserialize v3. Do not write v3 until this build is
+installed on the machine that owns `global-agent-config.json`.
 
 ## Request transport and identity
 
