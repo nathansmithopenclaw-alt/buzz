@@ -67,6 +67,73 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Log directives applied when the operator has not set `RUST_LOG`.
+///
+/// `EnvFilter` has no implicit global level: an event whose target matches no
+/// directive is dropped, silently. Most diagnostics in this crate are emitted
+/// on *bare* targets (`acp::background`, `pool::prompt`, `canvas::fetch`, …)
+/// that share no prefix with `buzz_acp`, so a crate-only filter discards every
+/// warning and error they carry — including
+/// `background_task_monitoring_unconfirmed`, which exists specifically to say a
+/// real background task may have gone untracked.
+///
+/// Directives match by string prefix and the most specific one wins, so a
+/// namespace entry sets a floor for every bare target beneath it and the
+/// per-target entries lift the few that triage always needs. `warn` is the
+/// floor because it cannot be chatty by construction — it admits only what is
+/// already exceptional, leaving high-volume `debug`/`info` traffic muted.
+///
+/// Managed agents are spawned by the desktop with an explicit `RUST_LOG`, so
+/// this default does not reach them: the same list is built for child
+/// processes in `desktop/src-tauri/src/managed_agents/runtime/child_env.rs`
+/// (`CHILD_LOG_DIRECTIVES`). Keep the two in sync.
+const DEFAULT_LOG_FILTER: &str = "buzz_acp=info,\
+     acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn,\
+     acp::background=info,acp::session=info,pool::session=info,pool::model=info";
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::DEFAULT_LOG_FILTER;
+    use tracing::Level;
+    use tracing_subscriber::EnvFilter;
+
+    /// A background-work termination notice tells the operator to inspect the
+    /// local log. Prove the filter actually admits the lines they are sent to
+    /// find, that a per-target entry lifts its own target above the namespace
+    /// floor, and that buying the evidence did not also un-mute the
+    /// high-volume traffic the floor exists to leave alone.
+    #[test]
+    fn default_filter_admits_bare_target_diagnostics_without_unmuting_chatty_traffic() {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new(DEFAULT_LOG_FILTER))
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            // Background-task lifecycle: `acp::background=info` must beat the
+            // `acp=warn` floor for its own target.
+            assert!(tracing::enabled!(target: "acp::background", Level::INFO));
+            assert!(tracing::enabled!(target: "acp::session", Level::INFO));
+            assert!(tracing::enabled!(target: "pool::session", Level::INFO));
+            // Every other bare namespace keeps its warn/error diagnostics.
+            // `pool::prompt` alone carries seven error-level call sites.
+            assert!(tracing::enabled!(target: "pool::prompt", Level::ERROR));
+            assert!(tracing::enabled!(target: "acp::wire", Level::WARN));
+            assert!(tracing::enabled!(target: "canvas::fetch", Level::WARN));
+            assert!(tracing::enabled!(target: "engram::core", Level::WARN));
+            assert!(tracing::enabled!(target: "observer", Level::WARN));
+            // The floor stays a floor: per-message wire and prompt chatter is
+            // still dropped, so restoring the evidence cannot flood a log.
+            assert!(!tracing::enabled!(target: "acp::wire", Level::DEBUG));
+            assert!(!tracing::enabled!(target: "pool::prompt", Level::INFO));
+            assert!(!tracing::enabled!(target: "acp::usage", Level::DEBUG));
+            // The floors are scoped to this crate's targets, not to the
+            // dependency tree behind it.
+            assert!(!tracing::enabled!(target: "hyper::client", Level::WARN));
+            assert!(!tracing::enabled!(target: "nostr_relay_pool::relay", Level::WARN));
+        });
+    }
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -2348,7 +2415,8 @@ async fn tokio_main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER)),
         )
         .compact()
         .init();

@@ -1,19 +1,43 @@
 use crate::managed_agents::known_acp_runtime;
 
+/// Keep in sync with `DEFAULT_LOG_FILTER` in `crates/buzz-acp/src/lib.rs` —
+/// a managed child and a hand-run harness must log the same things.
+const EXPECTED_DEFAULTS: &str = "buzz_acp=info,\
+     acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn,\
+     acp::background=info,acp::session=info,pool::session=info,pool::model=info";
+
 #[test]
-fn child_logs_always_include_model_application_evidence() {
-    assert_eq!(
-        super::child_rust_log_filter_from(None),
-        "buzz_acp=info,pool::model=info"
-    );
+fn child_logs_always_include_teardown_and_model_application_evidence() {
+    assert_eq!(super::child_rust_log_filter_from(None), EXPECTED_DEFAULTS);
+    // An operator level/crate directive is preserved; the rest is still added.
     assert_eq!(
         super::child_rust_log_filter_from(Some("warn,buzz_acp=debug")),
-        "warn,buzz_acp=debug,pool::model=info"
+        "warn,buzz_acp=debug,\
+         acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn,\
+         acp::background=info,acp::session=info,pool::session=info,pool::model=info"
     );
     assert_eq!(
         super::child_rust_log_filter_from(Some("pool::model=debug")),
-        "pool::model=debug,buzz_acp=info"
+        "pool::model=debug,buzz_acp=info,\
+         acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn,\
+         acp::background=info,acp::session=info,pool::session=info"
     );
+}
+
+/// An operator directive overrides its own target and nothing else. Under a
+/// `starts_with` dedup a supplied `acp::background=debug` also matches the
+/// `acp` floor, which would silently re-mute every *other* `acp::*` target —
+/// re-creating the defect this list exists to fix, in the one situation where
+/// someone is actively debugging.
+#[test]
+fn operator_directive_overrides_its_target_without_eating_the_namespace_floor() {
+    let filter = super::child_rust_log_filter_from(Some("acp::background=debug"));
+    let directives: Vec<&str> = filter.split(',').collect();
+
+    assert!(directives.contains(&"acp::background=debug"));
+    assert!(!directives.contains(&"acp::background=info"));
+    assert!(directives.contains(&"acp=warn"));
+    assert!(directives.contains(&"acp::session=info"));
 }
 
 #[test]
