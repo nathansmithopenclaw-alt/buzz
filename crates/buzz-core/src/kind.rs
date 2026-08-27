@@ -658,6 +658,24 @@ pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
 /// announcement, never a project. See `docs/nips/NIP-MP.md`.
 pub const KIND_PROJECT: u32 = 30621;
 
+/// NIP-BR: owner-authored briefing include-set and local schedule.
+///
+/// Parameterized replaceable, keyed by `(pubkey, kind, d="summary")`. Global
+/// (never channel-scoped). See `docs/nips/NIP-BR.md`.
+pub const KIND_BRIEF_CONFIG: u32 = 30623;
+
+/// NIP-BR: reporter-authored per-conversation watermark.
+///
+/// Parameterized replaceable, keyed by `(pubkey, kind, d="wm:<channel-uuid>")`.
+/// Global (never channel-scoped). See `docs/nips/NIP-BR.md`.
+pub const KIND_BRIEF_WATERMARK: u32 = 30624;
+
+/// NIP-BR: immutable published briefing report (one event per run).
+///
+/// Regular stored event; recency-first history. Global (never channel-scoped).
+/// See `docs/nips/NIP-BR.md`.
+pub const KIND_BRIEF_REPORT: u32 = 40030;
+
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
     KIND_PROFILE,
@@ -798,6 +816,9 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_CLOSED,
     KIND_GIT_STATUS_DRAFT,
     KIND_PROJECT,
+    KIND_BRIEF_CONFIG,
+    KIND_BRIEF_WATERMARK,
+    KIND_BRIEF_REPORT,
 ];
 
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).
@@ -899,6 +920,11 @@ const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_BRIEF_CONFIG)); // 30623 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_BRIEF_WATERMARK)); // 30624 ∈ 30000–39999
+const _: () = assert!(!is_parameterized_replaceable(KIND_BRIEF_REPORT)); // 40030 regular
+const _: () = assert!(!is_replaceable(KIND_BRIEF_REPORT));
+const _: () = assert!(!is_ephemeral(KIND_BRIEF_REPORT));
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
 

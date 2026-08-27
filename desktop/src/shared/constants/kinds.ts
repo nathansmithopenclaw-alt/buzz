@@ -79,6 +79,10 @@ export const KIND_GIT_STATUS_DRAFT = 1633;
 // NIP-DV: relay-signed per-viewer DM visibility snapshot (d=viewer pubkey,
 // h-tags = currently-hidden DM channel ids).
 export const KIND_DM_VISIBILITY = 30622;
+// NIP-BR: personal briefing config, watermarks, and published reports.
+export const KIND_BRIEF_CONFIG = 30623;
+export const KIND_BRIEF_WATERMARK = 30624;
+export const KIND_BRIEF_REPORT = 40030;
 
 // Human-visible "new content" message kinds. Used as the unread trigger set
 // (sidebar badges, catch-up queries) and as the Home-feed mention query.

@@ -24,8 +24,10 @@ import { AgentActivityCard } from "@/features/pulse/ui/AgentActivityCard";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import { NoteCard } from "@/features/pulse/ui/NoteCard";
 import { PulseTabBar } from "@/features/pulse/ui/PulseTabBar";
+import { SummaryView } from "@/features/pulse/ui/SummaryView";
 import type { UserNote } from "@/shared/api/socialTypes";
 import type { ChannelMember, UserProfileSummary } from "@/shared/api/types";
+import { useFeatureEnabled } from "@/shared/features";
 import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -38,7 +40,8 @@ export type PulseTab =
   | "people"
   | "liked"
   | "agents"
-  | "mine";
+  | "mine"
+  | "summary";
 
 const pulsePanelId = (tab: PulseTab) => `pulse-panel-${tab}`;
 const pulseTabId = (tab: PulseTab) => `pulse-tab-${tab}`;
@@ -73,7 +76,13 @@ function TimelineSkeleton() {
 }
 
 export function PulseView({ currentPubkey }: PulseViewProps) {
+  const summaryEnabled = useFeatureEnabled("summary");
   const [activeTab, setActiveTab] = React.useState<PulseTab>("everyone");
+  React.useEffect(() => {
+    if (!summaryEnabled && activeTab === "summary") {
+      setActiveTab("everyone");
+    }
+  }, [activeTab, summaryEnabled]);
   const [searchQuery, setSearchQuery] = React.useState("");
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const contactListQuery = useContactListQuery(currentPubkey);
@@ -264,6 +273,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
         ? "No agents registered yet."
         : "No agent notes yet. Agents post here when they publish.",
     mine: "You haven't posted any notes yet.",
+    summary: "No summary yet.",
   };
 
   function renderTimeline() {
@@ -335,18 +345,25 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
         getTabId={pulseTabId}
         onTabChange={setActiveTab}
         relayAgents={relayAgents}
+        summaryEnabled={summaryEnabled}
       />
 
       <div className="mt-0 min-h-0 flex-1 overflow-y-auto" ref={scrollRef}>
         <div
           aria-labelledby={pulseTabId(activeTab)}
           className={`mx-auto flex w-full max-w-2xl flex-col px-4 pb-10 sm:px-6 ${
-            activeTab !== "search" && activeTab !== "agents" ? "pt-0" : "pt-7"
+            activeTab !== "search" &&
+            activeTab !== "agents" &&
+            activeTab !== "summary"
+              ? "pt-0"
+              : "pt-7"
           }`}
           id={pulsePanelId(activeTab)}
           role="tabpanel"
         >
-          {activeTab === "search" ? (
+          {activeTab === "summary" ? (
+            <SummaryView currentPubkey={currentPubkey} />
+          ) : activeTab === "search" ? (
             <div className="flex min-h-[calc(100vh-96px)] items-center justify-center">
               <div className="relative flex w-full max-w-xl flex-col items-center px-2">
                 <h2 className="mb-5 text-center text-2xl font-semibold tracking-tight text-foreground">
@@ -418,7 +435,9 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
             </div>
           ) : null}
 
-          {activeTab !== "search" ? <div>{renderTimeline()}</div> : null}
+          {activeTab !== "search" && activeTab !== "summary" ? (
+            <div>{renderTimeline()}</div>
+          ) : null}
         </div>
       </div>
     </div>

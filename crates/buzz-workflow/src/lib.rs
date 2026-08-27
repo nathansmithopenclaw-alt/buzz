@@ -591,13 +591,15 @@ impl WorkflowEngine {
                     schema::TriggerDef::Schedule {
                         cron: Some(expr),
                         interval: None,
-                    } => match cron_fire_instant(expr, now, 60, workflow.id) {
+                        timezone,
+                    } => match cron_fire_instant(expr, timezone.as_deref(), now, 60, workflow.id) {
                         Some(instant) => (instant, "cron"),
                         None => continue,
                     },
                     schema::TriggerDef::Schedule {
                         cron: None,
                         interval: Some(dur),
+                        timezone: _,
                     } => {
                         // Cheap pre-filter: skip the claim attempt when the
                         // in-memory clock says we're clearly mid-interval. The
@@ -813,24 +815,46 @@ impl WorkflowEngine {
 /// is due in the window.
 fn cron_fire_instant(
     expr: &str,
+    timezone: Option<&str>,
     now: DateTime<Utc>,
     window_secs: i64,
     workflow_id: Uuid,
 ) -> Option<DateTime<Utc>> {
     let normalized = schema::normalize_cron(expr);
-    match normalized.parse::<cron::Schedule>() {
-        Ok(sched) => {
-            let window_start = now - chrono::Duration::seconds(window_secs);
-            sched.after(&window_start).next().filter(|t| *t <= now)
-        }
+    let sched = match normalized.parse::<cron::Schedule>() {
+        Ok(sched) => sched,
         Err(e) => {
             tracing::warn!(
                 workflow_id = %workflow_id,
                 "Cron tick: invalid cron expression '{expr}': {e}"
             );
-            None
+            return None;
         }
-    }
+    };
+    let window_start = now - chrono::Duration::seconds(window_secs);
+    let tz_name = timezone
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "UTC");
+    let Some(name) = tz_name else {
+        return sched.after(&window_start).next().filter(|t| *t <= now);
+    };
+    let tz: chrono_tz::Tz = match name.parse() {
+        Ok(tz) => tz,
+        Err(_) => {
+            tracing::warn!(
+                workflow_id = %workflow_id,
+                "Cron tick: invalid timezone '{name}'"
+            );
+            return None;
+        }
+    };
+    let local_now = now.with_timezone(&tz);
+    let local_start = window_start.with_timezone(&tz);
+    sched
+        .after(&local_start)
+        .next()
+        .filter(|t| *t <= local_now)
+        .map(|t| t.with_timezone(&Utc))
 }
 
 /// Quantize `now` to the interval bucket boundary, yielding a deterministic
@@ -1108,7 +1132,7 @@ mod tests {
         let wf_id = Uuid::new_v4();
         // The matched instant is the minute boundary 12:00:00, NOT `now`.
         assert_eq!(
-            cron_fire_instant("* * * * *", now, 60, wf_id),
+            cron_fire_instant("* * * * *", None, now, 60, wf_id),
             Some(
                 chrono::DateTime::parse_from_rfc3339("2026-06-15T12:00:00Z")
                     .unwrap()
@@ -1123,7 +1147,7 @@ mod tests {
         let now = Utc::now();
         let wf_id = Uuid::new_v4();
         assert!(
-            cron_fire_instant("not-a-cron", now, 60, wf_id).is_none(),
+            cron_fire_instant("not-a-cron", None, now, 60, wf_id).is_none(),
             "invalid cron should return None"
         );
     }
@@ -1137,7 +1161,7 @@ mod tests {
         let wf_id = Uuid::new_v4();
         // "0 0 1 1 *" = midnight on Jan 1 only — June 15 is definitely outside.
         assert!(
-            cron_fire_instant("0 0 1 1 *", now, 60, wf_id).is_none(),
+            cron_fire_instant("0 0 1 1 *", None, now, 60, wf_id).is_none(),
             "Jan-1-only cron should not fire on June 15"
         );
     }
@@ -1151,7 +1175,7 @@ mod tests {
             .with_timezone(&Utc);
         let wf_id = Uuid::new_v4();
         assert_eq!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id),
+            cron_fire_instant("0 9 * * *", None, now, 60, wf_id),
             Some(now),
             "cron should fire at exact minute boundary, anchored on 09:00:00"
         );
@@ -1168,7 +1192,7 @@ mod tests {
             .with_timezone(&Utc);
         let wf_id = Uuid::new_v4();
         assert_eq!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id),
+            cron_fire_instant("0 9 * * *", None, now, 60, wf_id),
             Some(
                 chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
                     .unwrap()
@@ -1187,8 +1211,37 @@ mod tests {
             .with_timezone(&Utc);
         let wf_id = Uuid::new_v4();
         assert!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id).is_none(),
+            cron_fire_instant("0 9 * * *", None, now, 60, wf_id).is_none(),
             "cron should not fire 61s after the scheduled time"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_honors_iana_timezone() {
+        // 15 June 2026 is EDT (UTC-4). 09:00 America/New_York is 13:00 UTC.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T13:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let wf_id = Uuid::new_v4();
+        assert_eq!(
+            cron_fire_instant("0 9 * * *", Some("America/New_York"), now, 60, wf_id),
+            Some(now),
+            "09:00 Eastern must fire at 13:00 UTC in June"
+        );
+        assert!(cron_fire_instant("0 9 * * *", Some("America/New_York"), now, 60, wf_id).is_some());
+        let utc_morning = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(
+            cron_fire_instant(
+                "0 9 * * *",
+                Some("America/New_York"),
+                utc_morning,
+                60,
+                wf_id
+            )
+            .is_none(),
+            "09:00 UTC is 05:00 Eastern and must not fire the Eastern 09:00 cron"
         );
     }
 
@@ -1457,6 +1510,7 @@ steps:
         let trigger = TriggerDef::Schedule {
             cron: Some("0 9 * * 1-5".to_owned()),
             interval: None,
+            timezone: None,
         };
         // Schedule triggers are fired by the cron loop, not by events.
         assert!(!trigger_matches_event(
@@ -1569,6 +1623,7 @@ steps:
         let sched_trigger = TriggerDef::Schedule {
             cron: None,
             interval: Some("1h".to_owned()),
+            timezone: None,
         };
         let webhook_trigger = TriggerDef::Webhook;
 

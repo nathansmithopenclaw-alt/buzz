@@ -12,6 +12,7 @@
 //! The caller signs with their own keys: `builder.sign_with_keys(&keys)?`.
 //! No keys are held here. No network calls are made.
 
+pub mod brief;
 pub mod broker;
 pub mod builders;
 pub mod mentions;
@@ -19,6 +20,7 @@ pub mod nip_oa;
 pub mod task_envelope;
 pub mod tracker;
 
+pub use brief::*;
 pub use builders::*;
 
 /// Re-export kind constants so consumers don't need buzz-core directly.

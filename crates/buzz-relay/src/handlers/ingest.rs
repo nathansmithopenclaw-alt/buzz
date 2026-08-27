@@ -15,10 +15,11 @@ use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_HOST, KIND_AGENT_HOST_STATUS,
     KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH,
-    KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION,
-    KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET,
-    KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE,
-    KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_BRIEF_CONFIG, KIND_BRIEF_REPORT,
+    KIND_BRIEF_WATERMARK, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
+    KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
+    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
     KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
     KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
@@ -455,6 +456,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT | KIND_AGENT_HOST
         | KIND_AGENT_HOST_STATUS | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG
+        | KIND_BRIEF_CONFIG | KIND_BRIEF_WATERMARK
         | super::push_lease::KIND_PUSH_LEASE => Ok(Scope::UsersWrite),
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
@@ -561,6 +563,10 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
         KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
+        // NIP-BR: published reports are ordinary member writes; config/watermarks
+        // are UsersWrite above. Reports stay MessagesWrite so a selected reporter
+        // agent can publish without an admin grant.
+        KIND_BRIEF_REPORT => Ok(Scope::MessagesWrite),
         _ => Err("restricted: unknown event kind"),
     }
 }
@@ -692,6 +698,12 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // `buzz-channel` tag is a metadata reference, not a routing directive,
             // so a project's state is never channel-scoped.
             | KIND_PROJECT
+            // NIP-BR: briefing config, watermarks, and reports are personal
+            // workspace state addressed by (pubkey, kind[, d_tag]). A stray
+            // `h` tag must not channel-scope them.
+            | KIND_BRIEF_CONFIG
+            | KIND_BRIEF_WATERMARK
+            | KIND_BRIEF_REPORT
             // Community moderation commands (9040–9044): community-global
             // direct commands, same model as the NIP-43 9030-series. A stray
             // `h` tag must never channel-scope them (pinned contract —
@@ -5506,6 +5518,25 @@ mod tests {
         // `buzz-channel` is a metadata reference, not a routing directive.
         assert!(is_global_only_kind(KIND_PROJECT));
         assert!(!requires_h_channel_scope(KIND_PROJECT));
+    }
+
+    #[test]
+    fn brief_kinds_are_global_only_and_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        for kind in [KIND_BRIEF_CONFIG, KIND_BRIEF_WATERMARK] {
+            assert!(is_global_only_kind(kind), "kind {kind} must be global-only");
+            assert!(!requires_h_channel_scope(kind));
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).unwrap(),
+                Scope::UsersWrite
+            );
+        }
+        assert!(is_global_only_kind(KIND_BRIEF_REPORT));
+        assert!(!requires_h_channel_scope(KIND_BRIEF_REPORT));
+        assert_eq!(
+            required_scope_for_kind(KIND_BRIEF_REPORT, &dummy).unwrap(),
+            Scope::MessagesWrite
+        );
     }
 
     #[test]

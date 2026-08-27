@@ -221,6 +221,9 @@ enum Cmd {
     /// Publish and edit long-form NIP-23 notes — team knowledge base
     #[command(subcommand)]
     Notes(NotesCmd),
+    /// Personal briefing reports (NIP-BR)
+    #[command(subcommand)]
+    Briefs(BriefsCmd),
     /// Announce and discover git repositories (NIP-34)
     #[command(subcommand)]
     Repos(ReposCmd),
@@ -1788,6 +1791,112 @@ pub enum NotesCmd {
 }
 
 #[derive(Subcommand)]
+pub enum BriefsCmd {
+    /// List published briefing reports recency-first
+    List {
+        /// Maximum number of reports to return
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Get one report by event id or run id
+    Get {
+        /// Report event id (64-char hex)
+        #[arg(long, required_unless_present = "run", conflicts_with = "run")]
+        id: Option<String>,
+        /// Report run UUID (`d` tag)
+        #[arg(long, required_unless_present = "id", conflicts_with = "id")]
+        run: Option<String>,
+    },
+    /// Publish an immutable briefing report
+    Publish {
+        /// Markdown body; use '-' to read from stdin
+        #[arg(long)]
+        markdown: String,
+        /// Human title
+        #[arg(long)]
+        title: Option<String>,
+        /// Structured status JSON object
+        #[arg(long)]
+        status_json: Option<String>,
+        /// Owner pubkey this report is for (defaults to signer)
+        #[arg(long)]
+        owner: Option<String>,
+        /// Period start (unix seconds)
+        #[arg(long)]
+        since: Option<u64>,
+        /// Period end (unix seconds)
+        #[arg(long)]
+        until: Option<u64>,
+        /// Included channel UUID (repeatable)
+        #[arg(long = "channel")]
+        channels: Vec<String>,
+        /// Included DM UUID (repeatable)
+        #[arg(long = "dm")]
+        dms: Vec<String>,
+    },
+    /// Read or write the live include-set and local schedule
+    #[command(subcommand)]
+    Config(BriefsConfigCmd),
+    /// Reporter watermarks
+    #[command(subcommand)]
+    Watermarks(BriefsWatermarksCmd),
+}
+
+#[derive(Subcommand)]
+pub enum BriefsConfigCmd {
+    /// Get the caller's live briefing config
+    Get,
+    /// Create or replace the caller's live briefing config
+    Set {
+        /// Local hour (0–23)
+        #[arg(long)]
+        hour: Option<u8>,
+        /// Local minute (0–59)
+        #[arg(long)]
+        minute: Option<u8>,
+        /// IANA timezone or UTC
+        #[arg(long)]
+        timezone: Option<String>,
+        /// Automatically include newly joined member conversations
+        #[arg(long)]
+        auto_include: Option<bool>,
+        /// Reporter pubkey; empty string clears
+        #[arg(long)]
+        reporter: Option<String>,
+        /// Included channel UUID (repeatable; replaces the channel list when any are passed)
+        #[arg(long = "channel")]
+        channels: Vec<String>,
+        /// Included DM UUID (repeatable; replaces the DM list when any are passed)
+        #[arg(long = "dm")]
+        dms: Vec<String>,
+        /// Explicit opt-out UUID (repeatable)
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BriefsWatermarksCmd {
+    /// List watermarks authored by the caller
+    List,
+    /// Set a per-conversation watermark
+    Set {
+        /// Conversation UUID
+        #[arg(long)]
+        channel: String,
+        /// Last processed event id
+        #[arg(long)]
+        last_event: String,
+        /// Last processed created_at
+        #[arg(long)]
+        last_created_at: u64,
+        /// Owner pubkey to p-tag
+        #[arg(long)]
+        owner: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ReposCmd {
     /// Announce a git repository (NIP-34)
     Create {
@@ -2802,6 +2911,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
+        Cmd::Briefs(sub) => commands::briefs::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
         Cmd::Projects(sub) => commands::projects::dispatch(sub, &client).await,
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
@@ -3056,6 +3166,7 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            "briefs",
             "canvas",
             "channels",
             "dms",
@@ -3197,6 +3308,10 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(
+            names(&cmd, "briefs"),
+            vec!["config", "get", "list", "publish", "watermarks"]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),

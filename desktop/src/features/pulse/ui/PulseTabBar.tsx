@@ -9,6 +9,7 @@ type PulseTabBarProps = {
   getPanelId: (tab: PulseTab) => string;
   getTabId: (tab: PulseTab) => string;
   relayAgents: RelayAgent[];
+  summaryEnabled?: boolean;
   onTabChange: (tab: PulseTab) => void;
 };
 
@@ -20,6 +21,7 @@ export function PulseTabBar({
   getPanelId,
   getTabId,
   relayAgents,
+  summaryEnabled = false,
   onTabChange,
 }: PulseTabBarProps) {
   return (
@@ -122,6 +124,23 @@ export function PulseTabBar({
               >
                 Mine
               </Button>
+              {summaryEnabled ? (
+                <Button
+                  aria-controls={getPanelId("summary")}
+                  aria-selected={activeTab === "summary"}
+                  className={tabButtonClassName}
+                  data-active={activeTab === "summary"}
+                  data-testid="pulse-tab-summary"
+                  id={getTabId("summary")}
+                  onClick={() => onTabChange("summary")}
+                  role="tab"
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  Summary
+                </Button>
+              ) : null}
             </div>
           </div>
         </div>
