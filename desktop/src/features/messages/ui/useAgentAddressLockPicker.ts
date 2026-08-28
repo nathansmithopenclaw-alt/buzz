@@ -273,13 +273,7 @@ export function useAgentAddressLockPicker({
         applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
         if (!lockedAgentPubkeys.has(pubkey)) {
           trackMentionAddressedAgent(pubkey);
-          if (onAddressAgentMention) {
-            onAddressAgentMention(suggestion);
-          } else {
-            audience.addPubkey(pubkey);
-            onPulseAddressLock(pubkey);
-          }
-          setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
+          onAutoPinAgentMention?.(suggestion);
         } else {
           onPulseAddressLock(pubkey);
         }
@@ -291,12 +285,10 @@ export function useAgentAddressLockPicker({
     },
     [
       applyAutocompleteEdit,
-      audience.addPubkey,
       audienceScope,
       lockedAgentPubkeys,
       mentions.isInlineMentionSelection,
       mentions.insertMention,
-      onAddressAgentMention,
       onAutoPinAgentMention,
       onPulseAddressLock,
       richText.getPlainTextAndCursor,

@@ -4,6 +4,7 @@ export const MAX_IN_MEMORY_AGENT_AUDIENCES = 200;
 
 const listeners = new Set<() => void>();
 const revisions = new Map<string, number>();
+const automaticallyPromotedMembers = new Map<string, Set<string>>();
 let revisionClock = 0;
 let defaultRevision = 0;
 let audiences: Record<string, string[]> = {};
@@ -57,16 +58,28 @@ export function resetPersistentAgentAudienceStore(): void {
   revisionClock += 1;
   defaultRevision = revisionClock;
   revisions.clear();
+  automaticallyPromotedMembers.clear();
   audiences = {};
   emit();
 }
 
-export function setPersistentAgentAudience(
+function replacePersistentAgentAudience(
   scope: string,
   pubkeys: Iterable<string>,
+  automaticPubkeys: Iterable<string>,
 ): void {
   if (!scope) return;
   const normalized = normalizePubkeys(pubkeys);
+  const automaticMembers = new Set(
+    normalizePubkeys(automaticPubkeys).filter((pubkey) =>
+      normalized.includes(pubkey),
+    ),
+  );
+  if (automaticMembers.size) {
+    automaticallyPromotedMembers.set(scope, automaticMembers);
+  } else {
+    automaticallyPromotedMembers.delete(scope);
+  }
   const current = audiences[scope];
   if (
     current !== undefined &&
@@ -84,11 +97,20 @@ export function setPersistentAgentAudience(
   delete nextAudiences[scope];
   audiences = boundAudiences({ ...nextAudiences, [scope]: normalized });
   for (const revisedScope of revisions.keys()) {
-    if (!Object.hasOwn(audiences, revisedScope)) revisions.delete(revisedScope);
+    if (Object.hasOwn(audiences, revisedScope)) continue;
+    revisions.delete(revisedScope);
+    automaticallyPromotedMembers.delete(revisedScope);
   }
   revisionClock += 1;
   revisions.set(scope, revisionClock);
   emit();
+}
+
+export function setPersistentAgentAudience(
+  scope: string,
+  pubkeys: Iterable<string>,
+): void {
+  replacePersistentAgentAudience(scope, pubkeys, []);
 }
 
 export function getPersistentAgentAudienceRevision(scope: string): number {
@@ -98,10 +120,12 @@ export function getPersistentAgentAudienceRevision(scope: string): number {
 export function promotePersistentAgentAudienceIfUnchanged({
   expectedRevision,
   pubkeys,
+  source = "automatic",
   scope,
 }: {
   expectedRevision: number;
   pubkeys: Iterable<string>;
+  source?: "automatic" | "manual";
   scope: string;
 }): { promotedPubkeys: string[]; revision: number } | null {
   if (getPersistentAgentAudienceRevision(scope) !== expectedRevision)
@@ -110,10 +134,14 @@ export function promotePersistentAgentAudienceIfUnchanged({
     (pubkey) => !(audiences[scope] ?? []).includes(pubkey),
   );
   if (promotedPubkeys.length === 0) return null;
-  setPersistentAgentAudience(scope, [
-    ...(audiences[scope] ?? []),
-    ...promotedPubkeys,
-  ]);
+  const existingAutomaticMembers = automaticallyPromotedMembers.get(scope);
+  replacePersistentAgentAudience(
+    scope,
+    [...(audiences[scope] ?? []), ...promotedPubkeys],
+    source === "automatic"
+      ? [...(existingAutomaticMembers ?? []), ...promotedPubkeys]
+      : (existingAutomaticMembers ?? []),
+  );
   return {
     promotedPubkeys,
     revision: getPersistentAgentAudienceRevision(scope),
@@ -132,29 +160,63 @@ export function removePersistentAgentAudienceMembersIfUnchanged({
   if (getPersistentAgentAudienceRevision(scope) !== expectedRevision)
     return false;
   const removals = new Set(normalizePubkeys(pubkeys));
-  setPersistentAgentAudience(
+  const remainingAutomaticMembers = new Set(
+    [...(automaticallyPromotedMembers.get(scope) ?? [])].filter(
+      (pubkey) => !removals.has(pubkey),
+    ),
+  );
+  replacePersistentAgentAudience(
     scope,
     (audiences[scope] ?? []).filter((pubkey) => !removals.has(pubkey)),
+    remainingAutomaticMembers,
   );
   return true;
+}
+
+/** Removes preference-created members while preserving explicit address locks. */
+export function clearAutomaticallyPromotedPersistentAgentAudienceMembers(): void {
+  for (const [scope, automaticMembers] of [
+    ...automaticallyPromotedMembers.entries(),
+  ]) {
+    replacePersistentAgentAudience(
+      scope,
+      (audiences[scope] ?? []).filter(
+        (pubkey) => !automaticMembers.has(pubkey),
+      ),
+      [],
+    );
+  }
 }
 
 export function addPersistentAgentAudienceMember(
   scope: string,
   pubkey: string,
 ): void {
-  setPersistentAgentAudience(scope, [...(audiences[scope] ?? []), pubkey]);
+  const normalized = normalizePubkeys([pubkey])[0];
+  const remainingAutomaticMembers = new Set(
+    automaticallyPromotedMembers.get(scope) ?? [],
+  );
+  if (normalized) remainingAutomaticMembers.delete(normalized);
+  replacePersistentAgentAudience(
+    scope,
+    [...(audiences[scope] ?? []), pubkey],
+    remainingAutomaticMembers,
+  );
 }
 
 export function removePersistentAgentAudienceMember(
   scope: string,
   pubkey: string,
 ): void {
-  setPersistentAgentAudience(
+  const normalized = pubkey.trim().toLowerCase();
+  const remainingAutomaticMembers = new Set(
+    automaticallyPromotedMembers.get(scope) ?? [],
+  );
+  remainingAutomaticMembers.delete(normalized);
+  replacePersistentAgentAudience(
     scope,
-    (audiences[scope] ?? []).filter(
-      (candidate) => candidate !== pubkey.trim().toLowerCase(),
-    ),
+    (audiences[scope] ?? []).filter((candidate) => candidate !== normalized),
+    remainingAutomaticMembers,
   );
 }
 

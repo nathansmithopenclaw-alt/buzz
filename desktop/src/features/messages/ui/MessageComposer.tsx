@@ -32,6 +32,7 @@ import {
   usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
 import {
+  getKeepMentionedAgentsPinned,
   setKeepMentionedAgentsPinned,
   useKeepMentionedAgentsPinned,
 } from "@/features/messages/lib/autoPinMentionedAgentsPreference";
@@ -355,6 +356,7 @@ function MessageComposerImpl({
         () => {
           restoreAddressedAgentMentionsFrameRef.current = null;
           if (channelIdRef.current !== sentChannelId) return;
+          if (!getKeepMentionedAgentsPinned()) return;
           restoreAddressedAgentMentionsRef.current(pubkeys, newlyPinnedPubkeys);
         },
       );

@@ -8,6 +8,10 @@ globalThis.localStorage = {
 };
 
 const preference = await import("./autoPinMentionedAgentsPreference.ts");
+const audienceStore = await import("./persistentAgentAudience.ts");
+const agentA = "a".repeat(64);
+const agentB = "b".repeat(64);
+const scope = `${"1".repeat(64)}:channel-a:channel`;
 
 test("defaults missing and invalid values to one-time agent mentions", () => {
   assert.equal(preference.parseKeepMentionedAgentsPinned(null), false);
@@ -29,5 +33,28 @@ test("persists changes to the post-mention pinning preference", () => {
   assert.equal(
     values.get(preference.KEEP_MENTIONED_AGENTS_PINNED_STORAGE_KEY),
     "false",
+  );
+});
+
+test("turning off automatic mentions drops automatic audiences but keeps explicit locks", () => {
+  audienceStore.resetPersistentAgentAudienceStore();
+  preference.setKeepMentionedAgentsPinned(true);
+  audienceStore.promotePersistentAgentAudienceIfUnchanged({
+    expectedRevision: audienceStore.getPersistentAgentAudienceRevision(scope),
+    pubkeys: [agentA],
+    scope,
+  });
+  audienceStore.promotePersistentAgentAudienceIfUnchanged({
+    expectedRevision: audienceStore.getPersistentAgentAudienceRevision(scope),
+    pubkeys: [agentB],
+    source: "manual",
+    scope,
+  });
+
+  preference.setKeepMentionedAgentsPinned(false);
+
+  assert.deepEqual(
+    audienceStore.getPersistentAgentAudienceSnapshot().audiences[scope],
+    [agentB],
   );
 });

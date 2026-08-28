@@ -321,6 +321,12 @@ test("disabling automatic mentions leaves the composer empty after send", async 
 
   const composer = channelComposer(page);
   const input = composer.getByTestId("message-input");
+  await input.fill("@Mor");
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+  await input.press("Tab");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
   await composer.getByTestId("message-insert-mention").click();
   await composer.getByTestId("mention-options-trigger").click();
   const preference = composer.getByTestId("mention-keep-agents-pinned-toggle");
@@ -328,6 +334,16 @@ test("disabling automatic mentions leaves the composer empty after send", async 
   await preference.click();
   await expect(preference).toHaveAttribute("data-state", "unchecked");
   await input.press("Escape");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+
+  await input.fill("");
+  await page.goto("/#/home", { waitUntil: "domcontentloaded" });
+  await openGeneral(page);
+  await expect(
+    channelComposer(page).getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
 
   await input.fill("@Mor");
   await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
@@ -487,7 +503,7 @@ test("the mention button opens settings and can undo an address", async ({
   await expect(input).toHaveText("@Morgarita ");
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toBeVisible();
+  ).toHaveCount(0);
 
   await input.type("later");
   await input.press("Enter");
