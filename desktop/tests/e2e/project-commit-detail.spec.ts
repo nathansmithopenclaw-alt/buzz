@@ -781,6 +781,41 @@ test("latest files commit opens its detail without a divider", async ({
   await expect(page.getByTestId("project-commit-detail")).toBeVisible();
 });
 
+test("project home panel auto-open preference defaults on and deep-links to its setting", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await addProjectToSidebar(page, "buzz");
+
+  await expect(page.getByTestId("project-home-summary-column")).toBeVisible();
+  await page.getByTestId("project-home-panel-settings-link").click();
+  await expect(page).toHaveURL(
+    /#\/settings\?section=appearance&target=project-home-panel$/,
+  );
+  const toggle = page.getByTestId("project-home-panel-toggle");
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toBeFocused();
+  await expect(toggle).toBeChecked();
+
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await page.getByTestId("settings-back-to-app").click();
+  await expect(page.getByTestId("project-channel-home")).toBeVisible();
+  await expect(page.getByTestId("project-home-summary-column")).toHaveCount(0);
+  await expect(page.getByTestId("project-home-drawer-toggle")).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("project-channel-home")).toBeVisible();
+  await expect(page.getByTestId("project-home-summary-column")).toHaveCount(0);
+  await page.getByTestId("project-home-drawer-toggle").click();
+  await expect(page.getByTestId("project-home-summary-column")).toBeVisible();
+});
+
 test("project workspace sheet stays independent from an open thread", async ({
   page,
 }) => {

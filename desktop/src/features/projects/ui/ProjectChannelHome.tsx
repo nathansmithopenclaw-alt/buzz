@@ -7,6 +7,7 @@ import { useChannelsQuery } from "@/features/channels/hooks";
 import { ChannelScreenLoadingFallback } from "@/features/channels/ui/ChannelScreenLoadingFallback";
 import { useProfileQuery } from "@/features/profile/hooks";
 import type { Project } from "@/features/projects/hooks";
+import { getOpenProjectHomePanelAutomatically } from "@/features/projects/lib/projectHomePanelPreference";
 import {
   isProjectHomeWorkspaceSheetTab,
   projectHomeWorkspaceSheetExpandTab,
@@ -106,7 +107,9 @@ export function ProjectChannelHome({
     autoSend?: string;
     messageId?: string;
   };
-  const [summaryOpen, setSummaryOpen] = React.useState(true);
+  const [summaryOpen, setSummaryOpen] = React.useState(
+    getOpenProjectHomePanelAutomatically,
+  );
   const [addRepositoryOpen, setAddRepositoryOpen] = React.useState(false);
   const [workspaceSheetTab, setWorkspaceSheetTab] =
     React.useState<ProjectHomeWorkspaceSheetTab | null>(null);

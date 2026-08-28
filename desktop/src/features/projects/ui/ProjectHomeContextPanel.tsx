@@ -6,9 +6,11 @@ import {
   GitCommitHorizontal,
   GitPullRequest,
   Hash,
+  Settings2,
   Users,
 } from "lucide-react";
 import * as React from "react";
+import { Link } from "@tanstack/react-router";
 
 import { presentContextCount } from "@/features/projects/lib/projectHomeSummary";
 import type { ProjectHomeWorkspaceSheetTab } from "@/features/projects/lib/projectHomeWorkspaceSheet";
@@ -392,6 +394,16 @@ export function ProjectHomeContextPanel({
           </p>
         )}
       </ContextSection>
+      <Link
+        className={PROJECT_HOME_SIDEBAR_ROW_CLASS}
+        data-testid="project-home-panel-settings-link"
+        search={{ section: "appearance", target: "project-home-panel" }}
+        to="/settings"
+      >
+        <ContextRowContent icon={<Settings2 />}>
+          Project panel settings
+        </ContextRowContent>
+      </Link>
     </div>
   );
 }

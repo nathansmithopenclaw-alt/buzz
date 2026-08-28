@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useSearch } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Eye } from "lucide-react";
@@ -7,6 +8,10 @@ import {
   useThreadViewMode,
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
+import {
+  setOpenProjectHomePanelAutomatically,
+  useOpenProjectHomePanelAutomatically,
+} from "@/features/projects/lib/projectHomePanelPreference";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { AvatarFramingSlider } from "@/features/profile/ui/AnimatedAvatarControls";
 import { contrastColorForBackground } from "@/features/profile/ui/ProfileAvatarEditor.utils";
@@ -69,6 +74,54 @@ export function ProminentActiveTabSetting() {
         data-testid="prominent-active-tab-toggle"
         id="prominent-active-tab-switch"
         onCheckedChange={setProminentActiveTab}
+      />
+    </SettingsOptionRow>
+  );
+}
+
+export function ProjectHomePanelSetting() {
+  const openAutomatically = useOpenProjectHomePanelAutomatically();
+  const search = useSearch({ strict: false }) as { target?: string };
+
+  React.useEffect(() => {
+    if (search.target !== "project-home-panel") return;
+    const frameId = window.requestAnimationFrame(() => {
+      const row = document.getElementById("project-home-panel");
+      const focusTarget = row?.querySelector<HTMLElement>(
+        "[data-settings-focus-target]",
+      );
+      row?.scrollIntoView({ block: "center" });
+      focusTarget?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [search.target]);
+
+  return (
+    <SettingsOptionRow
+      data-testid="project-home-panel-setting"
+      id="project-home-panel"
+    >
+      <div className="min-w-0">
+        <label
+          className="text-sm font-medium"
+          htmlFor="project-home-panel-switch"
+        >
+          Open project panel automatically
+        </label>
+        <p
+          className="text-sm font-normal text-muted-foreground/70"
+          data-settings-subcopy
+        >
+          Show the project overview when you enter a project channel.
+        </p>
+      </div>
+      <Switch
+        aria-label="Open project panel automatically"
+        checked={openAutomatically}
+        data-settings-focus-target
+        data-testid="project-home-panel-toggle"
+        id="project-home-panel-switch"
+        onCheckedChange={setOpenProjectHomePanelAutomatically}
       />
     </SettingsOptionRow>
   );
