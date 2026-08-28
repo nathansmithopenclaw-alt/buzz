@@ -1,8 +1,28 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import {
+  managedAgentsQueryKey,
+  useAcpRuntimesQuery,
+  useCreateManagedAgentMutation,
+  useCreatePersonaMutation,
+  useManagedAgentsQuery,
+  usePersonasQuery,
+  useUpdatePersonaMutation,
+} from "@/features/agents/hooks";
+import { getDefaultPersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
+import {
+  formatRuntimeOptionLabel,
+  sortPersonaRuntimes,
+} from "@/features/agents/ui/agentConfigOptions";
+import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
+import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import {
+  ensureNectarReporter,
+  findNectarAgent,
+  readNectarAvatarDataUrl,
+} from "@/features/pulse/lib/nectarPersona";
 import {
   configFromEvent,
   conversationsFromChannels,
@@ -16,7 +36,11 @@ import {
   defaultSourceConfig,
   type SummarySourceConfig,
 } from "@/features/pulse/lib/summarySources";
-import { SummaryBuilder } from "@/features/pulse/ui/SummaryBuilder";
+import {
+  SummaryBuilder,
+  type SummaryReporterMode,
+} from "@/features/pulse/ui/SummaryBuilder";
+import type { AcpRuntime } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -49,9 +73,19 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
   const [editing, setEditing] = React.useState(false);
   const channelsQuery = useChannelsQuery();
   const agentsQuery = useManagedAgentsQuery();
+  const personasQuery = usePersonasQuery();
+  const runtimesQuery = useAcpRuntimesQuery();
+  const { globalConfig } = useGlobalAgentConfig();
+  const createPersonaMutation = useCreatePersonaMutation();
+  const updatePersonaMutation = useUpdatePersonaMutation();
+  const createAgentMutation = useCreateManagedAgentMutation();
   const conversations = React.useMemo(
     () => conversationsFromChannels(channelsQuery.data ?? []),
     [channelsQuery.data],
+  );
+  const nectarAgent = React.useMemo(
+    () => findNectarAgent(agentsQuery.data ?? []),
+    [agentsQuery.data],
   );
 
   const configQuery = useQuery({
@@ -74,8 +108,59 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
   );
   const [hour, setHour] = React.useState(9);
   const [minute, setMinute] = React.useState(0);
+  const [reporterMode, setReporterMode] =
+    React.useState<SummaryReporterMode>("nectar");
   const [reporterPubkey, setReporterPubkey] = React.useState<string | null>(
     null,
+  );
+  const [runtimeId, setRuntimeId] = React.useState("");
+  const [model, setModel] = React.useState("");
+
+  const defaultRuntime = React.useMemo(
+    () => getDefaultPersonaRuntime(runtimesQuery.data ?? []),
+    [runtimesQuery.data],
+  );
+  const availableRuntimes = React.useMemo(
+    () =>
+      sortPersonaRuntimes(runtimesQuery.data ?? []).filter(
+        (runtime): runtime is AcpRuntime =>
+          runtime.availability === "available",
+      ),
+    [runtimesQuery.data],
+  );
+  const runtimeOptions = React.useMemo(
+    () =>
+      availableRuntimes.map((runtime) => ({
+        id: runtime.id,
+        label: formatRuntimeOptionLabel(runtime),
+      })),
+    [availableRuntimes],
+  );
+  const selectedRuntime = availableRuntimes.find(
+    (runtime) => runtime.id === runtimeId,
+  );
+
+  React.useEffect(() => {
+    if (!runtimeId && defaultRuntime) {
+      setRuntimeId(defaultRuntime.id);
+    }
+  }, [defaultRuntime, runtimeId]);
+
+  const modelDiscovery = usePersonaModelDiscovery({
+    envVars: globalConfig.env_vars,
+    isCustomProviderEditing: false,
+    model: model || undefined,
+    modelFieldVisible: showBuilder && reporterMode === "nectar" && !nectarAgent,
+    open: showBuilder,
+    provider: globalConfig.provider ?? "",
+    selectedRuntime,
+  });
+  const modelOptions = React.useMemo(
+    () =>
+      (modelDiscovery.discoveredModelOptions ?? [])
+        .filter((option) => option.id.length > 0)
+        .map((option) => ({ id: option.id, label: option.label })),
+    [modelDiscovery.discoveredModelOptions],
   );
 
   React.useEffect(() => {
@@ -83,22 +168,54 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
       setSourceConfig(defaultSourceConfig(conversations));
       setHour(9);
       setMinute(0);
-      const synopsis = (agentsQuery.data ?? []).find(
-        (agent) => agent.name.toLowerCase() === "synopsis",
-      );
-      setReporterPubkey(synopsis?.pubkey ?? null);
+      setReporterMode("nectar");
+      setReporterPubkey(nectarAgent?.pubkey ?? null);
       return;
     }
     setSourceConfig(sourceConfigFromPayload(payload, conversations));
     setHour(payload.hour);
     setMinute(payload.minute);
     setReporterPubkey(payload.reporter_pubkey);
-  }, [agentsQuery.data, conversations, payload]);
+    const assignedNectar =
+      Boolean(nectarAgent) &&
+      payload.reporter_pubkey?.toLowerCase() ===
+        nectarAgent?.pubkey.toLowerCase();
+    setReporterMode(
+      assignedNectar || !payload.reporter_pubkey ? "nectar" : "existing",
+    );
+  }, [conversations, nectarAgent, payload]);
 
   const saveMutation = useMutation({
     mutationFn: async () => {
       if (!currentPubkey) {
         throw new Error("Sign in to save Summary sources.");
+      }
+      let reporter = reporterPubkey;
+      if (reporterMode === "nectar") {
+        if (nectarAgent) {
+          reporter = nectarAgent.pubkey;
+        } else {
+          if (!selectedRuntime) {
+            throw new Error("Choose a harness for Nectar.");
+          }
+          reporter = await ensureNectarReporter({
+            agents: agentsQuery.data ?? [],
+            personas: personasQuery.data ?? [],
+            runtime: selectedRuntime,
+            model,
+            provider: globalConfig.provider,
+            avatarDataUrl: await readNectarAvatarDataUrl(),
+            createPersona: (input) => createPersonaMutation.mutateAsync(input),
+            updatePersona: (input) => updatePersonaMutation.mutateAsync(input),
+            createManagedAgent: (input) =>
+              createAgentMutation.mutateAsync(input),
+          });
+        }
+      }
+      if (!reporter) {
+        throw new Error(
+          "Choose Nectar's harness, or pick an existing colleague.",
+        );
       }
       await publishBriefConfig({
         ownerPubkey: currentPubkey,
@@ -106,7 +223,7 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
         minute,
         timezone: payload?.timezone || timezone,
         autoInclude: sourceConfig.autoInclude,
-        reporterPubkey,
+        reporterPubkey: reporter,
         conversations,
         sourceConfig,
       });
@@ -114,6 +231,7 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
     onSuccess: async () => {
       setEditing(false);
       await queryClient.invalidateQueries({ queryKey: ["brief-config"] });
+      await queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     },
   });
 
@@ -145,15 +263,29 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
         }
         hour={hour}
         minute={minute}
+        model={model}
+        modelLoading={modelDiscovery.modelDiscoveryLoading}
+        modelOptions={modelOptions}
+        nectarExists={Boolean(nectarAgent)}
         onCancel={hasSavedConfig ? () => setEditing(false) : undefined}
+        onModelChange={setModel}
         onReporterChange={setReporterPubkey}
+        onReporterModeChange={setReporterMode}
+        onRuntimeChange={(nextRuntimeId) => {
+          setRuntimeId(nextRuntimeId);
+          setModel("");
+        }}
         onSave={() => saveMutation.mutate()}
         onSourceConfigChange={setSourceConfig}
         onTimeChange={(nextHour, nextMinute) => {
           setHour(nextHour);
           setMinute(nextMinute);
         }}
+        reporterMode={reporterMode}
         reporterPubkey={reporterPubkey}
+        runtimeId={runtimeId}
+        runtimes={runtimeOptions}
+        runtimesLoading={runtimesQuery.isLoading}
         saving={saveMutation.isPending}
         sourceConfig={sourceConfig}
         timezone={payload?.timezone || timezone}

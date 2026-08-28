@@ -1,4 +1,10 @@
 import {
+  NECTAR_AVATAR_PATH,
+  NECTAR_DESCRIPTION,
+  NECTAR_DISPLAY_NAME,
+  isNectarName,
+} from "@/features/pulse/lib/nectarPersona";
+import {
   formatLocalTime,
   isConversationChecked,
   parseLocalTime,
@@ -16,22 +22,49 @@ import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
 
+export type SummaryReporterMode = "nectar" | "existing";
+
+export type SummaryRuntimeOption = {
+  id: string;
+  label: string;
+};
+
+export type SummaryModelOption = {
+  id: string;
+  label: string;
+};
+
 type SummaryBuilderProps = {
   conversations: SummaryConversation[];
   sourceConfig: SummarySourceConfig;
   hour: number;
   minute: number;
   timezone: string;
+  reporterMode: SummaryReporterMode;
   reporterPubkey: string | null;
   agents: ManagedAgent[];
+  nectarExists: boolean;
+  runtimeId: string;
+  runtimes: SummaryRuntimeOption[];
+  runtimesLoading: boolean;
+  model: string;
+  modelOptions: SummaryModelOption[];
+  modelLoading: boolean;
   saving: boolean;
   error: string | null;
   onSourceConfigChange: (config: SummarySourceConfig) => void;
   onTimeChange: (hour: number, minute: number) => void;
+  onReporterModeChange: (mode: SummaryReporterMode) => void;
   onReporterChange: (pubkey: string | null) => void;
+  onRuntimeChange: (runtimeId: string) => void;
+  onModelChange: (model: string) => void;
   onSave: () => void;
   onCancel?: () => void;
 };
+
+const NECTAR_SELECT_VALUE = "nectar";
+const selectClassName =
+  "h-8 max-w-56 rounded-md border border-border/70 bg-background px-2 text-sm";
 
 function ConversationRow({
   conversation,
@@ -68,18 +101,33 @@ export function SummaryBuilder({
   hour,
   minute,
   timezone,
+  reporterMode,
   reporterPubkey,
   agents,
+  nectarExists,
+  runtimeId,
+  runtimes,
+  runtimesLoading,
+  model,
+  modelOptions,
+  modelLoading,
   saving,
   error,
   onSourceConfigChange,
   onTimeChange,
+  onReporterModeChange,
   onReporterChange,
+  onRuntimeChange,
+  onModelChange,
   onSave,
   onCancel,
 }: SummaryBuilderProps) {
   const { channels, dms } = partitionLiveConversations(conversations);
   const timeValue = formatLocalTime(hour, minute);
+  const otherAgents = agents.filter((agent) => !isNectarName(agent.name));
+  const reporterSelectValue =
+    reporterMode === "nectar" ? NECTAR_SELECT_VALUE : (reporterPubkey ?? "");
+  const showNectarSetup = reporterMode === "nectar" && !nectarExists;
 
   return (
     <div className="flex flex-col gap-8">
@@ -144,11 +192,35 @@ export function SummaryBuilder({
         </SettingsOptionRow>
       </SettingsOptionGroup>
 
-      {agents.length > 0 ? (
-        <SettingsOptionGroup
-          description="v1 adds the reporter as a bot on included channels. Direct messages stay on the read-grant path."
-          title="Reporter"
-        >
+      <SettingsOptionGroup
+        description="Nectar is the supplied Summary colleague. Choose a harness and model — name, avatar, and instructions are already written. v1 adds the reporter as a bot on included channels. Direct messages stay on the read-grant path."
+        title="Reporter"
+      >
+        {reporterMode === "nectar" ? (
+          <SettingsOptionRow data-testid="summary-nectar">
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              <img
+                alt=""
+                className="h-12 w-12 shrink-0 rounded-full bg-white object-cover"
+                src={NECTAR_AVATAR_PATH}
+              />
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium">
+                  {NECTAR_DISPLAY_NAME}
+                </p>
+                <p
+                  className="text-xs text-muted-foreground/70"
+                  data-settings-subcopy
+                >
+                  {nectarExists
+                    ? "Already in My Agents. Save assigns the Summary job."
+                    : NECTAR_DESCRIPTION}
+                </p>
+              </div>
+            </div>
+          </SettingsOptionRow>
+        ) : null}
+        {otherAgents.length > 0 ? (
           <SettingsOptionRow>
             <label
               className="min-w-0 flex-1 text-sm font-medium"
@@ -157,25 +229,87 @@ export function SummaryBuilder({
               Colleague
             </label>
             <select
-              className="h-8 max-w-56 rounded-md border border-border/70 bg-background px-2 text-sm"
+              className={selectClassName}
+              data-testid="summary-reporter"
               id="summary-reporter"
-              onChange={(event) =>
-                onReporterChange(
-                  event.target.value === "" ? null : event.target.value,
-                )
-              }
-              value={reporterPubkey ?? ""}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (value === NECTAR_SELECT_VALUE) {
+                  onReporterModeChange("nectar");
+                  onReporterChange(null);
+                  return;
+                }
+                onReporterModeChange("existing");
+                onReporterChange(value === "" ? null : value);
+              }}
+              value={reporterSelectValue}
             >
-              <option value="">None yet</option>
-              {agents.map((agent) => (
+              <option value={NECTAR_SELECT_VALUE}>{NECTAR_DISPLAY_NAME}</option>
+              {otherAgents.map((agent) => (
                 <option key={agent.pubkey} value={agent.pubkey}>
                   {agent.name}
                 </option>
               ))}
             </select>
           </SettingsOptionRow>
-        </SettingsOptionGroup>
-      ) : null}
+        ) : null}
+        {showNectarSetup ? (
+          <>
+            <SettingsOptionRow>
+              <label
+                className="min-w-0 flex-1 text-sm font-medium"
+                htmlFor="summary-nectar-harness"
+              >
+                Harness
+              </label>
+              <select
+                className={selectClassName}
+                data-testid="summary-nectar-harness"
+                disabled={runtimesLoading || runtimes.length === 0}
+                id="summary-nectar-harness"
+                onChange={(event) => onRuntimeChange(event.target.value)}
+                value={runtimeId}
+              >
+                <option value="">
+                  {runtimesLoading ? "Loading harnesses…" : "Choose a harness"}
+                </option>
+                {runtimes.map((runtime) => (
+                  <option key={runtime.id} value={runtime.id}>
+                    {runtime.label}
+                  </option>
+                ))}
+              </select>
+            </SettingsOptionRow>
+            <SettingsOptionRow>
+              <label
+                className="min-w-0 flex-1 text-sm font-medium"
+                htmlFor="summary-nectar-model"
+              >
+                Model
+              </label>
+              <select
+                className={selectClassName}
+                data-testid="summary-nectar-model"
+                disabled={!runtimeId || modelLoading}
+                id="summary-nectar-model"
+                onChange={(event) => onModelChange(event.target.value)}
+                value={model}
+              >
+                <option value="">
+                  {modelLoading ? "Loading models…" : "Default model"}
+                </option>
+                {modelOptions.map((option) =>
+                  option.id ? (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ) : null,
+                )}
+              </select>
+            </SettingsOptionRow>
+          </>
+        ) : null}
+      </SettingsOptionGroup>
 
       <SettingsOptionGroup title="Channels">
         {channels.length === 0 ? (
@@ -230,7 +364,14 @@ export function SummaryBuilder({
       ) : null}
 
       <div className="flex items-center gap-2">
-        <Button disabled={saving} onClick={onSave} type="button">
+        <Button
+          disabled={
+            saving ||
+            (showNectarSetup && (runtimesLoading || runtimeId.length === 0))
+          }
+          onClick={onSave}
+          type="button"
+        >
           {saving ? "Saving…" : "Save"}
         </Button>
         {onCancel ? (

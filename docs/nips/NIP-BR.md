@@ -13,7 +13,10 @@ from deltas, never from full history.
 
 The protocol does not hardcode organization names, reporter names, model
 providers, or channel IDs. Feature naming in a client (tab label vs
-reporter display name) is a UI concern.
+reporter display name) is a UI concern. Clients MAY ship a starter
+reporter persona (name, avatar, and instructions) created during Summary
+setup so a new user only chooses harness and model. That persona is not a
+protocol identity and MUST NOT be required as a Welcome teammate.
 
 ## Kind allocation
 
