@@ -212,3 +212,40 @@ test("promotion reports only newly added agents for transactional Undo", async (
   );
   assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
 });
+
+test("disabling automatic promotion removes automatic members but preserves manual locks", async () => {
+  const store = await loadStore(12);
+  const scope = `${ownerA}:channel-a:channel`;
+  store.setPersistentAgentAudience(scope, []);
+  store.promotePersistentAgentAudienceIfUnchanged({
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    pubkeys: [agentA],
+    scope,
+  });
+  store.promotePersistentAgentAudienceIfUnchanged({
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    pubkeys: [agentB],
+    source: "manual",
+    scope,
+  });
+
+  store.clearAutomaticallyPromotedPersistentAgentAudienceMembers();
+
+  assert.deepEqual(currentAudiences(store), { [scope]: [agentB] });
+});
+
+test("manual unpin remains empty after automatic audiences are cleared", async () => {
+  const store = await loadStore(13);
+  const scope = `${ownerA}:channel-a:channel`;
+  store.setPersistentAgentAudience(scope, []);
+  store.promotePersistentAgentAudienceIfUnchanged({
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    pubkeys: [agentA],
+    scope,
+  });
+  store.removePersistentAgentAudienceMember(scope, agentA);
+
+  store.clearAutomaticallyPromotedPersistentAgentAudienceMembers();
+
+  assert.deepEqual(currentAudiences(store), { [scope]: [] });
+});

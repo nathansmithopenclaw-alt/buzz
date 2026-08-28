@@ -467,13 +467,14 @@ test("removing human mentions is ignored while removing a restored agent chip cl
   assert.deepEqual(removedPubkeys, ["existing-lock"]);
 });
 
-test("selecting an agent from the explicit picker auto-addresses it", async () => {
+test("selecting an agent from the explicit picker delegates preference-gated auto-promotion", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
   );
   const appliedEdits = [];
   const addedPubkeys = [];
+  const autoPinnedSuggestions = [];
   const pulsedPubkeys = [];
   const mentions = {
     cancelMentionAutocomplete: () => {},
@@ -501,18 +502,19 @@ test("selecting an agent from the explicit picker auto-addresses it", async () =
       audience,
       audienceScope: "channel-scope",
       mentions,
+      onAutoPinAgentMention: (suggestion) =>
+        autoPinnedSuggestions.push(suggestion),
       onPulseAddressLock: (pubkey) => pulsedPubkeys.push(pubkey),
       richText,
     }),
   );
 
-  act(() => {
-    result.current.selectMentionSuggestion({
-      pubkey: "agent-pubkey",
-      displayName: "Agent Ada",
-      isAgent: true,
-    });
-  });
+  const suggestion = {
+    pubkey: "agent-pubkey",
+    displayName: "Agent Ada",
+    isAgent: true,
+  };
+  act(() => result.current.selectMentionSuggestion(suggestion));
 
   assert.deepEqual(appliedEdits, [
     {
@@ -521,12 +523,10 @@ test("selecting an agent from the explicit picker auto-addresses it", async () =
       insertText: "@Agent Ada ",
     },
   ]);
-  assert.deepEqual(addedPubkeys, ["agent-pubkey"]);
-  assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
-  assert.equal(
-    result.current.announcement,
-    "Automatically mentioning Agent Ada",
-  );
+  assert.deepEqual(autoPinnedSuggestions, [suggestion]);
+  assert.deepEqual(addedPubkeys, []);
+  assert.deepEqual(pulsedPubkeys, []);
+  assert.equal(result.current.announcement, "");
 });
 
 test("selecting an explicitly unpinned agent inserts a mention until send", async () => {

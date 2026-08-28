@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { clearAutomaticallyPromotedPersistentAgentAudienceMembers } from "./persistentAgentAudience";
+
 export const KEEP_MENTIONED_AGENTS_PINNED_STORAGE_KEY =
   "buzz.messages.keepMentionedAgentsPinned";
 export const DEFAULT_KEEP_MENTIONED_AGENTS_PINNED = false;
@@ -37,6 +39,7 @@ export function getKeepMentionedAgentsPinned(): boolean {
 }
 
 export function setKeepMentionedAgentsPinned(value: boolean): void {
+  if (!value) clearAutomaticallyPromotedPersistentAgentAudienceMembers();
   if (value === keepMentionedAgentsPinned) return;
   keepMentionedAgentsPinned = value;
   try {

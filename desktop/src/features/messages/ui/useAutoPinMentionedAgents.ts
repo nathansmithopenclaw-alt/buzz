@@ -63,6 +63,7 @@ export function useAutoPinMentionedAgents({
       const promotion = promotePersistentAgentAudienceIfUnchanged({
         expectedRevision,
         pubkeys: normalizedPubkeys,
+        source: requirePreference ? "automatic" : "manual",
         scope: audienceScope,
       });
       if (promotion === null) return;
