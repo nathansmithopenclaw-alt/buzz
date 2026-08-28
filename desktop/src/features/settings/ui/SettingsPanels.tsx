@@ -59,6 +59,7 @@ import {
   GlassBackgroundSetting,
   LinkPreviewStyleSetting,
   ProminentActiveTabSetting,
+  ProjectHomePanelSetting,
   ThreadLayoutSetting,
 } from "./AppearanceSettingsControls";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
@@ -98,6 +99,12 @@ export type SettingsSection =
   | "local-archive"
   | "mobile"
   | "updates";
+
+export type SettingsTarget = "project-home-panel";
+
+export function isSettingsTarget(value: unknown): value is SettingsTarget {
+  return value === "project-home-panel";
+}
 
 export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
 
@@ -793,6 +800,7 @@ function ThemeSettingsCard() {
           <ConversationDisplaySettings />
           <LinkPreviewStyleSetting />
           <ThreadLayoutSetting />
+          <ProjectHomePanelSetting />
         </SettingsOptionGroup>
       </SettingsOptionGroupList>
     </section>
