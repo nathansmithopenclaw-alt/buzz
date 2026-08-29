@@ -161,7 +161,7 @@ function AssigneeControl({
           title={pubkey}
         >
           <ProfileAvatar profiles={profiles} pubkey={pubkey} />
-          <span className="truncate">
+          <span className="truncate" data-testid="dispatch-assignee-name">
             {assigneeLabel(pubkey, profiles ?? {})}
           </span>
         </button>

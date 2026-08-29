@@ -343,8 +343,9 @@ test("assignee rail shows the profile name, not the pubkey", async ({
   await openDispatch(page, assignPrimary(OTHER));
   await openPrimaryIssue(page);
 
-  const assignee = page.getByTestId("dispatch-assignee");
-  await expect(assignee).toHaveText("Helm");
+  // Scoped to the name node: the row also renders an avatar whose fallback is
+  // the first letter, so the button's full text is "HHelm".
+  await expect(page.getByTestId("dispatch-assignee-name")).toHaveText("Helm");
   await expect(page.getByText(OTHER, { exact: true })).toHaveCount(0);
   // The pubkey field is reachable, but it is not the resting state.
   await expect(page.getByLabel("Issue assignee pubkey")).toHaveCount(0);
@@ -362,8 +363,9 @@ test("assignee rail falls back to a truncated pubkey with no profile", async ({
   await openDispatch(page, assignPrimary(unknown));
   await openPrimaryIssue(page);
 
-  const assignee = page.getByTestId("dispatch-assignee");
-  await expect(assignee).toHaveText(`${"f".repeat(8)}…ffff`);
+  await expect(page.getByTestId("dispatch-assignee-name")).toHaveText(
+    `${"f".repeat(8)}…ffff`,
+  );
   await expect(page.getByText(unknown, { exact: true })).toHaveCount(0);
 
   await waitForAnimations(page);

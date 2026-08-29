@@ -248,13 +248,23 @@ export function DispatchScreen() {
               <Button
                 aria-label="Refresh Dispatch"
                 data-testid="dispatch-refresh"
-                disabled={!workspaceId || context.isLoading}
-                onClick={() => void context.refresh()}
+                disabled={workspaceQuery.isLoading || context.isLoading}
+                onClick={() => {
+                  // Refresh what the screen shows, which includes the
+                  // workspace list: it is cached with a staleTime and nothing
+                  // invalidates it, so this is the only way to pick up a
+                  // newly-joined workspace before that expires.
+                  workspaceQuery.refresh();
+                  if (workspaceId) void context.refresh();
+                }}
                 size="icon-xs"
                 variant="ghost"
               >
                 <RefreshCw
-                  className={cn(context.isLoading && "animate-spin")}
+                  className={cn(
+                    (workspaceQuery.isLoading || context.isLoading) &&
+                      "animate-spin",
+                  )}
                 />
               </Button>
             </div>

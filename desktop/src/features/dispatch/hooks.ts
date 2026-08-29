@@ -238,11 +238,17 @@ async function loadContext(
 
 /**
  * Workspace membership changes rarely, and the list is re-read every time
- * Dispatch mounts. Without this the default `staleTime: 0` plus the client's
- * 5-minute `gcTime` means leaving Dispatch for five minutes and returning pays
- * full discovery again — not just once per launch.
+ * Dispatch mounts. Without this the default `staleTime: 0` means every remount
+ * pays full discovery again — not just once per launch.
+ *
+ * Matched to the client's `gcTime` rather than set higher. Nothing invalidates
+ * this key, so `staleTime` is the *only* thing bounding how long a
+ * newly-joined workspace stays invisible; going past `gcTime` would buy no
+ * extra cache hits in the unmount-and-return case (the entry is collected
+ * anyway) while widening that window. The Dispatch refresh control forces a
+ * refetch inside it.
  */
-const WORKSPACES_STALE_TIME_MS = 10 * 60 * 1_000;
+const WORKSPACES_STALE_TIME_MS = 5 * 60 * 1_000;
 
 /**
  * Shared so the boot prefetch and the screen's own read resolve to the same
