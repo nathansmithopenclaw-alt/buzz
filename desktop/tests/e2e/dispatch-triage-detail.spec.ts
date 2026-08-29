@@ -9,6 +9,7 @@ import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 const WORKSPACE = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const SELF = TEST_IDENTITIES.tyler.pubkey;
 const OTHER = TEST_IDENTITIES.alice.pubkey;
+const PRIMARY_ISSUE = "11111111-1111-4111-8111-111111111111";
 const LONG_IDENTIFIER = `D-${"a".repeat(32)}`;
 const RELATED_LONG_IDENTIFIER = `D-${"b".repeat(32)}`;
 
@@ -324,6 +325,61 @@ test("detail keeps canonical activity visible when comments and profiles degrade
   ).toBeVisible();
   await expect(page.getByText("Needs owner review")).toBeVisible();
   await expect(page.getByTestId("dispatch-comment")).toHaveCount(0);
+});
+
+function assignPrimary(assignee: string) {
+  return context({
+    issues: context().issues.map((entry) =>
+      entry.issueId === PRIMARY_ISSUE ? { ...entry, assignee } : entry,
+    ),
+  });
+}
+
+test("assignee rail shows the profile name, not the pubkey", async ({
+  page,
+}) => {
+  // OTHER is seeded in searchProfiles as kind:0 displayName "Helm".
+  await openDispatch(page, assignPrimary(OTHER));
+  await openPrimaryIssue(page);
+
+  const assignee = page.getByTestId("dispatch-assignee");
+  await expect(assignee).toHaveText("Helm");
+  await expect(page.getByText(OTHER, { exact: true })).toHaveCount(0);
+  // The pubkey field is reachable, but it is not the resting state.
+  await expect(page.getByLabel("Issue assignee pubkey")).toHaveCount(0);
+});
+
+test("assignee rail falls back to a truncated pubkey with no profile", async ({
+  page,
+}) => {
+  const unknown = "f".repeat(64);
+  await openDispatch(page, assignPrimary(unknown));
+  await openPrimaryIssue(page);
+
+  const assignee = page.getByTestId("dispatch-assignee");
+  await expect(assignee).toHaveText(`${"f".repeat(8)}…ffff`);
+  await expect(page.getByText(unknown, { exact: true })).toHaveCount(0);
+});
+
+test("assignee rail still edits by pubkey behind a click", async ({ page }) => {
+  await openDispatch(page, assignPrimary(OTHER));
+  await openPrimaryIssue(page);
+
+  await page.getByTestId("dispatch-assignee").click();
+  const field = page.getByLabel("Issue assignee pubkey");
+  await expect(field).toHaveValue(OTHER);
+  await field.fill(SELF);
+  await field.press("Enter");
+  await expect(page.getByText("Issue updated")).toBeVisible();
+
+  const signed = await page.evaluate(
+    () => window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [],
+  );
+  const revision = signed.find((event) => event.kind === 40021);
+  const content = JSON.parse(revision?.content ?? "{}") as {
+    set?: { assignee?: string };
+  };
+  expect(content.set?.assignee).toBe(SELF);
 });
 
 test("detail never turns a non-http provenance source into a link", async ({

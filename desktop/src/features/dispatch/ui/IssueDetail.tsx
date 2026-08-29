@@ -20,6 +20,7 @@ import { Markdown } from "@/shared/ui/markdown";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Textarea } from "@/shared/ui/textarea";
 import { chronologicalActivity, taskMessageLink } from "../selectors.mjs";
+import { assigneeLabel } from "../viewModel";
 import type { DispatchIssueMutation } from "../mutations";
 import type {
   DispatchActivity,
@@ -98,6 +99,98 @@ function ProfileAvatar({
         {label.slice(0, 1).toUpperCase()}
       </AvatarFallback>
     </Avatar>
+  );
+}
+
+/**
+ * Assignee row: shows who the issue is assigned to, not the raw key.
+ *
+ * The name comes from kind:0 profile metadata via {@link assigneeLabel} — the
+ * same resolver the board and list views use — and falls back to a truncated
+ * pubkey when no profile has been published. Editing is still by pubkey, so
+ * the raw value stays reachable behind a click rather than being the resting
+ * state of the field.
+ */
+function AssigneeControl({
+  canEdit,
+  currentPubkey,
+  isMutating,
+  onMutate,
+  profiles,
+  pubkey,
+}: {
+  canEdit: boolean;
+  currentPubkey?: string;
+  isMutating: boolean;
+  onMutate: (mutation: DispatchIssueMutation) => Promise<void>;
+  profiles?: UserProfileLookup;
+  pubkey: string | null;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const inputRef = React.useRef<HTMLInputElement | null>(null);
+  // Focus follows the user's click into edit mode; not an autofocus on mount.
+  React.useEffect(() => {
+    if (!editing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [editing]);
+  const assign = (next: string | null) =>
+    void onMutate({ type: "assignee", assignee: next }).catch(() => undefined);
+  const assignToMe = (
+    <Button
+      aria-label="Assign to me"
+      disabled={!canEdit || isMutating || !currentPubkey}
+      onClick={() => assign(currentPubkey ?? null)}
+      size="icon"
+      variant="ghost"
+    >
+      <UserRound className="h-4 w-4" />
+    </Button>
+  );
+
+  if (pubkey && !editing) {
+    return (
+      <div className="flex items-center gap-1">
+        <button
+          aria-label="Change issue assignee"
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left hover:bg-muted/60 disabled:opacity-50 disabled:hover:bg-transparent"
+          data-testid="dispatch-assignee"
+          disabled={!canEdit || isMutating}
+          onClick={() => setEditing(true)}
+          type="button"
+          title={pubkey}
+        >
+          <ProfileAvatar profiles={profiles} pubkey={pubkey} />
+          <span className="truncate">
+            {assigneeLabel(pubkey, profiles ?? {})}
+          </span>
+        </button>
+        {assignToMe}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex gap-1">
+      <input
+        aria-label="Issue assignee pubkey"
+        className="h-8 min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-2 font-mono text-xs disabled:opacity-50"
+        defaultValue={pubkey ?? ""}
+        disabled={!canEdit || isMutating}
+        key={pubkey ?? "none"}
+        onBlur={() => setEditing(false)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setEditing(false);
+          if (event.key === "Enter") {
+            setEditing(false);
+            assign(event.currentTarget.value.trim() || null);
+          }
+        }}
+        placeholder="Unassigned"
+        ref={inputRef}
+      />
+      {assignToMe}
+    </div>
   );
 }
 
@@ -471,37 +564,14 @@ export function IssueDetail({
             </select>
           </Property>
           <Property label="Assignee">
-            <div className="flex gap-1">
-              <input
-                aria-label="Issue assignee pubkey"
-                className="h-8 min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-2 font-mono text-xs disabled:opacity-50"
-                defaultValue={issue.assignee ?? ""}
-                disabled={!canEdit || isMutating}
-                key={issue.assignee ?? "none"}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter")
-                    void onMutate({
-                      type: "assignee",
-                      assignee: event.currentTarget.value.trim() || null,
-                    }).catch(() => undefined);
-                }}
-                placeholder="Unassigned"
-              />
-              <Button
-                aria-label="Assign to me"
-                disabled={!canEdit || isMutating || !currentPubkey}
-                onClick={() =>
-                  void onMutate({
-                    type: "assignee",
-                    assignee: currentPubkey ?? null,
-                  }).catch(() => undefined)
-                }
-                size="icon"
-                variant="ghost"
-              >
-                <UserRound className="h-4 w-4" />
-              </Button>
-            </div>
+            <AssigneeControl
+              canEdit={canEdit}
+              currentPubkey={currentPubkey}
+              isMutating={isMutating}
+              onMutate={onMutate}
+              profiles={profiles}
+              pubkey={issue.assignee}
+            />
           </Property>
           <Property label="Project">
             {sectionErrors.projects ? (
