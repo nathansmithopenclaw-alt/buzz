@@ -144,6 +144,15 @@ non-hook commands.
 
 **Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
 
+**Commit as yourself — new worktrees inherit Helm's identity.** The shared
+`.git/config` sets Helm's `user.name`/`user.email`, and a freshly created
+worktree inherits it, so a plain `git commit` there lands misattributed.
+`extensions.worktreeConfig` is enabled repo-wide: before your first commit in a
+new worktree, run `git config --worktree user.name "<Your Name>"` and
+`git config --worktree user.email "<you>@smithcrafts.dev"` (or pass
+`-c user.name=... -c user.email=...` per commit). Never edit the shared config.
+Sign-off and any Co-authored-by trailers use the same identity.
+
 Additional rules:
 - No `unsafe` code
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types
