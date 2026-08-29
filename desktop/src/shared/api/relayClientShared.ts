@@ -38,6 +38,20 @@ export function isRelayConnectionDegraded(state: ConnectionState): boolean {
  */
 export const MAX_EXPLICIT_CHANNEL_VALUES = 128;
 
+/**
+ * Cap on how many filters one REQ may carry before the relay rejects it with
+ * `NOTICE … maximum is 10`. Mirrors `MAX_FILTERS_PER_REQ` in
+ * `crates/buzz-relay/src/protocol.rs`, which is the value advertised in NIP-11
+ * as `max_filters`.
+ *
+ * The relay runs each filter as its own query and deliberately refuses to
+ * collapse them (`crates/buzz-relay/src/handlers/req.rs`), so per-filter
+ * `limit`s are preserved. That is what makes one REQ a safe replacement for N
+ * single-filter REQs: a combined filter would share one limit, letting a busy
+ * subject consume the whole budget and starve the rest.
+ */
+export const MAX_FILTERS_PER_REQ = 10;
+
 export type RelaySubscriptionFilter = {
   ids?: string[];
   kinds: number[];

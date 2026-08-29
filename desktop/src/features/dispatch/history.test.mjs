@@ -150,6 +150,74 @@ test("serial queue paces concurrent cold-load streams", async () => {
   assert.deepEqual(starts, [0, 150, 300, 450]);
 });
 
+test("a multi-filter batch spends one queue slot, not one per filter", async () => {
+  let now = 0;
+  const starts = [];
+  const history = client({
+    requestIntervalMs: 150,
+    now: () => now,
+    sleep: async (milliseconds) => {
+      now += milliseconds;
+    },
+    fetchEventsMulti: async () => {
+      starts.push(now);
+      return [];
+    },
+  });
+
+  await Promise.all([
+    history.fetchMulti([{ kinds: [40020], "#h": ["a"], limit: 1 }]),
+    history.fetchMulti([
+      { kinds: [40020], "#h": ["b"], limit: 1 },
+      { kinds: [40020], "#h": ["c"], limit: 1 },
+    ]),
+  ]);
+
+  // Two batches carrying three filters pay two pacing gaps, not three.
+  assert.deepEqual(starts, [0, 150]);
+});
+
+test("an empty batch issues no request", async () => {
+  let calls = 0;
+  const history = client({
+    fetchEventsMulti: async () => {
+      calls += 1;
+      return [];
+    },
+  });
+
+  assert.deepEqual(await history.fetchMulti([]), []);
+  assert.equal(calls, 0);
+});
+
+test("a rate-limited multi-filter batch retries behind the gate", async () => {
+  let attempts = 0;
+  let gateActive = false;
+  const history = client({
+    isRateLimited: () => gateActive,
+    waitForRateLimit: async () => {
+      gateActive = false;
+    },
+    activateRateLimit: () => {
+      gateActive = true;
+    },
+    fetchEventsMulti: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error("rate-limited: quota exceeded; retry in 1s");
+      }
+      return [event(1, 100)];
+    },
+  });
+
+  const events = await history.fetchMulti([
+    { kinds: [40020], "#h": ["a"], limit: 1 },
+  ]);
+
+  assert.equal(events.length, 1);
+  assert.equal(attempts, 2);
+});
+
 test("rate-limited page waits behind the gate and then succeeds", async () => {
   let attempts = 0;
   let gateActive = false;
