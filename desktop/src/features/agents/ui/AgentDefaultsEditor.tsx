@@ -217,6 +217,7 @@ export function AgentDefaultsEditor({
           // Grant persists on its own path; a Save that started first must
           // not clobber a grant that landed while the IPC was in flight.
           agent_management_delegation: current.agent_management_delegation,
+          agent_management_delegations: current.agent_management_delegations,
         };
         configRef.current = next;
         setDirty(false);
@@ -238,6 +239,9 @@ export function AgentDefaultsEditor({
           agent_management_delegation:
             current?.agent_management_delegation ??
             result.config.agent_management_delegation,
+          agent_management_delegations:
+            current?.agent_management_delegations ??
+            result.config.agent_management_delegations,
         }),
       );
       if (savedCurrentDraft) onSaveSuccess?.(result);
@@ -338,11 +342,14 @@ export function AgentDefaultsEditor({
       {!configSurfaceLoading && !configSurfaceError ? (
         <AgentManagementDelegationCard
           grant={config.agent_management_delegation}
+          grants={config.agent_management_delegations}
           onPersisted={(saved) => {
             setConfig((current) => {
               const next = {
                 ...current,
                 agent_management_delegation: saved.agent_management_delegation,
+                agent_management_delegations:
+                  saved.agent_management_delegations,
               };
               configRef.current = next;
               return next;
@@ -352,6 +359,8 @@ export function AgentDefaultsEditor({
               (current: GlobalAgentConfig | undefined) => ({
                 ...(current ?? saved),
                 agent_management_delegation: saved.agent_management_delegation,
+                agent_management_delegations:
+                  saved.agent_management_delegations,
               }),
             );
           }}

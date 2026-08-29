@@ -20,6 +20,22 @@ fn unsigned_grant(
     }
 }
 
+fn signed_grant(
+    owner: &Keys,
+    grantee_pubkey: String,
+    capabilities: AgentManagementDelegationCapabilities,
+) -> AgentManagementDelegationGrant {
+    let mut grant = unsigned_grant(grantee_pubkey, capabilities);
+    let event = EventBuilder::new(
+        Kind::Custom(30_078),
+        serde_json::to_string(&grant.payload).unwrap(),
+    )
+    .sign_with_keys(owner)
+    .unwrap();
+    grant.signed_event = Some(event.as_json());
+    grant
+}
+
 fn request(authorized: bool) -> NewLedgerRequest {
     NewLedgerRequest {
         source_pubkey: "11".repeat(32),
@@ -160,6 +176,48 @@ fn agent_and_global_config_grants_are_independent_and_env_is_conjunctive() {
         DelegatedCapability::GlobalConfig,
         true,
     ));
+}
+
+#[test]
+fn matching_grant_selects_each_acting_grantee_independently() {
+    let owner = Keys::generate();
+    let first = Keys::generate().public_key().to_hex();
+    let second = Keys::generate().public_key().to_hex();
+    let first_grant = signed_grant(
+        &owner,
+        first.clone(),
+        AgentManagementDelegationCapabilities {
+            agent_config: true,
+            ..Default::default()
+        },
+    );
+    let second_grant = signed_grant(
+        &owner,
+        second.clone(),
+        AgentManagementDelegationCapabilities {
+            teams: true,
+            ..Default::default()
+        },
+    );
+    let config = crate::managed_agents::GlobalAgentConfig {
+        agent_management_delegations: [
+            (first.clone(), first_grant.clone()),
+            (second.clone(), second_grant.clone()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        matching_grant(&config, &first, &owner.public_key()),
+        Some(&first_grant)
+    );
+    assert_eq!(
+        matching_grant(&config, &second, &owner.public_key()),
+        Some(&second_grant)
+    );
+    assert!(matching_grant(&config, &"33".repeat(32), &owner.public_key()).is_none());
 }
 
 fn unsigned_v2(subjects: AgentManagementDelegationSubjects) -> AgentManagementDelegationGrant {

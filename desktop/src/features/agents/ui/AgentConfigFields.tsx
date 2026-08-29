@@ -72,6 +72,7 @@ export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   preferred_runtime: null,
   auto_approve_agent_drafts: false,
   agent_management_delegation: null,
+  agent_management_delegations: {},
 };
 
 const BAKED_STRUCTURED_KEYS = new Set([

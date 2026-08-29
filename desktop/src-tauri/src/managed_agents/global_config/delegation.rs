@@ -21,6 +21,16 @@ pub struct AgentManagementDelegationCapabilities {
     pub env_vars: bool,
 }
 
+impl AgentManagementDelegationCapabilities {
+    pub fn is_empty(&self) -> bool {
+        !self.agent_config
+            && !self.global_config
+            && !self.teams
+            && !self.agent_creation
+            && !self.env_vars
+    }
+}
+
 /// Who a v2 capability applies to.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "scope", rename_all = "snake_case")]
@@ -302,6 +312,30 @@ impl<'de> Deserialize<'de> for AgentManagementDelegationGrant {
 }
 
 impl AgentManagementDelegationGrant {
+    pub fn singular_grantee_pubkey(&self) -> Option<&str> {
+        match &self.payload {
+            AgentManagementDelegationPayload::V1(payload) => Some(payload.grantee_pubkey.as_str()),
+            AgentManagementDelegationPayload::V2(_) => None,
+        }
+    }
+
+    pub fn validate_for_grantee_key(
+        &self,
+        grantee_pubkey: &str,
+        owner: &PublicKey,
+    ) -> Result<(), String> {
+        let key = PublicKey::parse(grantee_pubkey.trim())
+            .map_err(|error| format!("invalid delegation map grantee pubkey: {error}"))?
+            .to_hex();
+        if key != grantee_pubkey {
+            return Err("delegation map grantee key is not canonical lowercase hex".into());
+        }
+        if self.singular_grantee_pubkey() != Some(grantee_pubkey) {
+            return Err("delegation map key does not match its singular signed grant".into());
+        }
+        self.validate(owner)
+    }
+
     pub fn validate(&self, owner: &PublicKey) -> Result<(), String> {
         match &self.payload {
             AgentManagementDelegationPayload::V1(payload) => {

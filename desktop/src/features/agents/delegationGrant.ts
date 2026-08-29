@@ -50,23 +50,115 @@ export function isV2Grant(
 
 export function grantSubjects(
   grant: AgentManagementDelegationGrant | null,
+  grants: Readonly<Record<string, AgentManagementDelegationGrant>> = {},
 ): AgentManagementDelegationSubjects {
-  if (!grant) return emptySubjects();
-  if (isV2Grant(grant)) return grant.capabilities;
-  if (!("granteePubkey" in grant) || typeof grant.granteePubkey !== "string") {
-    return emptySubjects();
-  }
-  const bit = (enabled: boolean): CapabilitySubject =>
-    enabled
-      ? { scope: "set", grantees: [grant.granteePubkey.toLowerCase()] }
-      : noneSubject();
-  return {
-    agent_config: bit(grant.capabilities.agent_config),
-    agent_creation: bit(grant.capabilities.agent_creation),
-    env_vars: bit(grant.capabilities.env_vars),
-    global_config: bit(grant.capabilities.global_config),
-    teams: bit(grant.capabilities.teams),
+  let subjects = emptySubjects();
+  const mergeSubject = (
+    current: CapabilitySubject,
+    incoming: CapabilitySubject,
+  ): CapabilitySubject => {
+    if (current.scope === "all" || incoming.scope === "all") {
+      return allSubject();
+    }
+    const selected = new Set<string>();
+    if (current.scope === "set") {
+      for (const pubkey of current.grantees) selected.add(pubkey.toLowerCase());
+    }
+    if (incoming.scope === "set") {
+      for (const pubkey of incoming.grantees)
+        selected.add(pubkey.toLowerCase());
+    }
+    return selected.size === 0
+      ? noneSubject()
+      : { scope: "set", grantees: [...selected].sort() };
   };
+  const bit = (enabled: boolean): CapabilitySubject =>
+    enabled ? { scope: "set", grantees: [] } : noneSubject();
+  const mergeGrant = (nextGrant: AgentManagementDelegationGrant) => {
+    let incoming: AgentManagementDelegationSubjects;
+    if (isV2Grant(nextGrant)) {
+      incoming = nextGrant.capabilities;
+    } else if (
+      "granteePubkey" in nextGrant &&
+      typeof nextGrant.granteePubkey === "string"
+    ) {
+      const pubkey = nextGrant.granteePubkey.toLowerCase();
+      const grantedBit = (enabled: boolean): CapabilitySubject => {
+        const subject = bit(enabled);
+        return subject.scope === "set"
+          ? { scope: "set", grantees: [pubkey] }
+          : subject;
+      };
+      incoming = {
+        agent_config: grantedBit(nextGrant.capabilities.agent_config),
+        agent_creation: grantedBit(nextGrant.capabilities.agent_creation),
+        env_vars: grantedBit(nextGrant.capabilities.env_vars),
+        global_config: grantedBit(nextGrant.capabilities.global_config),
+        teams: grantedBit(nextGrant.capabilities.teams),
+      };
+    } else {
+      return;
+    }
+    subjects = {
+      agent_config: mergeSubject(subjects.agent_config, incoming.agent_config),
+      agent_creation: mergeSubject(
+        subjects.agent_creation,
+        incoming.agent_creation,
+      ),
+      env_vars: mergeSubject(subjects.env_vars, incoming.env_vars),
+      global_config: mergeSubject(
+        subjects.global_config,
+        incoming.global_config,
+      ),
+      teams: mergeSubject(subjects.teams, incoming.teams),
+    };
+  };
+
+  if (grant) mergeGrant(grant);
+  for (const nextGrant of Object.values(grants)) mergeGrant(nextGrant);
+  return subjects;
+}
+
+export function grantedPubkeys(
+  subjects: AgentManagementDelegationSubjects,
+  roster: readonly string[],
+): string[] {
+  const selected = new Set<string>();
+  for (const [capability] of DELEGATION_CAPABILITIES) {
+    const subject = subjects[capability];
+    if (subject.scope === "all") {
+      for (const pubkey of roster) selected.add(pubkey.toLowerCase());
+    } else if (subject.scope === "set") {
+      for (const pubkey of subject.grantees) selected.add(pubkey.toLowerCase());
+    }
+  }
+  return [...selected].sort();
+}
+
+export function removeGranteeFromSubjects(
+  subjects: AgentManagementDelegationSubjects,
+  pubkey: string,
+  roster: readonly string[],
+): AgentManagementDelegationSubjects {
+  const hex = pubkey.toLowerCase();
+  return Object.fromEntries(
+    DELEGATION_CAPABILITIES.map(([capability]) => {
+      const subject = subjects[capability];
+      const selected =
+        subject.scope === "all"
+          ? roster.map((item) => item.toLowerCase())
+          : subject.scope === "set"
+            ? subject.grantees.map((item) => item.toLowerCase())
+            : [];
+      const next = [...new Set(selected.filter((item) => item !== hex))].sort();
+      return [
+        capability,
+        next.length === 0
+          ? noneSubject()
+          : { scope: "set" as const, grantees: next },
+      ];
+    }),
+  ) as AgentManagementDelegationSubjects;
 }
 
 export function subjectsAreEmpty(

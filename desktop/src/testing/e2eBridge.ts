@@ -595,6 +595,7 @@ type E2eConfig = {
       preferred_runtime?: string | null;
       auto_approve_agent_drafts?: boolean;
       agent_management_delegation?: unknown;
+      agent_management_delegations?: Record<string, unknown>;
     };
     /** Explicit owner-only agent-access capability; independent of baked defaults. */
     ownerOnlyAccessBuild?: boolean;
@@ -8487,6 +8488,7 @@ let mockGlobalAgentConfig: {
   preferred_runtime?: string | null;
   auto_approve_agent_drafts?: boolean;
   agent_management_delegation?: unknown;
+  agent_management_delegations?: Record<string, unknown>;
 } | null = null;
 let mockFleetVisibilitySettings: {
   enabled: boolean;
@@ -13836,6 +13838,7 @@ export function maybeInstallE2eTauriMocks() {
           preferred_runtime: null,
           auto_approve_agent_drafts: false,
           agent_management_delegation: null,
+          agent_management_delegations: {},
           ...mockGlobalAgentConfig,
         };
       }
@@ -13860,6 +13863,7 @@ export function maybeInstallE2eTauriMocks() {
               preferred_runtime: string | null;
               auto_approve_agent_drafts: boolean;
               agent_management_delegation?: unknown;
+              agent_management_delegations?: Record<string, unknown>;
             };
           }
         ).config;
@@ -13877,9 +13881,12 @@ export function maybeInstallE2eTauriMocks() {
         // Mirror preserve_durable_grant: Agent-defaults Save cannot write the grant.
         const previousGrant =
           mockGlobalAgentConfig?.agent_management_delegation ?? null;
+        const previousGrants =
+          mockGlobalAgentConfig?.agent_management_delegations ?? {};
         mockGlobalAgentConfig = {
           ...submitted,
           agent_management_delegation: previousGrant,
+          agent_management_delegations: previousGrants,
         };
         // In the E2E environment there are no running agents to restart, so
         // the counts default to 0 unless a spec drives them explicitly.
@@ -13895,15 +13902,86 @@ export function maybeInstallE2eTauriMocks() {
         const capabilities = (payload as { capabilities: unknown })
           .capabilities;
         lastAgentManagementDelegationPayload = capabilities;
-        const grant =
-          capabilities == null
-            ? null
-            : {
-                version: 2,
-                auditChannelId: "7c07e659-3610-42f4-9a5e-1e9973c09da9",
-                capabilities,
-                signedEvent: "mock-signed-event",
+        const previousGrant =
+          mockGlobalAgentConfig?.agent_management_delegation ?? null;
+        const previousGrants =
+          mockGlobalAgentConfig?.agent_management_delegations ?? {};
+        const roster = (activeConfig?.mock?.managedAgents ?? []).map((agent) =>
+          agent.pubkey.toLowerCase(),
+        );
+        const selectedFor = (subject: unknown): string[] => {
+          if (!subject || typeof subject !== "object") return [];
+          const value = subject as { scope?: string; grantees?: string[] };
+          if (value.scope === "all") return roster;
+          if (value.scope === "set") {
+            return (value.grantees ?? []).map((pubkey) => pubkey.toLowerCase());
+          }
+          return [];
+        };
+        const desired = new Map<string, Record<string, boolean>>();
+        if (capabilities && typeof capabilities === "object") {
+          for (const capability of [
+            "agent_config",
+            "agent_creation",
+            "env_vars",
+            "global_config",
+            "teams",
+          ]) {
+            for (const pubkey of selectedFor(
+              (capabilities as Record<string, unknown>)[capability],
+            )) {
+              const bits = desired.get(pubkey) ?? {
+                agent_config: false,
+                agent_creation: false,
+                env_vars: false,
+                global_config: false,
+                teams: false,
               };
+              bits[capability] = true;
+              desired.set(pubkey, bits);
+            }
+          }
+        }
+        let legacyGrant = previousGrant;
+        if (
+          legacyGrant &&
+          typeof legacyGrant === "object" &&
+          "granteePubkey" in legacyGrant
+        ) {
+          const legacy = legacyGrant as {
+            granteePubkey: string;
+            capabilities: Record<string, boolean>;
+          };
+          const desiredBits = desired.get(legacy.granteePubkey.toLowerCase());
+          if (
+            JSON.stringify(desiredBits) === JSON.stringify(legacy.capabilities)
+          ) {
+            desired.delete(legacy.granteePubkey.toLowerCase());
+          } else {
+            legacyGrant = null;
+          }
+        } else if (legacyGrant) {
+          legacyGrant = null;
+        }
+        const grants = Object.fromEntries(
+          [...desired.entries()].map(([pubkey, bits]) => {
+            const old = previousGrants[pubkey] as
+              | { capabilities?: Record<string, boolean>; signedEvent?: string }
+              | undefined;
+            return [
+              pubkey,
+              {
+                granteePubkey: pubkey,
+                auditChannelId: "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+                capabilities: bits,
+                signedEvent:
+                  JSON.stringify(old?.capabilities) === JSON.stringify(bits)
+                    ? old?.signedEvent
+                    : `mock-signed-event-${pubkey}`,
+              },
+            ];
+          }),
+        );
         mockGlobalAgentConfig = {
           env_vars: {},
           provider: null,
@@ -13911,7 +13989,9 @@ export function maybeInstallE2eTauriMocks() {
           preferred_runtime: null,
           auto_approve_agent_drafts: false,
           ...mockGlobalAgentConfig,
-          agent_management_delegation: grant,
+          agent_management_delegation:
+            capabilities == null ? null : legacyGrant,
+          agent_management_delegations: capabilities == null ? {} : grants,
         };
         return {
           config: mockGlobalAgentConfig,

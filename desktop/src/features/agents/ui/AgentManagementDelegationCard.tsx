@@ -4,12 +4,11 @@ import * as React from "react";
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import {
   DELEGATION_CAPABILITIES,
-  LEFT_ALL_NOTICE,
   agentIsGranted,
-  allSubject,
-  allSubjects,
   grantSubjects,
+  grantedPubkeys,
   noneSubject,
+  removeGranteeFromSubjects,
   subjectIsOn,
   subjectSummary,
   subjectsAreEmpty,
@@ -23,6 +22,7 @@ import type {
   CapabilitySubject,
   GlobalAgentConfig,
 } from "@/shared/api/types";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import {
@@ -52,6 +52,7 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type AgentManagementDelegationCardProps = {
   grant: AgentManagementDelegationGrant | null;
+  grants: Record<string, AgentManagementDelegationGrant>;
   onPersisted: (config: GlobalAgentConfig) => void;
 };
 
@@ -59,11 +60,11 @@ type PickerState = {
   capability: DelegationCapability;
   label: string;
   draft: CapabilitySubject;
-  leftAll: boolean;
 };
 
 export function AgentManagementDelegationCard({
   grant,
+  grants,
   onPersisted,
 }: AgentManagementDelegationCardProps) {
   const agentsQuery = useManagedAgentsQuery();
@@ -79,7 +80,14 @@ export function AgentManagementDelegationCard({
     () => agents.map((agent) => agent.pubkey.toLowerCase()),
     [agents],
   );
-  const subjects = React.useMemo(() => grantSubjects(grant), [grant]);
+  const subjects = React.useMemo(
+    () => grantSubjects(grant, grants),
+    [grant, grants],
+  );
+  const activeGrantees = React.useMemo(
+    () => grantedPubkeys(subjects, roster),
+    [roster, subjects],
+  );
   const [picker, setPicker] = React.useState<PickerState | null>(null);
   const [search, setSearch] = React.useState("");
   const [saving, setSaving] = React.useState(false);
@@ -111,7 +119,6 @@ export function AgentManagementDelegationCard({
       capability,
       label,
       draft: subjects[capability],
-      leftAll: false,
     });
   }
 
@@ -126,7 +133,6 @@ export function AgentManagementDelegationCard({
         capability,
         label,
         draft: noneSubject(),
-        leftAll: false,
       });
       return;
     }
@@ -149,8 +155,26 @@ export function AgentManagementDelegationCard({
 
   async function confirmGrantAll() {
     try {
-      await persist(allSubjects());
+      const allCurrent = {
+        scope: "set" as const,
+        grantees: [...roster],
+      };
+      await persist({
+        agent_config: allCurrent,
+        agent_creation: allCurrent,
+        env_vars: allCurrent,
+        global_config: allCurrent,
+        teams: allCurrent,
+      });
       setGrantAllOpen(false);
+    } catch {
+      // Error is already on the card.
+    }
+  }
+
+  async function revokeGrantee(pubkey: string) {
+    try {
+      await persist(removeGranteeFromSubjects(subjects, pubkey, roster));
     } catch {
       // Error is already on the card.
     }
@@ -180,14 +204,60 @@ export function AgentManagementDelegationCard({
 
       <Button
         data-testid="agent-management-grant-all"
-        disabled={saving}
+        disabled={saving || roster.length === 0}
         onClick={() => setGrantAllOpen(true)}
         size="sm"
         type="button"
         variant="outline"
       >
-        Grant all permissions to all agents
+        Grant all permissions to current agents
       </Button>
+
+      {activeGrantees.length > 0 ? (
+        <div className="space-y-2" data-testid="agent-management-grantee-list">
+          {activeGrantees.map((pubkey) => {
+            const agent = agents.find(
+              (candidate) => candidate.pubkey.toLowerCase() === pubkey,
+            );
+            const permissionCount = DELEGATION_CAPABILITIES.filter(
+              ([capability]) => agentIsGranted(subjects[capability], pubkey),
+            ).length;
+            return (
+              <div
+                className="flex items-center gap-3 rounded-md border border-border/60 px-3 py-2"
+                data-testid={`agent-management-grantee-${pubkey}`}
+                key={pubkey}
+              >
+                <UserAvatar
+                  avatarUrl={agent?.avatarUrl ?? null}
+                  displayName={agent?.name ?? truncatePubkey(pubkey)}
+                  size="sm"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm">
+                    {agent?.name ?? truncatePubkey(pubkey)}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {permissionCount === 1
+                      ? "1 permission"
+                      : `${permissionCount} permissions`}
+                  </p>
+                </div>
+                <Button
+                  data-testid={`agent-management-revoke-${pubkey}`}
+                  disabled={saving}
+                  onClick={() => void revokeGrantee(pubkey)}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Revoke
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
 
       <div className="grid gap-3 sm:grid-cols-2">
         {DELEGATION_CAPABILITIES.map(([capability, label]) => {
@@ -275,25 +345,20 @@ export function AgentManagementDelegationCard({
             </label>
           </DialogHeader>
 
-          {picker?.leftAll ? (
-            <p
-              className="rounded-md bg-muted/60 px-3 py-2 text-sm text-muted-foreground"
-              data-testid="agent-management-picker-left-all-notice"
-            >
-              {LEFT_ALL_NOTICE}
-            </p>
-          ) : null}
-
           <div className="rounded-xl border border-border/70">
             <div className="flex items-center justify-between gap-3 border-b border-border/60 px-3 py-2.5">
               <label
                 className="flex-1 cursor-pointer text-sm font-medium"
                 htmlFor="agent-management-picker-all"
               >
-                All agents
+                All current agents
               </label>
               <Checkbox
-                checked={picker?.draft.scope === "all"}
+                checked={
+                  picker !== null &&
+                  roster.length > 0 &&
+                  roster.every((pubkey) => agentIsGranted(picker.draft, pubkey))
+                }
                 data-testid="agent-management-picker-all"
                 id="agent-management-picker-all"
                 onCheckedChange={(checked) => {
@@ -301,19 +366,13 @@ export function AgentManagementDelegationCard({
                   if (checked === true) {
                     setPicker({
                       ...picker,
-                      draft: allSubject(),
-                      leftAll: false,
+                      draft: { scope: "set", grantees: [...roster] },
                     });
                     return;
                   }
-                  const next =
-                    roster.length === 0
-                      ? noneSubject()
-                      : { scope: "set" as const, grantees: [...roster] };
                   setPicker({
                     ...picker,
-                    draft: next,
-                    leftAll: picker.draft.scope === "all",
+                    draft: noneSubject(),
                   });
                 }}
               />
@@ -363,7 +422,6 @@ export function AgentManagementDelegationCard({
                           setPicker({
                             ...picker,
                             draft: result.subject,
-                            leftAll: picker.leftAll || result.leftAll,
                           });
                         }}
                       />
@@ -400,13 +458,13 @@ export function AgentManagementDelegationCard({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Grant all permissions to all agents?
+              Grant all permissions to current agents?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Every current and future managed colleague will be able to create
-              agents, update configuration, set environment variables, change
-              global defaults, and manage teams. You can revoke any permission
-              later.
+              Every currently managed colleague will be able to create agents,
+              update configuration, set environment variables, change global
+              defaults, and manage teams. Future agents remain ungranted until
+              you add them.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
