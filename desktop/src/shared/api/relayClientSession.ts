@@ -48,6 +48,7 @@ import {
   fetchChunkedHistory,
   requestFirstEventGated,
   requestHistoryGated,
+  requestHistoryMultiGated,
 } from "@/shared/api/relayGateBoundary";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
 import {
@@ -220,6 +221,27 @@ export class RelayClient {
 
   async fetchEvents(filter: RelaySubscriptionFilter): Promise<RelayEvent[]> {
     return this.fetchHistory(filter);
+  }
+
+  /**
+   * Fetch history for several filters in a single REQ.
+   *
+   * Costs one frame against the relay's per-pubkey burst budget instead of one
+   * per filter, and each filter keeps its own `limit`. Results are flattened
+   * across filters — see {@link requestHistoryMultiGated}.
+   */
+  async fetchEventsMulti(
+    filters: RelaySubscriptionFilter[],
+  ): Promise<RelayEvent[]> {
+    if (filters.length === 0) return [];
+    await this.ensureConnected();
+    return requestHistoryMultiGated(
+      this.subscriptions,
+      (payload) => this.sendRaw(payload),
+      (subId) => this.closeSubscription(subId),
+      filters,
+      HISTORY_TIMEOUT_MS,
+    );
   }
 
   async fetchFirstEvent(
