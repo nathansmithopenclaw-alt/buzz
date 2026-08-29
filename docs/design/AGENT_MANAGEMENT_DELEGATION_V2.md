@@ -9,6 +9,16 @@ created: 2026-08-20
 
 Signed off before implementation. Implemented in this PR.
 
+## Superseded storage direction (2026-08-29)
+
+The aggregate v2 proof described below remains a supported read/authorization
+format, but it is no longer the write format. Before v2 reached production,
+the product direction moved to independently signed singular grants keyed by
+grantee pubkey. This preserves an existing v1 proof byte-for-byte while a
+second grantee is added and makes per-grantee revocation independent. The
+normative current contract is `docs/nips/NIP-SD.md`; the rest of this document
+is retained as the rationale and compatibility record for aggregate v2.
+
 Source of current behavior:
 
 - Payload + validate: `desktop/src-tauri/src/managed_agents/global_config/mod.rs:58-104`

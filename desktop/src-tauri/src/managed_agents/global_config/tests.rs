@@ -114,6 +114,53 @@ fn delegation_grant_rejects_noncanonical_grantee_and_invalid_audit_channel() {
     assert!(grant.validate(&owner.public_key()).is_err());
 }
 
+#[test]
+fn legacy_single_grant_loads_with_empty_keyed_store() {
+    let owner = Keys::generate();
+    let grantee = Keys::generate().public_key().to_hex();
+    let grant = signed_delegation_grant(&owner, grantee);
+    let json = serde_json::json!({
+        "env_vars": {},
+        "provider": null,
+        "model": null,
+        "preferred_runtime": null,
+        "agent_management_delegation": serde_json::to_value(&grant).unwrap()
+    });
+    let config = parse_global_agent_config(&json.to_string()).unwrap();
+    assert_eq!(config.agent_management_delegation, Some(grant));
+    assert!(config.agent_management_delegations.is_empty());
+}
+
+#[test]
+fn keyed_grants_round_trip_and_require_key_payload_identity() {
+    let owner = Keys::generate();
+    let first = Keys::generate().public_key().to_hex();
+    let second = Keys::generate().public_key().to_hex();
+    let first_grant = signed_delegation_grant(&owner, first.clone());
+    let second_grant = signed_delegation_grant(&owner, second.clone());
+    let config = GlobalAgentConfig {
+        agent_management_delegations: [
+            (first.clone(), first_grant.clone()),
+            (second.clone(), second_grant.clone()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let encoded = serde_json::to_string(&config).unwrap();
+    let decoded = parse_global_agent_config(&encoded).unwrap();
+    assert_eq!(decoded, config);
+    decoded.agent_management_delegations[&first]
+        .validate_for_grantee_key(&first, &owner.public_key())
+        .unwrap();
+    decoded.agent_management_delegations[&second]
+        .validate_for_grantee_key(&second, &owner.public_key())
+        .unwrap();
+    assert!(decoded.agent_management_delegations[&second]
+        .validate_for_grantee_key(&first, &owner.public_key())
+        .is_err());
+}
+
 // ── validate_global_config ────────────────────────────────────────────────────
 
 #[test]
@@ -379,6 +426,7 @@ fn roundtrip_serialization() {
         preferred_runtime: Some("claude".to_string()),
         auto_approve_agent_drafts: true,
         agent_management_delegation: None,
+        agent_management_delegations: BTreeMap::new(),
     };
     let json = serde_json::to_string(&config).expect("serialize");
     let back: GlobalAgentConfig = serde_json::from_str(&json).expect("deserialize");
@@ -711,6 +759,7 @@ fn populated_global_config_round_trips() {
         preferred_runtime: None,
         auto_approve_agent_drafts: true,
         agent_management_delegation: None,
+        agent_management_delegations: BTreeMap::new(),
     };
     let json = serde_json::to_string(&original).expect("serialization must not fail");
     let decoded: GlobalAgentConfig =

@@ -997,7 +997,9 @@ export type {
   CapabilitySubject,
 } from "./agentManagementDelegation";
 
-/** Global defaults. Precedence: baked floor < global < persona < per-agent. */
+type DelegationGrant =
+  import("./agentManagementDelegation").AgentManagementDelegationGrant;
+
 export type GlobalAgentConfig = {
   /** Global env vars injected into all agents unconditionally. */
   env_vars: Record<string, string>;
@@ -1008,10 +1010,8 @@ export type GlobalAgentConfig = {
   /** Preferred ACP runtime for agents without a persona-specific runtime. */
   preferred_runtime: string | null;
   auto_approve_agent_drafts: boolean;
-  /** Owner-signed standing delegation; null revokes it immediately. */
-  agent_management_delegation:
-    | import("./agentManagementDelegation").AgentManagementDelegationGrant
-    | null;
+  agent_management_delegation: DelegationGrant | null;
+  agent_management_delegations: Record<string, DelegationGrant>;
 };
 
 /** Result from `set_global_agent_config`, mirroring Rust's save result. */

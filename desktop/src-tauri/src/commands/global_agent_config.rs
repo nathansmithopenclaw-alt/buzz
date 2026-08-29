@@ -90,8 +90,16 @@ enum GlobalConfigWrite {
 #[tauri::command]
 pub fn get_global_agent_config(app: AppHandle) -> Result<GlobalAgentConfig, String> {
     let config = load_global_agent_config(&app)?;
-    if let Some(grant) = &config.agent_management_delegation {
-        grant.validate(&app.state::<AppState>().signing_keys()?.public_key())?;
+    if config.agent_management_delegation.is_some()
+        || !config.agent_management_delegations.is_empty()
+    {
+        let owner = app.state::<AppState>().signing_keys()?.public_key();
+        if let Some(grant) = &config.agent_management_delegation {
+            grant.validate(&owner)?;
+        }
+        for (grantee, grant) in &config.agent_management_delegations {
+            grant.validate_for_grantee_key(grantee, &owner)?;
+        }
     }
     Ok(config)
 }
@@ -154,12 +162,19 @@ async fn write_global_agent_config(
                 GlobalConfigWrite::Delegation {
                     subjects,
                     audit_channel_id,
-                } => apply_delegation_subjects(
-                    old_global.clone(),
-                    subjects,
-                    audit_channel_id,
-                    &owner_keys,
-                )?,
+                } => {
+                    let managed_pubkeys = load_managed_agents(&app_for_write)?
+                        .into_iter()
+                        .map(|record| record.pubkey.to_lowercase())
+                        .collect::<Vec<_>>();
+                    apply_delegation_subjects(
+                        old_global.clone(),
+                        subjects,
+                        audit_channel_id,
+                        &managed_pubkeys,
+                        &owner_keys,
+                    )?
+                }
             };
             validate_global_config(&config)?;
             save_global_agent_config(&app_for_write, &config)?;
@@ -223,6 +238,9 @@ fn preserve_durable_grant(
 ) -> GlobalAgentConfig {
     incoming.agent_management_delegation = old.agent_management_delegation.clone();
     incoming
+        .agent_management_delegations
+        .clone_from(&old.agent_management_delegations);
+    incoming
 }
 
 /// Persist a v2 grant (or revoke) against the latest durable config.
@@ -245,21 +263,24 @@ fn apply_delegation_subjects(
     old_config: GlobalAgentConfig,
     subjects: Option<crate::managed_agents::global_config::AgentManagementDelegationSubjects>,
     audit_channel_id: Option<String>,
+    managed_pubkeys: &[String],
     owner_keys: &nostr::Keys,
 ) -> Result<GlobalAgentConfig, String> {
     use crate::managed_agents::global_config::{
-        AgentManagementDelegationGrant, AgentManagementDelegationPayload,
-        AgentManagementDelegationPayloadV2,
+        AgentManagementDelegationCapabilities, AgentManagementDelegationGrant,
+        AgentManagementDelegationPayload, AgentManagementDelegationPayloadV1, CapabilitySubject,
     };
 
     let mut config = old_config.clone();
     let Some(mut subjects) = subjects else {
         config.agent_management_delegation = None;
+        config.agent_management_delegations.clear();
         return Ok(config);
     };
     subjects.canonicalize()?;
     if subjects.is_empty() {
         config.agent_management_delegation = None;
+        config.agent_management_delegations.clear();
         return Ok(config);
     }
 
@@ -269,28 +290,86 @@ fn apply_delegation_subjects(
             "delegation grant is missing an audit channel (ensure it before signing)".to_string()
         })?;
 
-    config.agent_management_delegation = Some(AgentManagementDelegationGrant {
-        payload: AgentManagementDelegationPayload::V2(AgentManagementDelegationPayloadV2 {
-            version: 2,
-            audit_channel_id,
-            capabilities: subjects,
-        }),
-        signed_event: None,
-    });
-    prepare_delegation_signature(&mut config, &old_config, owner_keys)?;
+    let mut grantees = std::collections::BTreeSet::new();
+    for subject in [
+        &subjects.agent_config,
+        &subjects.global_config,
+        &subjects.teams,
+        &subjects.agent_creation,
+        &subjects.env_vars,
+    ] {
+        match subject {
+            CapabilitySubject::None => {}
+            CapabilitySubject::All => grantees.extend(managed_pubkeys.iter().cloned()),
+            CapabilitySubject::Set { grantees: selected } => {
+                grantees.extend(selected.iter().cloned());
+            }
+        }
+    }
+
+    let mut desired = std::collections::BTreeMap::new();
+    for grantee in grantees {
+        let capabilities = AgentManagementDelegationCapabilities {
+            agent_config: subjects.agent_config.allows(&grantee),
+            global_config: subjects.global_config.allows(&grantee),
+            teams: subjects.teams.allows(&grantee),
+            agent_creation: subjects.agent_creation.allows(&grantee),
+            env_vars: subjects.env_vars.allows(&grantee),
+        };
+        if !capabilities.is_empty() {
+            desired.insert(grantee, capabilities);
+        }
+    }
+
+    // A byte-identical legacy v1 proof remains in its original field when its
+    // effective capabilities are unchanged. This is the live upgrade path:
+    // adding a second grantee never asks the owner to re-sign the first.
+    if let Some(legacy) = old_config.agent_management_delegation.as_ref() {
+        if let AgentManagementDelegationPayload::V1(payload) = &legacy.payload {
+            if desired.get(&payload.grantee_pubkey) == Some(&payload.capabilities)
+                && legacy.validate(&owner_keys.public_key()).is_ok()
+            {
+                desired.remove(&payload.grantee_pubkey);
+                config.agent_management_delegation = Some(legacy.clone());
+            } else {
+                config.agent_management_delegation = None;
+            }
+        } else {
+            // Aggregate v2 remains valid until the owner changes delegation.
+            // The first write expands its current effective roster into
+            // independently signed per-grantee proofs.
+            config.agent_management_delegation = None;
+        }
+    }
+
+    let mut grants = std::collections::BTreeMap::new();
+    for (grantee, capabilities) in desired {
+        let existing = old_config.agent_management_delegations.get(&grantee);
+        let grant_audit_channel_id = existing
+            .map(|grant| grant.payload.audit_channel_id().to_string())
+            .unwrap_or_else(|| audit_channel_id.clone());
+        let mut grant = AgentManagementDelegationGrant {
+            payload: AgentManagementDelegationPayload::V1(AgentManagementDelegationPayloadV1 {
+                grantee_pubkey: grantee.clone(),
+                audit_channel_id: grant_audit_channel_id,
+                capabilities,
+            }),
+            signed_event: None,
+        };
+        prepare_grant_signature(&mut grant, existing, owner_keys)?;
+        grants.insert(grantee, grant);
+    }
+    config.agent_management_delegations = grants;
     Ok(config)
 }
 
-fn prepare_delegation_signature(
-    config: &mut GlobalAgentConfig,
-    old_config: &GlobalAgentConfig,
+fn prepare_grant_signature(
+    grant: &mut crate::managed_agents::global_config::AgentManagementDelegationGrant,
+    old_grant: Option<&crate::managed_agents::global_config::AgentManagementDelegationGrant>,
     owner_keys: &nostr::Keys,
 ) -> Result<(), String> {
-    let Some(grant) = config.agent_management_delegation.as_mut() else {
-        return Ok(());
-    };
     grant.payload.canonicalize()?;
-    if let Some(old_grant) = &old_config.agent_management_delegation {
+    if let Some(old_grant) = old_grant {
         if old_grant.payload == grant.payload
             && old_grant.validate(&owner_keys.public_key()).is_ok()
         {
@@ -604,7 +683,7 @@ mod tests {
         AgentManagementDelegationSubjects, CapabilitySubject,
     };
     use crate::managed_agents::GlobalAgentConfig;
-    use nostr::{Event, JsonUtil, Keys, Kind};
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind};
 
     #[test]
     fn delegated_patch_preserves_authority_and_unrequested_defaults() {
@@ -725,51 +804,147 @@ mod tests {
     }
 
     #[test]
-    fn grant_all_permissions_signs_once_covering_five_scopes() {
+    fn grant_all_current_agents_signs_one_independent_proof_per_grantee() {
         let owner = Keys::generate();
         let audit = "7c07e659-3610-42f4-9a5e-1e9973c09da9";
+        let roster = ["11".repeat(32), "22".repeat(32)];
         let config = apply_delegation_subjects(
             GlobalAgentConfig::default(),
             Some(AgentManagementDelegationSubjects::all_agents()),
             Some(audit.into()),
+            &roster,
             &owner,
         )
         .unwrap();
-        let grant = config
-            .agent_management_delegation
-            .expect("grant-all must persist a grant");
-        grant.validate(&owner.public_key()).unwrap();
-        let raw = grant
-            .signed_event
-            .as_ref()
-            .expect("grant-all must produce one signature");
-        let event = Event::from_json(raw).unwrap();
-        assert_eq!(event.kind, Kind::Custom(30_078));
-        let signed: AgentManagementDelegationPayload =
-            serde_json::from_str(&event.content).unwrap();
-        match signed {
-            AgentManagementDelegationPayload::V2(payload) => {
-                assert_eq!(payload.version, 2);
-                assert!(matches!(
-                    payload.capabilities.agent_config,
-                    CapabilitySubject::All
-                ));
-                assert!(matches!(
-                    payload.capabilities.global_config,
-                    CapabilitySubject::All
-                ));
-                assert!(matches!(payload.capabilities.teams, CapabilitySubject::All));
-                assert!(matches!(
-                    payload.capabilities.agent_creation,
-                    CapabilitySubject::All
-                ));
-                assert!(matches!(
-                    payload.capabilities.env_vars,
-                    CapabilitySubject::All
-                ));
+        assert!(config.agent_management_delegation.is_none());
+        assert_eq!(config.agent_management_delegations.len(), 2);
+        for (grantee, grant) in &config.agent_management_delegations {
+            grant
+                .validate_for_grantee_key(grantee, &owner.public_key())
+                .unwrap();
+            match &grant.payload {
+                AgentManagementDelegationPayload::V1(payload) => {
+                    assert!(payload.capabilities.agent_config);
+                    assert!(payload.capabilities.global_config);
+                    assert!(payload.capabilities.teams);
+                    assert!(payload.capabilities.agent_creation);
+                    assert!(payload.capabilities.env_vars);
+                }
+                AgentManagementDelegationPayload::V2(_) => {
+                    panic!("keyed grants must be singular")
+                }
             }
-            AgentManagementDelegationPayload::V1(_) => panic!("grant-all must write v2"),
         }
+    }
+
+    #[test]
+    fn adding_and_revoking_second_grantee_preserves_legacy_proof() {
+        let owner = Keys::generate();
+        let first = Keys::generate().public_key().to_hex();
+        let second = Keys::generate().public_key().to_hex();
+        let audit = "7c07e659-3610-42f4-9a5e-1e9973c09da9";
+        let payload = AgentManagementDelegationPayload::V1(AgentManagementDelegationPayloadV1 {
+            grantee_pubkey: first.clone(),
+            audit_channel_id: audit.into(),
+            capabilities: AgentManagementDelegationCapabilities {
+                agent_config: true,
+                ..Default::default()
+            },
+        });
+        let event = EventBuilder::new(
+            Kind::Custom(30_078),
+            serde_json::to_string(&payload).unwrap(),
+        )
+        .sign_with_keys(&owner)
+        .unwrap();
+        let legacy = AgentManagementDelegationGrant {
+            payload,
+            signed_event: Some(event.as_json()),
+        };
+        let old = GlobalAgentConfig {
+            agent_management_delegation: Some(legacy.clone()),
+            ..Default::default()
+        };
+        let subjects = AgentManagementDelegationSubjects {
+            agent_config: CapabilitySubject::Set {
+                grantees: vec![first.clone(), second.clone()],
+            },
+            ..Default::default()
+        };
+        let added = apply_delegation_subjects(
+            old,
+            Some(subjects),
+            Some(audit.into()),
+            &[first.clone(), second.clone()],
+            &owner,
+        )
+        .unwrap();
+        assert_eq!(added.agent_management_delegation, Some(legacy.clone()));
+        assert_eq!(added.agent_management_delegations.len(), 1);
+        added.agent_management_delegations[&second]
+            .validate_for_grantee_key(&second, &owner.public_key())
+            .unwrap();
+
+        let first_only = AgentManagementDelegationSubjects {
+            agent_config: CapabilitySubject::Set {
+                grantees: vec![first.clone()],
+            },
+            ..Default::default()
+        };
+        let revoked = apply_delegation_subjects(
+            added,
+            Some(first_only),
+            Some(audit.into()),
+            &[first],
+            &owner,
+        )
+        .unwrap();
+        assert_eq!(revoked.agent_management_delegation, Some(legacy));
+        assert!(revoked.agent_management_delegations.is_empty());
+    }
+
+    #[test]
+    fn revoking_one_keyed_grantee_preserves_the_other_signed_proof_byte_for_byte() {
+        let owner = Keys::generate();
+        let first = Keys::generate().public_key().to_hex();
+        let second = Keys::generate().public_key().to_hex();
+        let audit = "7c07e659-3610-42f4-9a5e-1e9973c09da9";
+        let both = AgentManagementDelegationSubjects {
+            agent_config: CapabilitySubject::Set {
+                grantees: vec![first.clone(), second.clone()],
+            },
+            ..Default::default()
+        };
+        let granted = apply_delegation_subjects(
+            GlobalAgentConfig::default(),
+            Some(both),
+            Some(audit.into()),
+            &[first.clone(), second.clone()],
+            &owner,
+        )
+        .unwrap();
+        let retained = granted.agent_management_delegations[&second].clone();
+
+        let second_only = AgentManagementDelegationSubjects {
+            agent_config: CapabilitySubject::Set {
+                grantees: vec![second.clone()],
+            },
+            ..Default::default()
+        };
+        let revoked = apply_delegation_subjects(
+            granted,
+            Some(second_only),
+            Some(audit.into()),
+            std::slice::from_ref(&second),
+            &owner,
+        )
+        .unwrap();
+
+        assert!(!revoked.agent_management_delegations.contains_key(&first));
+        assert_eq!(revoked.agent_management_delegations[&second], retained);
+        revoked.agent_management_delegations[&second]
+            .validate_for_grantee_key(&second, &owner.public_key())
+            .unwrap();
     }
 
     #[test]
@@ -779,12 +954,14 @@ mod tests {
             GlobalAgentConfig::default(),
             Some(AgentManagementDelegationSubjects::all_agents()),
             Some("7c07e659-3610-42f4-9a5e-1e9973c09da9".into()),
+            &["11".repeat(32)],
             &owner,
         )
         .unwrap();
-        assert!(granted.agent_management_delegation.is_some());
-        let revoked = apply_delegation_subjects(granted, None, None, &owner).unwrap();
+        assert!(!granted.agent_management_delegations.is_empty());
+        let revoked = apply_delegation_subjects(granted, None, None, &[], &owner).unwrap();
         assert!(revoked.agent_management_delegation.is_none());
+        assert!(revoked.agent_management_delegations.is_empty());
     }
 
     #[test]
@@ -794,6 +971,7 @@ mod tests {
             GlobalAgentConfig::default(),
             Some(AgentManagementDelegationSubjects::all_agents()),
             Some("7c07e659-3610-42f4-9a5e-1e9973c09da9".into()),
+            &["11".repeat(32)],
             &owner,
         )
         .unwrap();
@@ -808,6 +986,10 @@ mod tests {
         assert_eq!(
             saved.agent_management_delegation,
             granted.agent_management_delegation
+        );
+        assert_eq!(
+            saved.agent_management_delegations,
+            granted.agent_management_delegations
         );
     }
 }

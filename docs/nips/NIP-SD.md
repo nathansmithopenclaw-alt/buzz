@@ -24,15 +24,26 @@ creation of a new standing grant.
 
 ## Owner-signed grant
 
-Desktop stores a grant containing a canonical camel-case payload as the
-content of a `kind:30078` event signed by the current Desktop owner. Desktop
-treats that event as an opaque authorization proof: its signature, author,
-kind, content, and decoded payload must all validate against current state,
-and the decoded signed payload must exactly equal the stored payload.
+Each grant contains a canonical camel-case payload as the content of a
+`kind:30078` event signed by the current Desktop owner. Desktop treats every
+event as an opaque authorization proof: its signature, author, kind, content,
+and decoded payload must all validate against current state, and the decoded
+signed payload must exactly equal the stored payload.
 
-Changing any grant field causes Desktop to sign a new proof. Setting the grant
-to `null` revokes it immediately. Capabilities are checked independently;
-granting `agent_config` does not grant `global_config`, and vice versa.
+`global-agent-config.json` has two compatible storage fields:
+
+- `agent_management_delegation` is the legacy single-proof slot. Existing
+  files load without modification, and adding another grantee MUST NOT
+  re-sign or rewrite this proof.
+- `agent_management_delegations` is an object keyed by canonical lowercase
+  grantee pubkey. Every value is an independently signed singular grant whose
+  signed `granteePubkey` MUST equal its object key.
+
+Changing one keyed grant signs only that grantee's new proof. Removing one
+key revokes only that grantee; other proof bytes stay unchanged. Clearing the
+whole delegation surface removes both fields. Capabilities are checked
+independently; granting `agent_config` does not grant `global_config`, and vice
+versa.
 
 ### v1 payload
 
@@ -52,8 +63,9 @@ A grant with no `version` field is v1: one grantee and boolean bits.
 }
 ```
 
-v1 grants keep verifying. Desktop does not auto-upgrade them on read. The next
-owner save of the delegation card re-signs as v2.
+v1 grants keep verifying. Desktop does not auto-upgrade them on read. New
+keyed entries deliberately reuse this singular payload, so multi-grantee
+storage does not require a new signature format.
 
 ### Unknown versions
 
@@ -63,9 +75,12 @@ has no `version` field. Desktop refuses to load a `global-agent-config.json`
 that cannot deserialize for this reason; restoring a pre-v2 copy of that file
 is the rollback path.
 
-### v2 payload
+### v2 aggregate payload (compatibility)
 
-v2 replaces the single grantee with a per-capability subject.
+Earlier Desktop builds wrote one aggregate v2 proof with a per-capability
+subject. Current Desktop continues to validate and authorize an existing v2
+proof from the legacy field, but new writes create independently signed keyed
+v1 proofs instead.
 
 ```json
 {
@@ -91,9 +106,11 @@ For `scope: "set"`, `grantees` is required and must be canonical lowercase
 `none`, not as `set` with zero entries. Implementations MUST reject a signed
 grant whose `set` entries are non-canonical, duplicated, or empty.
 
-Unchecking one name while `all` is on leaves `all` mode and writes `set` of the
-current roster minus that name. Future agents are then not covered until `all`
-is checked again.
+When the owner edits an aggregate v2 proof, Desktop expands its current
+effective managed-agent roster into singular keyed proofs. `all` therefore
+means all managed agents at conversion time; future agents remain ungranted
+until the owner adds them. No deployed v1 proof is re-signed by this conversion
+unless that grantee's effective capabilities changed.
 
 The audit channel is created-once as a private stream named `Agent management`
 with a deterministic UUID. The namespace is the same UUID used for starter
@@ -125,9 +142,10 @@ fails closed and nothing is signed — the UUID inputs are public, so a
 pre-created channel on a multi-tenant relay is otherwise a squat. Desktop
 must not join that channel or post receipts into it.
 
-A v1 Desktop cannot deserialize v2. Do not write v2 until this build is
-installed on the machine that owns `global-agent-config.json`. Do not write a
-synthetic v1 `granteePubkey` alongside v2.
+A v1 Desktop cannot deserialize a legacy v2 proof. Older builds ignore the new
+keyed field and therefore cannot administer those grants; do not save global
+agent defaults from an older build after keyed grants exist, because an old
+serializer can drop fields it does not know.
 
 A request that carries `request.envVars` is authorized only when the requester
 matches the `env_vars` subject (the same subject-match as the primary
@@ -225,10 +243,13 @@ report the setter's actual restart and restart-failure counts.
 
 ## Durable classification, retries, and fallback
 
-Desktop validates the live owner-signed grant and atomically records a new
-authorized request as `applying` before any management side effect. A UUID is an
-idempotency key: replaying identical content returns the recorded disposition;
-reusing the UUID with a different sender, capability, or payload is rejected.
+Desktop first resolves the request signer to its exact keyed grant. If no keyed
+entry exists, it checks the legacy v1/v2 proof. A present but invalid keyed
+entry fails closed and MUST NOT fall through to broader legacy authority.
+Desktop atomically records a new authorized request as `applying` before any
+management side effect. A UUID is an idempotency key: replaying identical
+content returns the recorded disposition; reusing the UUID with a different
+sender, capability, or payload is rejected.
 
 If `intent` is `draft`, or no current matching grant exists, Desktop records the
 request as `pending_draft`. Pending drafts retain FIFO presentation order. The

@@ -22,6 +22,7 @@ const EMPTY_CONFIG: GlobalAgentConfig = {
   preferred_runtime: null,
   auto_approve_agent_drafts: false,
   agent_management_delegation: null,
+  agent_management_delegations: {},
 };
 
 export const globalAgentConfigQueryKey = ["globalAgentConfig"] as const;
