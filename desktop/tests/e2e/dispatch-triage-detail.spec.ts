@@ -4,6 +4,7 @@ import type {
   DispatchContext,
   DispatchIssue,
 } from "../../src/features/dispatch/types";
+import { waitForAnimations } from "../helpers/animations";
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
 const WORKSPACE = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
@@ -347,6 +348,11 @@ test("assignee rail shows the profile name, not the pubkey", async ({
   await expect(page.getByText(OTHER, { exact: true })).toHaveCount(0);
   // The pubkey field is reachable, but it is not the resting state.
   await expect(page.getByLabel("Issue assignee pubkey")).toHaveCount(0);
+
+  await waitForAnimations(page);
+  await page
+    .locator("aside")
+    .screenshot({ path: "test-results/dispatch-assignee/01-name.png" });
 });
 
 test("assignee rail falls back to a truncated pubkey with no profile", async ({
@@ -359,6 +365,11 @@ test("assignee rail falls back to a truncated pubkey with no profile", async ({
   const assignee = page.getByTestId("dispatch-assignee");
   await expect(assignee).toHaveText(`${"f".repeat(8)}…ffff`);
   await expect(page.getByText(unknown, { exact: true })).toHaveCount(0);
+
+  await waitForAnimations(page);
+  await page
+    .locator("aside")
+    .screenshot({ path: "test-results/dispatch-assignee/02-fallback.png" });
 });
 
 test("assignee rail still edits by pubkey behind a click", async ({ page }) => {
