@@ -1,0 +1,218 @@
+{
+  "version": 1,
+  "_about": [
+    "Expected-red set for the canonical-main smoke gate (D-0b14e7d3).",
+    "This file IS the quarantine list (D-6880b42e) — there is deliberately only one artifact.",
+    "The gate runs the full smoke project on darwin at workers:1 / retries:0 and alerts only on",
+    "reds NOT listed here, after confirming them by re-running the affected spec files.",
+    "",
+    "Entries are keyed on file + full title. NOT file:line — line is informational only.",
+    "messaging.spec.ts generates two tests from one `for` loop at the SAME line (4495), so a",
+    "line-keyed list would silently quarantine the wrong variant.",
+    "",
+    "class=deterministic      reproduced in every run it appeared in; a real red with an owner.",
+    "class=quarantined-flake  observed passing AND failing across runs; suppressed, not accepted.",
+    "",
+    "When a test is fixed, delete its entry in the same commit as the fix.",
+    "Measured on darwin, retries:0 — this set is platform- and retry-specific and is NOT a claim",
+    "about upstream's ubuntu CI, which runs with retries:2."
+  ],
+  "measured": {
+    "commit": "d5c187fbefe1765afa8e529b0b688f609f97676a",
+    "date": "2026-08-29",
+    "platform": "darwin",
+    "workers": 1,
+    "retries": 0,
+    "result": "28 failed / 1230 passed / 1 skipped",
+    "note": "19 of the 28 were the D-4f05940c cluster, fixed in 0f6450592 and not listed here."
+  },
+  "entries": [
+    {
+      "file": "tests/e2e/huddle-transcription.spec.ts",
+      "title": "assigns distinct agent voices and exposes compact per-agent controls",
+      "line": 759,
+      "class": "deterministic",
+      "reason": "Voice menu content never becomes visible; failed in all 3 runs that covered it.",
+      "owner": "anvil",
+      "issue": "D-6f0edd0ed",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/mentions.spec.ts",
+      "title": "defers agent mentions until DM members finish loading",
+      "line": 664,
+      "class": "deterministic",
+      "reason": "Composer input stays empty where '@alice ' is expected; failed in all 3 runs.",
+      "owner": "anvil",
+      "issue": "D-6f0edd0ed",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/message-copy-link.spec.ts",
+      "title": "message action rail copies the same canonical thread link as More",
+      "line": 39,
+      "class": "deterministic",
+      "reason": "'Link copied to clipboard' toast never appears; failed in all 3 runs.",
+      "owner": "anvil",
+      "issue": "D-6f0edd0ed",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/send-channel-binding.spec.ts",
+      "title": "message with agent mention lands in compose-time channel despite mid-send navigation",
+      "line": 51,
+      "class": "deterministic",
+      "reason": "composer-address-lock testid not found; failed in all 3 runs.",
+      "owner": "anvil",
+      "issue": "D-6f0edd0ed",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/workflow-local-controls.spec.ts",
+      "title": "inserts template variables with keyboard control and restores the caret",
+      "line": 148,
+      "class": "deterministic",
+      "reason": "Visual snapshot diff, 498px (ratio 0.01) vs the committed -darwin.png; failed in all 3 runs.",
+      "owner": "anvil",
+      "issue": "D-6f0edd0ed",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/virtualization.spec.ts",
+      "title": "list virtualization › 08 — cascading older pages never snap the viewport toward newest",
+      "line": 246,
+      "class": "quarantined-flake",
+      "reason": "toBeLessThan geometry assertion. PRIORITY DEFLAKE — a numeric geometry flake at retries:0 is the most likely real product race in this set.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/image-attachment-gallery.spec.ts",
+      "title": "hidden spoiler images are excluded from gallery navigation until revealed",
+      "line": 660,
+      "class": "quarantined-flake",
+      "reason": "toBeVisible timeout; red in the baseline arm, green in the fixed arm of the same A/B.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/onboarding-agent-defaults.spec.ts",
+      "title": "concurrent installs each keep their own state — one fails, one succeeds",
+      "line": 910,
+      "class": "quarantined-flake",
+      "reason": "toHaveCount mismatch; red in the baseline arm, green in the fixed arm.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/thread-unread.spec.ts",
+      "title": "thread unread indicator › 13-thread-badge-clears-on-read-without-reentry",
+      "line": 810,
+      "class": "quarantined-flake",
+      "reason": "toHaveText mismatch; red in the baseline arm, green in the fixed arm.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/channel-browser.spec.ts",
+      "title": "Enter with no matches jumps to create",
+      "line": 402,
+      "class": "quarantined-flake",
+      "reason": "Red in the fixed arm, green in the baseline arm; file untouched by that diff.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/channels.spec.ts",
+      "title": "routes an agent mention from an existing DM to the expanded conversation",
+      "line": 815,
+      "class": "quarantined-flake",
+      "reason": "Red in the fixed arm, green in the baseline arm; file untouched by that diff.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/community-rail.spec.ts",
+      "title": "community rail › keyboard reorder: Space to pick up, ArrowUp to move, Space to drop updates stored order",
+      "line": 1480,
+      "class": "quarantined-flake",
+      "reason": "community-rail reds at a DIFFERENT test each run — this variant in Morty's run and my full run, the sidebar-collapsed one in my scoped run. File-level flake.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/community-rail.spec.ts",
+      "title": "community rail › keeps the rail visible when the sidebar is collapsed",
+      "line": 1294,
+      "class": "quarantined-flake",
+      "reason": "The other half of the community-rail file-level flake; red only in the scoped disposition run.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/mentions.spec.ts",
+      "title": "mention text is highlighted in sent messages",
+      "line": 2903,
+      "class": "quarantined-flake",
+      "reason": "Red in the fixed arm, green in the baseline arm.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/mentions.spec.ts",
+      "title": "selecting a persona mention creates a channel agent before sending",
+      "line": 1116,
+      "class": "quarantined-flake",
+      "reason": "Red only in the scoped disposition run; green in both full-suite arms.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/messaging.spec.ts",
+      "title": "a refused keyboard Back preserves the reply edit and retries after cancel",
+      "line": 4495,
+      "class": "quarantined-flake",
+      "reason": "The 'keyboard' variant only — the 'button' variant at the SAME line passed in the same run. This is why entries are keyed on title, not line.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/workflows.spec.ts",
+      "title": "captures workflow library across responsive viewports",
+      "line": 291,
+      "class": "quarantined-flake",
+      "reason": "Red in Morty's run only; green in both of my full-suite arms and the scoped run.",
+      "owner": "anvil",
+      "issue": "D-6880b42e",
+      "added": "2026-08-29",
+      "expires": "2026-09-28"
+    }
+  ]
+}

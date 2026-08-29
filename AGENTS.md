@@ -421,6 +421,12 @@ Set `BUZZ_E2E_PORT` to give a lane its own preview server:
 BUZZ_E2E_PORT=4319 pnpm exec playwright test --project=integration
 ```
 
+**Port 4399 is RESERVED for the canonical-main smoke gate** (D-0b14e7d3) and must not be
+used by a lane. The gate runs unattended against every canonical-main advance; if a lane
+takes 4399 mid-run, the gate and the lane serve each other's `dist` and the gate reports a
+verdict about the wrong build — silently, and in the one direction nobody checks. Pick any
+other free port for lane work.
+
 The default stays 4173, so a single-checkout run and CI are unchanged. When a
 run's numbers matter — a verification pass, a merge battery — confirm the served
 build is yours **before and after**, since a concurrent lane can take the port
