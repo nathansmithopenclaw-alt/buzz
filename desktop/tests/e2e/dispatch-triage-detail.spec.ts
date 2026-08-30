@@ -523,6 +523,79 @@ test("assignee picker and the channel members popup are the same shell", async (
   expect(Object.values(membersSignature).every(Boolean)).toBe(true);
 });
 
+/** A relay-hosted avatar — the shape `rewriteRelayUrl` has to intercept. */
+function relayAvatarUrl(hexDigit: string) {
+  return `http://localhost:3000/media/${hexDigit.repeat(64)}.png`;
+}
+
+const PROXIED_AVATAR = /^http:\/\/127\.0\.0\.1:54321\/media\/[\da-f]{64}\.png$/;
+
+/** Relative luminance of a `rgb(r, g, b)` string, 0 (black) to 1 (white). */
+function luminanceOf(color: string) {
+  const [r, g, b] = (/rgba?\((\d+), (\d+), (\d+)/.exec(color) ?? [])
+    .slice(1)
+    .map(Number);
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+
+test("Dispatch avatars load through the media proxy and take the app theme", async ({
+  page,
+}) => {
+  // Our avatars are relay-hosted, and bare relay media URLs are unauthenticated
+  // 401s — every avatar has to go through the local proxy that `UserAvatar`
+  // applies. Three Dispatch surfaces used to pass `profile.avatarUrl` straight
+  // to an `<img>`, so an identity with a published photo rendered as its
+  // initial. This pins the proxy path on the assignee rail and the picker: with
+  // a raw `<img src>` the src is the relay URL and this fails.
+  await page.route(`http://127.0.0.1:54321/media/**`, (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#22c55e"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+  });
+  await installMockBridge(page, {
+    dispatch: {
+      workspace: { id: WORKSPACE, name: "Dispatch Test Workspace" },
+      context: assignPrimary(OTHER),
+    },
+    searchProfiles: [
+      { pubkey: OTHER, displayName: "Helm", avatarUrl: relayAvatarUrl("e") },
+      { pubkey: SELF, displayName: "Tyler", avatarUrl: relayAvatarUrl("d") },
+    ],
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-dispatch-view").click();
+  await openPrimaryIssue(page);
+
+  const railAvatar = page.getByTestId("dispatch-assignee").locator("img");
+  await expect(railAvatar).toHaveAttribute("src", PROXIED_AVATAR);
+  // A broken `<img>` still renders "an avatar" — assert the pixels decoded.
+  expect(
+    await railAvatar.evaluate((img: HTMLImageElement) => img.naturalWidth),
+  ).toBeGreaterThan(0);
+
+  await page.getByTestId("dispatch-assignee").click();
+  await expect(page.getByTestId("dispatch-assignee-picker")).toBeVisible();
+  const rowAvatar = page
+    .getByTestId(`dispatch-assignee-option-${SELF}`)
+    .locator("img");
+  await expect(rowAvatar).toHaveAttribute("src", PROXIED_AVATAR);
+  expect(
+    await rowAvatar.evaluate((img: HTMLImageElement) => img.naturalWidth),
+  ).toBeGreaterThan(0);
+
+  // The popup surface is a theme token, not a hardcoded light panel. The exact
+  // palette value is deliberately not pinned — only that a dark theme renders
+  // dark, which is what a literal `bg-white` would break.
+  const background = await page
+    .getByTestId("dispatch-assignee-picker")
+    .evaluate((element) => getComputedStyle(element).backgroundColor);
+  expect(luminanceOf(background)).toBeLessThan(0.5);
+});
+
 test("detail never turns a non-http provenance source into a link", async ({
   page,
 }) => {
