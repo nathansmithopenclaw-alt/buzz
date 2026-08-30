@@ -50,6 +50,14 @@ function candidateFromProfiles(
  * kind:0), not the issue's channel: `homeChannelId` is nullable and null on
  * most issues, so a channel-scoped list would be empty exactly when the user
  * needs it.
+ *
+ * The two candidate sets are therefore *not* identical, on purpose. The members
+ * popup narrows agents through `getMentionableAgentPubkeys` — an agent has to be
+ * one you manage, a relay agent, or one you share a channel with — because
+ * adding an agent to a channel is a membership act. Assigning is not: you assign
+ * work to an identity regardless of where it is a member, so this picker
+ * deliberately omits that filter. If you are diffing the two lists, that
+ * difference is a decision, not drift.
  */
 export function AssigneePickerDialog({
   assignee,
