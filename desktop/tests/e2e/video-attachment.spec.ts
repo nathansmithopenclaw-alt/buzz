@@ -30,6 +30,13 @@ const VIDEO_REVIEW_ACCENT_FOREGROUND_RGB = "rgb(240, 115, 177)";
 const VIDEO_REVIEW_INDIGO_ACCENT = "#6366f1";
 const VIDEO_REVIEW_INDIGO_FOREGROUND_RGB = "rgb(141, 143, 245)";
 const VIDEO_REVIEW_NEUTRAL_DARK_RGB = "rgb(250, 250, 250)";
+// A relay-hosted custom emoji — the shape `rewriteRelayUrl` has to intercept —
+// and the settled id its reaction targets.
+const REVIEW_EMOJI_SHA = "9".repeat(64);
+const REVIEW_EMOJI_RELAY_URL = `http://localhost:3000/media/${REVIEW_EMOJI_SHA}.png`;
+const REVIEW_COMMENT_EVENT_ID = "7".repeat(64);
+const PROXIED_MEDIA_URL =
+  /^http:\/\/127\.0\.0\.1:54321\/media\/[\da-f]{64}\.png$/;
 const POSTER_DATA_URL =
   "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNjAgODAiPjxyZWN0IHdpZHRoPSIxNjAiIGhlaWdodD0iODAiIGZpbGw9IiMyNjQ2NTMiLz48Y2lyY2xlIGN4PSI1NCIgY3k9IjQwIiByPSIyMiIgZmlsbD0iI2YyYzE0ZSIvPjxwYXRoIGQ9Ik05MiAyNGg0NHYzMkg5MnoiIGZpbGw9IiNmNzgxNTQiLz48L3N2Zz4=";
 
@@ -222,10 +229,11 @@ async function installVideoReviewHarness(
   });
 }
 
-async function openReviewWithPostedTimecode(
-  page: Page,
-  commentText = "Neutral accent check",
-) {
+/**
+ * Post the harness video to `general` and open its review dialog. Returns the
+ * settled (non-optimistic) message id so callers can thread comments onto it.
+ */
+async function openVideoReview(page: Page) {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -250,12 +258,27 @@ async function openReviewWithPostedTimecode(
     const messageId = row?.getAttribute("data-message-id") ?? "";
     return Boolean(messageId) && !messageId.startsWith("optimistic");
   });
+  const videoMessageId = await page.evaluate(() => {
+    const launcher = document.querySelector("[data-video-review-launcher]");
+    return (
+      launcher?.closest("[data-message-id]")?.getAttribute("data-message-id") ??
+      ""
+    );
+  });
   await reviewButton.evaluate((button) =>
     (button as HTMLButtonElement).click(),
   );
 
   const reviewDialog = page.getByTestId("video-review-dialog");
   await expect(reviewDialog).toBeVisible();
+  return { reviewDialog, videoMessageId };
+}
+
+async function openReviewWithPostedTimecode(
+  page: Page,
+  commentText = "Neutral accent check",
+) {
+  const { reviewDialog } = await openVideoReview(page);
   await reviewDialog.locator("video").evaluate((video) => {
     const el = video as HTMLVideoElement;
     el.currentTime = 10;
@@ -275,6 +298,83 @@ async function openReviewWithPostedTimecode(
 
   return reviewDialog;
 }
+
+test("a review comment's custom emoji reaction loads through the media proxy", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(45_000);
+  // Custom-emoji reactions carry a raw relay URL on their NIP-30 `emoji` tag,
+  // and bare relay media is an unauthenticated 401 — every relay-hosted <img>
+  // has to go through the local proxy. The review panel rendered
+  // `reaction.emojiUrl` directly while the timeline rendered the same field
+  // through `rewriteRelayUrl`, so the pill was a broken image with no glyph to
+  // fall back to. With a raw `src` this fails on the proxied-URL assertion.
+  await page.route(`http://127.0.0.1:54321/media/**`, (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#f2c14e"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+  await installVideoReviewHarness(page, {
+    themeName: VIDEO_REVIEW_LIGHT_THEME,
+  });
+
+  const { reviewDialog, videoMessageId } = await openVideoReview(page);
+  expect(videoMessageId).not.toEqual("");
+
+  await page.evaluate(
+    ({ commentId, parentEventId }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: "00:10 Does the custom emoji survive the proxy?",
+        id: commentId,
+        parentEventId,
+      });
+    },
+    { commentId: REVIEW_COMMENT_EVENT_ID, parentEventId: videoMessageId },
+  );
+  await expect(page.getByTestId("video-review-comments")).toContainText(
+    "Does the custom emoji survive the proxy?",
+  );
+
+  await page.evaluate(
+    ({ emojiUrl, targetId }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: ":party:",
+        extraTags: [
+          ["e", targetId],
+          ["emoji", "party", emojiUrl],
+        ],
+        kind: 7,
+      });
+    },
+    {
+      emojiUrl: REVIEW_EMOJI_RELAY_URL,
+      targetId: REVIEW_COMMENT_EVENT_ID,
+    },
+  );
+
+  const pill = reviewDialog.getByRole("button", {
+    name: "Toggle :party: reaction",
+  });
+  await expect(pill).toBeVisible();
+  const glyph = pill.locator("img");
+  await expect(glyph).toHaveAttribute("src", PROXIED_MEDIA_URL);
+  // A 401'd <img> still occupies the pill — assert the bytes decoded, not that
+  // an element exists. This branch has no text fallback, so a failed load is a
+  // broken-image icon rather than the shortcode.
+  await expect
+    .poll(() =>
+      glyph.evaluate(
+        (element) =>
+          element instanceof HTMLImageElement &&
+          element.complete &&
+          element.naturalWidth > 0,
+      ),
+    )
+    .toBe(true);
+});
 
 test("video upload previews use poster frames and inline videos open review mode", async ({
   page,
