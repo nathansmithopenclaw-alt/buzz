@@ -374,6 +374,39 @@ test("rewriteRelayUrl: still passes external Blossom URLs through unchanged", as
   }
 });
 
+test("rewriteRelayUrl: rewriting an already-proxied URL is a no-op", async () => {
+  // The proxy URL has the same `/media/{64-hex}.{ext}` shape as a relay URL,
+  // so the pattern matches it too. Call sites that rewrite defensively must be
+  // able to sit above callers that already rewrote — this is what makes the
+  // rewrite safe to add inside a shared helper rather than at every caller.
+  const previousWindow = globalThis.window;
+
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_media_proxy_port") return Promise.resolve(54321);
+        if (command === "get_relay_http_url") {
+          return Promise.resolve("http://tituss-mac-mini:3000");
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+
+  try {
+    const mediaUrl = await import(`./mediaUrl.ts?idempotent=${Date.now()}`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const once = mediaUrl.rewriteRelayUrl(
+      `http://tituss-mac-mini:3000/media/${HASH}.png`,
+    );
+    assert.equal(once, `http://127.0.0.1:54321/media/${HASH}.png`);
+    assert.equal(mediaUrl.rewriteRelayUrl(once), once);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
 test("rewriteRelayUrl: proxies the same relay on a LAN vs tailnet origin", async () => {
   const previousWindow = globalThis.window;
 
