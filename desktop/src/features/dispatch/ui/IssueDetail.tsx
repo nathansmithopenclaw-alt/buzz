@@ -14,12 +14,12 @@ import * as React from "react";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
-import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Textarea } from "@/shared/ui/textarea";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { AssigneePickerDialog } from "./AssigneePickerDialog";
 import { chronologicalActivity, taskMessageLink } from "../selectors.mjs";
 import { assigneeLabel } from "../viewModel";
@@ -91,16 +91,12 @@ function ProfileAvatar({
   pubkey: string;
 }) {
   const profile = profiles?.[pubkey.toLowerCase()];
-  const label = resolveUserLabel({ profiles, pubkey });
   return (
-    <Avatar className="h-6 w-6">
-      {profile?.avatarUrl ? (
-        <AvatarImage alt="" src={profile.avatarUrl} />
-      ) : null}
-      <AvatarFallback className="text-2xs font-semibold">
-        {label.slice(0, 1).toUpperCase()}
-      </AvatarFallback>
-    </Avatar>
+    <UserAvatar
+      avatarUrl={profile?.avatarUrl ?? null}
+      displayName={resolveUserLabel({ profiles, pubkey })}
+      size="sm"
+    />
   );
 }
 
