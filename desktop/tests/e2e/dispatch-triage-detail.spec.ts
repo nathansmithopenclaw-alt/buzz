@@ -166,7 +166,10 @@ async function openDispatch(
       context: dispatchContext,
       ...dispatchOptions,
     },
-    searchProfiles: [{ pubkey: OTHER, displayName: "Helm" }],
+    searchProfiles: [
+      { pubkey: OTHER, displayName: "Helm" },
+      { pubkey: SELF, displayName: "Tyler" },
+    ],
   });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-dispatch-view").click();
@@ -374,25 +377,150 @@ test("assignee rail falls back to a truncated pubkey with no profile", async ({
     .screenshot({ path: "test-results/dispatch-assignee/02-fallback.png" });
 });
 
-test("assignee rail still edits by pubkey behind a click", async ({ page }) => {
+async function readAssigneeRevision(page: import("@playwright/test").Page) {
+  const signed = await page.evaluate(
+    () => window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [],
+  );
+  const revision = signed.findLast((event) => event.kind === 40021);
+  return JSON.parse(revision?.content ?? "{}") as {
+    set?: { assignee?: string | null };
+    clear?: string[];
+  };
+}
+
+/**
+ * The structural fingerprint of a user-search popup: every class string that
+ * comes from the shared shell, none of the per-call-site copy.
+ *
+ * Two popups that agree here are rendering the same component, not two
+ * hand-matched copies of it — which is the property "looks exactly like the
+ * members popup" actually needs, and the one a screenshot comparison cannot
+ * distinguish from a lucky clone.
+ */
+async function popupShellSignature(
+  page: import("@playwright/test").Page,
+  testId: string,
+) {
+  return page.evaluate((id) => {
+    const content = document.querySelector(`[data-testid="${id}"]`);
+    if (!content) throw new Error(`popup ${id} is not mounted`);
+    const searchShell = content.querySelector("label");
+    return {
+      content: content.className,
+      header: content.children[0]?.className ?? null,
+      closeButton: content.querySelector("button")?.className ?? null,
+      searchShell: searchShell?.className ?? null,
+      searchInput: searchShell?.querySelector("input")?.className ?? null,
+      body: content.children[1]?.className ?? null,
+      panel: content.querySelector("section > div")?.className ?? null,
+      sectionTitle:
+        content.querySelector("section > div > div")?.className ?? null,
+    };
+  }, testId);
+}
+
+test("assignee row opens the members-style picker and assigns from search", async ({
+  page,
+}) => {
   await openDispatch(page, assignPrimary(OTHER));
   await openPrimaryIssue(page);
 
   await page.getByTestId("dispatch-assignee").click();
-  const field = page.getByLabel("Issue assignee pubkey");
-  await expect(field).toHaveValue(OTHER);
-  await field.fill(SELF);
-  await field.press("Enter");
-  await expect(page.getByText("Issue updated")).toBeVisible();
+  await expect(page.getByTestId("dispatch-assignee-picker")).toBeVisible();
+  // The current assignee is not offered as something to assign again; it sits
+  // in its own section with the action that is actually available on it.
+  await expect(
+    page.getByTestId(`dispatch-assignee-option-${OTHER}`).getByRole("button", {
+      name: "Unassign",
+    }),
+  ).toBeVisible();
 
-  const signed = await page.evaluate(
-    () => window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [],
+  await page.getByTestId("dispatch-assignee-search").fill("Tyler");
+  const candidate = page.getByTestId(`dispatch-assignee-option-${SELF}`);
+  await expect(candidate).toBeVisible();
+  await candidate.getByRole("button", { name: "Assign" }).click();
+
+  await expect(page.getByTestId("dispatch-assignee-picker")).toHaveCount(0);
+  await expect(page.getByText("Issue updated")).toBeVisible();
+  expect((await readAssigneeRevision(page)).set?.assignee).toBe(SELF);
+});
+
+test("assignee picker unassigns from the assigned section", async ({
+  page,
+}) => {
+  await openDispatch(page, assignPrimary(OTHER));
+  await openPrimaryIssue(page);
+
+  await page.getByTestId("dispatch-assignee").click();
+  await page
+    .getByTestId(`dispatch-assignee-option-${OTHER}`)
+    .getByRole("button", { name: "Unassign" })
+    .click();
+
+  await expect(page.getByText("Issue updated")).toBeVisible();
+  // Removing an assignee is a `clear`, not a `set` to null — see
+  // `dispatchRevisionFields` in mutations.ts.
+  const revision = await readAssigneeRevision(page);
+  expect(revision.clear).toEqual(["assignee"]);
+  expect(revision.set?.assignee).toBeUndefined();
+  await expect(page.getByTestId("dispatch-assignee-name")).toHaveText(
+    "Unassigned",
   );
-  const revision = signed.find((event) => event.kind === 40021);
-  const content = JSON.parse(revision?.content ?? "{}") as {
-    set?: { assignee?: string };
-  };
-  expect(content.set?.assignee).toBe(SELF);
+});
+
+test("assignee picker still assigns a pasted key the directory cannot find", async ({
+  page,
+}) => {
+  // The directory is a full-text search over kind:0 content, where a pubkey
+  // never appears — so this key is unreachable by search and only assignable
+  // because the picker offers a parsed key as its own candidate.
+  const unpublished = "c".repeat(64);
+  await openDispatch(page);
+  await openPrimaryIssue(page);
+
+  await page.getByTestId("dispatch-assignee").click();
+  await page.getByTestId("dispatch-assignee-search").fill(unpublished);
+  const pasted = page.getByTestId(`dispatch-assignee-option-${unpublished}`);
+  await expect(pasted).toBeVisible();
+  await pasted.getByRole("button", { name: "Assign" }).click();
+
+  await expect(page.getByText("Issue updated")).toBeVisible();
+  expect((await readAssigneeRevision(page)).set?.assignee).toBe(unpublished);
+});
+
+test("assignee picker and the channel members popup are the same shell", async ({
+  page,
+}) => {
+  await openDispatch(page, assignPrimary(OTHER));
+
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("channel-members-trigger").click();
+  await expect(page.getByTestId("members-sidebar")).toBeVisible();
+  const membersSignature = await popupShellSignature(page, "members-sidebar");
+  await waitForAnimations(page);
+  await page
+    .getByTestId("members-sidebar")
+    .screenshot({ path: "test-results/dispatch-assignee/03-members.png" });
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("members-sidebar")).toHaveCount(0);
+
+  await page.getByTestId("open-dispatch-view").click();
+  await openPrimaryIssue(page);
+  await page.getByTestId("dispatch-assignee").click();
+  await expect(page.getByTestId("dispatch-assignee-picker")).toBeVisible();
+  const assigneeSignature = await popupShellSignature(
+    page,
+    "dispatch-assignee-picker",
+  );
+  await waitForAnimations(page);
+  await page
+    .getByTestId("dispatch-assignee-picker")
+    .screenshot({ path: "test-results/dispatch-assignee/04-assignee.png" });
+
+  expect(assigneeSignature).toEqual(membersSignature);
+  // Guard the guard: a signature of all-nulls would compare equal and prove
+  // nothing.
+  expect(Object.values(membersSignature).every(Boolean)).toBe(true);
 });
 
 test("detail never turns a non-http provenance source into a link", async ({
