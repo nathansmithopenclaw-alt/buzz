@@ -1,3 +1,12 @@
+/**
+ * Presentation half of the compact link preview. It renders
+ * `preview.imageDataUrl` / `preview.faviconDataUrl` straight into `<img>`,
+ * which is only safe because `LinkPreviewAttachment` is its sole value import
+ * site and rewrites both fields through `rewriteRelayUrl` first. Import this
+ * component anywhere else and snapshot-derived previews — which carry relay
+ * `/media/` URLs in those fields — will 403 under WKWebView.
+ */
+
 import { ImageOff } from "lucide-react";
 import { useRef, useState } from "react";
 
