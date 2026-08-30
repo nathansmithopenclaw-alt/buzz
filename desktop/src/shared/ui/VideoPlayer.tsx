@@ -18,6 +18,7 @@ import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
@@ -2186,7 +2187,11 @@ function VideoReviewCommentBody({
               }}
             >
               {reaction.emojiUrl ? (
-                <img alt="" className="h-4 w-4" src={reaction.emojiUrl} />
+                <img
+                  alt=""
+                  className="h-4 w-4"
+                  src={rewriteRelayUrl(reaction.emojiUrl)}
+                />
               ) : (
                 <span>{reaction.emoji}</span>
               )}
