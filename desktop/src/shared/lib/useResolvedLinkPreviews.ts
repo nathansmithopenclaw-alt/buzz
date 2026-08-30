@@ -368,6 +368,12 @@ export type LinkPreviewImageState = "pending" | "image" | "fallback" | "none";
 
 export type ResolvedLinkPreview = SupportedLinkPreview & {
   description?: string | null;
+  /**
+   * Same two provenances as `imageDataUrl`, and the same caveat: a data URL
+   * from `resolveLinkPreview`, a relay `/media/` URL from
+   * `parseLinkPreviewSnapshots`. Only render it via `LinkPreviewAttachment`,
+   * which applies `rewriteRelayUrl`.
+   */
   faviconDataUrl?: string | null;
   imageState: LinkPreviewImageState;
   /** Metadata extraction completed successfully; safe to snapshot after media uploads. */

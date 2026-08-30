@@ -29,7 +29,16 @@ export type SupportedLinkPreview = {
   href: string;
   provider: string;
   title: string;
-  /** Sanitized native-fetched bitmap; never a remote URL. */
+  /**
+   * Sanitized native-fetched bitmap on the metadata path
+   * (`resolveLinkPreview`) — but **not always a data URL**. On the snapshot
+   * path `parseLinkPreviewSnapshots` puts a relay `/media/` URL here, having
+   * validated it as one via `isRelayMediaPair`. WKWebView cannot load that
+   * directly (Cloudflare Access 403s it), so it must reach an `<img>` through
+   * `rewriteRelayUrl`. `LinkPreviewAttachment` is the single place that does
+   * the rewrite, for this field and `faviconDataUrl` both; render either one
+   * from anywhere else and the snapshot case fails to an empty box.
+   */
   imageDataUrl?: string | null;
   imageDomain?: string | null;
   typeLabel:
