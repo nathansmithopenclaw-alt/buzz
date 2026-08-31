@@ -325,6 +325,25 @@ test("Observer renders relay fleet liveness and mentions the existing agent", as
   await expect(projectedMenuTrigger).toBeFocused();
 
   await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+        exact: true,
+      });
+    },
+    {
+      channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+      pubkey: TEAM_AGENT,
+    },
+  );
   const composer = page.getByTestId("message-input");
   await composer.fill("@Review");
   const autocomplete = page
@@ -339,6 +358,13 @@ test("Observer renders relay fleet liveness and mentions the existing agent", as
   await expect(
     autocomplete.getByText("Will Create Team", { exact: true }),
   ).toHaveCount(0);
+
+  // The signed channel projection is fresher than the dedicated roster query.
+  // Observer-mode remote agents must become mentionable from that projection.
+  await composer.fill("@Team");
+  await expect(
+    autocomplete.getByText("Team Review Agent", { exact: true }),
+  ).toBeVisible();
 
   await composer.fill("@Stale");
   await expect(

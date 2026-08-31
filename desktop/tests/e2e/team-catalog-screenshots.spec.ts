@@ -154,6 +154,18 @@ const CATALOG_EVENTS: RelayEvent[] = [
   }),
 ];
 
+// The Smith Crafts Agents IA replaces the library grids with a focused
+// first-agent onboarding state when both the local persona and deployment
+// libraries are empty. Seed one local definition so these catalog screenshots
+// exercise the established Teams entry point rather than the onboarding fork.
+const LOCAL_LIBRARY_PERSONAS = [
+  {
+    id: "custom:local-helper",
+    displayName: "Local Helper",
+    systemPrompt: "Help with local workspace tasks.",
+  },
+];
+
 async function gotoAgentsView(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("open-agents-view")).toBeVisible({
@@ -174,7 +186,10 @@ test.describe("team catalog screenshots", () => {
 
   test("01 — catalog browse, add, and added states", async ({ page }) => {
     test.setTimeout(60_000);
-    await installMockBridge(page, { teamCatalogEvents: CATALOG_EVENTS });
+    await installMockBridge(page, {
+      personas: LOCAL_LIBRARY_PERSONAS,
+      teamCatalogEvents: CATALOG_EVENTS,
+    });
     await gotoAgentsView(page);
     await openTeamCatalog(page);
 
@@ -223,7 +238,10 @@ test.describe("team catalog screenshots", () => {
   });
 
   test("02 — empty catalog", async ({ page }) => {
-    await installMockBridge(page, { teamCatalogEvents: [] });
+    await installMockBridge(page, {
+      personas: LOCAL_LIBRARY_PERSONAS,
+      teamCatalogEvents: [],
+    });
     await gotoAgentsView(page);
     await openTeamCatalog(page);
 
@@ -281,6 +299,7 @@ test.describe("team catalog screenshots", () => {
 
   test("04 — both sections populated (agents + teams)", async ({ page }) => {
     await installMockBridge(page, {
+      personas: LOCAL_LIBRARY_PERSONAS,
       personaCatalogEvents: PERSONA_CATALOG_EVENTS,
       teamCatalogEvents: CATALOG_EVENTS,
     });

@@ -71,4 +71,12 @@ test("team projections keep channel membership and respond-to eligibility", () =
     agents.map((candidate) => candidate.agentPubkey),
     [TEAM_AGENT, "5".repeat(64)],
   );
+
+  const dmAgents = mentionableProjectionAgents({
+    owners,
+    channelType: "dm",
+    currentPubkey: VIEWER,
+    memberPubkeys: new Set([TEAM_AGENT, "5".repeat(64), "6".repeat(64)]),
+  });
+  assert.deepEqual(dmAgents, []);
 });
