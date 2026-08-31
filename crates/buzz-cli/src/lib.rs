@@ -1844,8 +1844,13 @@ pub enum BriefsCmd {
 
 #[derive(Subcommand)]
 pub enum BriefsConfigCmd {
-    /// Get the caller's live briefing config
-    Get,
+    /// Get a live briefing config
+    Get {
+        /// Owner pubkey whose config to read (defaults to the signer).
+        /// The reporter uses this to load the include-set.
+        #[arg(long)]
+        owner: Option<String>,
+    },
     /// Create or replace the caller's live briefing config
     Set {
         /// Local hour (0–23)
@@ -3584,6 +3589,22 @@ mod tests {
             ])
             .is_ok(),
             "--name with --clear-description must be accepted"
+        );
+    }
+
+    #[test]
+    fn briefs_config_get_accepts_owner() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "briefs",
+                "config",
+                "get",
+                "--owner",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ])
+            .is_ok(),
+            "briefs config get --owner must parse so a reporter can read the include-set"
         );
     }
 

@@ -24,16 +24,51 @@ fn newest_first(mut events: Vec<Event>) -> Vec<Event> {
     events
 }
 
-async fn fetch_own_config(client: &BuzzClient) -> Result<Option<Event>, CliError> {
-    let me = client.keys().public_key().to_hex();
-    let filter = serde_json::json!({
+pub(crate) fn config_read_filter(author: &str, reader: &str) -> serde_json::Value {
+    serde_json::json!({
         "kinds": [KIND_BRIEF_CONFIG],
-        "authors": [me],
+        "authors": [author],
         "#d": [BRIEF_CONFIG_D_TAG],
+        "#p": [reader],
         "limit": 1,
-    });
-    let raw = client.query(&filter).await?;
+    })
+}
+
+pub(crate) fn watermarks_list_filter(reader: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [KIND_BRIEF_WATERMARK],
+        "authors": [reader],
+        "#p": [reader],
+        "#t": [BRIEF_DISCOVERY_TAG],
+        "limit": 200,
+    })
+}
+
+pub(crate) fn reports_list_filter(owner: &str, reporter: &str, limit: u32) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [KIND_BRIEF_REPORT],
+        "authors": [reporter],
+        "#p": [owner],
+        "#t": [BRIEF_DISCOVERY_TAG],
+        "limit": limit.min(100),
+    })
+}
+
+async fn fetch_config(client: &BuzzClient, owner: Option<&str>) -> Result<Option<Event>, CliError> {
+    let me = client.keys().public_key().to_hex();
+    let author = match owner {
+        Some(value) => {
+            validate_hex64(value)?;
+            value.to_ascii_lowercase()
+        }
+        None => me.clone(),
+    };
+    let raw = client.query(&config_read_filter(&author, &me)).await?;
     Ok(newest_first(parse_events(&raw)?).into_iter().next())
+}
+
+async fn fetch_own_config(client: &BuzzClient) -> Result<Option<Event>, CliError> {
+    fetch_config(client, None).await
 }
 
 async fn expected_brief_reporter(client: &BuzzClient) -> Result<Option<String>, CliError> {
@@ -56,13 +91,7 @@ pub async fn cmd_list(client: &BuzzClient, limit: u32) -> Result<(), CliError> {
             .unwrap_or_else(|| me.clone()),
         None => me.clone(),
     };
-    let filter = serde_json::json!({
-        "kinds": [KIND_BRIEF_REPORT],
-        "authors": [reporter],
-        "#p": [me],
-        "#t": [BRIEF_DISCOVERY_TAG],
-        "limit": limit.min(100),
-    });
+    let filter = reports_list_filter(&me, &reporter, limit);
     let raw = client.query(&filter).await?;
     let mut rows = Vec::new();
     for event in newest_first(parse_events(&raw)?) {
@@ -193,9 +222,12 @@ pub async fn cmd_publish(
     Ok(())
 }
 
-/// Print the caller's live briefing config, or null.
-pub async fn cmd_config_get(client: &BuzzClient) -> Result<(), CliError> {
-    match fetch_own_config(client).await? {
+/// Print a live briefing config, or null.
+///
+/// Defaults to the signer's own config. Pass `owner` so a reporter can read
+/// the include-set they are assigned to (`#p` = signer, `authors` = owner).
+pub async fn cmd_config_get(client: &BuzzClient, owner: Option<&str>) -> Result<(), CliError> {
+    match fetch_config(client, owner).await? {
         Some(event) => {
             let config = parse_brief_config(&event).map_err(sdk_err)?;
             println!(
@@ -283,12 +315,7 @@ pub async fn cmd_config_set(
 /// List the caller's watermark events.
 pub async fn cmd_watermarks_list(client: &BuzzClient) -> Result<(), CliError> {
     let me = client.keys().public_key().to_hex();
-    let filter = serde_json::json!({
-        "kinds": [KIND_BRIEF_WATERMARK],
-        "authors": [me],
-        "#t": [BRIEF_DISCOVERY_TAG],
-        "limit": 200,
-    });
+    let filter = watermarks_list_filter(&me);
     let raw = client.query(&filter).await?;
     let mut rows = Vec::new();
     for event in newest_first(parse_events(&raw)?) {
@@ -365,7 +392,7 @@ pub async fn dispatch(cmd: crate::BriefsCmd, client: &BuzzClient) -> Result<(), 
             .await
         }
         BriefsCmd::Config(cmd) => match cmd {
-            crate::BriefsConfigCmd::Get => cmd_config_get(client).await,
+            crate::BriefsConfigCmd::Get { owner } => cmd_config_get(client, owner.as_deref()).await,
             crate::BriefsConfigCmd::Set {
                 hour,
                 minute,
@@ -408,5 +435,51 @@ pub async fn dispatch(cmd: crate::BriefsCmd, client: &BuzzClient) -> Result<(), 
                 .await
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const REPORTER: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn p_values(filter: &serde_json::Value) -> Vec<&str> {
+        filter["#p"]
+            .as_array()
+            .expect("#p must be present")
+            .iter()
+            .map(|value| value.as_str().expect("#p values are strings"))
+            .collect()
+    }
+
+    #[test]
+    fn config_read_filter_pins_reader_p_tag() {
+        let own = config_read_filter(OWNER, OWNER);
+        assert_eq!(own["kinds"], serde_json::json!([KIND_BRIEF_CONFIG]));
+        assert_eq!(own["authors"], serde_json::json!([OWNER]));
+        assert_eq!(own["#d"], serde_json::json!([BRIEF_CONFIG_D_TAG]));
+        assert_eq!(p_values(&own), vec![OWNER]);
+
+        let reporter_view = config_read_filter(OWNER, REPORTER);
+        assert_eq!(reporter_view["authors"], serde_json::json!([OWNER]));
+        assert_eq!(p_values(&reporter_view), vec![REPORTER]);
+    }
+
+    #[test]
+    fn watermarks_list_filter_pins_reader_p_tag() {
+        let filter = watermarks_list_filter(REPORTER);
+        assert_eq!(filter["kinds"], serde_json::json!([KIND_BRIEF_WATERMARK]));
+        assert_eq!(filter["authors"], serde_json::json!([REPORTER]));
+        assert_eq!(p_values(&filter), vec![REPORTER]);
+    }
+
+    #[test]
+    fn reports_list_filter_pins_owner_p_tag() {
+        let filter = reports_list_filter(OWNER, REPORTER, 20);
+        assert_eq!(filter["kinds"], serde_json::json!([KIND_BRIEF_REPORT]));
+        assert_eq!(filter["authors"], serde_json::json!([REPORTER]));
+        assert_eq!(p_values(&filter), vec![OWNER]);
     }
 }

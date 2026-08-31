@@ -1998,6 +1998,81 @@ mod tests {
         );
     }
 
+    /// Shipped NIP-BR client filters must carry `#p` = authed reader. An
+    /// authors-only REQ for 30623/30624/40030 is closed by the p-gate — that
+    /// was R2: the feature could not read its own config or watermarks.
+    #[test]
+    fn brief_client_filter_shapes_pass_p_gate() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+        let t_tag = SingleLetterTag::lowercase(Alphabet::T);
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let reporter = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let owner_pk = nostr::PublicKey::from_hex(owner).unwrap();
+        let reporter_pk = nostr::PublicKey::from_hex(reporter).unwrap();
+        let config_kind = nostr::Kind::Custom(buzz_core::kind::KIND_BRIEF_CONFIG as u16);
+        let watermark_kind = nostr::Kind::Custom(buzz_core::kind::KIND_BRIEF_WATERMARK as u16);
+        let report_kind = nostr::Kind::Custom(buzz_core::kind::KIND_BRIEF_REPORT as u16);
+
+        let config_without_p = Filter::new()
+            .kind(config_kind)
+            .author(owner_pk)
+            .custom_tags(d_tag, ["summary"]);
+        assert!(
+            !p_gated_filters_authorized(&[config_without_p], owner),
+            "R2: authors-only 30623 must be closed"
+        );
+
+        let config_self = Filter::new()
+            .kind(config_kind)
+            .author(owner_pk)
+            .custom_tags(d_tag, ["summary"])
+            .custom_tags(p_tag, [owner]);
+        assert!(
+            p_gated_filters_authorized(&[config_self], owner),
+            "owner config read with #p:[self] must pass"
+        );
+
+        let config_for_reporter = Filter::new()
+            .kind(config_kind)
+            .author(owner_pk)
+            .custom_tags(d_tag, ["summary"])
+            .custom_tags(p_tag, [reporter]);
+        assert!(
+            p_gated_filters_authorized(&[config_for_reporter], reporter),
+            "reporter config read with #p:[self] authors:[owner] must pass"
+        );
+
+        let watermarks_without_p = Filter::new()
+            .kind(watermark_kind)
+            .author(reporter_pk)
+            .custom_tags(t_tag, ["buzz-brief"]);
+        assert!(
+            !p_gated_filters_authorized(&[watermarks_without_p], reporter),
+            "R2: authors-only 30624 must be closed"
+        );
+
+        let watermarks = Filter::new()
+            .kind(watermark_kind)
+            .author(reporter_pk)
+            .custom_tags(t_tag, ["buzz-brief"])
+            .custom_tags(p_tag, [reporter]);
+        assert!(
+            p_gated_filters_authorized(&[watermarks], reporter),
+            "reporter watermark list with #p:[self] must pass"
+        );
+
+        let reports = Filter::new()
+            .kind(report_kind)
+            .author(reporter_pk)
+            .custom_tags(t_tag, ["buzz-brief"])
+            .custom_tags(p_tag, [owner]);
+        assert!(
+            p_gated_filters_authorized(&[reports], owner),
+            "owner report list with #p:[self] authors:[reporter] must pass"
+        );
+    }
+
     #[test]
     fn test_mixed_search_and_non_search_detection() {
         let search_filter = Filter::new().search("hello");

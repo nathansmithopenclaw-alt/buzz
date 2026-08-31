@@ -130,15 +130,33 @@ export function sourceConfigFromPayload(
   };
 }
 
-export async function fetchBriefConfig(
-  pubkey: string,
-): Promise<RelayEvent | null> {
-  const events = await relayClient.fetchEvents({
+export function briefConfigFilter(pubkey: string) {
+  return {
     kinds: [KIND_BRIEF_CONFIG],
     authors: [pubkey],
     "#d": [BRIEF_CONFIG_D_TAG],
+    "#p": [pubkey],
     limit: 1,
-  });
+  };
+}
+
+export function briefReportsFilter(
+  ownerPubkey: string,
+  reporterPubkey: string,
+) {
+  return {
+    kinds: [KIND_BRIEF_REPORT],
+    authors: [reporterPubkey],
+    "#p": [ownerPubkey],
+    "#t": [BRIEF_DISCOVERY_TAG],
+    limit: 50,
+  };
+}
+
+export async function fetchBriefConfig(
+  pubkey: string,
+): Promise<RelayEvent | null> {
+  const events = await relayClient.fetchEvents(briefConfigFilter(pubkey));
   return events[0] ?? null;
 }
 
@@ -147,13 +165,9 @@ export async function fetchBriefReports(
   reporterPubkey?: string | null,
 ): Promise<SummaryReport[]> {
   if (!reporterPubkey) return [];
-  const events = await relayClient.fetchEvents({
-    kinds: [KIND_BRIEF_REPORT],
-    authors: [reporterPubkey],
-    "#p": [pubkey],
-    "#t": [BRIEF_DISCOVERY_TAG],
-    limit: 50,
-  });
+  const events = await relayClient.fetchEvents(
+    briefReportsFilter(pubkey, reporterPubkey),
+  );
   return events
     .map((event) => reportFromEvent(event, reporterPubkey))
     .filter((report): report is SummaryReport => report !== null)

@@ -2,10 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  briefConfigFilter,
+  briefReportsFilter,
   membershipDiff,
   reportFromEvent,
   workflowIdFromEvent,
 } from "./summaryProtocol.ts";
+
+test("briefConfigFilter pins #p so the p-gate does not close the owner's read", () => {
+  const filter = briefConfigFilter("owner");
+  assert.deepEqual(filter["#p"], ["owner"]);
+  assert.deepEqual(filter.authors, ["owner"]);
+  assert.deepEqual(filter["#d"], ["summary"]);
+  assert.deepEqual(filter.kinds, [30623]);
+});
+
+test("briefReportsFilter pins #p to the owner and authors to the reporter", () => {
+  const filter = briefReportsFilter("owner", "reporter");
+  assert.deepEqual(filter["#p"], ["owner"]);
+  assert.deepEqual(filter.authors, ["reporter"]);
+  assert.deepEqual(filter.kinds, [40030]);
+});
 
 test("membershipDiff adds and removes by id", () => {
   assert.deepEqual(membershipDiff(["a", "b"], ["b", "c"]), {
