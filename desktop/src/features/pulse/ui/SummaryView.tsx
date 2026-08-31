@@ -30,6 +30,7 @@ import {
   fetchBriefReports,
   publishBriefConfig,
   sourceConfigFromPayload,
+  workflowIdFromEvent,
   type SummaryReport,
 } from "@/features/pulse/lib/summaryProtocol";
 import {
@@ -93,13 +94,20 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
     enabled: Boolean(currentPubkey),
     queryFn: () => fetchBriefConfig(currentPubkey as string),
   });
-  const reportsQuery = useQuery({
-    queryKey: ["brief-reports", currentPubkey],
-    enabled: Boolean(currentPubkey),
-    queryFn: () => fetchBriefReports(currentPubkey as string),
-  });
-
   const payload = configQuery.data ? configFromEvent(configQuery.data) : null;
+  const reportsQuery = useQuery({
+    queryKey: [
+      "brief-reports",
+      currentPubkey,
+      payload?.reporter_pubkey ?? null,
+    ],
+    enabled: Boolean(currentPubkey) && configQuery.isFetched,
+    queryFn: () =>
+      fetchBriefReports(
+        currentPubkey as string,
+        payload?.reporter_pubkey ?? null,
+      ),
+  });
   const hasSavedConfig = Boolean(payload);
   const showBuilder = !hasSavedConfig || editing;
 
@@ -217,6 +225,9 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
           "Choose Nectar's harness, or pick an existing colleague.",
         );
       }
+      const reporterAgent = (agentsQuery.data ?? []).find(
+        (agent) => agent.pubkey.toLowerCase() === reporter.toLowerCase(),
+      );
       await publishBriefConfig({
         ownerPubkey: currentPubkey,
         hour,
@@ -224,8 +235,13 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
         timezone: payload?.timezone || timezone,
         autoInclude: sourceConfig.autoInclude,
         reporterPubkey: reporter,
+        reporterName: reporterAgent?.name || "Nectar",
         conversations,
         sourceConfig,
+        previousChannelIds: payload?.channels ?? [],
+        previousWorkflowId: configQuery.data
+          ? workflowIdFromEvent(configQuery.data)
+          : null,
       });
     },
     onSuccess: async () => {

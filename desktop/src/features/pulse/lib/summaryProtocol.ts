@@ -1,8 +1,13 @@
 import { relayClient } from "@/shared/api/relayClient";
-import { addChannelMembers, signRelayEvent } from "@/shared/api/tauri";
+import {
+  addChannelMembers,
+  removeChannelMember,
+  signRelayEvent,
+} from "@/shared/api/tauri";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { KIND_BRIEF_CONFIG, KIND_BRIEF_REPORT } from "@/shared/constants/kinds";
 
+import { syncSummarySchedule } from "./summarySchedule";
 import type {
   SummaryConversation,
   SummarySourceConfig,
@@ -71,10 +76,19 @@ export function configFromEvent(event: RelayEvent): BriefConfigPayload | null {
   }
 }
 
-export function reportFromEvent(event: RelayEvent): SummaryReport | null {
+export function reportFromEvent(
+  event: RelayEvent,
+  expectedReporterPubkey?: string | null,
+): SummaryReport | null {
   try {
     const parsed = JSON.parse(event.content) as BriefReportPayload;
     if (parsed.v !== 1 || tagValue(event, "t") !== BRIEF_DISCOVERY_TAG) {
+      return null;
+    }
+    if (
+      expectedReporterPubkey &&
+      event.pubkey.toLowerCase() !== expectedReporterPubkey.toLowerCase()
+    ) {
       return null;
     }
     return {
@@ -86,6 +100,22 @@ export function reportFromEvent(event: RelayEvent): SummaryReport | null {
   } catch {
     return null;
   }
+}
+
+export function workflowIdFromEvent(event: RelayEvent): string | null {
+  return tagValue(event, "workflow") ?? null;
+}
+
+export function membershipDiff(
+  previous: readonly string[],
+  next: readonly string[],
+): { added: string[]; removed: string[] } {
+  const nextSet = new Set(next.map((id) => id.toLowerCase()));
+  const previousSet = new Set(previous.map((id) => id.toLowerCase()));
+  return {
+    added: next.filter((id) => !previousSet.has(id.toLowerCase())),
+    removed: previous.filter((id) => !nextSet.has(id.toLowerCase())),
+  };
 }
 
 export function sourceConfigFromPayload(
@@ -114,15 +144,18 @@ export async function fetchBriefConfig(
 
 export async function fetchBriefReports(
   pubkey: string,
+  reporterPubkey?: string | null,
 ): Promise<SummaryReport[]> {
+  if (!reporterPubkey) return [];
   const events = await relayClient.fetchEvents({
     kinds: [KIND_BRIEF_REPORT],
+    authors: [reporterPubkey],
     "#p": [pubkey],
     "#t": [BRIEF_DISCOVERY_TAG],
     limit: 50,
   });
   return events
-    .map(reportFromEvent)
+    .map((event) => reportFromEvent(event, reporterPubkey))
     .filter((report): report is SummaryReport => report !== null)
     .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
 }
@@ -134,10 +167,29 @@ export async function publishBriefConfig(input: {
   timezone: string;
   autoInclude: boolean;
   reporterPubkey: string | null;
+  reporterName: string;
   conversations: SummaryConversation[];
   sourceConfig: SummarySourceConfig;
+  previousChannelIds?: string[];
+  previousWorkflowId?: string | null;
 }): Promise<void> {
   const lists = listsFromChecked(input.conversations, input.sourceConfig);
+  if (input.reporterPubkey) {
+    await reconcileReporterMembership({
+      reporterPubkey: input.reporterPubkey,
+      previousChannels: input.previousChannelIds ?? [],
+      nextChannels: lists.channels,
+    });
+  }
+  const workflowId = await syncSummarySchedule({
+    ownerPubkey: input.ownerPubkey,
+    previousWorkflowId: input.previousWorkflowId ?? null,
+    hostChannelId: lists.channels[0] ?? null,
+    hour: input.hour,
+    minute: input.minute,
+    timezone: input.timezone,
+    reporterName: input.reporterName,
+  });
   const payload: BriefConfigPayload = {
     v: 1,
     reporter_pubkey: input.reporterPubkey,
@@ -164,6 +216,7 @@ export async function publishBriefConfig(input: {
   ) {
     tags.push(["p", input.reporterPubkey.toLowerCase()]);
   }
+  if (workflowId) tags.push(["workflow", workflowId]);
   for (const id of lists.channels) tags.push(["include", "channel", id]);
   for (const id of lists.dms) tags.push(["include", "dm", id]);
   for (const id of lists.exclude) tags.push(["exclude", id]);
@@ -178,18 +231,50 @@ export async function publishBriefConfig(input: {
     "Timed out publishing Summary sources",
     "Failed to save Summary sources",
   );
+}
 
-  if (input.reporterPubkey) {
-    await Promise.all(
-      lists.channels.map((channelId) =>
-        addChannelMembers({
-          channelId,
-          pubkeys: [input.reporterPubkey as string],
-          role: "bot",
-        }).catch((error) => {
-          console.warn("Could not add reporter to channel", channelId, error);
-        }),
-      ),
+export async function reconcileReporterMembership(input: {
+  reporterPubkey: string;
+  previousChannels: readonly string[];
+  nextChannels: readonly string[];
+}): Promise<void> {
+  const { added, removed } = membershipDiff(
+    input.previousChannels,
+    input.nextChannels,
+  );
+  const addFailures: string[] = [];
+  for (const channelId of added) {
+    const result = await addChannelMembers({
+      channelId,
+      pubkeys: [input.reporterPubkey],
+      role: "bot",
+    });
+    const membershipError = result.errors.find(
+      (error) =>
+        error.pubkey.toLowerCase() === input.reporterPubkey.toLowerCase(),
     );
+    if (membershipError) {
+      addFailures.push(`${channelId}: ${membershipError.error}`);
+    }
+  }
+  const removeFailures: string[] = [];
+  for (const channelId of removed) {
+    try {
+      await removeChannelMember(channelId, input.reporterPubkey);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      removeFailures.push(`${channelId}: ${message}`);
+    }
+  }
+  if (addFailures.length > 0 || removeFailures.length > 0) {
+    const parts = [
+      addFailures.length > 0
+        ? `Could not add the reporter to: ${addFailures.join("; ")}`
+        : null,
+      removeFailures.length > 0
+        ? `Could not revoke the reporter from: ${removeFailures.join("; ")}`
+        : null,
+    ].filter((part): part is string => part !== null);
+    throw new Error(parts.join(" "));
   }
 }

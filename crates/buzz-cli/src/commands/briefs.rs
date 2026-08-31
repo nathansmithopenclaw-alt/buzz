@@ -36,11 +36,29 @@ async fn fetch_own_config(client: &BuzzClient) -> Result<Option<Event>, CliError
     Ok(newest_first(parse_events(&raw)?).into_iter().next())
 }
 
+async fn expected_brief_reporter(client: &BuzzClient) -> Result<Option<String>, CliError> {
+    let Some(event) = fetch_own_config(client).await? else {
+        return Ok(None);
+    };
+    Ok(parse_brief_config(&event)
+        .ok()
+        .and_then(|config| config.reporter_pubkey)
+        .map(|pubkey| pubkey.to_ascii_lowercase()))
+}
+
 /// List published briefing reports recency-first.
 pub async fn cmd_list(client: &BuzzClient, limit: u32) -> Result<(), CliError> {
     let me = client.keys().public_key().to_hex();
+    let reporter = match fetch_own_config(client).await? {
+        Some(event) => parse_brief_config(&event)
+            .ok()
+            .and_then(|config| config.reporter_pubkey)
+            .unwrap_or_else(|| me.clone()),
+        None => me.clone(),
+    };
     let filter = serde_json::json!({
         "kinds": [KIND_BRIEF_REPORT],
+        "authors": [reporter],
         "#p": [me],
         "#t": [BRIEF_DISCOVERY_TAG],
         "limit": limit.min(100),
@@ -77,11 +95,17 @@ pub async fn cmd_get(
         serde_json::json!({ "ids": [id.to_ascii_lowercase()], "limit": 1 })
     } else if let Some(run) = run_id {
         let uuid = parse_uuid(run)?;
-        serde_json::json!({
+        let me = client.keys().public_key().to_hex();
+        let mut filter = serde_json::json!({
             "kinds": [KIND_BRIEF_REPORT],
             "#d": [uuid.to_string()],
+            "#p": [me],
             "limit": 5,
-        })
+        });
+        if let Some(reporter) = expected_brief_reporter(client).await? {
+            filter["authors"] = serde_json::json!([reporter]);
+        }
+        filter
     } else {
         return Err(CliError::Usage("briefs get requires --id or --run".into()));
     };
@@ -90,6 +114,12 @@ pub async fn cmd_get(
         println!("null");
         return Ok(());
     };
+    if let Some(reporter) = expected_brief_reporter(client).await? {
+        if event.pubkey.to_hex() != reporter {
+            println!("null");
+            return Ok(());
+        }
+    }
     let report = parse_brief_report(&event).map_err(sdk_err)?;
     let output = serde_json::json!({
         "id": event.id.to_hex(),
@@ -102,6 +132,7 @@ pub async fn cmd_get(
 }
 
 /// Publish an immutable briefing report.
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_publish(
     client: &BuzzClient,
     markdown: &str,
@@ -135,7 +166,7 @@ pub async fn cmd_publish(
             .to_string(),
         markdown,
         status: status_json
-            .map(|raw| serde_json::from_str(raw))
+            .map(serde_json::from_str)
             .transpose()
             .map_err(|e| CliError::Usage(format!("invalid --status-json: {e}")))?
             .unwrap_or_else(|| serde_json::json!({})),
@@ -182,6 +213,7 @@ pub async fn cmd_config_get(client: &BuzzClient) -> Result<(), CliError> {
 }
 
 /// Create or replace the caller's live briefing config.
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_config_set(
     client: &BuzzClient,
     hour: Option<u8>,

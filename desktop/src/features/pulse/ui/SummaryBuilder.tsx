@@ -2,7 +2,7 @@ import {
   NECTAR_AVATAR_PATH,
   NECTAR_DESCRIPTION,
   NECTAR_DISPLAY_NAME,
-  isNectarName,
+  NECTAR_PERSONA_ID,
 } from "@/features/pulse/lib/nectarPersona";
 import {
   formatLocalTime,
@@ -124,7 +124,9 @@ export function SummaryBuilder({
 }: SummaryBuilderProps) {
   const { channels, dms } = partitionLiveConversations(conversations);
   const timeValue = formatLocalTime(hour, minute);
-  const otherAgents = agents.filter((agent) => !isNectarName(agent.name));
+  const otherAgents = agents.filter(
+    (agent) => agent.personaId !== NECTAR_PERSONA_ID,
+  );
   const reporterSelectValue =
     reporterMode === "nectar" ? NECTAR_SELECT_VALUE : (reporterPubkey ?? "");
   const showNectarSetup = reporterMode === "nectar" && !nectarExists;
@@ -193,7 +195,7 @@ export function SummaryBuilder({
       </SettingsOptionGroup>
 
       <SettingsOptionGroup
-        description="Nectar is the supplied Summary colleague. Choose a harness and model — name, avatar, and instructions are already written. v1 adds the reporter as a bot on included channels. Direct messages stay on the read-grant path."
+        description="Nectar is the supplied Summary colleague. Choose a harness and model — name, avatar, and instructions are already written. Save adds the reporter as a bot on included channels and creates the daily run."
         title="Reporter"
       >
         {reporterMode === "nectar" ? (
@@ -334,7 +336,10 @@ export function SummaryBuilder({
         )}
       </SettingsOptionGroup>
 
-      <SettingsOptionGroup title="Direct messages">
+      <SettingsOptionGroup
+        description="Listed so you can choose them now. v1 does not grant the reporter access to DMs — that needs a native read-grant that does not exist yet."
+        title="Direct messages"
+      >
         {dms.length === 0 ? (
           <SettingsOptionRow>
             <p className="text-sm text-muted-foreground">

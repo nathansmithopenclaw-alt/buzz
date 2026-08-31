@@ -152,7 +152,15 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
 ///
 /// Used by `filter_can_match_result_gated_kinds` to force the per-event
 /// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    // NIP-BR: config, watermarks, and reports name private rooms and may
+    // quote their contents. Knowing an event id is not authorization.
+    KIND_BRIEF_CONFIG,
+    KIND_BRIEF_WATERMARK,
+    KIND_BRIEF_REPORT,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -179,6 +187,11 @@ pub const P_GATED_KINDS: &[u32] = &[
     // readable by any unauthenticated or non-owner party, including via `ids`
     // filters — see NIP-AM §Relay Behavior.
     KIND_AGENT_TURN_METRIC,
+    // NIP-BR: personal briefing state. Owner + reporter via `#p`; other
+    // community members must not REQ or NIP-50 the owner's digest.
+    KIND_BRIEF_CONFIG,
+    KIND_BRIEF_WATERMARK,
+    KIND_BRIEF_REPORT,
 ];
 
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
@@ -1133,6 +1146,20 @@ mod tests {
         );
         let foreign = [0u8; 32];
         assert!(is_unshared_gated_event(&ev, &foreign));
+    }
+
+    #[test]
+    fn brief_kinds_are_p_gated_and_result_gated() {
+        for kind in [KIND_BRIEF_CONFIG, KIND_BRIEF_WATERMARK, KIND_BRIEF_REPORT] {
+            assert!(
+                P_GATED_KINDS.contains(&kind),
+                "kind {kind} must be p-gated so community members cannot REQ the owner's digest"
+            );
+            assert!(
+                RESULT_GATED_KINDS.contains(&kind),
+                "kind {kind} must be result-gated so a known id is not authorization"
+            );
+        }
     }
 
     #[test]

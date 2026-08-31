@@ -43,11 +43,12 @@ reporter pubkey is known, they SHOULD also carry
 `["p", "<reporter-hex>"]`. Implementations that later p-gate these
 kinds can do so without rewriting historical envelopes.
 
-Native target: `#p`-gated read access for owner + reporter so direct
-message identifiers and report bodies are not community-searchable.
-Until a relay enforces that gate, clients MUST still treat reports as
-personal: they MUST NOT render kind 40030 in public Pulse, Home, or
-channel timelines.
+Relays MUST `#p`-gate kinds 30623, 30624, and 40030: a REQ that can
+match any of those kinds is closed unless the filter's `#p` values
+exactly equal the authenticated reader. Relays MUST also exclude those
+kinds from NIP-50 `search_tsv` so digest bodies are not full-text
+searchable. Clients MUST still treat reports as personal: they MUST
+NOT render kind 40030 in public Pulse, Home, or channel timelines.
 
 ## Config (30623)
 
@@ -176,8 +177,9 @@ zone, including DST. Omitting `timezone` preserves today's UTC
 behavior (`0 9 * * *` is 09:00 UTC).
 
 The briefing config is the user-facing source of truth for "09:00
-where I am." A companion workflow, when present, MUST use the same
-hour, minute, and timezone.
+where I am." Saving the config MUST create or update a companion
+scheduled workflow with the same hour, minute, and timezone. Clearing
+the include set or disabling Summary MUST delete that workflow.
 
 On-demand: mentioning the reporter is sufficient to request a run.
 The reporter still writes a kind 40030 report; it MUST NOT rely on
@@ -202,4 +204,8 @@ Clients that implement a Summary surface:
   for `channel_id` routing).
 - Kind 30623 / 30624 follow ordinary NIP-33 replacement.
 - Kind 40030 is stored immutably. NIP-09 may redact a report.
+- Kinds 30623 / 30624 / 40030 are `#p`-gated (owner + reporter) and
+  MUST NOT be indexed for NIP-50 search.
+- Kind 40030 ingest MUST reject the event unless `event.pubkey` equals
+  `reporter_pubkey` on the owner's live kind 30623 (`d=summary`).
 - Unknown kinds remain rejected.

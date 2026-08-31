@@ -45,6 +45,8 @@ use buzz_core::verification::verify_event;
 use buzz_core::CommunityId;
 use nostr::Event;
 
+use buzz_db::EventQuery;
+
 use crate::state::AppState;
 
 use super::event::dispatch_persistent_event;
@@ -444,6 +446,83 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
         }
         super::push_lease::AcceptError::Internal(reason) => IngestError::Internal(reason),
     }
+}
+
+/// Owner hex for a kind 40030 report: the `#p` that is not the author, or the
+/// sole `#p` when the owner reports for themselves.
+fn brief_report_owner_hex(event: &Event) -> Option<String> {
+    let author = event.pubkey.to_hex();
+    let mut tagged = Vec::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() >= 2 && parts[0] == "p" {
+            tagged.push(parts[1].to_ascii_lowercase());
+        }
+    }
+    tagged
+        .iter()
+        .find(|pubkey| *pubkey != &author)
+        .cloned()
+        .or_else(|| tagged.first().cloned())
+}
+
+/// True when `author_hex` is the live 30623 reporter (or the owner when no
+/// reporter is set).
+fn brief_report_author_matches_config(author_hex: &str, config_json: &str) -> Result<bool, String> {
+    let config: serde_json::Value = serde_json::from_str(config_json)
+        .map_err(|e| format!("invalid: brief config is not JSON: {e}"))?;
+    let configured = config
+        .get("reporter_pubkey")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "null");
+    match configured {
+        Some(reporter) => Ok(reporter.eq_ignore_ascii_case(author_hex)),
+        None => Ok(false),
+    }
+}
+
+/// Reject a kind 40030 whose author is not the owner's live 30623 reporter.
+async fn validate_brief_report_binding(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &AppState,
+) -> Result<(), IngestError> {
+    let Some(owner_hex) = brief_report_owner_hex(event) else {
+        return Err(IngestError::Rejected(
+            "invalid: briefing report must tag the owner with #p".into(),
+        ));
+    };
+    let owner_bytes = hex::decode(&owner_hex).map_err(|_| {
+        IngestError::Rejected("invalid: briefing report #p must be a hex pubkey".into())
+    })?;
+    let events = state
+        .db
+        .query_events(&EventQuery {
+            kinds: Some(vec![KIND_BRIEF_CONFIG as i32]),
+            pubkey: Some(owner_bytes),
+            d_tag: Some("summary".into()),
+            global_only: true,
+            limit: Some(1),
+            ..EventQuery::for_community(tenant.community())
+        })
+        .await
+        .map_err(|e| {
+            IngestError::Internal(format!("error: db error loading briefing config: {e}"))
+        })?;
+    let Some(config) = events.first() else {
+        return Err(IngestError::AuthFailed(
+            "restricted: no live briefing config for this owner".into(),
+        ));
+    };
+    let matches = brief_report_author_matches_config(&event.pubkey.to_hex(), &config.event.content)
+        .map_err(IngestError::Rejected)?;
+    if !matches {
+        return Err(IngestError::AuthFailed(
+            "restricted: briefing report author is not the configured reporter".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Determine the required scope for a given event kind.
@@ -2802,6 +2881,10 @@ async fn ingest_event_inner(
     if kind_u32 == KIND_AGENT_ENGRAM {
         validate_engram_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_BRIEF_REPORT {
+        validate_brief_report_binding(tenant, &event, state).await?;
     }
 
     if kind_u32 == KIND_AGENT_TURN_METRIC {
@@ -5537,6 +5620,26 @@ mod tests {
             required_scope_for_kind(KIND_BRIEF_REPORT, &dummy).unwrap(),
             Scope::MessagesWrite
         );
+    }
+
+    #[test]
+    fn brief_report_author_must_match_live_config_reporter() {
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let reporter = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let impostor = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let config = serde_json::json!({
+            "v": 1,
+            "reporter_pubkey": reporter,
+        })
+        .to_string();
+        assert!(brief_report_author_matches_config(reporter, &config).unwrap());
+        assert!(!brief_report_author_matches_config(impostor, &config).unwrap());
+        assert!(!brief_report_author_matches_config(owner, &config).unwrap());
+        assert!(!brief_report_author_matches_config(
+            reporter,
+            "{\"v\":1,\"reporter_pubkey\":null}"
+        )
+        .unwrap());
     }
 
     #[test]

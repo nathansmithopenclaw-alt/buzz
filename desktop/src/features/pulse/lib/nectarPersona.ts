@@ -14,6 +14,8 @@ import type {
 } from "@/shared/api/types";
 
 export const NECTAR_DISPLAY_NAME = "Nectar";
+/** Stable persona id, same shape as `builtin:fizz` — not a display-name match. */
+export const NECTAR_PERSONA_ID = "nectar";
 export const NECTAR_AVATAR_PATH = "/onboarding/starter-team/nectar.png";
 export const NECTAR_DESCRIPTION = "Concentrated daily digest of your rooms.";
 
@@ -21,20 +23,20 @@ export const NECTAR_DESCRIPTION = "Concentrated daily digest of your rooms.";
 export const NECTAR_SYSTEM_PROMPT =
   "You are Nectar, a concentrated daily digest. When your scheduled Summary run fires, or when someone asks, write a well-formatted easy-language report of what happened in the rooms you can read since the last watermark. Lead with what needs attention, then what moved, then what is parked. Pair the human markdown with a structured JSON status object other agents can query. Be calm, candid, and concise. Add occasional bee wordplay or 🐝 — keep it charming, never distracting. Do not invent work, assign tasks, or write to trackers. Summarize deltas only.";
 
-export function isNectarName(name: string | null | undefined): boolean {
-  return name?.trim().toLowerCase() === "nectar";
+export function isNectarPersonaId(id: string | null | undefined): boolean {
+  return id === NECTAR_PERSONA_ID;
 }
 
-export function findNectarAgent<T extends { name: string }>(
+export function findNectarAgent<T extends { personaId?: string | null }>(
   agents: readonly T[],
 ): T | undefined {
-  return agents.find((agent) => isNectarName(agent.name));
+  return agents.find((agent) => isNectarPersonaId(agent.personaId));
 }
 
-export function findNectarPersona<T extends { displayName: string }>(
+export function findNectarPersona<T extends { id: string }>(
   personas: readonly T[],
 ): T | undefined {
-  return personas.find((persona) => isNectarName(persona.displayName));
+  return personas.find((persona) => isNectarPersonaId(persona.id));
 }
 
 export function nectarCreateInput(input: {
@@ -44,6 +46,7 @@ export function nectarCreateInput(input: {
   provider?: string | null;
 }): CreatePersonaInput {
   return {
+    personaId: NECTAR_PERSONA_ID,
     displayName: NECTAR_DISPLAY_NAME,
     avatarUrl: input.avatarUrl,
     systemPrompt: NECTAR_SYSTEM_PROMPT,
@@ -74,7 +77,11 @@ export async function readNectarAvatarDataUrl(
 }
 
 export type EnsureNectarReporterInput = {
-  agents: readonly { name: string; pubkey: string }[];
+  agents: readonly {
+    name: string;
+    pubkey: string;
+    personaId?: string | null;
+  }[];
   personas: readonly AgentPersona[];
   runtime: AcpRuntime;
   model?: string | null;

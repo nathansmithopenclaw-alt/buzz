@@ -5,11 +5,12 @@ import {
   NECTAR_AVATAR_PATH,
   NECTAR_DESCRIPTION,
   NECTAR_DISPLAY_NAME,
+  NECTAR_PERSONA_ID,
   NECTAR_SYSTEM_PROMPT,
   ensureNectarReporter,
   findNectarAgent,
   findNectarPersona,
-  isNectarName,
+  isNectarPersonaId,
   nectarCreateInput,
   readNectarAvatarDataUrl,
 } from "./nectarPersona.ts";
@@ -31,29 +32,32 @@ test("Nectar's prompt assigns the Summary job and matches the starter-team voice
   assert.match(NECTAR_SYSTEM_PROMPT, /Do not invent work/);
 });
 
-test("isNectarName is case-insensitive and trimmed", () => {
-  assert.equal(isNectarName("Nectar"), true);
-  assert.equal(isNectarName(" nectar "), true);
-  assert.equal(isNectarName("NECTAR"), true);
-  assert.equal(isNectarName("Synopsis"), false);
-  assert.equal(isNectarName(""), false);
-  assert.equal(isNectarName(null), false);
+test("isNectarPersonaId matches the stable starter id, not a display name", () => {
+  assert.equal(isNectarPersonaId(NECTAR_PERSONA_ID), true);
+  assert.equal(isNectarPersonaId("builtin:fizz"), false);
+  assert.equal(isNectarPersonaId("Nectar"), false);
+  assert.equal(isNectarPersonaId(null), false);
 });
 
-test("findNectarAgent and findNectarPersona match display name only", () => {
+test("findNectarAgent and findNectarPersona match personaId, not display name", () => {
   assert.equal(
     findNectarAgent([
-      { name: "Fizz", pubkey: "f" },
-      { name: "Nectar", pubkey: "n" },
+      { name: "Nectar", pubkey: "impostor", personaId: "other" },
+      { name: "Digest", pubkey: "n", personaId: NECTAR_PERSONA_ID },
     ])?.pubkey,
     "n",
   );
   assert.equal(
-    findNectarPersona([{ displayName: "Honey" }, { displayName: "Nectar" }])
-      ?.displayName,
-    "Nectar",
+    findNectarPersona([
+      { id: "honey", displayName: "Nectar" },
+      { id: NECTAR_PERSONA_ID, displayName: "Digest" },
+    ])?.id,
+    NECTAR_PERSONA_ID,
   );
-  assert.equal(findNectarAgent([{ name: "Fizz", pubkey: "f" }]), undefined);
+  assert.equal(
+    findNectarAgent([{ name: "Nectar", pubkey: "f", personaId: "fizz" }]),
+    undefined,
+  );
 });
 
 test("nectarCreateInput supplies identity and leaves harness/model to the user", () => {
@@ -63,6 +67,7 @@ test("nectarCreateInput supplies identity and leaves harness/model to the user",
     model: "opus",
     provider: "anthropic",
   });
+  assert.equal(input.personaId, NECTAR_PERSONA_ID);
   assert.equal(input.displayName, "Nectar");
   assert.equal(input.systemPrompt, NECTAR_SYSTEM_PROMPT);
   assert.equal(input.runtime, "claude");
@@ -74,7 +79,7 @@ test("nectarCreateInput supplies identity and leaves harness/model to the user",
 test("ensureNectarReporter reuses an existing Nectar agent", async () => {
   let created = 0;
   const pubkey = await ensureNectarReporter({
-    agents: [{ name: "Nectar", pubkey: "abc" }],
+    agents: [{ name: "Nectar", pubkey: "abc", personaId: NECTAR_PERSONA_ID }],
     personas: [],
     runtime: availableRuntime(),
     avatarDataUrl: "data:image/png;base64,abc",
@@ -102,7 +107,10 @@ test("ensureNectarReporter creates the persona then deploys it", async () => {
     avatarDataUrl: "data:image/png;base64,abc",
     createPersona: async (input) => {
       calls.push(["persona", input.runtime, input.model]);
-      return personaRecord({ id: "p1", runtime: input.runtime ?? null });
+      return personaRecord({
+        id: input.personaId ?? "p1",
+        runtime: input.runtime ?? null,
+      });
     },
     createManagedAgent: async (input) => {
       calls.push(["agent", input.personaId, input.name]);
@@ -116,7 +124,7 @@ test("ensureNectarReporter creates the persona then deploys it", async () => {
   assert.equal(pubkey, "nectar-pk");
   assert.deepEqual(calls, [
     ["persona", "claude", "sonnet"],
-    ["agent", "p1", "Nectar"],
+    ["agent", "nectar", "Nectar"],
   ]);
 });
 
@@ -124,7 +132,7 @@ test("ensureNectarReporter deploys an existing Nectar persona", async () => {
   let createdPersona = false;
   const pubkey = await ensureNectarReporter({
     agents: [],
-    personas: [personaRecord({ id: "existing", runtime: "goose" })],
+    personas: [personaRecord({ id: NECTAR_PERSONA_ID, runtime: "goose" })],
     runtime: availableRuntime(),
     avatarDataUrl: "data:image/png;base64,abc",
     createPersona: async () => {

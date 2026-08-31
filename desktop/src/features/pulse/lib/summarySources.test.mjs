@@ -19,7 +19,7 @@ const liveChannel = {
 };
 const liveDm = {
   id: "d1",
-  name: "Nathan",
+  name: "Alex",
   kind: "dm",
   archived: false,
 };

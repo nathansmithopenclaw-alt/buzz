@@ -24,7 +24,6 @@ import { AgentActivityCard } from "@/features/pulse/ui/AgentActivityCard";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import { NoteCard } from "@/features/pulse/ui/NoteCard";
 import { PulseTabBar } from "@/features/pulse/ui/PulseTabBar";
-import { SummaryView } from "@/features/pulse/ui/SummaryView";
 import type { UserNote } from "@/shared/api/socialTypes";
 import type { ChannelMember, UserProfileSummary } from "@/shared/api/types";
 import { useFeatureEnabled } from "@/shared/features";
@@ -45,6 +44,12 @@ export type PulseTab =
 
 const pulsePanelId = (tab: PulseTab) => `pulse-panel-${tab}`;
 const pulseTabId = (tab: PulseTab) => `pulse-tab-${tab}`;
+
+const SummaryView = React.lazy(() =>
+  import("@/features/pulse/ui/SummaryView").then((module) => ({
+    default: module.SummaryView,
+  })),
+);
 
 type PulseViewProps = {
   currentPubkey?: string;
@@ -362,7 +367,9 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
           role="tabpanel"
         >
           {activeTab === "summary" ? (
-            <SummaryView currentPubkey={currentPubkey} />
+            <React.Suspense fallback={<TimelineSkeleton />}>
+              <SummaryView currentPubkey={currentPubkey} />
+            </React.Suspense>
           ) : activeTab === "search" ? (
             <div className="flex min-h-[calc(100vh-96px)] items-center justify-center">
               <div className="relative flex w-full max-w-xl flex-col items-center px-2">

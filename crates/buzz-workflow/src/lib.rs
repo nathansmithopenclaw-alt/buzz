@@ -848,13 +848,24 @@ fn cron_fire_instant(
             return None;
         }
     };
-    let local_now = now.with_timezone(&tz);
-    let local_start = window_start.with_timezone(&tz);
-    sched
-        .after(&local_start)
-        .next()
-        .filter(|t| *t <= local_now)
-        .map(|t| t.with_timezone(&Utc))
+    // Walk UTC minute boundaries in (window_start, now] and match the cron
+    // against the IANA local time. `Schedule::after` on a local DateTime
+    // skips the second copy of a fall-back hour (01:00 EDT then 01:00 EST);
+    // matching `includes` on each UTC instant keeps those as distinct
+    // `scheduled_for` claims. Spring-forward's nonexistent hour simply
+    // never includes.
+    let mut ts = (window_start.timestamp().div_euclid(60) + 1) * 60;
+    let end = now.timestamp();
+    while ts <= end {
+        let Some(utc) = DateTime::from_timestamp(ts, 0) else {
+            break;
+        };
+        if sched.includes(utc.with_timezone(&tz)) {
+            return Some(utc);
+        }
+        ts += 60;
+    }
+    None
 }
 
 /// Quantize `now` to the interval bucket boundary, yielding a deterministic
@@ -1242,6 +1253,46 @@ mod tests {
             )
             .is_none(),
             "09:00 UTC is 05:00 Eastern and must not fire the Eastern 09:00 cron"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_fall_back_uses_distinct_scheduled_for_claims() {
+        // 2026-11-01 America/New_York: 01:00 happens twice (EDT then EST).
+        // Distinct UTC instants must be the claim keys so the second 01:00
+        // is not swallowed as a duplicate of the first.
+        let wf_id = Uuid::new_v4();
+        let first = chrono::DateTime::parse_from_rfc3339("2026-11-01T05:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let second = chrono::DateTime::parse_from_rfc3339("2026-11-01T06:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let first_claim =
+            cron_fire_instant("0 1 * * *", Some("America/New_York"), first, 60, wf_id);
+        let second_claim =
+            cron_fire_instant("0 1 * * *", Some("America/New_York"), second, 60, wf_id);
+        assert_eq!(first_claim, Some(first), "first 01:00 EDT must fire");
+        assert_eq!(second_claim, Some(second), "second 01:00 EST must fire");
+        assert_ne!(
+            first_claim, second_claim,
+            "fall-back double 01:00 must not share a scheduled_for claim"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_spring_forward_nonexistent_hour_does_not_panic() {
+        // 2026-03-08 America/New_York: 02:00 does not exist (01:59 EST → 03:00 EDT).
+        let wf_id = Uuid::new_v4();
+        let skipped = chrono::DateTime::parse_from_rfc3339("2026-03-08T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = std::panic::catch_unwind(|| {
+            cron_fire_instant("0 2 * * *", Some("America/New_York"), skipped, 60, wf_id)
+        });
+        assert!(
+            result.is_ok(),
+            "spring-forward nonexistent 02:00 must not panic"
         );
     }
 

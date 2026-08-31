@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, P_GATED_KINDS,
+    RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -1192,18 +1192,14 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
 
         // The `ids` exemption ("knowing the id implies authorization") is only
         // safe for kinds whose id is author-bound or whose content is encrypted.
-        // KIND_DM_VISIBILITY is relay-signed (id not author-bound) and exposes
-        // plaintext private hide choices, so its `#p` owner check MUST hold even
-        // when `ids` is present. KIND_AGENT_TURN_METRIC events are long-lived
-        // and their cleartext envelope (pubkey, agent tag, created_at) leaks
-        // turn-activity metadata — knowing an event id is NOT authorization
-        // (NIP-AM §Relay Behavior). Only filters that explicitly name the kind
-        // lose the exemption — a kindless `ids` lookup is unaffected.
+        // Result-gated kinds (DM visibility, agent turn metrics, briefing
+        // reports) expose plaintext private state, so the `#p` owner check
+        // MUST hold even when `ids` is present. Only filters that explicitly
+        // name the kind lose the exemption — a kindless `ids` lookup is
+        // closed at the result layer by `reader_authorized_for_event`.
         let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
-            ks.iter().any(|kind| {
-                let k = kind.as_u16() as u32;
-                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
-            })
+            ks.iter()
+                .any(|kind| RESULT_GATED_KINDS.contains(&(kind.as_u16() as u32)))
         });
         if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             return true;
@@ -1967,6 +1963,38 @@ mod tests {
         assert!(
             p_gated_filters_authorized(&[owner_p_and_ids], authed),
             "kind:44200 with matching #p and ids must be allowed"
+        );
+    }
+
+    #[test]
+    fn brief_report_requires_p_tag_even_with_ids() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let authed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let event_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let report_kind = nostr::Kind::Custom(buzz_core::kind::KIND_BRIEF_REPORT as u16);
+
+        let ids_only = Filter::new()
+            .kind(report_kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap());
+        assert!(
+            !p_gated_filters_authorized(&[ids_only], authed),
+            "kind:40030 + ids without matching #p must be denied"
+        );
+
+        let wrong_p = Filter::new()
+            .kind(report_kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap())
+            .custom_tags(p_tag, [other]);
+        assert!(
+            !p_gated_filters_authorized(&[wrong_p], authed),
+            "kind:40030 + ids + wrong #p must be denied"
+        );
+
+        let owner = Filter::new().kind(report_kind).custom_tags(p_tag, [authed]);
+        assert!(
+            p_gated_filters_authorized(&[owner], authed),
+            "kind:40030 with matching #p must be allowed"
         );
     }
 

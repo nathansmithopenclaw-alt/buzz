@@ -901,7 +901,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 37);
+        assert_eq!(migrations.len(), 38);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1103,8 +1103,9 @@ mod tests {
         // NIP-PMA kind:30179 FTS exclusion is asserted at its renumbered 0036
         // position below. Fresh desired state must carry the same exclusion.
         assert!(!migrations[0].sql.as_str().contains("30179"));
-        assert!(include_str!("../../../schema/schema.sql")
-            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
+        assert!(include_str!("../../../schema/schema.sql").contains(
+            "kind IN (1059, 30179, 30300, 30350, 30622, 30623, 30624, 40030, 44100, 44101, 44200)"
+        ));
 
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be
@@ -1390,6 +1391,16 @@ mod tests {
         assert!(heartbeat_vacuum.contains("ALTER TABLE replica_heartbeat"));
         assert!(heartbeat_vacuum.contains("vacuum_truncate = false"));
         assert!(desired_schema.contains("vacuum_truncate = false"));
+
+        // NIP-BR briefing kinds (30623/30624/40030) must not be NIP-50
+        // searchable. Additive wrap, never folded into 0001.
+        assert_eq!(migrations[37].version, 38);
+        let brief_fts = migrations[37].sql.as_str();
+        assert!(brief_fts.contains("30623"));
+        assert!(brief_fts.contains("30624"));
+        assert!(brief_fts.contains("40030"));
+        assert!(brief_fts.contains("search_tsv"));
+        assert!(desired_schema.contains("30623, 30624, 40030"));
 
         // pgschema intentionally reconciles DDL, not seed DML or table storage
         // parameters. Its post-apply reconciliation must restore and verify
