@@ -85,6 +85,73 @@ fn current_working_directory() -> Result<String> {
     Ok(cwd.to_string_lossy().into_owned())
 }
 
+/// Log directives applied when the operator has not set `RUST_LOG`.
+///
+/// `EnvFilter` has no implicit global level: an event whose target matches no
+/// directive is dropped, silently. Most diagnostics in this crate are emitted
+/// on *bare* targets (`acp::background`, `pool::prompt`, `canvas::fetch`, …)
+/// that share no prefix with `buzz_acp`, so a crate-only filter discards every
+/// warning and error they carry — including
+/// `background_task_monitoring_unconfirmed`, which exists specifically to say a
+/// real background task may have gone untracked.
+///
+/// Directives match by string prefix and the most specific one wins, so a
+/// namespace entry sets a floor for every bare target beneath it and the
+/// per-target entries lift the few that triage always needs. `warn` is the
+/// floor because it cannot be chatty by construction — it admits only what is
+/// already exceptional, leaving high-volume `debug`/`info` traffic muted.
+///
+/// Managed agents are spawned by the desktop with an explicit `RUST_LOG`, so
+/// this default does not reach them: the same list is built for child
+/// processes in `desktop/src-tauri/src/managed_agents/runtime/child_env.rs`
+/// (`CHILD_LOG_DIRECTIVES`). Keep the two in sync.
+const DEFAULT_LOG_FILTER: &str = "buzz_acp=info,\
+     acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn,\
+     acp::background=info,acp::session=info,pool::session=info,pool::model=info";
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::DEFAULT_LOG_FILTER;
+    use tracing::Level;
+    use tracing_subscriber::EnvFilter;
+
+    /// A background-work termination notice tells the operator to inspect the
+    /// local log. Prove the filter actually admits the lines they are sent to
+    /// find, that a per-target entry lifts its own target above the namespace
+    /// floor, and that buying the evidence did not also un-mute the
+    /// high-volume traffic the floor exists to leave alone.
+    #[test]
+    fn default_filter_admits_bare_target_diagnostics_without_unmuting_chatty_traffic() {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new(DEFAULT_LOG_FILTER))
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            // Background-task lifecycle: `acp::background=info` must beat the
+            // `acp=warn` floor for its own target.
+            assert!(tracing::enabled!(target: "acp::background", Level::INFO));
+            assert!(tracing::enabled!(target: "acp::session", Level::INFO));
+            assert!(tracing::enabled!(target: "pool::session", Level::INFO));
+            // Every other bare namespace keeps its warn/error diagnostics.
+            // `pool::prompt` alone carries seven error-level call sites.
+            assert!(tracing::enabled!(target: "pool::prompt", Level::ERROR));
+            assert!(tracing::enabled!(target: "acp::wire", Level::WARN));
+            assert!(tracing::enabled!(target: "canvas::fetch", Level::WARN));
+            assert!(tracing::enabled!(target: "engram::core", Level::WARN));
+            assert!(tracing::enabled!(target: "observer", Level::WARN));
+            // The floor stays a floor: per-message wire and prompt chatter is
+            // still dropped, so restoring the evidence cannot flood a log.
+            assert!(!tracing::enabled!(target: "acp::wire", Level::DEBUG));
+            assert!(!tracing::enabled!(target: "pool::prompt", Level::INFO));
+            assert!(!tracing::enabled!(target: "acp::usage", Level::DEBUG));
+            // The floors are scoped to this crate's targets, not to the
+            // dependency tree behind it.
+            assert!(!tracing::enabled!(target: "hyper::client", Level::WARN));
+            assert!(!tracing::enabled!(target: "nostr_relay_pool::relay", Level::WARN));
+        });
+    }
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -1748,10 +1815,52 @@ struct ChannelPendingBackgroundTasks {
     monitoring_state: &'static str,
 }
 
+/// Why the main loop exited, carried from the break site to the shutdown
+/// notice.
+///
+/// Every exit used to be reported as "the agent harness was explicitly shut
+/// down", which is true of exactly two of these. A Desktop restart, a lost
+/// relay and a dead agent pool all read as deliberate, so an operator could
+/// not tell an expected teardown from an incident without going to the process
+/// table — and the log that would have said so is not in the notice's reach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownCause {
+    ConsoleInterrupt,
+    Sigterm,
+    OwnerCommand,
+    InactivityBound,
+    RelayStreamGone,
+    ResultChannelClosed,
+    AllAgentsDead,
+}
+
+impl ShutdownCause {
+    /// Operator-facing phrase completing "the agent harness exited because …".
+    fn describe(self) -> &'static str {
+        match self {
+            Self::ConsoleInterrupt => "it was interrupted at the console (Ctrl-C)",
+            // Parenthesised, not em-dashed: this phrase is spliced into a
+            // longer sentence, and a trailing dash clause collides with the
+            // ", so the ACP process was torn down …" continuation.
+            Self::Sigterm => {
+                "it received SIGTERM (typically a Buzz Desktop restart, an agent stop, \
+                 or an OS shutdown)"
+            }
+            Self::OwnerCommand => "the owner sent `!shutdown`",
+            Self::InactivityBound => "the configured inactivity bound elapsed",
+            Self::RelayStreamGone => "the relay connection ended and could not be re-established",
+            Self::ResultChannelClosed => "the agent worker pool closed its result channel",
+            Self::AllAgentsDead => "every agent slot died and could not be respawned",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum BackgroundTaskTerminationReason {
     HoldBoundExpired,
-    HarnessShutdown,
+    /// `None` when the loop broke without recording a cause — stated as
+    /// unrecorded rather than dressed up as a deliberate stop.
+    HarnessShutdown(Option<ShutdownCause>),
 }
 
 async fn drain_idle_agent_notifications(pool: &mut AgentPool) -> usize {
@@ -1825,13 +1934,19 @@ fn background_task_termination_notice(
 ) -> String {
     let task_count = pending.iter().map(|state| state.tasks.len()).sum::<usize>();
     let reason_text = match reason {
+        // Name the anchor. The hold is measured from the session's FIRST
+        // pending task, so with per-task ages below this line would otherwise
+        // read as a contradiction: "expired after 7200 seconds" next to a task
+        // that has been pending 30s.
         BackgroundTaskTerminationReason::HoldBoundExpired => format!(
-            "the bounded background-work hold expired after {} seconds",
+            "the session's bounded background-work hold expired {} seconds after its \
+             first pending task",
             hold_bound.as_secs()
         ),
-        BackgroundTaskTerminationReason::HarnessShutdown => {
-            "the agent harness was explicitly shut down".to_string()
-        }
+        BackgroundTaskTerminationReason::HarnessShutdown(cause) => match cause {
+            Some(cause) => format!("the agent harness exited because {}", cause.describe()),
+            None => "the agent harness main loop exited for a cause it did not record".to_string(),
+        },
     };
     // Each task carries its own first-observed timestamp: the hold in
     // reason_text is the SESSION's anti-pinning anchor, which a rolling task
@@ -2097,15 +2212,88 @@ mod idle_pool_sleep_tests {
         assert!(cap.contains("background_tasks_terminated"));
         assert!(cap.contains("7200 seconds"));
         assert!(cap.contains("Remote sign (task-1; pending 2h13m)"));
+        // The hold is measured from the session's first pending task, not from
+        // the task named on the line below it. Say so, or the two numbers read
+        // as a contradiction.
+        assert!(cap.contains("first pending task"));
 
         let shutdown = background_task_termination_notice(
             &states,
-            BackgroundTaskTerminationReason::HarnessShutdown,
+            BackgroundTaskTerminationReason::HarnessShutdown(Some(ShutdownCause::OwnerCommand)),
             Duration::from_secs(7200),
             now,
         );
-        assert!(shutdown.contains("explicitly shut down"));
+        assert!(shutdown.contains("!shutdown"));
         assert!(shutdown.contains("restart the commitment"));
+    }
+
+    /// A teardown notice is the operator's only account of why the work died.
+    /// Every exit must arrive under its own name, and the five that are NOT a
+    /// deliberate stop must never be dressed up as one.
+    #[test]
+    fn shutdown_notice_names_the_concrete_exit_cause() {
+        let started = tokio::time::Instant::now();
+        let now = started + Duration::from_secs(30);
+        let state = ChannelPendingBackgroundTasks {
+            channel_id: Some(Uuid::nil()),
+            session_id: "sess-1".to_string(),
+            first_observed_at: started,
+            monitoring_state: "typed-confirmed",
+            tasks: vec![BackgroundTask {
+                task_id: "task-1".to_string(),
+                task_type: "local_bash".to_string(),
+                description: "Wait for reply".to_string(),
+                first_observed_at: started,
+            }],
+        };
+        let states = [&state];
+        let notice = |cause| {
+            background_task_termination_notice(
+                &states,
+                BackgroundTaskTerminationReason::HarnessShutdown(cause),
+                Duration::from_secs(7200),
+                now,
+            )
+        };
+
+        // Distinct causes must not collapse into one another.
+        let all = [
+            ShutdownCause::ConsoleInterrupt,
+            ShutdownCause::Sigterm,
+            ShutdownCause::OwnerCommand,
+            ShutdownCause::InactivityBound,
+            ShutdownCause::RelayStreamGone,
+            ShutdownCause::ResultChannelClosed,
+            ShutdownCause::AllAgentsDead,
+        ];
+        let mut phrases = HashSet::new();
+        for cause in all {
+            let phrase = cause.describe();
+            assert!(!phrase.is_empty());
+            assert!(phrases.insert(phrase), "duplicate phrase for {cause:?}");
+            assert!(notice(Some(cause)).contains(phrase));
+        }
+
+        // The incident that started this: a Desktop restart delivers SIGTERM to
+        // every agent. It is not an "explicit" shutdown, and an operator has to
+        // be able to tell it from a lost relay.
+        let sigterm = notice(Some(ShutdownCause::Sigterm));
+        assert!(sigterm.contains("SIGTERM"));
+        assert!(sigterm.contains("Buzz Desktop restart"));
+        assert!(!sigterm.contains("explicitly shut down"));
+        // Every phrase is spliced mid-sentence, so the seam has to read as
+        // prose — a trailing dash clause would collide with the continuation.
+        assert!(
+            sigterm.contains("an OS shutdown), so the ACP process was torn down"),
+            "cause phrase must close cleanly before the sentence resumes: {sigterm}"
+        );
+        assert!(!notice(Some(ShutdownCause::RelayStreamGone)).contains("explicitly shut down"));
+
+        // An unrecorded cause is reported as unrecorded, never implied to be
+        // deliberate.
+        let unrecorded = notice(None);
+        assert!(unrecorded.contains("did not record"));
+        assert!(!unrecorded.contains("explicitly shut down"));
     }
 
     #[test]
@@ -2366,7 +2554,8 @@ async fn tokio_main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER)),
         )
         .compact()
         .init();
@@ -2785,12 +2974,15 @@ async fn tokio_main() -> Result<()> {
     let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
 
     // ── Step 7: Shutdown signal ───────────────────────────────────────────────
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+    // Carries the cause, not just the fact: the signal handlers are the only
+    // place that knows a teardown was a SIGTERM rather than an owner command,
+    // and the shutdown notice is posted long after they have run.
+    let (shutdown_tx, mut shutdown_rx) = watch::channel::<Option<ShutdownCause>>(None);
 
     let tx = shutdown_tx.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
-        let _ = tx.send(());
+        let _ = tx.send(Some(ShutdownCause::ConsoleInterrupt));
     });
 
     #[cfg(unix)]
@@ -2800,7 +2992,7 @@ async fn tokio_main() -> Result<()> {
             use tokio::signal::unix::{signal, SignalKind};
             let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
             sigterm.recv().await;
-            let _ = tx.send(());
+            let _ = tx.send(Some(ShutdownCause::Sigterm));
         });
     }
 
@@ -2859,6 +3051,12 @@ async fn tokio_main() -> Result<()> {
         SteerAck(SteerAckEvent),
         Wake(u32, Result<AgentPool, String>),
     }
+
+    // Read by the shutdown notice after the loop. Deliberately declared without
+    // an initializer: definite-assignment then makes it a compile error to add
+    // a new `break` out of this loop without naming why it fired — which is the
+    // defect this exists to close, restated as a type-checker rule.
+    let exit_cause: Option<ShutdownCause>;
 
     loop {
         // Whether buffered work is waiting on a lazy pool. Also gates the
@@ -3001,6 +3199,7 @@ async fn tokio_main() -> Result<()> {
                     Some(result) => Some(PoolEvent::Result(Box::new(result))),
                     None => {
                         tracing::info!("result channel closed — exiting main loop");
+                        exit_cause = Some(ShutdownCause::ResultChannelClosed);
                         break;
                     }
                 },
@@ -3232,7 +3431,7 @@ async fn tokio_main() -> Result<()> {
                                             sender = %buzz_event.event.pubkey.to_hex(),
                                             "shutdown command from owner — exiting gracefully"
                                         );
-                                        let _ = shutdown_tx.send(());
+                                        let _ = shutdown_tx.send(Some(ShutdownCause::OwnerCommand));
                                         continue;
                                     }
                                 }
@@ -3472,6 +3671,7 @@ async fn tokio_main() -> Result<()> {
                             if let Err(e) = relay.reconnect().await {
                                 tracing::error!("relay background task is gone: {e} — exiting");
                                 tokio::time::sleep(Duration::from_secs(1)).await;
+                                exit_cause = Some(ShutdownCause::RelayStreamGone);
                                 break;
                             }
                         }
@@ -3495,7 +3695,7 @@ async fn tokio_main() -> Result<()> {
                             inactivity_seconds = config.exit_after_inactivity_secs,
                             "inactivity bound reached — exiting gracefully"
                         );
-                        let _ = shutdown_tx.send(());
+                        let _ = shutdown_tx.send(Some(ShutdownCause::InactivityBound));
                     }
                     None
                 }
@@ -3667,7 +3867,10 @@ async fn tokio_main() -> Result<()> {
                     None
                 }
                 _ = shutdown_rx.changed() => {
-                    tracing::info!("shutting down");
+                    // Read through the sender: the watch value is the cause the
+                    // signal handler / control path recorded when it fired.
+                    exit_cause = *shutdown_tx.borrow();
+                    tracing::info!(cause = ?exit_cause, "shutting down");
                     break;
                 }
             }
@@ -3693,6 +3896,8 @@ async fn tokio_main() -> Result<()> {
                     Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
+                    // The only Exit any of these return is the dead-pool case.
+                    exit_cause = Some(ShutdownCause::AllAgentsDead);
                     break;
                 }
                 if drain_ready_join_results(
@@ -3709,6 +3914,7 @@ async fn tokio_main() -> Result<()> {
                     Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
+                    exit_cause = Some(ShutdownCause::AllAgentsDead);
                     break;
                 }
                 for (channel_id, thread_tags) in
@@ -3735,6 +3941,7 @@ async fn tokio_main() -> Result<()> {
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
+                    exit_cause = Some(ShutdownCause::AllAgentsDead);
                     break;
                 }
                 for (channel_id, thread_tags) in
@@ -3943,16 +4150,19 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // A deliberate harness shutdown is allowed to terminate background work,
-    // but never silently. Drain any final lifecycle frames first, then surface
-    // one notice per affected channel through the existing failure seam.
+    // A harness exit is allowed to terminate background work, but never
+    // silently and never anonymously — the notice names which of the exits
+    // below actually happened, since a Desktop restart and a lost relay are
+    // very different news. Drain any final lifecycle frames first, then
+    // surface one notice per affected channel through the existing failure
+    // seam.
     let _ = drain_idle_agent_notifications(&mut pool).await;
     let shutdown_pending_background = channel_pending_background_tasks(&mut pool);
     if !shutdown_pending_background.is_empty() {
         post_background_task_termination_notices(
             &ctx,
             &shutdown_pending_background,
-            BackgroundTaskTerminationReason::HarnessShutdown,
+            BackgroundTaskTerminationReason::HarnessShutdown(exit_cause),
             ctx.max_turn_duration,
         )
         .await;
@@ -3966,8 +4176,10 @@ async fn tokio_main() -> Result<()> {
     // comment exists to prevent. Fire the watch first so exits that bypass the
     // signal handlers (result channel closed, LoopAction::Exit) cancel the wake
     // just as promptly. Timeout is a backstop for a slot stuck outside the
-    // select (e.g. in spawn); only then do we fall back to aborting.
-    let _ = shutdown_tx.send(());
+    // select (e.g. in spawn); only then do we fall back to aborting. `send`
+    // always notifies, so re-sending the cause a signal handler already
+    // stored still wakes the receivers.
+    let _ = shutdown_tx.send(exit_cause);
     let wake_drain = tokio::time::timeout(Duration::from_secs(30), async {
         while wake_tasks.join_next().await.is_some() {}
     })
@@ -5391,7 +5603,9 @@ impl PoolStartup {
 
 async fn initialize_agent_pool(
     startup: &PoolStartup,
-    mut shutdown: Option<watch::Receiver<()>>,
+    // Only the change notification matters here; the cause rides along for the
+    // shutdown notice the main loop posts.
+    mut shutdown: Option<watch::Receiver<Option<ShutdownCause>>>,
 ) -> Result<AgentPool> {
     // One agent failing to start must not kill the whole pool.
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
