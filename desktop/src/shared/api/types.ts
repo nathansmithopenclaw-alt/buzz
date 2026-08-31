@@ -754,6 +754,8 @@ export type PersonaBehaviorInput = {
 };
 
 export type CreatePersonaInput = {
+  /** Optional stable id. Nectar uses `nectar` so lookup is not display-name. */
+  personaId?: string;
   displayName: string;
   avatarUrl?: string;
   systemPrompt: string;

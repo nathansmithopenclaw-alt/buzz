@@ -59,12 +59,17 @@ pub enum TriggerDef {
     },
     /// Fires on a cron schedule.
     Schedule {
-        /// Cron expression (UTC). Mutually exclusive with `interval`.
+        /// Cron expression. Mutually exclusive with `interval`.
+        ///
+        /// Fields are interpreted in `timezone` when set, otherwise UTC.
         #[serde(default)]
         cron: Option<String>,
         /// Simple interval string (e.g. "1h", "30m"). Mutually exclusive with `cron`.
         #[serde(default)]
         interval: Option<String>,
+        /// IANA timezone for cron fields (e.g. `America/New_York`). Omit for UTC.
+        #[serde(default)]
+        timezone: Option<String>,
     },
     /// Fires when HTTP POST arrives at `/hooks/{id}`.
     Webhook,
@@ -241,7 +246,12 @@ impl WorkflowDef {
             }
         }
 
-        if let TriggerDef::Schedule { cron, interval } = &self.trigger {
+        if let TriggerDef::Schedule {
+            cron,
+            interval,
+            timezone,
+        } = &self.trigger
+        {
             if cron.is_none() && interval.is_none() {
                 return Err(WorkflowError::InvalidDefinition(
                     "schedule trigger requires either 'cron' or 'interval'".into(),
@@ -252,6 +262,14 @@ impl WorkflowDef {
                 return Err(WorkflowError::InvalidDefinition(
                     "schedule trigger cannot specify both 'cron' and 'interval'; use one or the other".into(),
                 ));
+            }
+
+            if let Some(name) = timezone.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if name != "UTC" && name.parse::<chrono_tz::Tz>().is_err() {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "invalid timezone '{name}': expected an IANA name or UTC"
+                    )));
+                }
             }
 
             if let Some(expr) = cron {
@@ -352,11 +370,35 @@ mod tests {
         let yaml = "name: Daily Standup\ntrigger:\n  on: schedule\n  cron: '0 9 * * 1-5'\nsteps:\n  - id: prompt\n    action: send_message\n    text: Standup time\n";
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         match &def.trigger {
-            TriggerDef::Schedule { cron, .. } => {
+            TriggerDef::Schedule { cron, timezone, .. } => {
                 assert_eq!(cron.as_deref(), Some("0 9 * * 1-5"));
+                assert!(timezone.is_none());
             }
             other => panic!("unexpected trigger: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_schedule_trigger_with_iana_timezone() {
+        let yaml = "name: Daily Standup\ntrigger:\n  on: schedule\n  cron: '0 9 * * *'\n  timezone: America/New_York\nsteps:\n  - id: prompt\n    action: send_message\n    text: Standup time\n";
+        let (def, _) = parse_yaml(yaml).expect("parse failed");
+        match &def.trigger {
+            TriggerDef::Schedule { cron, timezone, .. } => {
+                assert_eq!(cron.as_deref(), Some("0 9 * * *"));
+                assert_eq!(timezone.as_deref(), Some("America/New_York"));
+            }
+            other => panic!("unexpected trigger: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reject_schedule_trigger_with_unknown_timezone() {
+        let yaml = "name: Daily Standup\ntrigger:\n  on: schedule\n  cron: '0 9 * * *'\n  timezone: Eastern\nsteps:\n  - id: prompt\n    action: send_message\n    text: Standup time\n";
+        let err = parse_yaml(yaml).expect_err("invalid timezone must fail");
+        assert!(
+            err.to_string().contains("timezone"),
+            "expected timezone error, got {err}"
+        );
     }
 
     #[test]
@@ -622,9 +664,14 @@ mod tests {
         let yaml = "name: Interval Schedule\ntrigger:\n  on: schedule\n  interval: 30m\nsteps:\n  - id: s1\n    action: send_message\n    text: tick\n";
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         match &def.trigger {
-            TriggerDef::Schedule { cron, interval } => {
+            TriggerDef::Schedule {
+                cron,
+                interval,
+                timezone,
+            } => {
                 assert!(cron.is_none());
                 assert_eq!(interval.as_deref(), Some("30m"));
+                assert!(timezone.is_none());
             }
             other => panic!("unexpected trigger: {other:?}"),
         }

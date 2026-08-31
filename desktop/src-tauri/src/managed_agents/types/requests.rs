@@ -92,6 +92,8 @@ pub fn apply_persona_behavior(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatePersonaRequest {
+    #[serde(default)]
+    pub id: Option<String>,
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub system_prompt: String,

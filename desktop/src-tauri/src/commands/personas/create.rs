@@ -55,8 +55,22 @@ pub async fn create_persona(
             .filter(|s| !s.is_empty())
             .collect();
         crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+        let id = match input
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            Some(requested) => {
+                if personas.iter().any(|persona| persona.id == requested) {
+                    return Err(format!("Persona {requested} already exists"));
+                }
+                requested.to_string()
+            }
+            None => Uuid::new_v4().to_string(),
+        };
         let mut persona = AgentDefinition {
-            id: Uuid::new_v4().to_string(),
+            id,
             display_name,
             avatar_url,
             system_prompt,
