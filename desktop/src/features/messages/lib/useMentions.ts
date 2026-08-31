@@ -51,6 +51,7 @@ import {
 import { rankMentionCandidates } from "./mentionRanking";
 import { useFleetMentionProjection } from "@/features/agents/fleetProjection/useFleetMentionProjection";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
+import { getMentionMemberPubkeys } from "./mentionMemberPubkeys";
 import {
   appendUniqueName,
   buildTeamMentionCandidates,
@@ -100,6 +101,10 @@ export function useMentions(
   const channelsQuery = useChannelsQuery();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
+  const memberPubkeys = React.useMemo(
+    () => getMentionMemberPubkeys(channelId, channelsQuery.data, members),
+    [channelId, channelsQuery.data, members],
+  );
   const {
     blockPersonaCreation,
     eligibleProjectionAgents,
@@ -108,13 +113,12 @@ export function useMentions(
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
     managedAgentPubkeys,
-    memberPubkeys,
     personaNameByPubkey,
   } = useFleetMentionProjection({
     channelType: options?.channelType,
     currentPubkey,
     managedAgents: managedAgentsQuery.data ?? [],
-    members: members ?? [],
+    memberPubkeys,
     personas: personasQuery.data ?? [],
   });
   const managedAgentDirectoryReady = isAgentDirectoryReady(managedAgentsQuery);
