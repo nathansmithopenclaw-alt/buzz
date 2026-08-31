@@ -17,7 +17,7 @@ struct Transition {
     target_role: DeviceRole,
 }
 
-fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+fn path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, String> {
     Ok(config_path(app)?.with_file_name("fleet-visibility-transition.json"))
 }
 
@@ -57,7 +57,7 @@ fn clear_path(path: &Path) -> Result<(), String> {
     }
 }
 
-pub(super) fn clear(app: &AppHandle) -> Result<(), String> {
+pub(super) fn clear<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     clear_path(&path(app)?)
 }
 
@@ -77,7 +77,10 @@ fn apply(
     Ok(())
 }
 
-pub(super) fn recover(app: &AppHandle, config: &mut FleetVisibilityConfig) -> Result<(), String> {
+pub(super) fn recover<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    config: &mut FleetVisibilityConfig,
+) -> Result<(), String> {
     let Some(transition) = load_path(&path(app)?)? else {
         return Ok(());
     };
@@ -108,7 +111,7 @@ pub(super) fn recover(app: &AppHandle, config: &mut FleetVisibilityConfig) -> Re
 /// observe a partial runtime map. A heartbeat that began before this marker may
 /// still finish as Host, but final role commit (or boot recovery) takes the same
 /// role mutex and retracts the latest Host heads afterward.
-pub(crate) fn begin(app: &AppHandle, state: &AppState) -> Result<(), String> {
+pub(crate) fn begin<R: tauri::Runtime>(app: &AppHandle<R>, state: &AppState) -> Result<(), String> {
     let guard = state
         .fleet_visibility
         .lock()

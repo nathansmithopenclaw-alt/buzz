@@ -212,6 +212,10 @@ pub async fn update_persona(
     crate::managed_agents::require_fleet_host(&app.state::<AppState>())?;
     let (persona, ()) = update_persona_with(input, app, |app, state, persona| {
         retain_persona_pending(app, state, persona);
+        // F2: immediately refresh any shared 30178 heads that include this
+        // persona as a member. Best-effort inside retain so a hiccup cannot
+        // fail the persona edit itself.
+        crate::commands::refresh_team_catalog_heads_for_persona(app, state, &persona.id);
         Ok(())
     })
     .await?;

@@ -1473,10 +1473,9 @@ test("create channel template selector matches the lifecycle controls", async ({
   await expect(page.getByTestId("create-channel-description")).toHaveValue(
     "Coordinate a new project from planning through launch.",
   );
-  await expect(page.getByTestId("create-channel-permissions")).toContainText(
-    "Private",
-  );
-  await page.getByTestId("create-channel-permissions").click();
+  await expect(
+    page.getByTestId("create-channel-permissions-option-private"),
+  ).toHaveAttribute("aria-pressed", "true");
   await page.getByTestId("create-channel-permissions-option-open").click();
   await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
     "Open · Canvas included · 1 agent · 1 team",
@@ -1499,6 +1498,12 @@ test("create channel exposes templates when the library is empty", async ({
   const templateContainer = page.getByTestId(
     "create-channel-template-container",
   );
+  await expect(
+    page.getByTestId("create-channel-channel-type").getByRole("button"),
+  ).toHaveText(["Temporary", "Ongoing"]);
+  await expect(
+    page.getByTestId("create-channel-permissions").getByRole("button"),
+  ).toHaveText(["Private", "Public"]);
   await expect(templateContainer).toContainText("TemplateOptional");
   const typeBox = await typeContainer.boundingBox();
   const visibilityBox = await visibilityContainer.boundingBox();
@@ -1540,8 +1545,9 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await page
     .getByTestId("create-channel-description")
     .fill("Auto-cleaned test stream");
-  await page.getByTestId("create-channel-channel-type").click();
-  await page.getByLabel("Temporary channel").click();
+  await page
+    .getByTestId("create-channel-channel-type-option-temporary")
+    .click();
   const channelTypeContainer = page.getByTestId(
     "create-channel-channel-type-container",
   );
@@ -1551,22 +1557,20 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await expect(
     page.getByTestId("create-channel-permissions-container"),
   ).toBeVisible();
-  await expect(page.getByTestId("create-channel-permissions")).toContainText(
-    "Public",
-  );
-  await page.getByTestId("create-channel-permissions").click();
-  await page.getByTestId("create-channel-permissions-option-private").click();
-  await expect(page.getByTestId("create-channel-permissions")).toContainText(
-    "Private",
-  );
-  await expect(
-    page.getByTestId("create-channel-permissions-option-private"),
-  ).toHaveCount(0);
-  await page.getByTestId("create-channel-permissions").click();
   await expect(
     page.getByTestId("create-channel-permissions-option-open"),
-  ).toBeVisible();
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.getByTestId("create-channel-permissions-option-private").click();
+  await expect(
+    page.getByTestId("create-channel-permissions-option-private"),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByTestId("create-channel-permissions-option-open"),
+  ).toHaveAttribute("aria-pressed", "false");
   await page.getByTestId("create-channel-permissions-option-open").click();
+  await expect(
+    page.getByTestId("create-channel-permissions-option-open"),
+  ).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByTestId("create-channel-ttl")).toContainText("7 days");
   await page.getByTestId("create-channel-ttl").click();
   await page.getByTestId("create-channel-ttl-option-1209600").click();
@@ -1675,8 +1679,9 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
     await page
       .getByTestId("create-channel-description")
       .fill("Auto-cleaned test stream");
-    await page.getByTestId("create-channel-channel-type").click();
-    await page.getByLabel("Temporary channel").click();
+    await page
+      .getByTestId("create-channel-channel-type-option-temporary")
+      .click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toContainText(channelName);
   }
@@ -2682,6 +2687,85 @@ test("manage channel updates details", async ({ page }) => {
   await expect(
     reopenedEditDialog.getByTestId("channel-management-purpose"),
   ).toHaveCount(0);
+});
+
+test("channel management keeps both description paragraphs visible for editors and readers", async ({
+  page,
+}) => {
+  const description =
+    "Post deploy requests here before 3pm.\n\nFor emergencies, ping the on-call directly.\nInclude the service name and rollback plan.";
+  const visibleFragment = "Include the service name and rollback plan.";
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_MUTATE_CHANNEL__ === "function" &&
+      typeof window.__BUZZ_E2E_INVALIDATE_CHANNELS__ === "function",
+  );
+  await page.evaluate(
+    async ({ generalChannelId, randomChannelId, description }) => {
+      const bridge = window as Window & {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__: () => Promise<void>;
+        __BUZZ_E2E_MUTATE_CHANNEL__: (options: {
+          channelId: string;
+          description?: string;
+        }) => void;
+      };
+      for (const channelId of [generalChannelId, randomChannelId]) {
+        bridge.__BUZZ_E2E_MUTATE_CHANNEL__({ channelId, description });
+      }
+      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__();
+    },
+    {
+      generalChannelId: GENERAL_CHANNEL_ID,
+      randomChannelId: RANDOM_CHANNEL_ID,
+      description,
+    },
+  );
+
+  for (const [channelName, editable] of [
+    ["general", true],
+    ["random", false],
+  ] as const) {
+    await openChannelManagement(page, channelName);
+    const summary = page.getByTestId("channel-management-description");
+    await expect(summary).toHaveText(description);
+    await expect(page.getByTestId("channel-management-edit")).toHaveCount(
+      editable ? 1 : 0,
+    );
+
+    const fragmentBounds = await summary.evaluate((element, fragment) => {
+      const textNode = Array.from(element.childNodes).find(
+        (node) => node.nodeType === Node.TEXT_NODE,
+      );
+      if (!textNode?.textContent) {
+        throw new Error("channel summary text node is missing");
+      }
+      const start = textNode.textContent.indexOf(fragment);
+      if (start < 0) {
+        throw new Error(`channel summary is missing fragment: ${fragment}`);
+      }
+      const range = document.createRange();
+      range.setStart(textNode, start);
+      range.setEnd(textNode, start + fragment.length);
+      const textRect = range.getBoundingClientRect();
+      const containerRect = element.getBoundingClientRect();
+      return {
+        containerBottom: containerRect.bottom,
+        containerTop: containerRect.top,
+        textBottom: textRect.bottom,
+        textTop: textRect.top,
+      };
+    }, visibleFragment);
+    expect(fragmentBounds.textTop).toBeGreaterThanOrEqual(
+      fragmentBounds.containerTop - 1,
+    );
+    expect(fragmentBounds.textBottom).toBeLessThanOrEqual(
+      fragmentBounds.containerBottom + 1,
+    );
+
+    await closeChannelManagement(page);
+  }
 });
 
 test("manage channel shows member avatars and owner-only row controls", async ({

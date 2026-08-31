@@ -5,6 +5,7 @@ export const MAX_IN_MEMORY_AGENT_AUDIENCES = 200;
 const listeners = new Set<() => void>();
 const revisions = new Map<string, number>();
 const automaticallyPromotedMembers = new Map<string, Set<string>>();
+const excludedPubkeysByScope = new Map<string, Set<string>>();
 let revisionClock = 0;
 let defaultRevision = 0;
 let audiences: Record<string, string[]> = {};
@@ -17,7 +18,7 @@ export type PersistentAgentAudienceSnapshot = Readonly<{
 type PersistentAgentAudienceScopeInput = {
   ownerPubkey: string;
   channelId: string;
-  threadRootId?: string | null;
+  composerKey?: string | null;
 };
 
 function normalizePubkeys(pubkeys: Iterable<string>): string[] {
@@ -47,11 +48,15 @@ function emit(): void {
 export function getPersistentAgentAudienceScope({
   ownerPubkey,
   channelId,
+  composerKey,
 }: PersistentAgentAudienceScopeInput): string | null {
   const owner = ownerPubkey.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(owner) || !channelId) return null;
-  // Thread composers intentionally share their parent channel's audience.
-  return `${owner}:${channelId}:channel`;
+  const composer =
+    composerKey?.trim() && composerKey.trim() !== channelId
+      ? composerKey.trim()
+      : "channel";
+  return `${owner}:${channelId}:${composer}`;
 }
 
 export function resetPersistentAgentAudienceStore(): void {
@@ -59,6 +64,7 @@ export function resetPersistentAgentAudienceStore(): void {
   defaultRevision = revisionClock;
   revisions.clear();
   automaticallyPromotedMembers.clear();
+  excludedPubkeysByScope.clear();
   audiences = {};
   emit();
 }
@@ -96,6 +102,11 @@ function replacePersistentAgentAudience(
   const nextAudiences = { ...audiences };
   delete nextAudiences[scope];
   audiences = boundAudiences({ ...nextAudiences, [scope]: normalized });
+  for (const excludedScope of excludedPubkeysByScope.keys()) {
+    if (!Object.hasOwn(audiences, excludedScope)) {
+      excludedPubkeysByScope.delete(excludedScope);
+    }
+  }
   for (const revisedScope of revisions.keys()) {
     if (Object.hasOwn(audiences, revisedScope)) continue;
     revisions.delete(revisedScope);
@@ -119,21 +130,31 @@ export function getPersistentAgentAudienceRevision(scope: string): number {
 
 export function promotePersistentAgentAudienceIfUnchanged({
   expectedRevision,
+  reinstateExcluded = false,
   pubkeys,
   source = "automatic",
   scope,
 }: {
   expectedRevision: number;
+  reinstateExcluded?: boolean;
   pubkeys: Iterable<string>;
   source?: "automatic" | "manual";
   scope: string;
 }): { promotedPubkeys: string[]; revision: number } | null {
   if (getPersistentAgentAudienceRevision(scope) !== expectedRevision)
     return null;
-  const promotedPubkeys = normalizePubkeys(pubkeys).filter(
-    (pubkey) => !(audiences[scope] ?? []).includes(pubkey),
+  const normalizedPubkeys = normalizePubkeys(pubkeys);
+  const promotedPubkeys = normalizedPubkeys.filter(
+    (pubkey) =>
+      !(audiences[scope] ?? []).includes(pubkey) &&
+      (reinstateExcluded || !excludedPubkeysByScope.get(scope)?.has(pubkey)),
   );
   if (promotedPubkeys.length === 0) return null;
+  if (reinstateExcluded) {
+    const excluded = excludedPubkeysByScope.get(scope);
+    for (const pubkey of promotedPubkeys) excluded?.delete(pubkey);
+    if (excluded?.size === 0) excludedPubkeysByScope.delete(scope);
+  }
   const existingAutomaticMembers = automaticallyPromotedMembers.get(scope);
   replacePersistentAgentAudience(
     scope,
@@ -193,6 +214,8 @@ export function addPersistentAgentAudienceMember(
   pubkey: string,
 ): void {
   const normalized = normalizePubkeys([pubkey])[0];
+  if (!normalized) return;
+  excludedPubkeysByScope.get(scope)?.delete(normalized);
   const remainingAutomaticMembers = new Set(
     automaticallyPromotedMembers.get(scope) ?? [],
   );
@@ -202,6 +225,18 @@ export function addPersistentAgentAudienceMember(
     [...(audiences[scope] ?? []), pubkey],
     remainingAutomaticMembers,
   );
+}
+
+export function excludePersistentAgentAudienceMember(
+  scope: string,
+  pubkey: string,
+): void {
+  const normalized = normalizePubkeys([pubkey])[0];
+  if (!scope || !normalized) return;
+  const excluded = excludedPubkeysByScope.get(scope) ?? new Set<string>();
+  excluded.add(normalized);
+  excludedPubkeysByScope.set(scope, excluded);
+  removePersistentAgentAudienceMember(scope, normalized);
 }
 
 export function removePersistentAgentAudienceMember(
@@ -241,6 +276,7 @@ export function usePersistentAgentAudience(scope: string | null): {
   pubkeys: readonly string[];
   addPubkey: (pubkey: string) => void;
   removePubkey: (pubkey: string) => void;
+  excludePubkey: (pubkey: string) => void;
   clear: () => void;
 } {
   const state = React.useSyncExternalStore(
@@ -257,6 +293,10 @@ export function usePersistentAgentAudience(scope: string | null): {
     ),
     removePubkey: React.useCallback(
       (pubkey) => removePersistentAgentAudienceMember(resolvedScope, pubkey),
+      [resolvedScope],
+    ),
+    excludePubkey: React.useCallback(
+      (pubkey) => excludePersistentAgentAudienceMember(resolvedScope, pubkey),
       [resolvedScope],
     ),
     clear: React.useCallback(

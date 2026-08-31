@@ -123,6 +123,9 @@ function UnifiedAgentsView({
       refetchRelayAgents: agents.refetchRelayAgents,
     },
   );
+  const [catalogLaunchTarget, setCatalogLaunchTarget] = React.useState<
+    "agents" | "teams" | null
+  >(null);
 
   const personasById = React.useMemo(
     () =>
@@ -260,8 +263,15 @@ function UnifiedAgentsView({
   );
 
   function openUnifiedCatalog() {
+    openCommunityCatalog("agents");
+  }
+
+  function openCommunityCatalog(target: "agents" | "teams") {
+    personas.clearFeedback("catalog");
     personas.prepareCreate();
-    personas.openCatalog();
+    void personas.catalogQuery.refetch();
+    void teamActions.catalogQuery.refetch();
+    setCatalogLaunchTarget(target);
   }
 
   function openAiDefaults(trigger: HTMLButtonElement | null) {
@@ -526,6 +536,7 @@ function UnifiedAgentsView({
                   onAddToChannel={teamActions.setTeamToAddToChannel}
                   onCreate={teamActions.openCreateDialog}
                   onDelete={teamActions.setTeamToDelete}
+                  onDiscover={() => openCommunityCatalog("teams")}
                   onDuplicate={teamActions.openDuplicateDialog}
                   onEdit={teamActions.openEditDialog}
                   onImport={() => snapshotImportInputRef.current?.click()}
@@ -550,6 +561,8 @@ function UnifiedAgentsView({
           agents={agents}
           aiDefaultsOpen={isAiDefaultsOpen}
           aiDefaultsReturnFocusRef={aiDefaultsTriggerRef}
+          catalogLaunchTarget={catalogLaunchTarget}
+          onCatalogLaunchTargetChange={setCatalogLaunchTarget}
           onAiDefaultsOpenChange={setAiDefaultsDialogOpen}
           onOpenPersonaProfile={(persona) => openPersonaProfilePanel?.(persona)}
           personas={personas}

@@ -105,3 +105,5 @@ keyring = { version = "3.6.3", default-features = false, features = ["windows-na
 tempfile = "3"
 # Minimal HTTP test server for retry/policy integration tests
 axum = { workspace = true }
+# `test-util` enables paused-time control for deterministic timeout tests
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

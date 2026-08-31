@@ -18,7 +18,6 @@ import {
   restoreImetaMediaDisplayLabels,
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
-import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import {
   cancelBackgroundMediaUploads,
@@ -26,13 +25,13 @@ import {
   takeQueuedAttachmentsForDraft,
   useBackgroundMediaUpload,
 } from "@/features/messages/lib/backgroundMediaUploadStore";
+import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import {
   getPersistentAgentAudienceScope,
   usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
 import {
-  getKeepMentionedAgentsPinned,
   setKeepMentionedAgentsPinned,
   useKeepMentionedAgentsPinned,
 } from "@/features/messages/lib/autoPinMentionedAgentsPreference";
@@ -62,12 +61,15 @@ import { useAddressMentionPulse } from "./useAddressMentionPulse";
 import { useAlwaysAddressShortcut } from "./useAlwaysAddressShortcut";
 import { useComposerMentionPicker } from "./useComposerMentionPicker";
 import { useAutoPinMentionedAgents } from "./useAutoPinMentionedAgents";
+import { useComposerAttachmentSpoilers } from "./useComposerAttachmentSpoilers";
 import { useComposerContentState } from "./useComposerContentState";
 import { useComposerPasteHandler } from "./useComposerPasteHandler";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
+import { useImplicitAgentMentionProvenance } from "./useImplicitAgentMentionProvenance";
 import { submitMessageEdit } from "./submitMessageEdit";
 import { prepareBackgroundLinkPreviews } from "@/features/messages/lib/linkPreviewPreparationStore";
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
+import { useAddressedAgentMentionRestore } from "./useAddressedAgentMentionRestore";
 import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
 import type { MessageComposerProps } from "./MessageComposer.types";
 function MessageComposerImpl({
@@ -119,11 +121,6 @@ function MessageComposerImpl({
   } = useComposerLinkPreviews(previewContent, editTarget == null);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
-  const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
-    Set<string>
-  >(() => new Set());
-  const spoileredAttachmentUrlsRef = React.useRef(spoileredAttachmentUrls);
-  spoileredAttachmentUrlsRef.current = spoileredAttachmentUrls;
   const handleFormattingToggle = React.useCallback((pressed: boolean) => {
     if (pressed) setIsEmojiPickerOpen(false);
     setIsFormattingOpen(pressed);
@@ -137,10 +134,13 @@ function MessageComposerImpl({
       ? getPersistentAgentAudienceScope({
           ownerPubkey,
           channelId,
+          composerKey: effectiveDraftKey,
         })
       : null;
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
+  const implicitAgentMentionProvenance =
+    useImplicitAgentMentionProvenance(effectiveDraftKey);
   const preEditSnapshotRef = React.useRef<{
     content: string;
     pendingImeta: ImetaMedia[];
@@ -161,6 +161,19 @@ function MessageComposerImpl({
   );
   const internalMedia = useMediaUpload({ deferUploadsUntilSend: true });
   const media = mediaController ?? internalMedia;
+  const {
+    handleAttachmentEditSave,
+    handleAttachmentRevert,
+    handleRemoveAttachment,
+    handleToggleAttachmentSpoiler,
+    setSpoileredAttachmentUrls,
+    spoileredAttachmentUrls,
+    spoileredAttachmentUrlsRef,
+  } = useComposerAttachmentSpoilers({
+    removeAttachment: media.removeAttachment,
+    revertAttachment: media.revertAttachment,
+    uploadEditedAttachment: media.uploadEditedAttachment,
+  });
   const [isDeferredEditPending, setDeferredEditPending] = React.useState(false);
   const composerDisabled = disabled || isDeferredEditPending;
   const isEditSubmissionLocked =
@@ -197,6 +210,7 @@ function MessageComposerImpl({
     setSpoileredAttachmentUrls,
     spoileredAttachmentUrlsRef,
     syncComposerContentFromEditor,
+    getImplicitAgentMentionPrefix: implicitAgentMentionProvenance.getPrefix,
   });
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
@@ -303,10 +317,13 @@ function MessageComposerImpl({
   const keepMentionedAgentsPinned = useKeepMentionedAgentsPinned();
   const addressPulse = useAddressMentionPulse();
   const {
+    completeOptionsReveal: completeMentionOptionsReveal,
     confirmationTitle: autoPinConfirmationTitle,
     dismissConfirmation: dismissAutoPinConfirmation,
+    openOptionsRequest: openMentionOptionsRequest,
     promoteExplicitlyAddressedAgents,
     promoteMentionedAgents,
+    setConfirmationHovered: setAutoPinConfirmationHovered,
     turnOffConfirmation: turnOffAutoPinConfirmation,
   } = useAutoPinMentionedAgents({
     audienceScope,
@@ -314,26 +331,13 @@ function MessageComposerImpl({
     getDisplayName: mentions.getMentionDisplayName,
     onPulse: addressPulse.pulseOne,
     onTurnOff: () => setKeepMentionedAgentsPinned(false),
+    onTurnOn: () => setKeepMentionedAgentsPinned(true),
   });
-  const restoreAddressedAgentMentionsRef = React.useRef<
-    (
-      pubkeys?: readonly string[],
-      allowedUnpinnedPubkeys?: readonly string[],
-    ) => string
-  >(() => "");
-  const restoreAddressedAgentMentionsFrameRef = React.useRef<number | null>(
-    null,
-  );
-  const channelIdRef = React.useRef(channelId);
-  channelIdRef.current = channelId;
-  React.useEffect(
-    () => () => {
-      if (restoreAddressedAgentMentionsFrameRef.current !== null) {
-        cancelAnimationFrame(restoreAddressedAgentMentionsFrameRef.current);
-      }
-    },
-    [],
-  );
+  const addressedMentionRestore = useAddressedAgentMentionRestore({
+    audiencePubkeys: persistentAudience.pubkeys,
+    channelId,
+    enabled: keepMentionedAgentsPinned,
+  });
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -343,24 +347,11 @@ function MessageComposerImpl({
     drafts,
     emojiAutocomplete,
     mentions,
-    onAddressedAgentsComposerCleared: (pubkeys) =>
-      restoreAddressedAgentMentionsRef.current(pubkeys),
+    onAddressedAgentsComposerCleared:
+      addressedMentionRestore.onAddressedAgentsComposerCleared,
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
-    onAddressedAgentsSendSucceeded: (pubkeys, newlyPinnedPubkeys) => {
-      if (!keepMentionedAgentsPinned || newlyPinnedPubkeys.length === 0) return;
-      const sentChannelId = channelId;
-      if (restoreAddressedAgentMentionsFrameRef.current !== null) {
-        cancelAnimationFrame(restoreAddressedAgentMentionsFrameRef.current);
-      }
-      restoreAddressedAgentMentionsFrameRef.current = requestAnimationFrame(
-        () => {
-          restoreAddressedAgentMentionsFrameRef.current = null;
-          if (channelIdRef.current !== sentChannelId) return;
-          if (!getKeepMentionedAgentsPinned()) return;
-          restoreAddressedAgentMentionsRef.current(pubkeys, newlyPinnedPubkeys);
-        },
-      );
-    },
+    onAddressedAgentsSendSucceeded:
+      addressedMentionRestore.onAddressedAgentsSendSucceeded,
     onPrepareSendChannel,
     onSendRef,
     richText,
@@ -439,6 +430,7 @@ function MessageComposerImpl({
         edit.insertText,
         edit.customEmojiShortcode,
         edit.preserveSelection,
+        edit.reassertMentionCaret,
       );
     },
     [richText.replacePlainTextRange],
@@ -461,16 +453,24 @@ function MessageComposerImpl({
       promoteExplicitlyAddressedAgents({
         pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
       }),
-    onAutoPinAgentMention: (suggestion) => {
+    onAutoPinAgentMention: (suggestion, options) => {
       promoteMentionedAgents({
+        ...options,
         pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
       });
     },
+    onImplicitPrefixInserted: implicitAgentMentionProvenance.add,
+    onImplicitPrefixRemoved: implicitAgentMentionProvenance.remove,
     onPulseAddressLock: addressPulse.pulseOne,
     profiles,
     richText,
   });
-  restoreAddressedAgentMentionsRef.current = restoreAddressedAgentMentions;
+  addressedMentionRestore.restoreAddressedAgentMentionsRef.current =
+    restoreAddressedAgentMentions;
+  React.useLayoutEffect(() => {
+    if (!audienceScope || editTarget != null) return;
+    restoreAddressedAgentMentions();
+  }, [audienceScope, editTarget, restoreAddressedAgentMentions]);
   syncAddressedAgentsFromTextRef.current = syncAddressedAgentsFromText;
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
@@ -530,21 +530,17 @@ function MessageComposerImpl({
     },
     [richText.editor, mentions.clearMentions, customEmoji],
   );
-  const openMentionPicker = useComposerMentionPicker({
+  const mentionPicker = useComposerMentionPicker({
     mentions,
+    onTurnOffAutoPinConfirmation: turnOffAutoPinConfirmation,
     richText,
     setIsEmojiPickerOpen,
   });
-  const openMentionSettings = React.useCallback(
-    () => openMentionPicker(false),
-    [openMentionPicker],
-  );
   const handleAlwaysAddressShortcut = useAlwaysAddressShortcut({
     enabled: Boolean(audienceScope && editTarget == null),
     lockedAgent: lockedAgents[0],
     mentions,
-    onOpenPicker: openMentionPicker,
-    onSelect: selectMentionSuggestion,
+    onOpenPicker: mentionPicker.openMentionPicker,
     onToggle: toggleAlwaysAddressAgent,
   });
   const submitMessage = React.useCallback(async () => {
@@ -665,6 +661,7 @@ function MessageComposerImpl({
     richText.clearContent,
     richText.setContent,
     setComposerContent,
+    setSpoileredAttachmentUrls,
     spoileredAttachmentUrls,
     syncComposerContentFromEditor,
     onCaptureSendContext,
@@ -726,7 +723,9 @@ function MessageComposerImpl({
         }
         return;
       }
-      const { handled, suggestion } = mentions.handleMentionKeyDown(event);
+      const { handled, suggestion } = mentions.handleMentionKeyDown(event, {
+        isCodeContext: () => isMentionCodeContext(richText.editor),
+      });
       if (handled) {
         if (suggestion) {
           selectMentionSuggestion(suggestion);
@@ -759,6 +758,7 @@ function MessageComposerImpl({
       channelLinks.handleChannelKeyDown,
       applyChannelInsert,
       mentions.handleMentionKeyDown,
+      richText.editor,
       selectMentionSuggestion,
       linkEditor.isCardOpen,
       linkEditor.focusCardFirstControl,
@@ -792,35 +792,6 @@ function MessageComposerImpl({
   const handlePaperclipClick = React.useCallback(() => {
     void media.handlePaperclip();
   }, [media.handlePaperclip]);
-  const handleRemoveAttachment = React.useCallback(
-    (url: string) => {
-      setSpoileredAttachmentUrls((current) => {
-        if (!current.has(url)) return current;
-        const next = new Set(current);
-        next.delete(url);
-        return next;
-      });
-      media.removeAttachment(url);
-    },
-    [media.removeAttachment],
-  );
-  const { handleAttachmentEditSave, handleAttachmentRevert } =
-    useAttachmentEditing({
-      revertAttachment: media.revertAttachment,
-      setSpoileredAttachmentUrls,
-      uploadEditedAttachment: media.uploadEditedAttachment,
-    });
-  const handleToggleAttachmentSpoiler = React.useCallback((url: string) => {
-    setSpoileredAttachmentUrls((current) => {
-      const next = new Set(current);
-      if (next.has(url)) {
-        next.delete(url);
-      } else {
-        next.add(url);
-      }
-      return next;
-    });
-  }, []);
   return (
     <>
       <footer
@@ -899,11 +870,13 @@ function MessageComposerImpl({
             <MentionAutocomplete
               keepMentionedAgentsPinned={keepMentionedAgentsPinned}
               lockedAgentPubkeys={lockedAgentPubkeys}
+              openOptionsRequest={openMentionOptionsRequest}
               onKeepMentionedAgentsPinnedChange={
                 audienceScope && editTarget == null
                   ? setKeepMentionedAgentsPinned
                   : undefined
               }
+              onOptionsRevealComplete={completeMentionOptionsReveal}
               onToggleAlwaysAddressAgent={
                 audienceScope && editTarget == null
                   ? toggleAlwaysAddressAgent
@@ -971,7 +944,9 @@ function MessageComposerImpl({
               <EditorContent editor={richText.editor} />
             </div>
             <ComposerDockToolbar
-              addressedAgents={editTarget == null ? lockedAgents : []}
+              addressedAgents={
+                editTarget == null && !composerDisabled ? lockedAgents : []
+              }
               autoPinConfirmationTitle={autoPinConfirmationTitle}
               layoutMode={layoutMode}
               composerDisabled={composerDisabled}
@@ -986,12 +961,13 @@ function MessageComposerImpl({
               isUploading={media.isUploading}
               onCaptureSelection={handleCaptureSelection}
               onAutoPinConfirmationDismiss={dismissAutoPinConfirmation}
-              onAutoPinConfirmationTurnOff={turnOffAutoPinConfirmation}
+              onAutoPinConfirmationHoverChange={setAutoPinConfirmationHovered}
+              onAutoPinConfirmationTurnOff={mentionPicker.turnOff}
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}
               onEmojiSelect={insertEmoji}
               onFormattingToggle={handleFormattingToggle}
               onLinkButton={linkEditor.openFromToolbar}
-              onOpenMentionPicker={openMentionSettings}
+              onOpenMentionPicker={mentionPicker.openMentionSettings}
               onPaperclip={handlePaperclipClick}
               onRemoveAddressedAgent={removeAddressedAgent}
               pulseVersionByPubkey={addressPulse.pulseVersionByPubkey}
