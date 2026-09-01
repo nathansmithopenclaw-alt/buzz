@@ -1,9 +1,8 @@
 # The Reviewer-Agent Pattern
 
 Design guidance for workspaces that route memory promotion (or any
-verification-gated approval) to a designated agent reviewer — the "Memory
-Orchestrator" in [BUZZ_MEMORY_DESIGN.md](../../PLANS/BUZZ_MEMORY_DESIGN.md)
-§5b, normatively specified in [NIP-ME](../nips/NIP-ME.md) (delegated review
+verification-gated approval) to a designated agent reviewer, normatively
+specified in [NIP-ME](../nips/NIP-ME.md) (delegated review
 verdicts) and [NIP-SD](../nips/NIP-SD.md) (the `memory_promotion` capability).
 
 **A reviewer agent without a probe registry is a UI, not a control.** The
@@ -32,7 +31,7 @@ review", never to false truth.
 - **Publisher** signs receipts (`kind:40201`).
 
 The reviewer never signs `current` truth, never holds the publisher key, never
-receives generic kernel append. `promoter ≠ proposer` is a protocol MUST.
+receives a generic provider write path. `promoter ≠ proposer` is a protocol MUST.
 
 ## Authority: a capability, not a role
 
@@ -40,7 +39,11 @@ Authority to promote is a NIP-SD standing delegation (v3 keyed singular proof:
 `memory_promotion` scoped by claim type, fail-closed human fallback), re-
 validated by the engine at use time — a client-evaluated grant is a suggestion.
 The grantee cannot widen itself; unknown versions and unknown shapes fail
-loud; revocation falls back to owner review, never discards.
+loud; revocation falls back to owner review, never discards. Activation
+requires a human above the reviewer: the engine refuses to activate a reviewer
+whose owner edge is unset — no verifier without a human above it. A delegation
+whose human-fallback set cannot be established is rejected at grant-signing
+time (NIP-SD), not discovered at escalation time.
 
 ## Verification standards by claim type
 
@@ -66,7 +69,11 @@ proposer sentence and evidence statement is itself an escalation.
 **Generation binding.** An approval is bound to the engine generation it was
 evaluated at; if the generation advanced within the claim's dependency set,
 promotion is rejected to re-verification at head. Freshness bounds catch age,
-not interference — two individually-true proofs can be jointly false.
+not interference — two individually-true proofs can be jointly false. The
+binding has a health signal with teeth: under concurrent load, a re-verify
+rate of zero means the binding is not wired — a correctly wired generation
+check refuses *something* when the world moves underneath an in-flight
+approval.
 
 ## Escalation is engine state, not a speech act
 
