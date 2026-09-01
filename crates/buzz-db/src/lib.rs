@@ -29,6 +29,9 @@ pub mod error;
 /// Per-community monotonic transport-integrity journal.
 pub mod journal;
 
+#[cfg(test)]
+mod test_support;
+
 pub use runtime::{
     insert_mentions, migration, replica_fence, Db, DbConfig, DbPoolStats, ReadSession,
 };

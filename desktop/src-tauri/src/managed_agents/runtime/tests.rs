@@ -342,6 +342,7 @@ fn persona_with_provider(
     provider: Option<&str>,
 ) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        description: None,
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,
@@ -1304,6 +1305,7 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
             "wss://relay.example",
             &Default::default(),
             false,
+            crate::managed_agents::AcpSessionPolicy::Channel,
         ),
         claude_account_id: None,
         claude_token_fingerprint: None,

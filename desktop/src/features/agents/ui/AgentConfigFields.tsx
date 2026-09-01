@@ -819,7 +819,6 @@ export function AgentConfigFields({
               fallbackModel === null &&
               !dependentFieldsDisabled
             }
-            keepSelectedModelValueLabel
             model={dependentFieldsDisabled ? "" : (config.model ?? "")}
             modelDiscoveryLoading={
               dependentFieldsDisabled ? false : modelDiscoveryLoading
