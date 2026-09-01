@@ -245,6 +245,9 @@ pub async fn apply_managed_agent_avatar_request(
                             pubkey: record.pubkey.clone(),
                             agent_command: record.agent_command.clone(),
                             persona_id: record.persona_id.clone(),
+                            about: crate::managed_agents::record_effective_description(
+                                record, &personas,
+                            ),
                         },
                     }
                 })
@@ -385,6 +388,7 @@ mod tests {
             id: id.into(),
             display_name: id.into(),
             avatar_url: Some("https://relay.example/old.png".into()),
+            description: None,
             system_prompt: String::new(),
             runtime: None,
             model: None,

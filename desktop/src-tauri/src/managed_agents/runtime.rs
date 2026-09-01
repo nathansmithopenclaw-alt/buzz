@@ -85,7 +85,6 @@ pub(crate) fn workspace_pair_key(
     app: &AppHandle,
     record: &ManagedAgentRecord,
 ) -> Option<ManagedAgentRuntimeKey> {
-    use tauri::Manager;
     let state = app.state::<crate::app_state::AppState>();
     resolve_workspace_pair_key(
         &record.pubkey,
@@ -230,6 +229,7 @@ pub fn build_managed_agent_summary(
             &key.relay_url,
             global_config,
             super::owner_only_access_build(),
+            super::acp_session_policy(app.state::<crate::app_state::AppState>().inner()),
         );
         (runtime, current)
     });
@@ -485,7 +485,6 @@ pub fn spawn_agent_child(
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
     let effective_relay_url = runtime_key.relay_url.clone();
-
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
     //   - nvm-managed node/npm (nvm initializes only in interactive shells)
@@ -818,6 +817,10 @@ pub fn spawn_agent_child(
         &record.env_vars,
         &global.env_vars,
     );
+    // Resolve once and stamp the same value onto the snapshot below.
+    let acp_session_policy = super::apply_app_acp_session_policy_env(app, &mut command);
+
+    crate::build_identity::apply_demo_config_home(&mut command)?;
     // Apply canonical persisted effort after the descriptor so stale free-form values cannot win.
     apply_effort_env(&mut command, record.effort_level.as_deref());
     // Structured model state wins over stale free-form BUZZ_ACP_MODEL values.
@@ -902,6 +905,7 @@ pub fn spawn_agent_child(
             model: effective_model.as_deref(),
             provider: effective_provider.as_deref(),
             enforced_owner_only: super::owner_only_access_build(),
+            session_policy: acp_session_policy,
         },
     );
 

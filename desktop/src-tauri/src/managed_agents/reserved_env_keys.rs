@@ -62,6 +62,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // Desktop-owned pool lifetime policy: user env must not disable or reset
     // the idle worker-reclamation window while the desktop launcher sets it.
     "BUZZ_ACP_IDLE_POOL_SLEEP",
+    // Desktop experiment policy: the Settings toggle is the sole authority
+    // for whether channel threads receive independent ACP sessions.
+    "BUZZ_ACP_SESSION_POLICY",
     "BUZZ_ACP_NO_PRESENCE",
     // Readiness handoff: desktop is the ONLY readiness source. A saved or
     // ambient env var must not be able to forge setup mode (NotReady) on a
@@ -71,6 +74,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // buzz-acp can distinguish a global default from an explicit override.
     // Allowing saved env to forge it would weaken explicit effort failures.
     "BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT",
+    // Demo-build identity owns the child agent config root. A user override
+    // could silently reconnect a demo harness to production OAuth state.
+    "BUZZ_AGENT_CONFIG_DIR",
     // Desktop ownership markers: these brand every spawned harness with the
     // launching Desktop instance. A user-supplied override would let a
     // definition masquerade as a different instance or fake the nonce used

@@ -1,5 +1,5 @@
 //! Unit tests for `commands/agent_config.rs` (split to keep `agent_config.rs`
-//! under the 1000-line file-size ratchet).
+//! under the 1500-line file-size ratchet).
 //!
 //! Included via `#[path = "agent_config_tests.rs"] mod tests;` at the bottom of
 //! `agent_config.rs`, so `use super::*` gives access to all items in that module.
@@ -67,6 +67,7 @@ fn goose_runtime() -> &'static KnownAcpRuntime {
 
 fn agent_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: Some("persona-1".to_string()),
@@ -129,6 +130,7 @@ fn agent_record() -> ManagedAgentRecord {
 
 fn persona_with_model(model: &str) -> AgentDefinition {
     AgentDefinition {
+        description: None,
         id: "persona-1".to_string(),
         display_name: "Persona".to_string(),
         avatar_url: None,

@@ -461,6 +461,16 @@ pub struct DbConfig {
     /// pool configured, because admitting older rows invalidates covered-page
     /// routing until their WAL has replayed.
     pub created_at_floor_override_secs: Option<u64>,
+    /// Session `lock_timeout` in milliseconds for writer connections (env
+    /// `BUZZ_DB_LOCK_TIMEOUT_MS`). `0` disables the timeout.
+    pub lock_timeout_ms: u64,
+    /// Session `idle_in_transaction_session_timeout` in milliseconds for
+    /// writer connections (env `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`). `0` disables.
+    pub idle_txn_timeout_ms: u64,
+    /// Session `statement_timeout` in milliseconds for writer connections
+    /// (env `BUZZ_DB_STATEMENT_TIMEOUT_MS`). `0` disables it and is the
+    /// default because migrations and backfills may legitimately run long.
+    pub statement_timeout_ms: u64,
 }
 
 impl Default for DbConfig {
@@ -479,7 +489,44 @@ impl Default for DbConfig {
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
             created_at_floor_override_secs: None,
+            lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
+            idle_txn_timeout_ms: DEFAULT_IDLE_TXN_TIMEOUT_MS,
+            statement_timeout_ms: 0,
         }
+    }
+}
+
+/// Default writer `lock_timeout` in milliseconds.
+pub const DEFAULT_LOCK_TIMEOUT_MS: u64 = 5_000;
+
+/// Default writer `idle_in_transaction_session_timeout` in milliseconds.
+pub const DEFAULT_IDLE_TXN_TIMEOUT_MS: u64 = 60_000;
+
+impl DbConfig {
+    /// Overlay writer session timeouts from the shared `BUZZ_DB_*_TIMEOUT_MS`
+    /// environment variables. Missing or invalid values retain the existing
+    /// configuration; explicit zeroes pass through to disable a timeout.
+    ///
+    /// This belongs in `buzz-db` so relay, admin, deletion, and audit writers
+    /// share one policy. The separately deployed push gateway owns its own
+    /// database and session policy.
+    pub fn with_session_timeouts_from_env(mut self) -> Self {
+        fn parse(key: &str) -> Option<u64> {
+            std::env::var(key)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+        }
+
+        if let Some(value) = parse("BUZZ_DB_LOCK_TIMEOUT_MS") {
+            self.lock_timeout_ms = value;
+        }
+        if let Some(value) = parse("BUZZ_DB_IDLE_TXN_TIMEOUT_MS") {
+            self.idle_txn_timeout_ms = value;
+        }
+        if let Some(value) = parse("BUZZ_DB_STATEMENT_TIMEOUT_MS") {
+            self.statement_timeout_ms = value;
+        }
+        self
     }
 }
 
@@ -508,7 +555,7 @@ impl Db {
                 "created_at floor override requires read_database_url to be unset".to_string(),
             ));
         }
-        let pool = Self::connect_pool(config, &config.database_url).await?;
+        let pool = Self::connect_writer_pool(config).await?;
         let read_max_connections = config
             .read_max_connections
             .unwrap_or(config.max_connections);
@@ -533,10 +580,16 @@ impl Db {
     /// SQLx stores one `after_connect` hook, so the floor guard and transaction
     /// isolation assertion must remain in this single closure. Registering a
     /// second hook replaces the first and silently disarms the floor trigger.
-    async fn connect_pool(config: &DbConfig, url: &str) -> Result<PgPool> {
+    /// Additional writer pools, including the relay audit pool, must use this
+    /// constructor so they inherit the timeout, floor-guard, and isolation
+    /// policy installed by [`Db::new`].
+    pub async fn connect_writer_pool(config: &DbConfig) -> Result<PgPool> {
         let created_at_floor_secs = config
             .created_at_floor_override_secs
             .unwrap_or(replica_fence::CREATED_AT_FLOOR_SECS as u64);
+        let lock_timeout_ms = config.lock_timeout_ms;
+        let idle_txn_timeout_ms = config.idle_txn_timeout_ms;
+        let statement_timeout_ms = config.statement_timeout_ms;
         let options = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
@@ -550,6 +603,24 @@ impl Db {
                         .bind(created_at_floor_secs.to_string())
                         .execute(&mut *conn)
                         .await?;
+                    // `lock_timeout` fails the waiting statement; it does not
+                    // cancel the holder. `idle_in_transaction_session_timeout`
+                    // reaps only holders idling inside an open transaction,
+                    // while actively executing holders are bounded only by
+                    // `statement_timeout` (off by default). Bare values are
+                    // milliseconds. Migration/schema-destruction connections
+                    // reset lock and statement timeouts before their intentional
+                    // long wait (see `with_exclusive_schema_destruction_lock`).
+                    sqlx::query(
+                        "SELECT set_config('lock_timeout', $1, false), \
+                                set_config('idle_in_transaction_session_timeout', $2, false), \
+                                set_config('statement_timeout', $3, false)",
+                    )
+                    .bind(lock_timeout_ms.to_string())
+                    .bind(idle_txn_timeout_ms.to_string())
+                    .bind(statement_timeout_ms.to_string())
+                    .execute(&mut *conn)
+                    .await?;
                     let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
                         .fetch_one(&mut *conn)
                         .await?;
@@ -564,7 +635,7 @@ impl Db {
                     Ok(())
                 })
             });
-        Ok(options.connect(url).await?)
+        Ok(options.connect(&config.database_url).await?)
     }
 
     /// Reader acquire timeout — deliberately far below the writer's
@@ -1066,4 +1137,5 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests;
+#[path = "tests.rs"]
+mod postgres_tests;
