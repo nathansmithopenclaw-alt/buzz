@@ -144,8 +144,12 @@ Normative requirements:
 - **Human fallback is configured, never inferred.** The escalation destination is an
   explicit allowlist frozen into the policy at admission. A valid NIP-OA attestation
   tag disqualifies an entry; role, kind-0, and a missing auth tag prove nothing. The
-  backing grants are NIP-SD v3 keyed proofs whose `humanFallbackAllowlist` values
-  agree byte-for-byte; any disagreement fails closed to human review.
+  grants, not the policy, are the source of truth: the backing NIP-SD v3 keyed proofs
+  carry `humanFallbackAllowlist` values that agree byte-for-byte, rotation is an
+  atomic set re-sign (see NIP-SD), and admission copies that agreed value into the
+  frozen policy snapshot for the item. A later allowlist rotation does not reroute
+  in-flight items, consistent with policy changes never applying retroactively. Any
+  grant disagreement fails closed to human review.
 - **Escalation is engine state, not a speech act.** The absence of a valid proof
   means the item never leaves `review` — the safety default is structural. The
   explicit `escalate` action is enrichment: it carries reason codes and the recorded
