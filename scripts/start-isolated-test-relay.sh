@@ -127,21 +127,26 @@ if ! docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" exec -T postgres \
     createdb -U buzz "${DB_NAME}"
 fi
 
-log "Resetting isolated database ${DB_NAME} and applying schema..."
-# This database belongs only to the buzz-harness Compose project. Reset it on
-# every launch so stale partitions/events from an earlier proof cannot alter
-# schema planning or test results.
-psql_h -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
-# Extensions are database-scoped. Per-lane databases do not inherit the
-# default harness database's pgcrypto installation, and the journal hash
-# functions require digest(bytea, text).
-psql_h -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
-export PGSCHEMA_PLAN_HOST=localhost PGSCHEMA_PLAN_PORT=${PG_PORT}
-export PGSCHEMA_PLAN_DB="${DB_NAME}" PGSCHEMA_PLAN_USER=buzz PGSCHEMA_PLAN_PASSWORD=buzz_dev
-export PGHOST=localhost PGPORT=${PG_PORT} PGUSER=buzz PGDATABASE="${DB_NAME}"
-./bin/pgschema apply --file schema/schema.sql --auto-approve
-psql_h < scripts/reconcile-schema-after-pgschema.sql
-ok "Schema applied"
+if [[ "${BUZZ_HARNESS_PRESERVE_SCHEMA:-false}" == "true" ]]; then
+  log "Preserving pre-provisioned schema in ${DB_NAME}; relay startup owns pending migrations"
+else
+  log "Resetting isolated database ${DB_NAME} and applying schema..."
+  # This database belongs only to the buzz-harness Compose project. Reset it on
+  # every normal launch so stale partitions/events from an earlier proof cannot
+  # alter schema planning or test results. Fold proofs may opt into preserving
+  # an explicitly prepared old ledger with BUZZ_HARNESS_PRESERVE_SCHEMA=true.
+  psql_h -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+  # Extensions are database-scoped. Per-lane databases do not inherit the
+  # default harness database's pgcrypto installation, and the journal hash
+  # functions require digest(bytea, text).
+  psql_h -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+  export PGSCHEMA_PLAN_HOST=localhost PGSCHEMA_PLAN_PORT=${PG_PORT}
+  export PGSCHEMA_PLAN_DB="${DB_NAME}" PGSCHEMA_PLAN_USER=buzz PGSCHEMA_PLAN_PASSWORD=buzz_dev
+  export PGHOST=localhost PGPORT=${PG_PORT} PGUSER=buzz PGDATABASE="${DB_NAME}"
+  ./bin/pgschema apply --file schema/schema.sql --auto-approve
+  psql_h < scripts/reconcile-schema-after-pgschema.sql
+  ok "Schema applied"
+fi
 
 # ── Deployment community + channels + members ────────────────────────────────
 # setup-desktop-test-data.sh is the single writer of the dev community row and
@@ -149,13 +154,15 @@ ok "Schema applied"
 # overridable host — point that host at OUR relay so the tenant binding matches,
 # and point its DB env at OUR isolated postgres. (psql is on PATH, so it uses
 # BUZZ_DB_HOST/PORT rather than the shared `buzz-postgres` container.)
-log "Seeding community (host=${COMMUNITY_HOST}), channels, and members..."
-BUZZ_COMMUNITY_HOST="${COMMUNITY_HOST}" \
-  BUZZ_DB_HOST=localhost BUZZ_DB_PORT=${PG_PORT} BUZZ_DB_USER=buzz \
-  BUZZ_DB_PASS=buzz_dev BUZZ_DB_NAME="${DB_NAME}" \
-  BUZZ_DB_DOCKER_CONTAINER="${PROJECT}-postgres-1" \
-  ./scripts/setup-desktop-test-data.sh
-ok "Community + channels + members seeded"
+if [[ "${BUZZ_HARNESS_PRESERVE_SCHEMA:-false}" != "true" ]]; then
+  log "Seeding community (host=${COMMUNITY_HOST}), channels, and members..."
+  BUZZ_COMMUNITY_HOST="${COMMUNITY_HOST}" \
+    BUZZ_DB_HOST=localhost BUZZ_DB_PORT=${PG_PORT} BUZZ_DB_USER=buzz \
+    BUZZ_DB_PASS=buzz_dev BUZZ_DB_NAME="${DB_NAME}" \
+    BUZZ_DB_DOCKER_CONTAINER="${PROJECT}-postgres-1" \
+    ./scripts/setup-desktop-test-data.sh
+  ok "Community + channels + members seeded"
+fi
 
 # ── Build relay from source (current branch) ─────────────────────────────────
 # The repo pins Rust via rust-toolchain.toml (1.95.0). Outside the hermit env a
@@ -203,6 +210,7 @@ tmux new-session -d -s "${TMUX_SESSION}" "cd '${REPO_ROOT}' && env \
   BUZZ_S3_BUCKET=buzz-media \
   BUZZ_RELAY_PRIVATE_KEY=${RELAY_PRIVATE_KEY} \
   BUZZ_REQUIRE_AUTH_TOKEN=false \
+  BUZZ_AUTO_MIGRATE=${BUZZ_HARNESS_PRESERVE_SCHEMA:-false} \
   BUZZ_RECONCILE_CHANNELS=true \
   './target/${CARGO_TARGET_PROFILE}/buzz-relay' > '${RELAY_LOG}' 2>&1"
 

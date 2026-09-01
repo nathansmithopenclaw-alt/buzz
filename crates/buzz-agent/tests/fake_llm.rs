@@ -80,42 +80,54 @@ async fn spawn_capturing_fake_llm(responses: Vec<Value>) -> (String, Arc<Mutex<V
 async fn spawn_capturing_fake_llm_with_statuses(
     responses: Vec<CannedResponse>,
 ) -> (String, Arc<Mutex<Vec<Value>>>) {
-    spawn_capturing_fake_llm_with_statuses_and_first_response_gate(responses, None).await
+    let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let url = spawn_capturing_fake_llm_core(responses, captures.clone(), None).await;
+    (url, captures)
 }
 
 async fn spawn_capturing_fake_llm_with_first_response_gate(
     responses: Vec<Value>,
     first_response_gate: Option<Arc<Notify>>,
 ) -> (String, Arc<Mutex<Vec<Value>>>) {
-    spawn_capturing_fake_llm_with_statuses_and_first_response_gate(
+    let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let gate = first_response_gate.map(FirstResponseGate::Notify);
+    let url = spawn_capturing_fake_llm_core(
         responses
             .into_iter()
             .map(|body| CannedResponse { status: 200, body })
             .collect(),
-        first_response_gate,
+        captures.clone(),
+        gate,
     )
-    .await
+    .await;
+    (url, captures)
 }
 
-async fn spawn_capturing_fake_llm_with_statuses_and_first_response_gate(
+#[derive(Clone)]
+enum FirstResponseGate {
+    Notify(Arc<Notify>),
+}
+
+async fn spawn_capturing_fake_llm_core(
     responses: Vec<CannedResponse>,
-    first_response_gate: Option<Arc<Notify>>,
-) -> (String, Arc<Mutex<Vec<Value>>>) {
+    captures: Arc<Mutex<Vec<Value>>>,
+    gate: Option<FirstResponseGate>,
+) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
-    let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let captures_clone = captures.clone();
-    let first_response_gate = Arc::new(Mutex::new(first_response_gate));
     tokio::spawn(async move {
+        let mut request_num = 0usize;
         loop {
             let (mut sock, _) = match listener.accept().await {
                 Ok(p) => p,
                 Err(_) => return,
             };
             let queue = queue.clone();
-            let captures = captures_clone.clone();
-            let first_response_gate = first_response_gate.clone();
+            let captures = captures.clone();
+            let gate = gate.clone();
+            request_num += 1;
+            let req_num = request_num;
             tokio::spawn(async move {
                 // Read headers.
                 let mut buf = Vec::new();
@@ -164,15 +176,19 @@ async fn spawn_capturing_fake_llm_with_statuses_and_first_response_gate(
                     captures.lock().await.push(parsed);
                 }
 
+                // Hold the first request's response until the gate opens.
+                if req_num == 1 {
+                    match gate {
+                        Some(FirstResponseGate::Notify(gate)) => gate.notified().await,
+                        None => {}
+                    }
+                }
+
                 // Send canned response.
                 let response = queue.lock().await.pop_front().unwrap_or(CannedResponse {
                     status: 500,
                     body: json!({ "error": "no canned response" }),
                 });
-                let response_gate = first_response_gate.lock().await.take();
-                if let Some(gate) = response_gate {
-                    gate.notified().await;
-                }
                 let body_s = serde_json::to_string(&response.body).unwrap();
                 let reason = if response.status == 200 {
                     "OK"
@@ -191,7 +207,7 @@ async fn spawn_capturing_fake_llm_with_statuses_and_first_response_gate(
             });
         }
     });
-    (url, captures)
+    url
 }
 
 struct Harness {
@@ -826,7 +842,8 @@ async fn steer_folds_into_active_turn_without_cancelling() {
         )
         .await;
 
-    // Learn the run id, then steer into it before the turn finishes.
+    // Learn the run id (advertised before the gated round-1 request), then steer
+    // into the live turn while round 1 is still held.
     let run_id = recv_active_run_id(&mut h).await;
     let steer_text = "STEER-CANARY: also consider the edge case";
     let s_id = h

@@ -1,5 +1,6 @@
 import { setAgentManagedProfiles } from "@/shared/api/tauri";
 import { updateFleetVisibilityEnabled } from "@/features/agents/lib/useFleetVisibilitySettings";
+import { setThreadScopedAcpSessions } from "@/shared/api/tauriWorkspace";
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
 import type { FeatureDefinition } from "@/shared/features";
 import { Switch } from "@/shared/ui/switch";
@@ -38,6 +39,15 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
             void updateFleetVisibilityEnabled(value).catch((error) => {
               toggle(!value);
               console.error("Failed to apply Remote Control setting:", error);
+            });
+          }
+          if (feature.id === "threadScopedAcpSessions") {
+            void setThreadScopedAcpSessions(value).catch((error) => {
+              toggle(!value);
+              console.error(
+                "Failed to apply thread-scoped ACP sessions setting:",
+                error,
+              );
             });
           }
         }}

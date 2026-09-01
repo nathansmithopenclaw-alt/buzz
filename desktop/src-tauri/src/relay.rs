@@ -471,10 +471,11 @@ fn build_profile_event(
     agent_keys: &nostr::Keys,
     display_name: &str,
     avatar_url: Option<&str>,
+    about: Option<&str>,
     prior_tags: &[nostr::Tag],
     auth_tag_json: Option<&str>,
 ) -> Result<nostr::Event, String> {
-    let builder = crate::events::build_profile(Some(display_name), None, avatar_url, None, None)?;
+    let builder = crate::events::build_profile(Some(display_name), None, avatar_url, about, None)?;
 
     sign_managed_agent_profile_event(builder, agent_keys, prior_tags, auth_tag_json)
 }
@@ -556,19 +557,23 @@ fn build_agent_managed_avatar_event(
 /// Sync a managed agent's kind:0 profile event to the relay using NIP-98 auth.
 ///
 /// The agent signs its own profile event and the NIP-98 HTTP-auth event, so no
-/// API token is required.
+/// API token is required. `about` carries the agent's authored public
+/// description (see `managed_agents::record_effective_description`); the
+/// relay treats kind:0
+/// fields as absolute, so passing `None` clears any previously published about.
 pub async fn sync_managed_agent_profile(
     state: &AppState,
     relay_url: &str,
     agent_keys: &nostr::Keys,
     display_name: &str,
     avatar_url: Option<&str>,
+    about: Option<&str>,
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
     // Fail before any network access if the outgoing profile itself violates
     // the secret-egress boundary. The final event is rebuilt after the read so
     // it can retain the prior kind:0 tags.
-    let preview = build_profile_event(agent_keys, display_name, avatar_url, &[], auth_tag)?;
+    let preview = build_profile_event(agent_keys, display_name, avatar_url, about, &[], auth_tag)?;
     crate::egress_guard::assert_no_key_backup_bytes(
         preview.as_json().as_bytes(),
         "agent profile sync",
@@ -581,6 +586,7 @@ pub async fn sync_managed_agent_profile(
         agent_keys,
         display_name,
         avatar_url,
+        about,
         auth_tag,
         existing.as_ref(),
     )
@@ -590,12 +596,14 @@ pub async fn sync_managed_agent_profile(
 /// Publish from a profile snapshot already fetched by the caller. Reconcile
 /// uses this form so its final experiment-guard check remains immediately
 /// adjacent to the write instead of opening another network-sized TOCTOU gap.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_managed_agent_profile_from_snapshot(
     state: &AppState,
     relay_url: &str,
     agent_keys: &nostr::Keys,
     display_name: &str,
     avatar_url: Option<&str>,
+    about: Option<&str>,
     auth_tag: Option<&str>,
     existing: Option<&AgentProfileInfo>,
 ) -> Result<(), String> {
@@ -605,7 +613,14 @@ pub(crate) async fn sync_managed_agent_profile_from_snapshot(
     let prior_tags = existing
         .map(|profile| profile.tags.as_slice())
         .unwrap_or_default();
-    let event = build_profile_event(agent_keys, display_name, avatar_url, prior_tags, auth_tag)?;
+    let event = build_profile_event(
+        agent_keys,
+        display_name,
+        avatar_url,
+        about,
+        prior_tags,
+        auth_tag,
+    )?;
     submit_managed_agent_profile_event(state, relay_url, agent_keys, event, auth_tag).await
 }
 
@@ -708,6 +723,10 @@ pub async fn query_agent_profile(
             .get("picture")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        about: content
+            .get("about")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         metadata: content.as_object().cloned().unwrap_or_default(),
         tags: event.tags.iter().cloned().collect(),
         created_at: event.created_at.as_secs() as i64,
@@ -719,6 +738,7 @@ pub async fn query_agent_profile(
 pub struct AgentProfileInfo {
     pub display_name: Option<String>,
     pub picture: Option<String>,
+    pub about: Option<String>,
     pub metadata: serde_json::Map<String, serde_json::Value>,
     pub tags: Vec<nostr::Tag>,
     pub created_at: i64,
@@ -1135,7 +1155,7 @@ mod tests {
     fn profile_event_with_valid_auth_tag() {
         let agent_keys = nostr::Keys::generate();
         let tag_json = make_valid_auth_tag(&agent_keys);
-        let event = build_profile_event(&agent_keys, "TestBot", None, &[], Some(&tag_json))
+        let event = build_profile_event(&agent_keys, "TestBot", None, None, &[], Some(&tag_json))
             .expect("should succeed with a valid auth tag");
 
         // Exactly one "auth" tag must be present.
@@ -1153,7 +1173,7 @@ mod tests {
     #[test]
     fn profile_event_without_auth_tag() {
         let agent_keys = nostr::Keys::generate();
-        let event = build_profile_event(&agent_keys, "TestBot", None, &[], None)
+        let event = build_profile_event(&agent_keys, "TestBot", None, None, &[], None)
             .expect("should succeed without an auth tag");
 
         // No "auth" tags should be present.
@@ -1186,6 +1206,7 @@ mod tests {
         let existing = AgentProfileInfo {
             display_name: Some("Relay-chosen name".into()),
             picture: Some("https://relay.example/old.png".into()),
+            about: Some("Agent-written bio".into()),
             metadata,
             tags: vec![serde_json::from_str(&make_valid_auth_tag(&agent_keys)).unwrap()],
             created_at: nostr::Timestamp::now().as_secs() as i64,
@@ -1226,7 +1247,7 @@ mod tests {
             nostr::Tag::parse(["client", "buzz"]).unwrap(),
         ];
 
-        let event = build_profile_event(&agent_keys, "TestBot", None, &prior_tags, None)
+        let event = build_profile_event(&agent_keys, "TestBot", None, None, &prior_tags, None)
             .expect("build reconciled profile");
 
         assert_eq!(event.tags.iter().cloned().collect::<Vec<_>>(), prior_tags);
@@ -1248,6 +1269,7 @@ mod tests {
             &agent_keys,
             "TestBot",
             None,
+            None,
             &prior_tags,
             Some(&canonical_json),
         )
@@ -1264,7 +1286,7 @@ mod tests {
         let agent_keys = nostr::Keys::generate();
         // Structurally valid JSON array but with a bogus signature — verification must fail.
         let bad_json = format!(r#"["auth","{}","","{}"]"#, "a".repeat(64), "b".repeat(128));
-        let result = build_profile_event(&agent_keys, "TestBot", None, &[], Some(&bad_json));
+        let result = build_profile_event(&agent_keys, "TestBot", None, None, &[], Some(&bad_json));
         assert!(result.is_err(), "should reject an invalid auth tag");
         assert!(
             result.unwrap_err().contains("verification failed"),

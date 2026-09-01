@@ -5,6 +5,7 @@ use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
 /// state right after creation, before any snapshot apply.
 pub(super) fn sample_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        description: None,
         pubkey: "p".repeat(64),
         name: "agent".into(),
         persona_id: Some("test-persona".into()),
@@ -145,6 +146,7 @@ fn preview_passes_through_unchanged_when_persona_missing() {
 
 pub(super) fn sample_persona() -> AgentDefinition {
     AgentDefinition {
+        description: None,
         id: "test-persona".to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -321,6 +323,7 @@ fn content_matches_nip_ap_vector() {
     const VECTOR: &str = r#"{"display_name":"Test Agent","system_prompt":"You are a test assistant.","avatar_url":"https://example.com/avatar.png","runtime":"goose","model":"claude-opus-4","provider":"anthropic","name_pool":["Alpha","Beta"]}"#;
 
     let content = PersonaEventContent {
+        description: None,
         display_name: "Test Agent".to_string(),
         system_prompt: Some("You are a test assistant.".to_string()),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -374,6 +377,7 @@ fn content_matches_nip_ap_vector() {
     // signed content, so a second implementer following the spec computes
     // the same NIP-01 id.
     let record = AgentDefinition {
+        description: None,
         id: "test-agent".to_string(),
         display_name: "Test Agent".to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -407,6 +411,7 @@ fn content_matches_nip_ap_vector() {
 #[test]
 fn round_trip_minimal_persona() {
     let record = AgentDefinition {
+        description: None,
         id: "minimal".to_string(),
         display_name: "Minimal".to_string(),
         avatar_url: None,
@@ -506,6 +511,7 @@ fn behavioral_defaults_survive_record_round_trip() {
 #[test]
 fn quad_absent_definition_hash_stable_across_activation() {
     let record = AgentDefinition {
+        description: None,
         id: "quad-absent".to_string(),
         display_name: "Test".to_string(),
         avatar_url: None,
@@ -552,6 +558,7 @@ fn quad_absent_definition_hash_stable_across_activation() {
 /// way `persona_from_event` maps fields, without needing a signed event.
 fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDefinition {
     AgentDefinition {
+        description: content.description,
         id: "staged".to_string(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
@@ -580,6 +587,7 @@ fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDef
 #[test]
 fn persona_content_hash_is_deterministic() {
     let content = PersonaEventContent {
+        description: None,
         display_name: "Test".to_string(),
         avatar_url: None,
         system_prompt: Some("Hello".to_string()),
@@ -600,6 +608,7 @@ fn persona_content_hash_is_deterministic() {
 #[test]
 fn persona_content_hash_changes_on_edit() {
     let content1 = PersonaEventContent {
+        description: None,
         display_name: "Test".to_string(),
         avatar_url: None,
         system_prompt: Some("Hello".to_string()),
@@ -616,6 +625,42 @@ fn persona_content_hash_changes_on_edit() {
     assert_ne!(
         persona_content_hash(&content1),
         persona_content_hash(&content2)
+    );
+}
+
+/// `description` is public display metadata, deliberately excluded from
+/// `persona_content_hash`: two contents differing only in description must
+/// hash identically, so a description-only edit never flips the
+/// "restart required" drift badge on linked instances.
+#[test]
+fn description_change_does_not_change_content_hash() {
+    let without = PersonaEventContent {
+        description: None,
+        display_name: "Test".to_string(),
+        avatar_url: None,
+        system_prompt: Some("Hello".to_string()),
+        runtime: None,
+        model: None,
+        provider: None,
+        name_pool: vec![],
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        parallelism: None,
+    };
+    let mut with = without.clone();
+    with.description = Some("A friendly test agent.".to_string());
+    assert_eq!(
+        persona_content_hash(&without),
+        persona_content_hash(&with),
+        "description must not participate in the content hash"
+    );
+
+    let mut edited = with.clone();
+    edited.description = Some("A different description.".to_string());
+    assert_eq!(
+        persona_content_hash(&with),
+        persona_content_hash(&edited),
+        "description-only edits must not change the content hash"
     );
 }
 

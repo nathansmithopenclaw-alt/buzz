@@ -156,6 +156,7 @@ pub async fn apply_workspace(
     repos_dir: Option<String>,
     agent_managed_profiles: Option<bool>,
     fleet_visibility: Option<bool>,
+    thread_scoped_acp_sessions: Option<bool>,
     app: AppHandle,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
@@ -231,8 +232,12 @@ pub async fn apply_workspace(
         // experiment before launch-time restore can spawn any agents. Missing
         // means the stable behavior: desktop remains authoritative.
         state
-            .managed_agent_profile_reconcile_enabled
+            .managed_agent_profile_reconcile_enabled()
             .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
+        state.thread_scoped_acp_sessions_enabled().store(
+            thread_scoped_acp_sessions.unwrap_or(false),
+            Ordering::Release,
+        );
         crate::managed_agents::fleet_visibility::configure_runtime(
             &app,
             &state.fleet_visibility,

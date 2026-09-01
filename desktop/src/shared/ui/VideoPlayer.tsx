@@ -44,7 +44,6 @@ import {
   saveReviewPlaybackPosition,
   setVideoReviewOpen,
 } from "./videoPlayerState";
-
 type VideoReviewReaction = {
   emoji: string;
   emojiUrl?: string;
@@ -56,11 +55,11 @@ type VideoReviewReaction = {
     avatarUrl: string | null;
   }>;
 };
-
 export type VideoReviewComment = {
   id: string;
   author: string;
   avatarUrl?: string | null;
+  isAgent?: boolean;
   body: string;
   createdAt: number;
   time: string;
@@ -68,7 +67,6 @@ export type VideoReviewComment = {
   parentId?: string | null;
   reactions?: VideoReviewReaction[];
 };
-
 export type VideoReviewContext = {
   channelId?: string | null;
   channelName?: string;
@@ -92,7 +90,6 @@ export type VideoReviewContext = {
   rootEventId?: string;
   title?: string;
 };
-
 type VideoPlayerProps = {
   src: string;
   poster?: string;
@@ -109,14 +106,12 @@ type VideoPlayerProps = {
   /** imeta `filename`, used as the save-dialog name. */
   filename?: string;
 };
-
 type TimecodedComment = {
   comment: VideoReviewComment;
   seconds: number | null;
   timecode: string | null;
   text: string;
 };
-
 const QUICK_REACTIONS = ["😂", "😍", "😮", "🙌", "👍", "👎"];
 const DEFAULT_PLAYBACK_SPEED = 1;
 const INLINE_SPEED_CONTROL_MIN_WIDTH = 220;
@@ -1814,6 +1809,9 @@ function VideoReviewDialog({
                                   avatarUrl={item.comment.avatarUrl ?? null}
                                   className="h-4 w-4 shadow-none"
                                   displayName={item.comment.author}
+                                  shape={
+                                    item.comment.isAgent ? "squircle" : "circle"
+                                  }
                                   size="xs"
                                 />
                               </button>
@@ -2144,6 +2142,7 @@ function VideoReviewCommentBody({
           avatarUrl={item.comment.avatarUrl ?? null}
           className="h-6 w-6 shadow-none"
           displayName={item.comment.author}
+          shape={item.comment.isAgent ? "squircle" : "circle"}
           size="xs"
         />
         <p className="truncate text-sm font-semibold text-foreground">

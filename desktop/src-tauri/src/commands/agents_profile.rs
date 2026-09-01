@@ -45,6 +45,11 @@ pub(crate) struct ProfileReconcileData {
     /// backfill to recover the correct avatar from the persona record when the
     /// relay profile has been corrupted.
     pub(crate) persona_id: Option<String>,
+    /// Expected kind:0 `about` — the agent's effective public description
+    /// (owner-authored when present; see
+    /// `managed_agents::record_effective_description`). `None` publishes an
+    /// about-less profile.
+    pub(crate) about: Option<String>,
 }
 
 /// Resolve the avatar to backfill for a legacy agent record (pre-PR-921, no
@@ -101,6 +106,7 @@ pub(crate) fn profile_reconcile_data(
         pubkey: record.pubkey.clone(),
         agent_command: crate::managed_agents::record_agent_command(record, personas),
         persona_id: record.persona_id.clone(),
+        about: crate::managed_agents::record_effective_description(record, personas),
     }
 }
 
@@ -256,7 +262,12 @@ pub(crate) async fn reconcile_agent_profile(
         Some(expected_avatar)
     };
 
-    if !profile_needs_sync(existing.as_ref(), &data.name, expected_avatar.as_deref()) {
+    if !profile_needs_sync(
+        existing.as_ref(),
+        &data.name,
+        expected_avatar.as_deref(),
+        data.about.as_deref(),
+    ) {
         return Ok(ProfileReconcileOutcome::AlreadyCurrent);
     }
 
@@ -273,6 +284,7 @@ pub(crate) async fn reconcile_agent_profile(
         &agent_keys,
         &data.name,
         expected_avatar.as_deref(),
+        data.about.as_deref(),
         data.auth_tag.as_deref(),
         existing.as_ref(),
     )
@@ -280,20 +292,75 @@ pub(crate) async fn reconcile_agent_profile(
     Ok(ProfileReconcileOutcome::Published)
 }
 
+/// Publish a managed agent's complete kind:0 profile and return a best-effort
+/// error for create/import callers to surface without rolling back creation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn publish_agent_profile_with_about(
+    state: &AppState,
+    record_relay_url: &str,
+    agent_keys: &nostr::Keys,
+    display_name: &str,
+    avatar_url: Option<&str>,
+    about: Option<&str>,
+    auth_tag: Option<&str>,
+) -> Option<String> {
+    let relay_url = crate::relay::effective_agent_relay_url(
+        record_relay_url,
+        &relay_ws_url_with_override(state),
+    );
+    crate::relay::sync_managed_agent_profile(
+        state,
+        &relay_url,
+        agent_keys,
+        display_name,
+        avatar_url,
+        about,
+        auth_tag,
+    )
+    .await
+    .err()
+}
+
+pub(crate) async fn publish_persona_profile(
+    state: &AppState,
+    record_relay_url: &str,
+    agent_keys: &nostr::Keys,
+    display_name: &str,
+    avatar_url: Option<&str>,
+    persona: &crate::managed_agents::AgentDefinition,
+    auth_tag: Option<&str>,
+) -> Option<String> {
+    let about = crate::managed_agents::effective_agent_description(persona.description.as_deref());
+    publish_agent_profile_with_about(
+        state,
+        record_relay_url,
+        agent_keys,
+        display_name,
+        avatar_url,
+        about.as_deref(),
+        auth_tag,
+    )
+    .await
+}
+
 /// Decide whether a published profile is missing or stale relative to the
-/// expected name and avatar. A missing profile always needs sync; a present
-/// one is stale when either the display name or picture diverges.
+/// expected name, avatar, and about. A missing profile always needs sync; a
+/// present one is stale when the display name, picture, or about diverges.
+/// For about, `None` and the empty string are treated as equal so an
+/// about-less profile never triggers a pointless republish loop.
 pub(super) fn profile_needs_sync(
     existing: Option<&crate::relay::AgentProfileInfo>,
     expected_name: &str,
     expected_avatar: Option<&str>,
+    expected_about: Option<&str>,
 ) -> bool {
     match existing {
         None => true,
         Some(info) => {
             let name_matches = info.display_name.as_deref() == Some(expected_name);
             let picture_matches = info.picture.as_deref() == expected_avatar;
-            !name_matches || !picture_matches
+            let about_matches = info.about.as_deref().unwrap_or("") == expected_about.unwrap_or("");
+            !name_matches || !picture_matches || !about_matches
         }
     }
 }

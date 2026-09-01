@@ -13,6 +13,8 @@ type AgentIdentityCardProps = {
   dataTestId: string;
   label: string;
   modelLabel?: string | null;
+  /** Description when present; callers may fall back to the model label. */
+  subtitle?: string | null;
   onClick?: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
   statusBadge?: ReactNode;
@@ -26,7 +28,7 @@ export function AgentIdentityCard({
   className,
   dataTestId,
   label,
-  modelLabel,
+  subtitle,
   onClick,
   statusBadge,
 }: AgentIdentityCardProps) {
@@ -59,6 +61,7 @@ export function AgentIdentityCard({
                 className="h-full w-full border-[3px] border-background bg-muted shadow-none"
                 iconClassName="h-8 w-8"
                 label={label}
+                shape="squircle"
               />
             ) : (
               <IdentityInitialsAvatar
@@ -78,9 +81,9 @@ export function AgentIdentityCard({
         <span className="min-w-0 truncate font-semibold text-foreground tracking-normal">
           {label}
         </span>
-        {modelLabel ? (
-          <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
-            {modelLabel}
+        {subtitle ? (
+          <span className="line-clamp-2 min-w-0 text-xs font-normal text-muted-foreground">
+            {subtitle}
           </span>
         ) : null}
         {/* pointer-events-auto: the overlay button above has pointer-events-none

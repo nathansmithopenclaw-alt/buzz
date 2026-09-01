@@ -220,7 +220,11 @@ async fn authenticate_scope(
             )
         })?;
     let url = bridge::nip98_expected_url(public_scheme, &tenant, path);
-    let (pubkey, event_id) = bridge::verify_bridge_auth_with_options(
+    let bridge::VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes: event_id,
+        signed_created_at,
+    } = bridge::verify_bridge_auth_with_options(
         headers,
         "POST",
         &url,
@@ -238,6 +242,7 @@ async fn authenticate_scope(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        signed_created_at,
     )
     .await?;
     let accessible = state
