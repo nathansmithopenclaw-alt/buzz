@@ -16,11 +16,14 @@ The current capability vocabulary is:
 - `global_config`
 - `env_vars`
 - `teams`
+- `memory_promotion`
 
 `agent_config` covers updates to an existing personal agent. `global_config`
-covers a narrow patch to global agent defaults. Neither capability permits key
-export, deletion, lifecycle controls, relay configuration, grant mutation, or
-creation of a new standing grant.
+covers a narrow patch to global agent defaults. `memory_promotion` covers
+casting delegated review verdicts on memory promotion candidates, limited to
+the claim types the grant names. No capability permits key export, deletion,
+lifecycle controls, relay configuration, grant mutation, promotion-policy
+writes, or creation of a new standing grant.
 
 ## Owner-signed grant
 
@@ -39,7 +42,9 @@ signed payload must exactly equal the stored payload.
   grantee pubkey. Every value is an independently signed singular grant whose
   signed `granteePubkey` MUST equal its object key.
 
-Changing one keyed grant signs only that grantee's new proof. Removing one
+Changing one keyed grant signs only that grantee's new proof — except
+`humanFallbackAllowlist`, whose rotation is a set operation (see v3 payload).
+Removing one
 key revokes only that grantee; other proof bytes stay unchanged. Clearing the
 whole delegation surface removes both fields. Capabilities are checked
 independently; granting `agent_config` does not grant `global_config`, and vice
@@ -65,14 +70,27 @@ A grant with no `version` field is v1: one grantee and boolean bits.
 
 v1 grants keep verifying. Desktop does not auto-upgrade them on read. New
 keyed entries deliberately reuse this singular payload, so multi-grantee
-storage does not require a new signature format.
+storage does not require a new signature format. Version and slot are now
+coupled, not orthogonal:
+
+| Slot | Valid payloads |
+| --- | --- |
+| legacy `agent_management_delegation` | v1 singular (no `version` field), v2 aggregate (`version: 2`, compatibility) |
+| keyed `agent_management_delegations` | v1-shape singular (no `version` field), v3 singular (`version: 3`) |
+
+A v2 aggregate is defined only in the legacy slot; a v3 proof is
+defined only as a keyed singular. The next owner save re-signs as the current
+build's version: v2-era builds write keyed entries as v1-shape and re-sign
+the legacy slot as v2; v3 builds write keyed entries as `version: 3`.
 
 ### Unknown versions
 
-A grant whose `version` field is present and not `2` fails validation loud. It
-is not treated as "no grant" and must not fall back to owner-review. A v1 grant
-has no `version` field. Desktop refuses to load a `global-agent-config.json`
-that cannot deserialize for this reason; restoring a pre-v2 copy of that file
+A grant whose `version` field is present and not `2` or `3` fails validation
+loud. It is not treated as "no grant" and must not fall back to owner-review. A
+v1 grant has no `version` field. A known version in the wrong shape fails the
+same way: a `version: 3` proof in the aggregate shape is an unknown-shape
+grant (see v3 payload). Desktop refuses to load a `global-agent-config.json` that
+cannot deserialize for this reason; restoring a pre-v2 copy of that file
 is the rollback path.
 
 ### v2 aggregate payload (compatibility)
@@ -155,6 +173,114 @@ is not sufficient: `scope: "set"` must still contain this source, and
 `scope: "all"` still requires origin classification. Reserved Buzz identity
 and control variables are rejected before a side effect. Public receipts
 include key names and value hashes, never raw values.
+
+### v3 payload
+
+v3 adds the `memory_promotion` capability and the fail-closed state a grant
+carrying it must establish. v3 is defined only as a keyed singular proof: it
+reuses the keyed v1 singular shape — one `granteePubkey` that MUST equal its
+storage key, one `auditChannelId`, boolean bits for the five capabilities
+Desktop consumes on the request path — plus `version: 3`, the
+`memory_promotion` capability, and `humanFallbackAllowlist`. Canonicalization
+and the audit channel are unchanged.
+
+```json
+{
+  "version": 3,
+  "granteePubkey": "<lowercase 32-byte hex pubkey>",
+  "auditChannelId": "<channel UUID>",
+  "humanFallbackAllowlist": ["<hex>"],
+  "capabilities": {
+    "agent_config": false,
+    "global_config": false,
+    "env_vars": false,
+    "teams": false,
+    "agent_creation": false,
+    "memory_promotion": { "claimTypes": ["fact_proposal", "verified_working"] }
+  }
+}
+```
+
+The storage key is the grantee, so `memory_promotion` carries no subject of
+its own. It is either `false` or absent (not granted) or an object whose
+`claimTypes` grants this one grantee; a boolean `true` fails validation loud,
+because granting without naming claim types is not a shape its author can have
+meant. The five boolean capabilities keep their keyed v1 meaning and matching
+rules exactly — the same request-path checks, including the `env_vars`
+request-shape check, and the same Desktop-side consumption.
+
+`memory_promotion` authorizes its grantee to cast delegated review verdicts —
+approve, reject, or escalate — on memory promotion candidates whose claim type
+is listed in `claimTypes`. It conveys permission to act under the governing
+memory policy; it does not convey authority over what becomes canonical truth.
+Unlike the five boolean capabilities, which Desktop itself consumes on the
+request path, `memory_promotion` is checked by the consuming promotion
+engine: the engine MUST re-validate the live owner-signed grant in its own
+process at use time, so revocation takes effect at the engine's next check
+rather than at the next client save. A grant evaluated only in the client is
+a suggestion.
+
+`claimTypes` is required whenever `memory_promotion` is granted, and MUST be a
+non-empty, deduplicated, sorted subset of the delegable claim type vocabulary:
+
+- `fact_proposal`
+- `verified_working`
+
+Claim types outside this vocabulary are not delegable: corrections and
+supersessions of promoted facts, restricted-realm facts, identity-mapping
+changes, and anything a workspace policy marks always-human are reviewed by a
+human regardless of any grant. A grant naming a claim type outside the
+vocabulary fails validation loud rather than narrowing to the known subset —
+the same lesson as the unknown-version rule, because a reader that silently
+ignored an unrecognized claim type would widen the grant to claim types its
+author never saw.
+
+`humanFallbackAllowlist` is required whenever `memory_promotion` is granted,
+and MUST NOT be carried by a proof that does not grant it. It names the
+pubkeys an escalated review falls back to when the delegated reviewer cannot
+verify, and MUST be a non-empty, deduplicated, sorted list of canonical
+lowercase 32-byte hex pubkeys. It lives in the signed grant because it cannot
+be inferred: the absence of an agent attestation proves nothing about who is a
+person, and a fallback set that cannot be established is a delegation whose
+failure mode is an unowned review queue.
+
+The allowlist is owner-wide, not per-grantee. Each keyed proof carries its own
+copy because every keyed proof is independently signed and must validate
+standalone inside the promotion engine's process; the copy is not a per-grantee
+value. Every keyed proof that grants `memory_promotion` MUST carry the same
+allowlist, byte-for-byte in canonical serialization. Grant persist fails
+closed when the allowlist cannot be established — the delegation is not
+signed — when a newly added promotion-granting proof would disagree with an
+existing one, and when an allowlist rotation would not produce a fully
+agreeing set. Rotating the allowlist with two or more promotion-granting
+grantees cannot be done proof-by-proof: the first re-signed proof would
+disagree with the rest and be refused. An owner save that changes the
+allowlist therefore re-signs ALL `memory_promotion`-granting keyed proofs as
+one atomic set write, and the agreement check is evaluated on the resulting
+set, not proof-by-proof. Disagreeing proofs found at validation time (for
+example, from a restored backup or a partial write) fail closed to human
+review: no promotion is authorized by
+any of them. There is no owner-level allowlist slot; byte-for-byte agreement
+across independently signed proofs is what produces one owner-wide value
+without adding a second write path.
+
+No capability, `memory_promotion` included, permits writing the memory
+promotion policy. Policy writes are the rules a delegated reviewer would
+otherwise be judged by: a grantee that could edit its own review rules could
+widen its grant's effect without ever touching the grant. Promotion-policy
+changes remain owner-reviewed regardless of any standing grant.
+
+v3 exists only in this keyed singular shape. A proof that carries
+`version: 3` in the v2 aggregate shape — per-capability subjects and no
+`granteePubkey` — is an unknown-shape grant and fails validation loud, the
+same as an unknown version: the version number is known, but the signed
+document is not the grant this specification defines, and silently re-reading
+it as keyed would authorize something its author did not sign. The aggregate
+shape remains valid only for v2, which stays compatibility-only in the legacy
+slot.
+
+A v2 Desktop cannot deserialize v3. Do not write v3 until this build is
+installed on the machine that owns `global-agent-config.json`.
 
 ## Request transport and identity
 

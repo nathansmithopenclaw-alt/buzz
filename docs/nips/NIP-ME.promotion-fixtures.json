@@ -1,0 +1,231 @@
+{
+  "$comment": "NIP-ME promotion-validator conformance fixtures — shared oracle for the engine-side typed promotion validator, in the NIP-MP.fixtures.json tradition: reject cases name the rule identifiers they must fire (see NIP-ME 'Validator rule identifiers') so an implementation cannot pass by rejecting for an unrelated reason. Unlike NIP-MP (unsigned relay-ingest templates), these cases evaluate a promotion DECISION: the validator receives the admitted kind:40200 proposal, the reviewer's kind:40203 verdict with its proof bundle, the promotion-granting NIP-SD v3 keyed proofs, and engine state (generation, admission time, frozen policy snapshot), and MUST produce exactly the `expect` outcome. Structure: `positive_control` is the one fully valid tuple; every other case is a stated mutation of it — most are a single field set, and where a case sets two fields the note says why. Apply a mutation by deep-copying the control (minus `name`/`expect`/`receipt_asserts`/`note`/`reject_rules`/`mutations`) and setting each `mutations[i].path` to `mutations[i].value`; dotted paths index arrays as `grants[0]`, and a value of the form `<actors.NAME>` resolves to that actor's pubkey from `actors`. `expect` values: reject (loud error naming one of `reject_rules`), no_promotion_authorized (fail-closed to human review across the whole grant set — authorizes nothing, not a single-event error), remains_review (no valid proof exists; the item never left review — not an error), promote (governed promotion event minted; receipt labels asserted). Spec: docs/nips/NIP-ME.md (Delegated review verdicts, Validator rule identifiers, Promotion policy and receipts); grant shapes: docs/nips/NIP-SD.md (v3 payload).",
+  "version": 2,
+  "actors": {
+    "proposer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reviewer": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "other_reviewer": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "fallback_human_1": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "fallback_human_2": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "second_grantee": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "positive_control": {
+    "name": "promote_valid_delegated_verdict",
+    "expect": "promote",
+    "receipt_asserts": {
+      "authority": "delegated_agent",
+      "verification_class": "reproduced_by_promoter",
+      "reproducible_by": "privileged"
+    },
+    "proposal": {
+      "kind": 40200,
+      "envelope_type": "fact_proposal",
+      "claim_type": "fact_proposal",
+      "slot": "deploy/edge-runtime-version",
+      "statement": "edge runtime pins 4.2.1 after the 2026-09-01 upgrade",
+      "proposer": "<actors.proposer>",
+      "payload_hash": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "admitted_at": "2026-09-01T12:00:00Z",
+      "policy_id": "pol-2026-09-01-a1"
+    },
+    "verdict": {
+      "kind": 40203,
+      "action": "approve",
+      "actor": "<actors.reviewer>",
+      "proposal_id": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "proof_bundle": {
+        "bound_verifier": "<actors.reviewer>",
+        "registered_probe": "edge-runtime-version",
+        "probe_result": "match",
+        "generation_at_evaluation": 4102,
+        "canary": "pass",
+        "evidence_signed_by": "<actors.reviewer>",
+        "evidence_signed_at": "2026-09-01T12:05:00Z",
+        "proposal_payload_hash": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+      }
+    },
+    "grants": [
+      {
+        "version": 3,
+        "granteePubkey": "<actors.reviewer>",
+        "auditChannelId": "1b2c3d4e-0000-4000-8000-00000000a001",
+        "humanFallbackAllowlist": ["<actors.fallback_human_1>", "<actors.fallback_human_2>"],
+        "capabilities": {
+          "agent_config": false,
+          "global_config": false,
+          "env_vars": false,
+          "teams": false,
+          "agent_creation": false,
+          "memory_promotion": { "claimTypes": ["fact_proposal", "verified_working"] }
+        }
+      },
+      {
+        "version": 3,
+        "granteePubkey": "<actors.second_grantee>",
+        "auditChannelId": "1b2c3d4e-0000-4000-8000-00000000a001",
+        "humanFallbackAllowlist": ["<actors.fallback_human_1>", "<actors.fallback_human_2>"],
+        "capabilities": {
+          "agent_config": false,
+          "global_config": false,
+          "env_vars": false,
+          "teams": false,
+          "agent_creation": false,
+          "memory_promotion": { "claimTypes": ["fact_proposal", "verified_working"] }
+        }
+      }
+    ],
+    "engine_state": {
+      "generation": 4102,
+      "admission_time": "2026-09-01T12:00:00Z",
+      "policy_snapshot": {
+        "policy_id": "pol-2026-09-01-a1",
+        "claim_types": ["fact_proposal", "verified_working"],
+        "human_fallback_allowlist": ["<actors.fallback_human_1>", "<actors.fallback_human_2>"],
+        "routing": {
+          "fact_proposal": {
+            "destination": "delegated",
+            "resolved_reviewers": ["<actors.reviewer>"]
+          }
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "promote_valid_delegated_verdict",
+      "expect": "promote",
+      "mutations": [],
+      "note": "Positive control, applied verbatim: current generation, promoter != proposer, reviewer-owned post-admission evidence bound to the 40200 payload hash, valid v3 keyed grant, allowlist agreeing across both granting proofs. Receipt must carry authority=delegated_agent, verification_class=reproduced_by_promoter, reproducible_by=privileged."
+    },
+    {
+      "name": "reject_copied_proof",
+      "expect": "reject",
+      "reject_rules": ["proof-producer-bound"],
+      "mutations": [
+        { "path": "verdict.proof_bundle.evidence_signed_by", "value": "<actors.proposer>" }
+      ],
+      "note": "Evidence produced and signed by the proposer, pasted into the verdict. Producer-bound means the reviewer signs its own evidence after admission; proposer-supplied evidence is the laundering path."
+    },
+    {
+      "name": "reject_proof_predates_admission",
+      "expect": "reject",
+      "reject_rules": ["proof-after-admission"],
+      "mutations": [
+        { "path": "verdict.proof_bundle.evidence_signed_at", "value": "2026-09-01T11:59:00Z" }
+      ],
+      "note": "Valid-looking reviewer evidence whose signature predates the proposal's admission time — it cannot have been produced for this item."
+    },
+    {
+      "name": "reject_unbound_verifier",
+      "expect": "reject",
+      "reject_rules": ["bound-verifier-equals-promoter"],
+      "mutations": [
+        { "path": "verdict.proof_bundle.bound_verifier", "value": "<actors.other_reviewer>" }
+      ],
+      "note": "The proof bundle's bound_verifier is another_reviewer while the verdict is signed by reviewer. The bundle must bind the promoting key itself."
+    },
+    {
+      "name": "reject_stale_generation",
+      "expect": "reject",
+      "reject_rules": ["generation-binding"],
+      "mutations": [
+        { "path": "engine_state.generation", "value": 4103 }
+      ],
+      "note": "The approve was evaluated at generation 4102; the engine has since advanced to 4103 within the claim's dependency set. Reject to re-verification at head — never queue, never warn."
+    },
+    {
+      "name": "reject_promoter_equals_proposer",
+      "expect": "reject",
+      "reject_rules": ["promoter-not-proposer"],
+      "mutations": [
+        { "path": "verdict.actor", "value": "<actors.proposer>" },
+        { "path": "verdict.proof_bundle.bound_verifier", "value": "<actors.proposer>" }
+      ],
+      "note": "Two fields move as one identity swap (actor and bound_verifier both become the proposer) so that only promoter-not-proposer can fire: a validator that rejects this via bound-verifier-equals-promoter instead has not implemented the protocol MUST."
+    },
+    {
+      "name": "reject_route_to_nobody",
+      "expect": "reject",
+      "reject_rules": ["admission-routing-resolves"],
+      "mutations": [
+        { "path": "engine_state.policy_snapshot.routing.fact_proposal.resolved_reviewers", "value": [] }
+      ],
+      "note": "Policy routes review but the resolved reviewer set is empty. Loud rejection at admission, never a void item nobody owns."
+    },
+    {
+      "name": "reject_v3_aggregate_shape",
+      "expect": "reject",
+      "reject_rules": ["unknown-shape-loud"],
+      "mutations": [
+        {
+          "path": "grants[0]",
+          "value": {
+            "version": 3,
+            "auditChannelId": "1b2c3d4e-0000-4000-8000-00000000a001",
+            "capabilities": {
+              "agent_config": { "scope": ["all"] },
+              "global_config": false,
+              "env_vars": false,
+              "teams": false,
+              "agent_creation": false,
+              "memory_promotion": { "claimTypes": ["fact_proposal", "verified_working"] }
+            }
+          }
+        }
+      ],
+      "note": "A proof carrying version:3 in the aggregate shape (per-capability subjects, no granteePubkey). Known version, unknown document — v3 exists only in the keyed singular shape (NIP-SD), so this fails validation loud, same as an unknown version."
+    },
+    {
+      "name": "reject_memory_promotion_boolean_true",
+      "expect": "reject",
+      "reject_rules": ["memory-promotion-not-boolean-true"],
+      "mutations": [
+        { "path": "grants[0].capabilities.memory_promotion", "value": true }
+      ],
+      "note": "memory_promotion granted as bare true. Granting without naming claim types is not a shape its author can have meant; fail loud, never interpret as unrestricted."
+    },
+    {
+      "name": "reject_claim_type_outside_vocabulary",
+      "expect": "reject",
+      "reject_rules": ["claim-types-in-vocabulary"],
+      "mutations": [
+        { "path": "grants[0].capabilities.memory_promotion.claimTypes", "value": ["fact_proposal", "identity_mapping"] }
+      ],
+      "note": "claimTypes includes identity_mapping — outside the delegable vocabulary. Fail loud rather than narrowing to the known subset: a reader that silently ignored an unrecognized claim type would widen the grant."
+    },
+    {
+      "name": "reject_empty_claim_types",
+      "expect": "reject",
+      "reject_rules": ["claim-types-non-empty"],
+      "mutations": [
+        { "path": "grants[0].capabilities.memory_promotion.claimTypes", "value": [] }
+      ],
+      "note": "claimTypes is []. An empty grant is an authoring error, not a silent none."
+    },
+    {
+      "name": "reject_allowlist_on_non_granting_proof",
+      "expect": "reject",
+      "reject_rules": ["allowlist-only-with-grant"],
+      "mutations": [
+        { "path": "grants[0].capabilities.memory_promotion", "value": false }
+      ],
+      "note": "humanFallbackAllowlist retained by a keyed proof whose memory_promotion is now false. The field exists only on granting proofs; this needs an explicit deny check, not serde defaults."
+    },
+    {
+      "name": "no_promotion_disagreeing_allowlists",
+      "expect": "no_promotion_authorized",
+      "mutations": [
+        { "path": "grants[1].humanFallbackAllowlist", "value": ["<actors.fallback_human_1>"] }
+      ],
+      "note": "Two keyed proofs both granting memory_promotion with differing humanFallbackAllowlist values (restored-backup / partial-write shape). Fail closed to human review: no promotion is authorized by any of them. Not a rejection — carries no rule identifier."
+    },
+    {
+      "name": "remains_review_no_probe",
+      "expect": "remains_review",
+      "mutations": [
+        { "path": "verdict.proof_bundle", "value": null }
+      ],
+      "note": "fact_proposal with no registered probe, so no valid proof exists. The item never leaves review — structural default, not an error and not an escalation requirement."
+    }
+  ]
+}
