@@ -78,7 +78,7 @@ coupled, not orthogonal:
 | legacy `agent_management_delegation` | v1 singular (no `version` field), v2 aggregate (`version: 2`, compatibility) |
 | keyed `agent_management_delegations` | v1-shape singular (no `version` field), v3 singular (`version: 3`) |
 
-A v2 aggregate is defined only in the legacy slot; a versioned proof is
+A v2 aggregate is defined only in the legacy slot; a v3 proof is
 defined only as a keyed singular. The next owner save re-signs as the current
 build's version: v2-era builds write keyed entries as v1-shape and re-sign
 the legacy slot as v2; v3 builds write keyed entries as `version: 3`.
