@@ -42,7 +42,9 @@ signed payload must exactly equal the stored payload.
   grantee pubkey. Every value is an independently signed singular grant whose
   signed `granteePubkey` MUST equal its object key.
 
-Changing one keyed grant signs only that grantee's new proof. Removing one
+Changing one keyed grant signs only that grantee's new proof — except
+`humanFallbackAllowlist`, whose rotation is a set operation (see v3 payload).
+Removing one
 key revokes only that grantee; other proof bytes stay unchanged. Clearing the
 whole delegation surface removes both fields. Capabilities are checked
 independently; granting `agent_config` does not grant `global_config`, and vice
@@ -68,10 +70,18 @@ A grant with no `version` field is v1: one grantee and boolean bits.
 
 v1 grants keep verifying. Desktop does not auto-upgrade them on read. New
 keyed entries deliberately reuse this singular payload, so multi-grantee
-storage does not require a new signature format. Storage slot and payload
-version are orthogonal: the next owner save re-signs as the current version —
-v2 on builds that predate the `memory_promotion` capability, v3 on builds
-that ship it.
+storage does not require a new signature format. Version and slot are now
+coupled, not orthogonal:
+
+| Slot | Valid payloads |
+| --- | --- |
+| legacy `agent_management_delegation` | v1 singular (no `version` field), v2 aggregate (`version: 2`, compatibility) |
+| keyed `agent_management_delegations` | v1-shape singular (no `version` field), v3 singular (`version: 3`) |
+
+A v2 aggregate is defined only in the legacy slot; a versioned proof is
+defined only as a keyed singular. The next owner save re-signs as the current
+build's version: v2-era builds write keyed entries as v1-shape and re-sign
+the legacy slot as v2; v3 builds write keyed entries as `version: 3`.
 
 ### Unknown versions
 
@@ -240,9 +250,16 @@ standalone inside the promotion engine's process; the copy is not a per-grantee
 value. Every keyed proof that grants `memory_promotion` MUST carry the same
 allowlist, byte-for-byte in canonical serialization. Grant persist fails
 closed when the allowlist cannot be established — the delegation is not
-signed — and when a new proof would disagree with an existing keyed proof's
-allowlist. Disagreeing proofs found at validation time (for example, from a
-restored backup) fail closed to human review: no promotion is authorized by
+signed — when a newly added promotion-granting proof would disagree with an
+existing one, and when an allowlist rotation would not produce a fully
+agreeing set. Rotating the allowlist with two or more promotion-granting
+grantees cannot be done proof-by-proof: the first re-signed proof would
+disagree with the rest and be refused. An owner save that changes the
+allowlist therefore re-signs ALL `memory_promotion`-granting keyed proofs as
+one atomic set write, and the agreement check is evaluated on the resulting
+set, not proof-by-proof. Disagreeing proofs found at validation time (for
+example, from a restored backup or a partial write) fail closed to human
+review: no promotion is authorized by
 any of them. There is no owner-level allowlist slot; byte-for-byte agreement
 across independently signed proofs is what produces one owner-wide value
 without adding a second write path.
