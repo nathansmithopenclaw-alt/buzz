@@ -1,9 +1,13 @@
 import * as React from "react";
 
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
+import { useRelayMembersQuery } from "@/features/community-members/hooks";
+import { prepareAssigneeDirectoryCandidates } from "@/features/dispatch/assigneeCandidates";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import {
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
+  useUsersBatchQuery,
   useUserSearchFetchMoreOnScroll,
 } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -77,7 +81,23 @@ export function AssigneePickerDialog({
   const [searchQuery, setSearchQuery] = React.useState("");
   const deferredSearchQuery = React.useDeferredValue(searchQuery.trim());
   const isArchivedIdentity = useIsArchivedPredicate();
+  const knownAgentPubkeys = useKnownAgentPubkeys();
+  const relayMembersQuery = useRelayMembersQuery(open);
   const normalizedAssignee = assignee ? normalizePubkey(assignee) : null;
+  const preferredPubkeys = React.useMemo(() => {
+    const pubkeys = new Set(knownAgentPubkeys);
+    for (const member of relayMembersQuery.data ?? []) {
+      pubkeys.add(normalizePubkey(member.pubkey));
+    }
+    return pubkeys;
+  }, [knownAgentPubkeys, relayMembersQuery.data]);
+  const preferredPubkeyList = React.useMemo(
+    () => [...preferredPubkeys],
+    [preferredPubkeys],
+  );
+  const preferredProfilesQuery = useUsersBatchQuery(preferredPubkeyList, {
+    enabled: open,
+  });
 
   React.useEffect(() => {
     if (!open) setSearchQuery("");
@@ -101,11 +121,28 @@ export function AssigneePickerDialog({
       if (pubkey === normalizedAssignee || isArchivedIdentity(pubkey)) continue;
       if (!byPubkey.has(pubkey)) byPubkey.set(pubkey, { ...user, pubkey });
     }
+    for (const pubkey of preferredPubkeyList) {
+      if (
+        byPubkey.has(pubkey) ||
+        !preferredProfilesQuery.data?.profiles[pubkey]
+      ) {
+        continue;
+      }
+      byPubkey.set(
+        pubkey,
+        candidateFromProfiles(pubkey, preferredProfilesQuery.data.profiles),
+      );
+    }
 
+    const prepared = prepareAssigneeDirectoryCandidates({
+      candidates: [...byPubkey.values()],
+      preferredPubkeys,
+    });
     const ranked = rankUserCandidatesBySearch({
       allowEmptyQuery: true,
-      candidates: [...byPubkey.values()],
+      candidates: prepared,
       getLabel: formatUserSearchCandidateName,
+      getPriority: (user) => (preferredPubkeys.has(user.pubkey) ? 0 : 1),
       limit: Math.max(ASSIGNEE_RESULT_LIMIT, byPubkey.size),
       query: deferredSearchQuery,
     });
@@ -116,7 +153,12 @@ export function AssigneePickerDialog({
     // all is unreachable by name by definition. Offering the parsed key as its
     // own row keeps the capability the raw pubkey field used to provide.
     const pasted = parsePubkeyInput(deferredSearchQuery);
-    if (pasted && pasted !== normalizedAssignee && !byPubkey.has(pasted)) {
+    if (
+      pasted &&
+      pasted !== normalizedAssignee &&
+      !isArchivedIdentity(pasted) &&
+      !prepared.some((user) => user.pubkey === pasted)
+    ) {
       ranked.unshift(candidateFromProfiles(pasted, profiles));
     }
 
@@ -126,6 +168,9 @@ export function AssigneePickerDialog({
     directoryResults,
     isArchivedIdentity,
     normalizedAssignee,
+    preferredPubkeys,
+    preferredProfilesQuery.data,
+    preferredPubkeyList,
     profiles,
   ]);
 

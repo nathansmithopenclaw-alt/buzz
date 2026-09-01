@@ -132,6 +132,23 @@ test("rankUserCandidatesBySearch applies score, label, and stable order sorting"
   );
 });
 
+test("rankUserCandidatesBySearch applies caller priority within equal search relevance", () => {
+  const stale = makeUser({ displayName: "Honey", pubkey: "a".repeat(64) });
+  const live = makeUser({ displayName: "Honey", pubkey: "b".repeat(64) });
+
+  assert.deepEqual(
+    rankUserCandidatesBySearch({
+      allowEmptyQuery: true,
+      candidates: [stale, live],
+      getLabel: (user) => user.displayName ?? user.pubkey,
+      getPriority: (user) => (user.pubkey === live.pubkey ? 0 : 1),
+      limit: 2,
+      query: "",
+    }).map((user) => user.pubkey),
+    [live.pubkey, stale.pubkey],
+  );
+});
+
 test("getKeyboardSearchSelection ignores stale ranked results", () => {
   const alice = makeUser({ displayName: "Alice", pubkey: "1000" });
   const charlie = makeUser({ displayName: "Charlie", pubkey: "3000" });
