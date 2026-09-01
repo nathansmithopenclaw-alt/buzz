@@ -92,6 +92,8 @@ pub fn apply_persona_behavior(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatePersonaRequest {
+    #[serde(default)]
+    pub id: Option<String>,
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub system_prompt: String,
@@ -308,6 +310,7 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             env_vars: BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),

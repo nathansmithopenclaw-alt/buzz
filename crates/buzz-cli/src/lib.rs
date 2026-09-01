@@ -221,6 +221,9 @@ enum Cmd {
     /// Publish and edit long-form NIP-23 notes — team knowledge base
     #[command(subcommand)]
     Notes(NotesCmd),
+    /// Personal briefing reports (NIP-BR)
+    #[command(subcommand)]
+    Briefs(BriefsCmd),
     /// Announce and discover git repositories (NIP-34)
     #[command(subcommand)]
     Repos(ReposCmd),
@@ -245,6 +248,9 @@ enum Cmd {
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
     Mem(MemCmd),
+    /// Shared workspace memory reads with Truth Receipts
+    #[command(subcommand)]
+    Memory(MemoryCmd),
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
@@ -1785,6 +1791,117 @@ pub enum NotesCmd {
 }
 
 #[derive(Subcommand)]
+pub enum BriefsCmd {
+    /// List published briefing reports recency-first
+    List {
+        /// Maximum number of reports to return
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Get one report by event id or run id
+    Get {
+        /// Report event id (64-char hex)
+        #[arg(long, required_unless_present = "run", conflicts_with = "run")]
+        id: Option<String>,
+        /// Report run UUID (`d` tag)
+        #[arg(long, required_unless_present = "id", conflicts_with = "id")]
+        run: Option<String>,
+    },
+    /// Publish an immutable briefing report
+    Publish {
+        /// Markdown body; use '-' to read from stdin
+        #[arg(long)]
+        markdown: String,
+        /// Human title
+        #[arg(long)]
+        title: Option<String>,
+        /// Structured status JSON object
+        #[arg(long)]
+        status_json: Option<String>,
+        /// Owner pubkey this report is for (defaults to signer)
+        #[arg(long)]
+        owner: Option<String>,
+        /// Period start (unix seconds)
+        #[arg(long)]
+        since: Option<u64>,
+        /// Period end (unix seconds)
+        #[arg(long)]
+        until: Option<u64>,
+        /// Included channel UUID (repeatable)
+        #[arg(long = "channel")]
+        channels: Vec<String>,
+        /// Included DM UUID (repeatable)
+        #[arg(long = "dm")]
+        dms: Vec<String>,
+    },
+    /// Read or write the live include-set and local schedule
+    #[command(subcommand)]
+    Config(BriefsConfigCmd),
+    /// Reporter watermarks
+    #[command(subcommand)]
+    Watermarks(BriefsWatermarksCmd),
+}
+
+#[derive(Subcommand)]
+pub enum BriefsConfigCmd {
+    /// Get a live briefing config
+    Get {
+        /// Owner pubkey whose config to read (defaults to the signer).
+        /// The reporter uses this to load the include-set.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Create or replace the caller's live briefing config
+    Set {
+        /// Local hour (0–23)
+        #[arg(long)]
+        hour: Option<u8>,
+        /// Local minute (0–59)
+        #[arg(long)]
+        minute: Option<u8>,
+        /// IANA timezone or UTC
+        #[arg(long)]
+        timezone: Option<String>,
+        /// Automatically include newly joined member conversations
+        #[arg(long)]
+        auto_include: Option<bool>,
+        /// Reporter pubkey; empty string clears
+        #[arg(long)]
+        reporter: Option<String>,
+        /// Included channel UUID (repeatable; replaces the channel list when any are passed)
+        #[arg(long = "channel")]
+        channels: Vec<String>,
+        /// Included DM UUID (repeatable; replaces the DM list when any are passed)
+        #[arg(long = "dm")]
+        dms: Vec<String>,
+        /// Explicit opt-out UUID (repeatable)
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BriefsWatermarksCmd {
+    /// List watermarks authored by the caller
+    List,
+    /// Set a per-conversation watermark
+    Set {
+        /// Conversation UUID
+        #[arg(long)]
+        channel: String,
+        /// Last processed event id
+        #[arg(long)]
+        last_event: String,
+        /// Last processed created_at
+        #[arg(long)]
+        last_created_at: u64,
+        /// Owner pubkey to p-tag
+        #[arg(long)]
+        owner: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ReposCmd {
     /// Announce a git repository (NIP-34)
     Create {
@@ -1923,14 +2040,15 @@ impl ProjectVisibility {
 pub enum ProjectsCmd {
     /// Create a new multi-repo project (NIP-MP kind:30621)
     ///
-    /// Requires at least one --repo. Fails with Conflict if the project already exists.
+    /// With no `--repo`, creates a default repository bound to `--channel`.
+    /// Fails with Conflict if the project already exists.
     Create {
         /// Project identifier (slug), up to 1024 bytes
         slug: String,
         /// Member repository coordinate: bare Buzz repo id (e.g. `buzz`) or full
         /// `30617:<owner-hex>:<repo-d>` for cross-owner or colon-bearing repo ids.
-        /// At least one --repo is required.
-        #[arg(long = "repo", required = true)]
+        /// Omit to create a default repository named after the slug (requires `--channel`).
+        #[arg(long = "repo")]
         repo: Vec<String>,
         /// Display name (≤256 bytes)
         #[arg(long)]
@@ -1970,6 +2088,28 @@ pub enum ProjectsCmd {
         /// Member repository coordinate (bare id or full `30617:<owner-hex>:<repo-d>`)
         #[arg(long = "repo", required = true)]
         repo: Vec<String>,
+    },
+    /// Draft a project-linked channel for owner review in Buzz Desktop
+    #[command(name = "add-channel")]
+    AddChannel {
+        /// Project home channel UUID from the current ACP [Context]
+        #[arg(long)]
+        home_channel: String,
+        /// New channel name
+        #[arg(long)]
+        name: String,
+        /// Optional channel description
+        #[arg(long)]
+        description: Option<String>,
+        /// Channel visibility
+        #[arg(long, value_enum, default_value = "open")]
+        visibility: ChannelVisibility,
+        /// Optional temporary-channel lifetime in seconds
+        #[arg(long)]
+        ttl: Option<u64>,
+        /// Optional Desktop channel-template name
+        #[arg(long)]
+        template: Option<String>,
     },
     /// Remove one or more member repositories from a project
     #[command(name = "remove-repo")]
@@ -2271,12 +2411,18 @@ pub enum PrCmd {
 pub enum IssuesCmd {
     /// Create a git issue (NIP-34 kind:1621)
     Create {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner pubkey (64-char hex). Optional when `--channel` (or
+        /// `BUZZ_GIT_ORIGIN_CHANNEL_ID`) names a project home.
         #[arg(long)]
-        repo_owner: String,
-        /// Repo identifier (d-tag)
+        repo_owner: Option<String>,
+        /// Repo identifier (d-tag). Optional when `--channel` (or
+        /// `BUZZ_GIT_ORIGIN_CHANNEL_ID`) names a project home.
         #[arg(long)]
-        repo_id: String,
+        repo_id: Option<String>,
+        /// Project home channel. Infers the repository, creating one bound to
+        /// this project when none exists. Defaults to `BUZZ_GIT_ORIGIN_CHANNEL_ID`.
+        #[arg(long)]
+        channel: Option<String>,
         /// Issue title
         #[arg(long, alias = "subject")]
         title: String,
@@ -2485,6 +2631,78 @@ pub enum MemCmd {
         slug: String,
         #[arg(long)]
         owner: Option<String>,
+    },
+}
+
+/// Explicit output context shared by all `buzz memory` reads.
+#[derive(Args, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("memory_context")
+        .required(true)
+        .multiple(false)
+        .args(["channel", "dm", "workspace_public"])
+))]
+pub struct MemoryContextArgs {
+    /// Stream/forum channel UUID in which the answer will be used.
+    #[arg(long)]
+    channel: Option<Uuid>,
+    /// DM channel UUID in which the answer will be used.
+    #[arg(long)]
+    dm: Option<Uuid>,
+    /// Use the workspace-public projection.
+    #[arg(long, default_value_t = false)]
+    workspace_public: bool,
+}
+
+/// Subcommands for the shared Buzz Memory read plane.
+#[derive(Subcommand)]
+pub enum MemoryCmd {
+    /// Show provider health, policy, and generation high-water.
+    Status {
+        #[command(flatten)]
+        context: MemoryContextArgs,
+    },
+    /// Read exact current slot winners.
+    Current {
+        #[command(flatten)]
+        context: MemoryContextArgs,
+        /// Optional exact slot.
+        #[arg(long)]
+        slot: Option<String>,
+        /// Optional full-text query.
+        #[arg(long)]
+        query: Option<String>,
+        /// Maximum records (1..=100).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Explain why a record is the current winner.
+    Why {
+        #[command(flatten)]
+        context: MemoryContextArgs,
+        /// Exact slot to explain.
+        #[arg(long)]
+        slot: String,
+        /// Optional full-text query.
+        #[arg(long)]
+        query: Option<String>,
+        /// Maximum records (1..=100).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Read append-only history, including superseded records.
+    History {
+        #[command(flatten)]
+        context: MemoryContextArgs,
+        /// Optional exact slot.
+        #[arg(long)]
+        slot: Option<String>,
+        /// Optional full-text query.
+        #[arg(long)]
+        query: Option<String>,
+        /// Maximum records (1..=100).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
 }
 
@@ -2698,6 +2916,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
+        Cmd::Briefs(sub) => commands::briefs::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
         Cmd::Projects(sub) => commands::projects::dispatch(sub, &client).await,
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
@@ -2706,6 +2925,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
+        Cmd::Memory(sub) => commands::memory::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
@@ -2951,6 +3171,7 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            "briefs",
             "canvas",
             "channels",
             "dms",
@@ -2959,6 +3180,7 @@ mod tests {
             "issues",
             "media",
             "mem",
+            "memory",
             "messages",
             "moderation",
             "notes",
@@ -3091,6 +3313,10 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(
+            names(&cmd, "briefs"),
+            vec!["config", "get", "list", "publish", "watermarks"]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
@@ -3115,6 +3341,10 @@ mod tests {
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
+        assert_eq!(
+            names(&cmd, "memory"),
+            vec!["current", "history", "status", "why"]
+        );
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -3157,6 +3387,7 @@ mod tests {
         assert_eq!(
             names(&cmd, "projects"),
             vec![
+                "add-channel",
                 "add-repo",
                 "create",
                 "delete",
@@ -3229,11 +3460,12 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
+            ("memory", 4),
             ("messages", 8),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
-            ("projects", 7),
+            ("projects", 8),
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
@@ -3304,6 +3536,25 @@ mod tests {
 
     // ── projects update mutation group ────────────────────────────────────────
 
+    /// Project-channel requests accept the owner-review metadata.
+    #[test]
+    fn projects_add_channel_accepts_owner_review_fields() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "projects",
+            "add-channel",
+            "--home-channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--name",
+            "release-planning",
+            "--visibility",
+            "private",
+            "--template",
+            "Release team",
+        ])
+        .is_ok());
+    }
+
     /// Multiple independent fields must be accepted in the same invocation.
     #[test]
     fn projects_update_multi_field_is_accepted() {
@@ -3338,6 +3589,22 @@ mod tests {
             ])
             .is_ok(),
             "--name with --clear-description must be accepted"
+        );
+    }
+
+    #[test]
+    fn briefs_config_get_accepts_owner() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "briefs",
+                "config",
+                "get",
+                "--owner",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ])
+            .is_ok(),
+            "briefs config get --owner must parse so a reporter can read the include-set"
         );
     }
 

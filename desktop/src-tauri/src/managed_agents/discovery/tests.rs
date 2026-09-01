@@ -4,11 +4,11 @@ use super::overrides::{divergent_agent_command_override, update_time_agent_comma
 use super::{
     apply_agent_command_update, classify_runtime, codex_adapter_availability,
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
-    effective_agent_command, find_nvm_default_bin, find_via_login_shell,
-    is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
-    parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
-    resolve_bundled_sidecar_from, try_record_agent_command, BUZZ_AGENT_AVATAR_URL,
-    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    effective_agent_command, find_nvm_default_bin, is_login_shell_path_uninit, is_safe_nvm_tag,
+    managed_agent_avatar_url, normalize_agent_args, parse_semver_tag, probe_codex_acp_version,
+    record_agent_command, refresh_login_shell_path, resolve_bundled_sidecar_from,
+    try_record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
+    GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -121,24 +121,6 @@ fn normalizes_buzz_agent_args_to_empty() {
     );
 }
 
-#[test]
-fn login_shell_lookup_treats_command_as_data() {
-    let marker =
-        std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));
-    let payload = format!("doesnotexist; touch {} #", marker.display());
-
-    let resolved = find_via_login_shell(&payload);
-
-    assert!(
-        resolved.is_none(),
-        "payload should not resolve to a command"
-    );
-    assert!(
-        !marker.exists(),
-        "shell lookup must not execute injected commands"
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn explicit_path_resolution_ignores_non_executable_files() {
@@ -231,6 +213,7 @@ fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agent
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -307,6 +290,7 @@ fn record_with(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
@@ -695,8 +679,8 @@ fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
 
 // ── probe_codex_acp_version ───────────────────────────────────────────────────
 
+mod forced_discovery;
 mod managed_path_resolution;
-
 #[cfg(unix)]
 #[test]
 fn probe_codex_acp_version_parses_full_semver_output() {
@@ -1712,7 +1696,7 @@ fn custom_catalog_entry_carries_definition_env_for_edit_roundtrip() {
     )
     .unwrap();
 
-    let entries = discover_acp_runtimes_from(Some(dir.path()));
+    let entries = discover_acp_runtimes_from(Some(dir.path()), true);
     let entry = entries
         .iter()
         .find(|e| e.id == "env-harness")
@@ -1742,7 +1726,7 @@ fn builtin_catalog_entry_has_empty_definition_env() {
     // publishes to the global registry.
     let _path_guard = crate::managed_agents::lock_path_mutex();
     let _lock = registry_test_lock();
-    let entries = discover_acp_runtimes_from(None);
+    let entries = discover_acp_runtimes_from(None, true);
     // Find any builtin entry (e.g. "goose" or "claude").
     let builtin = entries
         .iter()
@@ -1797,7 +1781,6 @@ fn harness_def(
         install_hint: String::new(),
     }
 }
-
 /// A `save_and_warm` landing mid-discovery (after the scan, before the
 /// publish) must survive discovery's registry publish — through the real
 /// `discover_acp_runtimes_from` path.
@@ -1823,7 +1806,7 @@ fn discovery_publish_path_survives_mid_flight_save() {
         assert!(lookup_loaded_harness_by_id("mid-flight-save").is_some());
     }));
 
-    let _entries = discover_acp_runtimes_from(Some(dir.path()));
+    let _entries = discover_acp_runtimes_from(Some(dir.path()), true);
 
     assert!(
         lookup_loaded_harness_by_id("mid-flight-save").is_some(),
@@ -1831,7 +1814,6 @@ fn discovery_publish_path_survives_mid_flight_save() {
          publish clobbers a save that landed mid-discovery"
     );
 }
-
 /// A `delete_and_warm` landing mid-discovery must stay gone after discovery's
 /// publish — a stale snapshot (taken while the file existed) would resurrect it.
 #[test]
@@ -1856,7 +1838,7 @@ fn discovery_publish_path_drops_mid_flight_delete() {
         assert!(lookup_loaded_harness_by_id("mid-flight-delete").is_none());
     }));
 
-    let _entries = discover_acp_runtimes_from(Some(dir.path()));
+    let _entries = discover_acp_runtimes_from(Some(dir.path()), true);
 
     assert!(
         lookup_loaded_harness_by_id("mid-flight-delete").is_none(),

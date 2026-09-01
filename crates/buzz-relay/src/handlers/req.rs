@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, P_GATED_KINDS,
+    RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -1192,18 +1192,14 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
 
         // The `ids` exemption ("knowing the id implies authorization") is only
         // safe for kinds whose id is author-bound or whose content is encrypted.
-        // KIND_DM_VISIBILITY is relay-signed (id not author-bound) and exposes
-        // plaintext private hide choices, so its `#p` owner check MUST hold even
-        // when `ids` is present. KIND_AGENT_TURN_METRIC events are long-lived
-        // and their cleartext envelope (pubkey, agent tag, created_at) leaks
-        // turn-activity metadata — knowing an event id is NOT authorization
-        // (NIP-AM §Relay Behavior). Only filters that explicitly name the kind
-        // lose the exemption — a kindless `ids` lookup is unaffected.
+        // Result-gated kinds (DM visibility, agent turn metrics, briefing
+        // reports) expose plaintext private state, so the `#p` owner check
+        // MUST hold even when `ids` is present. Only filters that explicitly
+        // name the kind lose the exemption — a kindless `ids` lookup is
+        // closed at the result layer by `reader_authorized_for_event`.
         let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
-            ks.iter().any(|kind| {
-                let k = kind.as_u16() as u32;
-                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
-            })
+            ks.iter()
+                .any(|kind| RESULT_GATED_KINDS.contains(&(kind.as_u16() as u32)))
         });
         if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             return true;
@@ -1562,6 +1558,8 @@ mod tests {
             None,
             false,
             crate::config::DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
             None,
         )
         .limitation
@@ -1966,6 +1964,113 @@ mod tests {
         assert!(
             p_gated_filters_authorized(&[owner_p_and_ids], authed),
             "kind:44200 with matching #p and ids must be allowed"
+        );
+    }
+
+    #[test]
+    fn brief_report_requires_p_tag_even_with_ids() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let authed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let event_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let report_kind = nostr::Kind::Custom(buzz_core::kind::KIND_BRIEF_REPORT as u16);
+
+        let ids_only = Filter::new()
+            .kind(report_kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap());
+        assert!(
+            !p_gated_filters_authorized(&[ids_only], authed),
+            "kind:40030 + ids without matching #p must be denied"
+        );
+
+        let wrong_p = Filter::new()
+            .kind(report_kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap())
+            .custom_tags(p_tag, [other]);
+        assert!(
+            !p_gated_filters_authorized(&[wrong_p], authed),
+            "kind:40030 + ids + wrong #p must be denied"
+        );
+
+        let owner = Filter::new().kind(report_kind).custom_tags(p_tag, [authed]);
+        assert!(
+            p_gated_filters_authorized(&[owner], authed),
+            "kind:40030 with matching #p must be allowed"
+        );
+    }
+
+    /// Shipped NIP-BR client filters must carry `#p` = authed reader. An
+    /// authors-only REQ for 30623/30624/40030 is closed by the p-gate — that
+    /// was R2: the feature could not read its own config or watermarks.
+    #[test]
+    fn brief_client_filter_shapes_pass_p_gate() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+        let t_tag = SingleLetterTag::lowercase(Alphabet::T);
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let reporter = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let owner_pk = nostr::PublicKey::from_hex(owner).unwrap();
+        let reporter_pk = nostr::PublicKey::from_hex(reporter).unwrap();
+        let config_kind = nostr::Kind::Custom(buzz_core::kind::KIND_BRIEF_CONFIG as u16);
+        let watermark_kind = nostr::Kind::Custom(buzz_core::kind::KIND_BRIEF_WATERMARK as u16);
+        let report_kind = nostr::Kind::Custom(buzz_core::kind::KIND_BRIEF_REPORT as u16);
+
+        let config_without_p = Filter::new()
+            .kind(config_kind)
+            .author(owner_pk)
+            .custom_tags(d_tag, ["summary"]);
+        assert!(
+            !p_gated_filters_authorized(&[config_without_p], owner),
+            "R2: authors-only 30623 must be closed"
+        );
+
+        let config_self = Filter::new()
+            .kind(config_kind)
+            .author(owner_pk)
+            .custom_tags(d_tag, ["summary"])
+            .custom_tags(p_tag, [owner]);
+        assert!(
+            p_gated_filters_authorized(&[config_self], owner),
+            "owner config read with #p:[self] must pass"
+        );
+
+        let config_for_reporter = Filter::new()
+            .kind(config_kind)
+            .author(owner_pk)
+            .custom_tags(d_tag, ["summary"])
+            .custom_tags(p_tag, [reporter]);
+        assert!(
+            p_gated_filters_authorized(&[config_for_reporter], reporter),
+            "reporter config read with #p:[self] authors:[owner] must pass"
+        );
+
+        let watermarks_without_p = Filter::new()
+            .kind(watermark_kind)
+            .author(reporter_pk)
+            .custom_tags(t_tag, ["buzz-brief"]);
+        assert!(
+            !p_gated_filters_authorized(&[watermarks_without_p], reporter),
+            "R2: authors-only 30624 must be closed"
+        );
+
+        let watermarks = Filter::new()
+            .kind(watermark_kind)
+            .author(reporter_pk)
+            .custom_tags(t_tag, ["buzz-brief"])
+            .custom_tags(p_tag, [reporter]);
+        assert!(
+            p_gated_filters_authorized(&[watermarks], reporter),
+            "reporter watermark list with #p:[self] must pass"
+        );
+
+        let reports = Filter::new()
+            .kind(report_kind)
+            .author(reporter_pk)
+            .custom_tags(t_tag, ["buzz-brief"])
+            .custom_tags(p_tag, [owner]);
+        assert!(
+            p_gated_filters_authorized(&[reports], owner),
+            "owner report list with #p:[self] authors:[reporter] must pass"
         );
     }
 

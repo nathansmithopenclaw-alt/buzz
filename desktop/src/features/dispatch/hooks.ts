@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { relayClient } from "@/shared/api/relayClient";
+import { MAX_FILTERS_PER_REQ } from "@/shared/api/relayClientShared";
 import {
   activateRateLimit,
   isRateLimited,
@@ -16,7 +17,11 @@ import {
   trackerFoldCursor,
 } from "@/shared/api/tracker";
 import type { RelayEvent } from "@/shared/api/types";
-import { createDispatchHistoryClient, isDispatchHistoryGap } from "./history";
+import {
+  createDispatchHistoryClient,
+  isDispatchHistoryGap,
+  type DispatchHistoryClient,
+} from "./history";
 import { createDispatchLiveMerge, type DispatchLiveMerge } from "./liveMerge";
 import type { DispatchContext, DispatchWorkspace } from "./types";
 
@@ -40,6 +45,7 @@ function asError(value: unknown): Error {
 function dispatchHistoryClient(onRetryingChange?: (value: boolean) => void) {
   return createDispatchHistoryClient({
     fetchEvents: (filter) => relayClient.fetchEvents(filter),
+    fetchEventsMulti: (filters) => relayClient.fetchEventsMulti(filters),
     waitForRateLimit,
     isRateLimited,
     activateRateLimit: (message) =>
@@ -66,6 +72,40 @@ function workspaceName(event: RelayEvent | undefined, id: string): string {
   return id;
 }
 
+/**
+ * Ask which of `ids` hold at least one tracker event, in
+ * `ceil(ids.length / MAX_FILTERS_PER_REQ)` requests rather than one per id.
+ *
+ * Each workspace gets its own `limit: 1` filter, batched into multi-filter
+ * REQs. The relay evaluates filters independently, so one busy workspace
+ * cannot consume another's limit — the reason this is not a single combined
+ * `#h` filter, which would be faster still but would silently misreport
+ * workspaces as empty once any one of them saturates the shared limit.
+ *
+ * The relay does not say which filter matched an event, so attribution comes
+ * from the event's own `h` tag. An event carrying several `h` tags marks every
+ * workspace it belongs to, which is exactly the per-filter answer.
+ */
+export async function probePopulatedWorkspaces(
+  history: Pick<DispatchHistoryClient, "fetchMulti">,
+  ids: string[],
+): Promise<Set<string>> {
+  const wanted = new Set(ids);
+  const populated = new Set<string>();
+  for (let index = 0; index < ids.length; index += MAX_FILTERS_PER_REQ) {
+    const batch = ids.slice(index, index + MAX_FILTERS_PER_REQ);
+    const events = await history.fetchMulti(
+      batch.map((id) => ({ kinds: TRACKER_KINDS, "#h": [id], limit: 1 })),
+    );
+    for (const event of events) {
+      for (const value of event.tags) {
+        if (value[0] === "h" && wanted.has(value[1])) populated.add(value[1]);
+      }
+    }
+  }
+  return populated;
+}
+
 async function loadWorkspaces(pubkey: string): Promise<DispatchWorkspace[]> {
   const history = dispatchHistoryClient();
   const memberships = await history.fetchExhaustively({
@@ -80,23 +120,20 @@ async function loadWorkspaces(pubkey: string): Promise<DispatchWorkspace[]> {
     kinds: [39000],
     "#d": ids,
   });
-  return Promise.all(
-    ids.map(async (id) => {
-      const probe = await history.fetch({
-        kinds: TRACKER_KINDS,
-        "#h": [id],
-        limit: 1,
-      });
-      const meta = metadata
-        .filter((event) => tag(event, "d") === id)
-        .sort((a, b) => b.created_at - a.created_at)[0];
-      return {
-        id,
-        name: workspaceName(meta, id),
-        trackerEventCount: probe.length,
-      };
-    }),
-  );
+  const populated = await probePopulatedWorkspaces(history, ids);
+  return ids.map((id) => {
+    const meta = metadata
+      .filter((event) => tag(event, "d") === id)
+      .sort((a, b) => b.created_at - a.created_at)[0];
+    return {
+      id,
+      name: workspaceName(meta, id),
+      // Probed with `limit: 1` per workspace, so this has always been a 0/1
+      // "is it populated" flag rather than a true count; every consumer reads
+      // it as a boolean.
+      trackerEventCount: populated.has(id) ? 1 : 0,
+    };
+  });
 }
 
 async function loadContext(
@@ -199,11 +236,55 @@ async function loadContext(
   };
 }
 
+/**
+ * Workspace membership changes rarely, and the list is re-read every time
+ * Dispatch mounts. Without this the default `staleTime: 0` means every remount
+ * pays full discovery again — not just once per launch.
+ *
+ * Matched to the client's `gcTime` rather than set higher. Nothing invalidates
+ * this key, so `staleTime` is the *only* thing bounding how long a
+ * newly-joined workspace stays invisible; going past `gcTime` would buy no
+ * extra cache hits in the unmount-and-return case (the entry is collected
+ * anyway) while widening that window. The Dispatch refresh control forces a
+ * refetch inside it.
+ */
+const WORKSPACES_STALE_TIME_MS = 5 * 60 * 1_000;
+
+/**
+ * Shared so the boot prefetch and the screen's own read resolve to the same
+ * cache entry. A prefetch under a different key or `staleTime` warms nothing.
+ */
+function dispatchWorkspacesQuery(pubkey: string | undefined) {
+  return {
+    queryKey: ["dispatch", "workspaces", pubkey] as const,
+    queryFn: () => loadWorkspaces(pubkey ?? ""),
+    staleTime: WORKSPACES_STALE_TIME_MS,
+  };
+}
+
+/**
+ * Warm the workspace list before the user first opens Dispatch, so discovery
+ * is not on the critical path of that click.
+ *
+ * Callers pass a pubkey that is already deferred past first paint: boot is
+ * when channel re-subscription is spending the relay's per-pubkey frame
+ * budget, and this is speculative work for a screen the user may never visit.
+ */
+export function useDispatchWorkspacePrefetch(pubkey: string | undefined) {
+  const queryClient = useQueryClient();
+  React.useEffect(() => {
+    if (!pubkey) return;
+    void queryClient
+      .prefetchQuery(dispatchWorkspacesQuery(pubkey))
+      // Prefetch is best-effort: the screen's own query reports failures.
+      .catch(() => undefined);
+  }, [pubkey, queryClient]);
+}
+
 export function useDispatchWorkspaces() {
   const identity = useIdentityQuery();
   const query = useQuery({
-    queryKey: ["dispatch", "workspaces", identity.data?.pubkey],
-    queryFn: () => loadWorkspaces(identity.data?.pubkey ?? ""),
+    ...dispatchWorkspacesQuery(identity.data?.pubkey),
     enabled: Boolean(identity.data?.pubkey),
   });
   return {

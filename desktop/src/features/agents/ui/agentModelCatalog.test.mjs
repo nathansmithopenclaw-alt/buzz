@@ -40,8 +40,20 @@ test("Claude catalog canonicalizes aliases, keeps 1m variants selectable, and or
   );
   assert.equal(
     options.length,
-    18,
-    "17 catalog rows including 1m variants plus one custom value",
+    20,
+    "19 catalog rows including 1m variants plus one custom value",
+  );
+  assert.deepEqual(
+    options
+      .filter((option) => option.group === "Fable")
+      .map((option) => option.id),
+    [
+      "claude-fable-5-1",
+      "claude-fable-5-1[1m]",
+      "claude-fable-5",
+      "claude-fable-5[1m]",
+    ],
+    "Fable 5.1 is offered ahead of Fable 5, each with its 1m variant",
   );
   assert.deepEqual(
     [...new Set(options.map((option) => option.group).filter(Boolean))],
@@ -78,6 +90,7 @@ test("dead effort bracket qualifiers fail closed while Claude 1m stays compatibl
   );
   assert.equal(validateModelSelection("opus[1m]", "claude"), null);
   assert.equal(validateModelSelection("claude-fable-5[1m]", "claude"), null);
+  assert.equal(validateModelSelection("claude-fable-5-1[1m]", "claude"), null);
 });
 
 test("an unchanged persisted model never wedges unrelated edits", () => {

@@ -92,6 +92,16 @@ function isRelayMediaPair(
   }
 }
 
+/**
+ * Rebuild previews from a message's `link-preview` snapshot tags.
+ *
+ * Note the provenance this introduces: the returned previews carry relay
+ * `/media/` URLs in `imageDataUrl` and `faviconDataUrl`, whose names say data
+ * URL and whose other producer (`resolveLinkPreview`) really does emit one.
+ * Anything rendering these previews must go through `LinkPreviewAttachment`
+ * so `rewriteRelayUrl` runs — a raw relay URL in an `<img>` 403s under
+ * WKWebView.
+ */
 export function parseLinkPreviewSnapshots(
   tags: readonly (readonly string[])[] | undefined,
   content: string,

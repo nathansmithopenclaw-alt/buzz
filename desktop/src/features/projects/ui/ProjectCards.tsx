@@ -5,6 +5,7 @@ import {
   Folders,
   GitCommit,
   GitPullRequest,
+  Plus,
   TerminalSquare,
   Trash2,
 } from "lucide-react";
@@ -20,10 +21,8 @@ import type {
   ProjectActivitySummary,
 } from "@/features/projects/hooks";
 import {
-  formatExactTimestamp,
   getProjectUpdatedAt,
   listRowDescription,
-  relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
@@ -54,39 +53,6 @@ import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
 import { ProjectEntityListRow } from "./ProjectEntityListRow";
 import { PROJECT_GRID_CARD_BODY_CLASS } from "./projectGridCardStyles";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
-
-function ProjectUpdatedLabel({
-  profiles,
-  project,
-  summary,
-}: {
-  profiles?: UserProfileLookup;
-  project: Project;
-  summary: ProjectActivitySummary | undefined;
-}) {
-  const updatedAt = getProjectUpdatedAt(project, summary);
-  const latestCommit = summary?.latestCommit;
-  const authorLabel = latestCommit?.author
-    ? resolveUserLabel({ profiles, pubkey: latestCommit.author })
-    : null;
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="whitespace-nowrap text-xs leading-4 text-muted-foreground/70">
-          {relativeTime(updatedAt)}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-96 break-words">
-        {latestCommit
-          ? `${latestCommit.title || latestCommit.commit.slice(0, 7)}${
-              authorLabel ? ` · ${authorLabel}` : ""
-            } · ${formatExactTimestamp(latestCommit.createdAt)}`
-          : `Created ${formatExactTimestamp(project.createdAt)}`}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
 
 export function ProjectPeopleStack({
   pubkeys,
@@ -333,13 +299,17 @@ function RepositoryUnavailableIndicator({
       </TooltipTrigger>
       <TooltipContent className="max-w-64">
         <p className="font-medium">{label}</p>
-        <p className="text-muted-foreground">{description}</p>
+        <p className="text-secondary-foreground">{description}</p>
       </TooltipContent>
     </Tooltip>
   );
 }
 
-export function EmptyState() {
+export function EmptyState({
+  onCreateProject,
+}: {
+  onCreateProject: () => void;
+}) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
       <Folders className="h-10 w-10 text-muted-foreground/40" />
@@ -349,6 +319,10 @@ export function EmptyState() {
           Projects published to this relay will appear here.
         </p>
       </div>
+      <Button onClick={onCreateProject} size="sm" type="button">
+        <Plus className="h-4 w-4" />
+        Create project
+      </Button>
     </div>
   );
 }
@@ -489,7 +463,9 @@ type ProjectItemProps = {
   onOpenTerminal: (project: Project) => Promise<void> | void;
 };
 
-export function ProjectGridCard({
+// Memoized: these cards render in unbounded grids/lists; identity-stable
+// props from the caller keep re-renders scoped to genuinely changed cards.
+export const ProjectGridCard = React.memo(function ProjectGridCard({
   project,
   people,
   profiles,
@@ -504,7 +480,7 @@ export function ProjectGridCard({
 }: ProjectItemProps) {
   return (
     <Card
-      className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
+      className="group relative flex h-full min-h-40 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
       data-projects-grid-card
       data-testid={`project-card-${project.dtag}`}
     >
@@ -540,12 +516,7 @@ export function ProjectGridCard({
               </div>
             </div>
           </div>
-          <div className="pointer-events-auto relative z-10 flex shrink-0 items-center gap-1">
-            <ProjectUpdatedLabel
-              profiles={profiles}
-              project={project}
-              summary={summary}
-            />
+          <div className="pointer-events-auto relative z-10 shrink-0">
             <ProjectActionsMenu
               canDelete={canDelete}
               disabled={deleteDisabled}
@@ -581,9 +552,9 @@ export function ProjectGridCard({
       </div>
     </Card>
   );
-}
+});
 
-export function ProjectListRow({
+export const ProjectListRow = React.memo(function ProjectListRow({
   project,
   people,
   profiles,
@@ -613,6 +584,7 @@ export function ProjectListRow({
           <span>{repositoryCount}</span>
         </span>
       }
+      affiliationClassName="w-auto"
       affiliationTestId="projects-row-context"
       affiliationTitle={`${repositoryCount} ${
         repositoryCount === 1 ? "repository" : "repositories"
@@ -656,7 +628,7 @@ export function ProjectListRow({
       }
     />
   );
-}
+});
 
 /** Compact, borderless repository row for the overview side rail. */
 export function ProjectRailRow({

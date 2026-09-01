@@ -119,10 +119,25 @@ export function DispatchScreen() {
       ),
     [workspaceQuery.workspaces],
   );
+  // The workspace to fold is already known at t=0 — it is in the URL, or it is
+  // the one persisted from last time. Waiting for discovery to confirm the id
+  // exists puts the whole workspace probe on the critical path of the fold,
+  // which is the bulk of the cold-open wait. Start the fold from the
+  // unconfirmed id instead and let discovery reconcile.
+  //
+  // Only trusted while discovery is in flight: once the list lands it is
+  // authoritative, so a stale id falls back to null and the effect below
+  // re-picks. The screen renders its loading state over this window
+  // (`workspaceQuery.isLoading` is checked before `context.error`), so a fold
+  // that fails against a stale id is never shown.
+  const unconfirmedWorkspaceId = React.useMemo(
+    () => values.workspace ?? getStorageItem(LAST_WORKSPACE_KEY),
+    [values.workspace],
+  );
   const workspaceId =
     workspaceQuery.workspaces.find(
       (workspace) => workspace.id === values.workspace,
-    )?.id ?? null;
+    )?.id ?? (workspaceQuery.isLoading ? unconfirmedWorkspaceId : null);
   const activeWorkspace =
     workspaceQuery.workspaces.find(
       (workspace) => workspace.id === workspaceId,
@@ -233,13 +248,23 @@ export function DispatchScreen() {
               <Button
                 aria-label="Refresh Dispatch"
                 data-testid="dispatch-refresh"
-                disabled={!workspaceId || context.isLoading}
-                onClick={() => void context.refresh()}
+                disabled={workspaceQuery.isLoading || context.isLoading}
+                onClick={() => {
+                  // Refresh what the screen shows, which includes the
+                  // workspace list: it is cached with a staleTime and nothing
+                  // invalidates it, so this is the only way to pick up a
+                  // newly-joined workspace before that expires.
+                  workspaceQuery.refresh();
+                  if (workspaceId) void context.refresh();
+                }}
                 size="icon-xs"
                 variant="ghost"
               >
                 <RefreshCw
-                  className={cn(context.isLoading && "animate-spin")}
+                  className={cn(
+                    (workspaceQuery.isLoading || context.isLoading) &&
+                      "animate-spin",
+                  )}
                 />
               </Button>
             </div>

@@ -19,6 +19,10 @@ import {
   parseAgentTeamManagementRequest,
   type AgentTeamManagementRequest,
 } from "./agentTeamManagement";
+import {
+  parseProjectChannelRequest,
+  type ProjectChannelRequest,
+} from "@/features/projects/projectChannelRequest";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
@@ -155,6 +159,9 @@ const agentAvatarApplyListeners = new Set<
 >();
 const agentTeamManagementListeners = new Set<
   (agentPubkey: string, request: AgentTeamManagementRequest) => void
+>();
+const projectChannelRequestListeners = new Set<
+  (agentPubkey: string, request: ProjectChannelRequest) => void
 >();
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
@@ -506,6 +513,12 @@ function processLiveObserverEvents(
         listener(agentPubkey, teamManagementRequest);
       }
     }
+    const projectChannelRequest = parseProjectChannelRequest(parsed.payload);
+    if (projectChannelRequest) {
+      for (const listener of projectChannelRequestListeners) {
+        listener(agentPubkey, projectChannelRequest);
+      }
+    }
     if (parsed.kind === "session_config_captured") {
       void putAgentSessionConfig(agentPubkey, parsed.payload);
       onSessionConfigCaptured?.(agentPubkey);
@@ -710,6 +723,16 @@ export function subscribeAgentTeamManagementRequests(
   void ensureRelayObserverSubscription();
   return () => {
     agentTeamManagementListeners.delete(listener);
+  };
+}
+
+export function subscribeProjectChannelRequests(
+  listener: (agentPubkey: string, request: ProjectChannelRequest) => void,
+) {
+  projectChannelRequestListeners.add(listener);
+  void ensureRelayObserverSubscription();
+  return () => {
+    projectChannelRequestListeners.delete(listener);
   };
 }
 
@@ -947,6 +970,7 @@ export function resetAgentObserverStore() {
   agentManagementListeners.clear();
   agentAvatarApplyListeners.clear();
   agentTeamManagementListeners.clear();
+  projectChannelRequestListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

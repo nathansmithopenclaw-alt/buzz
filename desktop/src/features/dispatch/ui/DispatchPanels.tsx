@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
-import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
 import { Input } from "@/shared/ui/input";
 import {
   Tooltip,
@@ -22,6 +21,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type { DispatchIssue, DispatchProject, DispatchStatus } from "../types";
 import {
   assigneeLabel,
@@ -137,14 +137,13 @@ function AssigneeAvatar({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Avatar className="h-[18px] w-[18px]">
-          {profile?.avatarUrl ? (
-            <AvatarImage alt="" src={profile.avatarUrl} />
-          ) : null}
-          <AvatarFallback className="bg-primary text-3xs font-semibold text-primary-foreground">
-            {label.charAt(0).toUpperCase()}
-          </AvatarFallback>
-        </Avatar>
+        <UserAvatar
+          accent
+          avatarUrl={profile?.avatarUrl ?? null}
+          className="h-[18px] w-[18px]"
+          displayName={label}
+          size="xs"
+        />
       </TooltipTrigger>
       <TooltipContent>{profile ? label : shortPubkey(pubkey)}</TooltipContent>
     </Tooltip>

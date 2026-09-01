@@ -124,7 +124,7 @@ pub struct HostStatusContent {
     pub agents: Vec<HostAgentStatus>,
 }
 
-fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+fn config_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -134,7 +134,7 @@ fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("fleet-visibility.json"))
 }
 
-fn load_config(app: &AppHandle) -> Result<FleetVisibilityConfig, String> {
+fn load_config<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<FleetVisibilityConfig, String> {
     let path = config_path(app)?;
     if !path.exists() {
         return Ok(FleetVisibilityConfig::default());
@@ -152,14 +152,17 @@ fn load_config(app: &AppHandle) -> Result<FleetVisibilityConfig, String> {
     Ok(config)
 }
 
-fn save_config(app: &AppHandle, config: &FleetVisibilityConfig) -> Result<(), String> {
+fn save_config<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    config: &FleetVisibilityConfig,
+) -> Result<(), String> {
     let payload = serde_json::to_vec_pretty(config)
         .map_err(|error| format!("failed to serialize Fleet Visibility config: {error}"))?;
     super::storage::atomic_write_json_restricted(&config_path(app)?, &payload)
 }
 
-pub fn configure_runtime(
-    app: &AppHandle,
+pub fn configure_runtime<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     runtime: &Mutex<FleetVisibilityRuntime>,
     enabled: bool,
 ) -> Result<(), String> {
@@ -378,8 +381,8 @@ pub fn project_agent_statuses(
     agents
 }
 
-fn retain_host_event(
-    app: &AppHandle,
+fn retain_host_event<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     kind: u32,
     host_id: &str,
@@ -437,7 +440,11 @@ fn build_host_delete(
 /// Replace both retained Host projections with durable pending tombstones.
 /// Offline publication is safe: the normal pending-event loop retries these
 /// rows after reconnect and always orders kind:5 before replacement events.
-fn retain_host_retractions(app: &AppHandle, state: &AppState, host_id: &str) -> Result<(), String> {
+fn retain_host_retractions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    host_id: &str,
+) -> Result<(), String> {
     let scope = super::retention::active_retention_scope(app, state)?;
     let mut conn = open_retention_db(&scope.db_path)?;
     retain_host_retractions_in_db(&mut conn, &scope.owner_keys, host_id)
@@ -500,8 +507,8 @@ fn host_id_to_retract(config: &FleetVisibilityConfig, role: DeviceRole) -> Optio
 /// Queue a Host declaration and a fresh status heartbeat in the existing
 /// pending-sync store. Call before each 30-second flush and after lifecycle
 /// writes; Observer/disabled devices are true no-ops.
-pub fn retain_host_heartbeat(
-    app: &AppHandle,
+pub fn retain_host_heartbeat<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     records: &[ManagedAgentRecord],
 ) -> Result<bool, String> {
@@ -511,8 +518,8 @@ pub fn retain_host_heartbeat(
 /// Publish using the in-memory runtime map as the authoritative local running
 /// set. Callers use this at boot and on keepalive; store-write hooks use the
 /// record timestamps because they often already hold the runtime mutex.
-pub fn retain_host_heartbeat_with_runtime_snapshot(
-    app: &AppHandle,
+pub fn retain_host_heartbeat_with_runtime_snapshot<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     records: &[ManagedAgentRecord],
 ) -> Result<bool, String> {
@@ -531,7 +538,7 @@ pub fn retain_host_heartbeat_with_runtime_snapshot(
     retain_host_heartbeat_with_running(app, state, records, Some(&running))
 }
 
-pub fn retain_host_heartbeat_tick(app: &AppHandle, state: &AppState) {
+pub fn retain_host_heartbeat_tick<R: tauri::Runtime>(app: &AppHandle<R>, state: &AppState) {
     if !is_host(state) {
         return;
     }
@@ -545,7 +552,10 @@ pub fn retain_host_heartbeat_tick(app: &AppHandle, state: &AppState) {
     }
 }
 
-pub fn retain_after_agent_store_write(app: &AppHandle, records: &[ManagedAgentRecord]) {
+pub fn retain_after_agent_store_write<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    records: &[ManagedAgentRecord],
+) {
     if let Some(state) = app.try_state::<AppState>() {
         if let Err(error) = retain_host_heartbeat(app, &state, records) {
             eprintln!("buzz-desktop: host-heartbeat-after-save: {error}");
@@ -553,8 +563,8 @@ pub fn retain_after_agent_store_write(app: &AppHandle, records: &[ManagedAgentRe
     }
 }
 
-fn retain_host_heartbeat_with_running(
-    app: &AppHandle,
+fn retain_host_heartbeat_with_running<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     records: &[ManagedAgentRecord],
     local_running_pubkeys: Option<&HashSet<String>>,
@@ -613,12 +623,16 @@ fn retain_host_heartbeat_with_running(
     Ok(true)
 }
 
-pub fn set_enabled(app: &AppHandle, state: &AppState, enabled: bool) -> Result<(), String> {
+pub fn set_enabled<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    enabled: bool,
+) -> Result<(), String> {
     configure_runtime(app, &state.fleet_visibility, enabled)
 }
 
-pub fn set_role(
-    app: &AppHandle,
+pub fn set_role<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     role: DeviceRole,
 ) -> Result<FleetVisibilitySettings, String> {

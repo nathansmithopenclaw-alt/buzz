@@ -13,6 +13,7 @@ type RankUserCandidatesInput = {
   allowEmptyQuery?: boolean;
   candidates: UserSearchResult[];
   getLabel: (user: UserSearchResult) => string;
+  getPriority?: (user: UserSearchResult) => number;
   limit: number;
   query: string;
 };
@@ -71,6 +72,7 @@ export function rankUserCandidatesBySearch({
   allowEmptyQuery = false,
   candidates,
   getLabel,
+  getPriority = () => 0,
   limit,
   query,
 }: RankUserCandidatesInput) {
@@ -82,6 +84,7 @@ export function rankUserCandidatesBySearch({
         candidate,
         label,
         order,
+        priority: getPriority(candidate),
         score: scoreUserCandidate({
           allowEmptyQuery,
           label,
@@ -96,6 +99,7 @@ export function rankUserCandidatesBySearch({
     .sort(
       (left, right) =>
         left.score - right.score ||
+        left.priority - right.priority ||
         left.label.localeCompare(right.label) ||
         left.order - right.order,
     )

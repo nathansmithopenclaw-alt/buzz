@@ -13,13 +13,16 @@ import * as React from "react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
-import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
+import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Textarea } from "@/shared/ui/textarea";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { AssigneePickerDialog } from "./AssigneePickerDialog";
 import { chronologicalActivity, taskMessageLink } from "../selectors.mjs";
+import { assigneeLabel } from "../viewModel";
 import type { DispatchIssueMutation } from "../mutations";
 import type {
   DispatchActivity,
@@ -88,16 +91,84 @@ function ProfileAvatar({
   pubkey: string;
 }) {
   const profile = profiles?.[pubkey.toLowerCase()];
-  const label = resolveUserLabel({ profiles, pubkey });
   return (
-    <Avatar className="h-6 w-6">
-      {profile?.avatarUrl ? (
-        <AvatarImage alt="" src={profile.avatarUrl} />
-      ) : null}
-      <AvatarFallback className="text-2xs font-semibold">
-        {label.slice(0, 1).toUpperCase()}
-      </AvatarFallback>
-    </Avatar>
+    <UserAvatar
+      avatarUrl={profile?.avatarUrl ?? null}
+      displayName={resolveUserLabel({ profiles, pubkey })}
+      size="sm"
+    />
+  );
+}
+
+/**
+ * Assignee row: shows who the issue is assigned to, not the raw key.
+ *
+ * The name comes from kind:0 profile metadata via {@link assigneeLabel} — the
+ * same resolver the board and list views use — and falls back to a truncated
+ * pubkey when no profile has been published. Clicking the row opens
+ * {@link AssigneePickerDialog}, which is the channel members popup rendered
+ * from the same shared components; setting an assignee is a search, not a hex
+ * field.
+ */
+function AssigneeControl({
+  canEdit,
+  currentPubkey,
+  isMutating,
+  onMutate,
+  profiles,
+  pubkey,
+}: {
+  canEdit: boolean;
+  currentPubkey?: string;
+  isMutating: boolean;
+  onMutate: (mutation: DispatchIssueMutation) => Promise<void>;
+  profiles?: UserProfileLookup;
+  pubkey: string | null;
+}) {
+  const [pickerOpen, setPickerOpen] = React.useState(false);
+  const assign = (next: string | null) =>
+    void onMutate({ type: "assignee", assignee: next }).catch(() => undefined);
+
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        aria-label={pubkey ? "Change issue assignee" : "Set issue assignee"}
+        className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left hover:bg-muted/60 disabled:opacity-50 disabled:hover:bg-transparent"
+        data-testid="dispatch-assignee"
+        disabled={!canEdit || isMutating}
+        onClick={() => setPickerOpen(true)}
+        type="button"
+        title={pubkey ?? undefined}
+      >
+        {pubkey ? <ProfileAvatar profiles={profiles} pubkey={pubkey} /> : null}
+        <span
+          className={cn(
+            "truncate",
+            pubkey ? undefined : "text-muted-foreground",
+          )}
+          data-testid="dispatch-assignee-name"
+        >
+          {pubkey ? assigneeLabel(pubkey, profiles ?? {}) : "Unassigned"}
+        </span>
+      </button>
+      <Button
+        aria-label="Assign to me"
+        disabled={!canEdit || isMutating || !currentPubkey}
+        onClick={() => assign(currentPubkey ?? null)}
+        size="icon"
+        variant="ghost"
+      >
+        <UserRound className="h-4 w-4" />
+      </Button>
+      <AssigneePickerDialog
+        assignee={pubkey}
+        disabled={!canEdit || isMutating}
+        onAssign={assign}
+        onOpenChange={setPickerOpen}
+        open={pickerOpen}
+        profiles={profiles}
+      />
+    </div>
   );
 }
 
@@ -471,37 +542,14 @@ export function IssueDetail({
             </select>
           </Property>
           <Property label="Assignee">
-            <div className="flex gap-1">
-              <input
-                aria-label="Issue assignee pubkey"
-                className="h-8 min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-2 font-mono text-xs disabled:opacity-50"
-                defaultValue={issue.assignee ?? ""}
-                disabled={!canEdit || isMutating}
-                key={issue.assignee ?? "none"}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter")
-                    void onMutate({
-                      type: "assignee",
-                      assignee: event.currentTarget.value.trim() || null,
-                    }).catch(() => undefined);
-                }}
-                placeholder="Unassigned"
-              />
-              <Button
-                aria-label="Assign to me"
-                disabled={!canEdit || isMutating || !currentPubkey}
-                onClick={() =>
-                  void onMutate({
-                    type: "assignee",
-                    assignee: currentPubkey ?? null,
-                  }).catch(() => undefined)
-                }
-                size="icon"
-                variant="ghost"
-              >
-                <UserRound className="h-4 w-4" />
-              </Button>
-            </div>
+            <AssigneeControl
+              canEdit={canEdit}
+              currentPubkey={currentPubkey}
+              isMutating={isMutating}
+              onMutate={onMutate}
+              profiles={profiles}
+              pubkey={issue.assignee}
+            />
           </Property>
           <Property label="Project">
             {sectionErrors.projects ? (

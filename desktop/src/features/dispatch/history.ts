@@ -9,6 +9,9 @@ type ExhaustiveFilter = Omit<RelaySubscriptionFilter, "limit" | "until">;
 
 type DispatchHistoryDependencies = {
   fetchEvents: (filter: RelaySubscriptionFilter) => Promise<RelayEvent[]>;
+  fetchEventsMulti: (
+    filters: RelaySubscriptionFilter[],
+  ) => Promise<RelayEvent[]>;
   waitForRateLimit: () => Promise<void>;
   isRateLimited: () => boolean;
   activateRateLimit: (message: string) => void;
@@ -21,6 +24,12 @@ type DispatchHistoryDependencies = {
 
 export type DispatchHistoryClient = {
   fetch: (filter: RelaySubscriptionFilter) => Promise<RelayEvent[]>;
+  /**
+   * Fetch several filters in one REQ, sharing this client's queue slot and
+   * pacing budget. Results are flattened across filters, so callers recover
+   * per-filter attribution from the events themselves.
+   */
+  fetchMulti: (filters: RelaySubscriptionFilter[]) => Promise<RelayEvent[]>;
   fetchExhaustively: (filter: ExhaustiveFilter) => Promise<RelayEvent[]>;
 };
 
@@ -50,6 +59,7 @@ export function isRateLimitRejection(error: unknown): boolean {
  */
 export function createDispatchHistoryClient({
   fetchEvents,
+  fetchEventsMulti,
   waitForRateLimit,
   isRateLimited,
   activateRateLimit,
@@ -78,14 +88,14 @@ export function createDispatchHistoryClient({
     lastRequestStartedAt = now();
   };
 
-  const requestWithRetry = async (filter: RelaySubscriptionFilter) => {
+  const requestWithRetry = async (run: () => Promise<RelayEvent[]>) => {
     let rateLimitRetries = 0;
     for (;;) {
       if (isRateLimited()) setRetrying(true);
       await waitForRateLimit();
       await waitForRequestSlot();
       try {
-        const events = await fetchEvents(filter);
+        const events = await run();
         setRetrying(false);
         return events;
       } catch (error) {
@@ -103,10 +113,10 @@ export function createDispatchHistoryClient({
     }
   };
 
-  const fetch = (filter: RelaySubscriptionFilter) => {
+  const enqueue = (run: () => Promise<RelayEvent[]>) => {
     const request = queue.then(
-      () => requestWithRetry(filter),
-      () => requestWithRetry(filter),
+      () => requestWithRetry(run),
+      () => requestWithRetry(run),
     );
     queue = request.then(
       () => undefined,
@@ -114,6 +124,14 @@ export function createDispatchHistoryClient({
     );
     return request;
   };
+
+  const fetch = (filter: RelaySubscriptionFilter) =>
+    enqueue(() => fetchEvents(filter));
+
+  const fetchMulti = (filters: RelaySubscriptionFilter[]) =>
+    filters.length === 0
+      ? Promise.resolve([])
+      : enqueue(() => fetchEventsMulti(filters));
 
   const fetchExhaustively = async (
     filter: ExhaustiveFilter,
@@ -147,5 +165,5 @@ export function createDispatchHistoryClient({
     }
   };
 
-  return { fetch, fetchExhaustively };
+  return { fetch, fetchMulti, fetchExhaustively };
 }

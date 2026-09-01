@@ -29,6 +29,29 @@ export function isRelayConnectionDegraded(state: ConnectionState): boolean {
   );
 }
 
+/**
+ * Aggregate cap on explicit `#h` channel values the relay accepts across one
+ * REQ's filters before rejecting it as `restricted: too many explicit
+ * channels`. Mirrors `MAX_EXPLICIT_CHANNEL_VALUES` in
+ * `crates/buzz-relay/src/handlers/req.rs`. A subscription over more hidden DMs
+ * than this must be split into multiple REQs, each within the cap.
+ */
+export const MAX_EXPLICIT_CHANNEL_VALUES = 128;
+
+/**
+ * Cap on how many filters one REQ may carry before the relay rejects it with
+ * `NOTICE … maximum is 10`. Mirrors `MAX_FILTERS_PER_REQ` in
+ * `crates/buzz-relay/src/protocol.rs`, which is the value advertised in NIP-11
+ * as `max_filters`.
+ *
+ * The relay runs each filter as its own query and deliberately refuses to
+ * collapse them (`crates/buzz-relay/src/handlers/req.rs`), so per-filter
+ * `limit`s are preserved. That is what makes one REQ a safe replacement for N
+ * single-filter REQs: a combined filter would share one limit, letting a busy
+ * subject consume the whole budget and starve the rest.
+ */
+export const MAX_FILTERS_PER_REQ = 10;
+
 export type RelaySubscriptionFilter = {
   ids?: string[];
   kinds: number[];
@@ -79,6 +102,13 @@ type LiveSubscription = {
    * `min(pendingReplaySince, cursor window)`.
    */
   pendingReplaySince?: number;
+  /** Dispatch-level duplicate suppression shared by restored-live and repair. */
+  reconnectReplay?: {
+    generation: number;
+    seenEventIds: Set<string>;
+    liveEose: boolean;
+    repairDone: boolean;
+  };
   closedRetryAttempt?: number;
   closedRetryTimeout?: number;
   onTerminalClosed?: (message: string) => void;
@@ -95,6 +125,12 @@ export type RelaySubscription =
   | HistorySubscription
   | FirstEventSubscription
   | LiveSubscription;
+
+export type SubscriptionEventBufferItem = {
+  subId: string;
+  event: RelayEvent;
+  generation: number;
+};
 
 export function sortEvents(events: RelayEvent[]) {
   return [...events].sort((left, right) => {

@@ -10,31 +10,25 @@ const LONG_AGENT_NAME =
   "Observer Agent With An Exceptionally Long Display Name";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301"; // #agents
 
-// Open the activity pane via profile → "View activity" (same ingress the
-// observer-feed screenshot spec uses).
+// Open the activity pane by restoring an `agentSession` deep link on the
+// channel — the same ingress the sibling all-channels test uses.
+//
+// This spec's subject is the thread panel's own header chrome (scope label,
+// recency label, raw-feed toggle), which only `AgentSessionThreadPanel`
+// renders. A3 repointed profile → "Activity log" at the profile-contained
+// focused view, which has no header chrome, so the profile ingress can no
+// longer reach what is under test here. The deep link still opens the thread
+// panel, and because the agent is in this channel's activity list the pane
+// resolves to channel scope.
 async function openActivityFromChannel(
   page: import("@playwright/test").Page,
-  channelTestId: string,
+  channelId: string,
   channelTitle: string,
 ) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
-  await page.getByTestId(channelTestId).click();
+  await page.goto(`/#/channels/${channelId}?agentSession=${AGENT_PUBKEY}`, {
+    waitUntil: "domcontentloaded",
+  });
   await expect(page.getByTestId("chat-title")).toHaveText(channelTitle);
-
-  const messageRow = page
-    .getByTestId("message-row")
-    .filter({ has: page.getByText("Observer Agent", { exact: false }) });
-  await expect(messageRow.first()).toBeVisible({ timeout: 8_000 });
-  await messageRow.first().getByRole("button").first().click();
-
-  const profilePanel = page.getByTestId("user-profile-panel");
-  await expect(profilePanel).toBeVisible({ timeout: 10_000 });
-
-  const activityBtn = page.getByTestId(
-    `user-profile-view-activity-${AGENT_PUBKEY}`,
-  );
-  await expect(activityBtn).toBeVisible({ timeout: 5_000 });
-  await activityBtn.click();
 
   const panel = page.getByTestId("agent-session-thread-panel");
   await expect(panel).toBeVisible({ timeout: 10_000 });
@@ -56,7 +50,7 @@ test.describe("activity panel scope label", () => {
 
     const panel = await openActivityFromChannel(
       page,
-      "channel-agents",
+      AGENTS_CHANNEL_ID,
       "agents",
     );
     await expect(page.getByTestId("agent-session-agent-name")).toHaveText(

@@ -260,8 +260,11 @@ test.describe("restart-diff screenshots", () => {
 
     await gotoAgentsView(page);
 
+    // `persona-agent-row-*` is the undeployed-persona card. This persona is
+    // deployed, so the unified fleet grid renders it as an agent card keyed by
+    // pubkey; the restart badge under test lives there.
     const personaCard = page.getByTestId(
-      `persona-agent-row-${PERSONA_AGENT.personaId}`,
+      `managed-agent-${PERSONA_AGENT.pubkey}`,
     );
     await expect(personaCard).toBeVisible({ timeout: 10_000 });
     await expect(

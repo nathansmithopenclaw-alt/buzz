@@ -1,4 +1,4 @@
-//! Owner-facing persist for the v2 standing-delegation grant.
+//! Owner-facing persist for independently signed standing-delegation grants.
 //!
 //! Grant writes are independent of the Agent-defaults Save bar: they overlay
 //! the latest durable config under `managed_agents_store_lock`. The private
@@ -59,6 +59,13 @@ fn existing_audit_channel_id(config: &GlobalAgentConfig) -> Option<String> {
         .agent_management_delegation
         .as_ref()
         .map(|grant| grant.payload.audit_channel_id().to_string())
+        .or_else(|| {
+            config
+                .agent_management_delegations
+                .values()
+                .next()
+                .map(|grant| grant.payload.audit_channel_id().to_string())
+        })
 }
 
 fn resolve_audit_channel_id(
@@ -253,6 +260,27 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(existing_audit_channel_id(&config).as_deref(), Some(AUDIT));
+
+        let grantee = "11".repeat(32);
+        let keyed = GlobalAgentConfig {
+            agent_management_delegations: [(
+                grantee.clone(),
+                AgentManagementDelegationGrant {
+                    payload: AgentManagementDelegationPayload::V1(
+                        crate::managed_agents::global_config::AgentManagementDelegationPayloadV1 {
+                            grantee_pubkey: grantee,
+                            audit_channel_id: AUDIT.into(),
+                            capabilities: Default::default(),
+                        },
+                    ),
+                    signed_event: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert_eq!(existing_audit_channel_id(&keyed).as_deref(), Some(AUDIT));
     }
 
     #[test]

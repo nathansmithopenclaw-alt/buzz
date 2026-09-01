@@ -26,6 +26,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "summary",
+      "name": "Summary",
+      "description": "Personal daily briefing in Pulse, from the channels and DMs you belong to",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "forum",
       "name": "Forum Channels",
       "description": "Forum-style threaded channels for long-form discussions",

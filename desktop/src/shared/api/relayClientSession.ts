@@ -21,6 +21,7 @@ import {
   type RelayLiveSubscriptionOptions,
   type RelaySubscription,
   type RelaySubscriptionFilter,
+  type SubscriptionEventBufferItem,
 } from "@/shared/api/relayClientShared";
 import {
   buildChannelAuxDeletionFilter,
@@ -31,10 +32,12 @@ import {
 } from "@/shared/api/relayChannelFilters";
 import {
   clearClosedRetry,
+  flushEvents,
   handleRelayClosed,
   handleSubscriptionEose,
   prepareSubscriptionEvent,
 } from "@/shared/api/relayClosedRecovery";
+import { getChannelReconnectRepairEvents } from "@/shared/api/channelReconnectRepair";
 import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import {
   activateRateLimit,
@@ -45,6 +48,7 @@ import {
   fetchChunkedHistory,
   requestFirstEventGated,
   requestHistoryGated,
+  requestHistoryMultiGated,
 } from "@/shared/api/relayGateBoundary";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
 import {
@@ -88,7 +92,7 @@ export class RelayClient {
   private authRequest: RelayAuthRequest | null = null;
   private subscriptions = new Map<string, RelaySubscription>();
   private pendingEvents = new Map<string, PendingEvent>();
-  private eventBuffer: Array<{ subId: string; event: RelayEvent }> = [];
+  private eventBuffer: SubscriptionEventBufferItem[] = [];
   private flushTimeout: number | null = null;
   private reconnectListeners = new Set<() => void>();
   private hasConnectedOnce = false;
@@ -217,6 +221,27 @@ export class RelayClient {
 
   async fetchEvents(filter: RelaySubscriptionFilter): Promise<RelayEvent[]> {
     return this.fetchHistory(filter);
+  }
+
+  /**
+   * Fetch history for several filters in a single REQ.
+   *
+   * Costs one frame against the relay's per-pubkey burst budget instead of one
+   * per filter, and each filter keeps its own `limit`. Results are flattened
+   * across filters — see {@link requestHistoryMultiGated}.
+   */
+  async fetchEventsMulti(
+    filters: RelaySubscriptionFilter[],
+  ): Promise<RelayEvent[]> {
+    if (filters.length === 0) return [];
+    await this.ensureConnected();
+    return requestHistoryMultiGated(
+      this.subscriptions,
+      (payload) => this.sendRaw(payload),
+      (subId) => this.closeSubscription(subId),
+      filters,
+      HISTORY_TIMEOUT_MS,
+    );
   }
 
   async fetchFirstEvent(
@@ -787,7 +812,7 @@ export class RelayClient {
       return;
     }
     if (type === "EVENT" && typeof rest[0] === "string" && rest[1]) {
-      this.handleEvent(rest[0], rest[1] as RelayEvent);
+      this.handleEvent(rest[0], rest[1] as RelayEvent, generation);
       return;
     }
 
@@ -805,7 +830,7 @@ export class RelayClient {
     }
 
     if (type === "EOSE" && typeof rest[0] === "string") {
-      this.handleEose(rest[0]);
+      this.handleEose(rest[0], generation);
       return;
     }
 
@@ -850,7 +875,7 @@ export class RelayClient {
     await this.sendRaw(["AUTH", event]);
   }
 
-  private handleEvent(subId: string, event: RelayEvent) {
+  private handleEvent(subId: string, event: RelayEvent, generation: number) {
     const subscription = this.subscriptions.get(subId);
     if (!subscription) {
       return;
@@ -862,7 +887,7 @@ export class RelayClient {
     }
 
     if (!prepareSubscriptionEvent(subscription, event)) return;
-    this.eventBuffer.push({ subId, event });
+    this.eventBuffer.push({ subId, event, generation });
     this.flushTimeout ??= window.setTimeout(
       () => this.flushEventBuffer(),
       EVENT_BATCH_MS,
@@ -874,21 +899,16 @@ export class RelayClient {
     const buffer = this.eventBuffer;
     this.eventBuffer = [];
 
-    // Re-lookup: subscriptions removed during batch window are intentionally skipped.
-    for (const { subId, event } of buffer) {
-      const subscription = this.subscriptions.get(subId);
-      if (subscription?.mode === "live") {
-        subscription.onEvent(event);
-      }
-    }
+    flushEvents(buffer, this.subscriptions, this.connectionGeneration);
   }
 
-  private handleEose(subId: string) {
+  private handleEose(subId: string, generation: number) {
     this.flushEventBuffer(); // Deliver preceding EVENT frames before EOSE.
     handleSubscriptionEose({
       subscriptions: this.subscriptions,
       subId,
       closeSubscription: (id) => this.closeSubscription(id),
+      generation,
     });
   }
 
@@ -936,7 +956,8 @@ export class RelayClient {
       await replayLiveSubscriptions({
         subscriptions: this.subscriptions,
         sendRaw: (payload) => this.sendRaw(payload),
-        requestHistory: (filter) => this.requestHistory(filter),
+        requestRepair: getChannelReconnectRepairEvents,
+        generation,
         visibleChannelId: this.visibleChannelId,
         isActive: () => this.connectionGeneration === generation,
       });

@@ -144,6 +144,15 @@ non-hook commands.
 
 **Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
 
+**Commit as yourself — new worktrees inherit Helm's identity.** The shared
+`.git/config` sets Helm's `user.name`/`user.email`, and a freshly created
+worktree inherits it, so a plain `git commit` there lands misattributed.
+`extensions.worktreeConfig` is enabled repo-wide: before your first commit in a
+new worktree, run `git config --worktree user.name "<Your Name>"` and
+`git config --worktree user.email "<you>@smithcrafts.dev"` (or pass
+`-c user.name=... -c user.email=...` per commit). Never edit the shared config.
+Sign-off and any Co-authored-by trailers use the same identity.
+
 Additional rules:
 - No `unsafe` code
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types
@@ -226,7 +235,9 @@ channel and derives its containing root. An optional `thread` parameter is
 accepted only when it matches that derived root. The explicit
 `--channel <uuid> --event <hex>` form remains available.
 
-All reads return sig-stripped JSON arrays; all writes return
+All event reads return normalized JSON arrays. Normal output preserves the seven
+canonical signed Nostr event fields (`id`, `pubkey`, `kind`, `content`,
+`created_at`, `tags`, `sig`); all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
 
@@ -410,6 +421,12 @@ Set `BUZZ_E2E_PORT` to give a lane its own preview server:
 BUZZ_E2E_PORT=4319 pnpm exec playwright test --project=integration
 ```
 
+**Port 4399 is RESERVED for the canonical-main smoke gate** (D-0b14e7d3) and must not be
+used by a lane. The gate runs unattended against every canonical-main advance; if a lane
+takes 4399 mid-run, the gate and the lane serve each other's `dist` and the gate reports a
+verdict about the wrong build — silently, and in the one direction nobody checks. Pick any
+other free port for lane work.
+
 The default stays 4173, so a single-checkout run and CI are unchanged. When a
 run's numbers matter — a verification pass, a merge battery — confirm the served
 build is yours **before and after**, since a concurrent lane can take the port
@@ -494,6 +511,7 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
 6. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
+7. **`pgschema` omits seed DML and some storage parameters** — Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
 
 ---
 

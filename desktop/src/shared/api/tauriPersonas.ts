@@ -74,6 +74,7 @@ export async function createPersona(
   return fromRawPersona(
     await invokeTauri<RawPersona>("create_persona", {
       input: {
+        id: input.personaId,
         displayName: input.displayName,
         avatarUrl: input.avatarUrl,
         systemPrompt: input.systemPrompt,

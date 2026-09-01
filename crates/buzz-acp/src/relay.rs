@@ -48,6 +48,15 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// If no pong is received within this duration after a ping, the connection is
 /// considered dead and the background task triggers a reconnect.
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum time without a relay-originated frame before the connection is
+/// considered half-open.
+///
+/// A terminating WebSocket proxy can keep answering client Pings after its
+/// upstream relay connection has reset. Pongs therefore prove only that the
+/// client-facing hop is alive. The relay sends its own Ping every 30 seconds;
+/// allowing two missed relay heartbeats plus jitter detects that split path
+/// without adding probe traffic.
+const RELAY_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(75);
 /// Timeout for individual ws.send() calls. Prevents a stalled socket from
 /// wedging the background task indefinitely.
 const WS_SEND_TIMEOUT_SECS: u64 = 10;
@@ -128,6 +137,27 @@ use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionHealthFailure {
+    RelaySilent,
+    PongTimeout,
+}
+
+fn connection_health_failure(
+    now: Instant,
+    ping_sent: bool,
+    last_pong: Instant,
+    last_relay_activity: Instant,
+) -> Option<ConnectionHealthFailure> {
+    if now.saturating_duration_since(last_relay_activity) > RELAY_ACTIVITY_TIMEOUT {
+        Some(ConnectionHealthFailure::RelaySilent)
+    } else if ping_sent && now.saturating_duration_since(last_pong) > PONG_TIMEOUT {
+        Some(ConnectionHealthFailure::PongTimeout)
+    } else {
+        None
+    }
+}
 
 use crate::config::ChannelFilter;
 
@@ -421,6 +451,64 @@ impl RestClient {
         resp.json()
             .await
             .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Query events via `POST /query` with a raw NIP-01 filter document.
+    ///
+    /// `nostr::Filter` only encodes single-letter generic tags. Project home
+    /// lookup needs `#buzz-channel`, which this path serializes verbatim.
+    pub async fn query_raw(&self, filters: &[Value]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let resp = self.bridge_post("/query", &body_bytes).await?;
+        resp.json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Query every historical event matching one raw filter across bounded pages.
+    ///
+    /// Uses the bridge's composite `(until, before_id)` cursor so a full page
+    /// never becomes evidence that older project metadata is absent.
+    pub async fn query_raw_all(&self, mut filter: Value) -> Result<Vec<Value>, RelayError> {
+        const PAGE_SIZE: usize = 500;
+        const EVENT_BOUND: usize = 10_000;
+        let mut events = Vec::new();
+        loop {
+            let remaining_probe = EVENT_BOUND + 1 - events.len();
+            let page_limit = PAGE_SIZE.min(remaining_probe);
+            filter["limit"] = serde_json::json!(page_limit);
+            let page = self.query_raw(std::slice::from_ref(&filter)).await?;
+            let page = page
+                .as_array()
+                .ok_or_else(|| RelayError::Http("query response is not an array".into()))?;
+            let done = page.len() < page_limit;
+            if events.len() + page.len() > EVENT_BOUND {
+                return Err(RelayError::Http(format!(
+                    "query exceeded the exhaustive {EVENT_BOUND}-event bound"
+                )));
+            }
+            if !done {
+                let last = page
+                    .last()
+                    .ok_or_else(|| RelayError::Http("full query page is empty".into()))?;
+                let created_at = last
+                    .get("created_at")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| RelayError::Http("query page event lacks created_at".into()))?;
+                let id = last
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| id.len() == 64 && id.chars().all(|ch| ch.is_ascii_hexdigit()))
+                    .ok_or_else(|| RelayError::Http("query page event has invalid id".into()))?;
+                filter["until"] = serde_json::json!(created_at);
+                filter["before_id"] = serde_json::json!(id);
+            }
+            events.extend(page.iter().cloned());
+            if done {
+                return Ok(events);
+            }
+        }
     }
 
     /// Count events via the HTTP bridge: `POST /count` with NIP-98 auth.
@@ -1643,6 +1731,7 @@ async fn run_background_task(
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_pong = Instant::now();
+    let mut last_relay_activity = Instant::now();
     let mut ping_sent = false;
 
     // Track connection stability for backoff reset.
@@ -1726,6 +1815,7 @@ async fn run_background_task(
                     }
                     ping_sent = false;
                     last_pong = Instant::now();
+                    last_relay_activity = Instant::now();
                     connected_since = Instant::now();
                     stable_logged = false;
                 }
@@ -1822,6 +1912,9 @@ async fn run_background_task(
                                    ping_sent = false;
                                    false // pong is healthy — not a socket loss
                                } else {
+                                   // Exclude Pong deliberately: an L7 proxy may answer
+                                   // client Pings after its relay-facing hop has reset.
+                                   last_relay_activity = Instant::now();
                                    !handle_ws_message(
                                        msg,
                                        &mut ws,
@@ -1873,6 +1966,7 @@ async fn run_background_task(
                                // Reset ping state after reconnect.
                                ping_sent = false;
                                last_pong = Instant::now();
+                               last_relay_activity = Instant::now();
                                connected_since = Instant::now();
                                stable_logged = false;
                            }
@@ -1887,6 +1981,7 @@ async fn run_background_task(
                                ) { return; }
                                ping_sent = false;
                                last_pong = Instant::now();
+                               last_relay_activity = Instant::now();
                                connected_since = Instant::now();
                                stable_logged = false;
                            }
@@ -1907,6 +2002,7 @@ async fn run_background_task(
                                ) { return; }
                                ping_sent = false;
                                last_pong = Instant::now();
+                               last_relay_activity = Instant::now();
                                connected_since = Instant::now();
                                stable_logged = false;
                            }
@@ -1958,6 +2054,7 @@ async fn run_background_task(
                                    }
                                    ping_sent = false;
                                    last_pong = Instant::now();
+                                   last_relay_activity = Instant::now();
                                    connected_since = Instant::now();
                                    stable_logged = false;
                                }
@@ -1966,9 +2063,22 @@ async fn run_background_task(
                    }
 
                    _ = ping_interval.tick() => {
-                       if ping_sent && last_pong.elapsed() > PONG_TIMEOUT {
-                           // No pong received after our last ping — connection is dead.
-                           warn!("no pong received within {:?} — connection dead, reconnecting", PONG_TIMEOUT);
+                       if let Some(failure) = connection_health_failure(
+                           Instant::now(),
+                           ping_sent,
+                           last_pong,
+                           last_relay_activity,
+                       ) {
+                           match failure {
+                               ConnectionHealthFailure::RelaySilent => warn!(
+                                   "no relay-originated frame received within {:?} — connection may be proxy-half-open, reconnecting",
+                                   RELAY_ACTIVITY_TIMEOUT
+                               ),
+                               ConnectionHealthFailure::PongTimeout => warn!(
+                                   "no pong received within {:?} — connection dead, reconnecting",
+                                   PONG_TIMEOUT
+                               ),
+                           }
                            // Use try_send to avoid blocking on backpressure during recovery.
                            let _ = event_tx.try_send(None);
                            match try_autonomous_reconnect(
@@ -1997,6 +2107,7 @@ async fn run_background_task(
                            }
                            ping_sent = false;
                            last_pong = Instant::now();
+                           last_relay_activity = Instant::now();
                            connected_since = Instant::now();
                            stable_logged = false;
                        } else if !ping_sent {
@@ -2030,6 +2141,7 @@ async fn run_background_task(
                                }
                                ping_sent = false;
                                last_pong = Instant::now();
+                               last_relay_activity = Instant::now();
                                connected_since = Instant::now();
                                stable_logged = false;
                            } else {
@@ -4025,6 +4137,44 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_proxy_pong_does_not_mask_relay_silence() {
+        let now = Instant::now();
+
+        assert_eq!(
+            connection_health_failure(
+                now,
+                true,
+                now - Duration::from_secs(1),
+                now - RELAY_ACTIVITY_TIMEOUT - Duration::from_secs(1),
+            ),
+            Some(ConnectionHealthFailure::RelaySilent),
+            "a proxy-synthesized Pong must not keep a relay-silent connection alive"
+        );
+
+        assert_eq!(
+            connection_health_failure(
+                now,
+                true,
+                now - PONG_TIMEOUT - Duration::from_secs(1),
+                now - Duration::from_secs(1),
+            ),
+            Some(ConnectionHealthFailure::PongTimeout),
+            "the existing end-to-end Pong timeout remains independently enforced"
+        );
+
+        assert_eq!(
+            connection_health_failure(
+                now,
+                true,
+                now - Duration::from_secs(1),
+                now - Duration::from_secs(1),
+            ),
+            None,
+            "recent Pong and relay-originated activity is healthy"
+        );
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {

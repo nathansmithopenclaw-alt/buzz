@@ -1,5 +1,6 @@
 import { useAgentManagement } from "@/features/agents/useAgentManagement";
 import { useAgentTeamManagement } from "@/features/agents/useAgentTeamManagement";
+import { ProjectChannelRequestDialog } from "@/features/projects/ui/ProjectChannelRequestDialog";
 import { AgentCardDialogs } from "./AgentCardViewerDialog";
 import { AgentDialog } from "./AgentDialog";
 import { AgentTeamManagementReviewDialog } from "./AgentTeamManagementReviewDialog";
@@ -59,6 +60,7 @@ export function AgentManagementDialogs() {
             : null
         }
       />
+      <ProjectChannelRequestDialog />
       <AgentCardDialogs />
       <AgentTeamManagementReviewDialog
         error={teamManagement.reviewError}

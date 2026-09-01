@@ -172,6 +172,13 @@ existing global-config setter.
 | | `runs` | Get workflow run history |
 | | `approve` | Approve/deny a workflow step |
 | `feed` | `get` | Get your activity feed |
+| `briefs` | `list` | List published briefing reports |
+| | `get` | Get one report by event id or run id |
+| | `publish` | Publish an immutable briefing report |
+| | `config get` | Read the live include-set and local schedule |
+| | `config set` | Write the live include-set and local schedule |
+| | `watermarks list` | List reporter watermarks |
+| | `watermarks set` | Write a per-conversation watermark |
 | `social` | `publish` | Publish a NIP-01 note |
 | | `set-contacts` | Set NIP-02 contact list |
 | | `event` | Get a Nostr event |

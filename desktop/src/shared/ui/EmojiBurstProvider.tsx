@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+
 type BurstPoint = {
   x: number;
   y: number;
@@ -217,7 +219,16 @@ function getEmojiCanvas(emoji: string): HTMLCanvasElement {
   return canvas;
 }
 
-function getEmojiImageCanvas(src: string): HTMLCanvasElement | null {
+/**
+ * Rasterize a custom emoji image for the particle canvas. Relay-hosted media
+ * has to go through the local proxy — a bare relay URL is an unauthenticated
+ * 401 — so the rewrite happens here rather than being left to each caller.
+ * `rewriteRelayUrl` is a no-op for non-relay sources and idempotent for the
+ * callers that already proxy (see mediaUrl.test.mjs), and the cache is keyed
+ * on the rewritten URL so a proxy-port change is a new entry, not a stale hit.
+ */
+function getEmojiImageCanvas(rawSrc: string): HTMLCanvasElement | null {
+  const src = rewriteRelayUrl(rawSrc);
   const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
   const cacheKey = `${src}:${dpr}:${EMOJI_CACHE_SCALE}`;
   const existing = emojiImageCanvasCache.get(cacheKey);

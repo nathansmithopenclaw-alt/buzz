@@ -58,6 +58,11 @@ export const KIND_COMMUNITY_THEME = 30078;
 export const KIND_PERSONA = 30175;
 export const KIND_TEAM = 30176;
 export const KIND_MANAGED_AGENT = 30177;
+// Team catalog projection: a self-contained snapshot of a team plus every
+// member's safe definition, so a recipient can rebuild it without reading the
+// publisher's personas. Separate from KIND_TEAM (30176, the team's own wire
+// body) so an ordinary team edit cannot disturb catalog share state.
+export const KIND_TEAM_CATALOG = 30178;
 export const KIND_HOST_DECLARATION = 30180;
 export const KIND_HOST_STATUS = 30181;
 export const KIND_USER_STATUS = 30315;
@@ -79,6 +84,10 @@ export const KIND_GIT_STATUS_DRAFT = 1633;
 // NIP-DV: relay-signed per-viewer DM visibility snapshot (d=viewer pubkey,
 // h-tags = currently-hidden DM channel ids).
 export const KIND_DM_VISIBILITY = 30622;
+// NIP-BR: personal briefing config, watermarks, and published reports.
+export const KIND_BRIEF_CONFIG = 30623;
+export const KIND_BRIEF_WATERMARK = 30624;
+export const KIND_BRIEF_REPORT = 40030;
 
 // Human-visible "new content" message kinds. Used as the unread trigger set
 // (sidebar badges, catch-up queries) and as the Home-feed mention query.

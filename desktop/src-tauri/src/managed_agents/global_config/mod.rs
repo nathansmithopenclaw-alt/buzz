@@ -31,12 +31,11 @@ mod audit;
 mod delegation;
 pub use audit::{agent_management_audit_channel_uuid, canonical_relay_scope};
 #[cfg(test)]
+pub use delegation::AgentManagementDelegationPayloadV2;
 pub use delegation::{
-    AgentManagementDelegationCapabilities, AgentManagementDelegationPayloadV1, CapabilitySubject,
-};
-pub use delegation::{
-    AgentManagementDelegationGrant, AgentManagementDelegationPayload,
-    AgentManagementDelegationPayloadV2, AgentManagementDelegationSubjects,
+    AgentManagementDelegationCapabilities, AgentManagementDelegationGrant,
+    AgentManagementDelegationPayload, AgentManagementDelegationPayloadV1,
+    AgentManagementDelegationSubjects, CapabilitySubject,
 };
 
 use crate::managed_agents::env_vars::{
@@ -95,10 +94,16 @@ pub struct GlobalAgentConfig {
     #[serde(default)]
     pub auto_approve_agent_drafts: bool,
 
-    /// Owner-signed standing delegation for agent creation and team management.
-    /// `None` revokes the grant immediately.
+    /// Legacy owner-signed standing delegation.
+    ///
+    /// Existing installs keep this proof byte-for-byte. New independently
+    /// revocable grants live in `agent_management_delegations`.
     #[serde(default)]
     pub agent_management_delegation: Option<AgentManagementDelegationGrant>,
+
+    /// Owner-signed standing delegations keyed by canonical grantee pubkey.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_management_delegations: BTreeMap<String, AgentManagementDelegationGrant>,
 }
 
 /// Validate a `GlobalAgentConfig` before persisting it.
@@ -203,14 +208,16 @@ pub fn normalize_global_config_fields(config: &mut GlobalAgentConfig) {
     }
 }
 
-fn global_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+fn global_config_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("global-agent-config.json"))
 }
 
 /// Load the global agent config from disk.
 ///
 /// Returns the default (all-empty) config if the file does not exist yet.
-pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, String> {
+pub fn load_global_agent_config<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<GlobalAgentConfig, String> {
     let path = global_config_path(app)?;
     if !path.exists() {
         return Ok(GlobalAgentConfig::default());

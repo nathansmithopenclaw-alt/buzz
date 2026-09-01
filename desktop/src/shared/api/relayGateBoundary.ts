@@ -8,9 +8,10 @@
 import { collectWithConcurrency } from "@/shared/api/concurrency";
 import { AUX_BACKFILL_CHUNK_SIZE } from "@/shared/api/relayChannelFilters";
 import { waitForRateLimit } from "@/shared/api/relayRateLimitGate";
-import type {
-  RelaySubscription,
-  RelaySubscriptionFilter,
+import {
+  MAX_FILTERS_PER_REQ,
+  type RelaySubscription,
+  type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 
@@ -28,6 +29,46 @@ export async function requestHistoryGated(
   filter: RelaySubscriptionFilter,
   historyTimeoutMs: number,
 ): Promise<RelayEvent[]> {
+  return requestHistoryMultiGated(
+    subscriptions,
+    sendRaw,
+    closeSubscription,
+    [filter],
+    historyTimeoutMs,
+  );
+}
+
+/**
+ * Issue one history REQ carrying several filters, waiting for any active
+ * rate-limit gate first.
+ *
+ * The relay evaluates each filter as its own query with its own `limit`, so a
+ * batch of N narrow lookups costs one websocket frame instead of N. That
+ * matters because the frame budget — not relay latency — is what forces
+ * callers to pace request bursts.
+ *
+ * Events from every filter arrive on the same subscription and are returned as
+ * one flat list: the relay does not label which filter matched. Callers that
+ * need per-filter attribution must recover it from the events themselves (for
+ * example by reading the tag they filtered on).
+ *
+ * Throws if `filters` exceeds {@link MAX_FILTERS_PER_REQ}; chunk before
+ * calling. Resolves empty without issuing a request when `filters` is empty.
+ */
+export async function requestHistoryMultiGated(
+  subscriptions: Map<string, RelaySubscription>,
+  sendRaw: (payload: unknown[]) => Promise<void>,
+  closeSubscription: (subId: string) => Promise<void>,
+  filters: RelaySubscriptionFilter[],
+  historyTimeoutMs: number,
+): Promise<RelayEvent[]> {
+  if (filters.length === 0) return [];
+  if (filters.length > MAX_FILTERS_PER_REQ) {
+    throw new Error(
+      `REQ carries ${filters.length} filters, maximum is ${MAX_FILTERS_PER_REQ}.`,
+    );
+  }
+
   // Await the gate before issuing REQ; op timeout starts after the wait.
   await waitForRateLimit();
 
@@ -47,7 +88,7 @@ export async function requestHistoryGated(
       timeout,
     });
 
-    void sendRaw(["REQ", subId, filter]).catch((error) => {
+    void sendRaw(["REQ", subId, ...filters]).catch((error) => {
       window.clearTimeout(timeout);
       subscriptions.delete(subId);
       reject(

@@ -3,6 +3,7 @@
 //! NIP-01 WebSocket relay for Buzz private team communication.
 
 mod admission;
+mod build_info;
 
 /// REST API route handlers.
 pub mod api;
@@ -23,6 +24,8 @@ pub mod error;
 pub mod handlers;
 /// Stateless HMAC-signed relay invite tokens (mint/verify).
 pub mod invite_token;
+/// Relay-key signing for transport-neutral journal checkpoints.
+pub mod journal_checkpoint;
 /// Inter-relay mesh startup wiring (`BUZZ_MESH` seam).
 pub mod mesh_boot;
 /// Prometheus metrics: recorder, upkeep, HTTP middleware.

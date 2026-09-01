@@ -84,13 +84,13 @@ export type SetCanvasResult = {
   ok: boolean;
   eventId: string;
 };
-
 export type AddChannelMembersInput = {
   channelId: string;
   pubkeys: string[];
   role?: Exclude<ChannelRole, "owner">;
+  expectedRelayUrl?: string;
+  expectedSignerPubkey?: string;
 };
-
 export type AddChannelMembersResult = {
   added: string[];
   errors: Array<{
@@ -430,7 +430,7 @@ export type CreateManagedAgentInput = {
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
   backend?: ManagedAgentBackend;
-  /** Inbound author gate mode. Omitted = `"owner-only"` (server default). */
+  /** Omitted uses the linked persona default, then `"owner-only"`. */
   respondTo?: RespondToMode;
   /**
    * Hex pubkeys to allow when `respondTo === "allowlist"`. Validated &
@@ -754,6 +754,8 @@ export type PersonaBehaviorInput = {
 };
 
 export type CreatePersonaInput = {
+  /** Optional stable id. Nectar uses `nectar` so lookup is not display-name. */
+  personaId?: string;
   displayName: string;
   avatarUrl?: string;
   systemPrompt: string;
@@ -784,39 +786,13 @@ export type UpdatePersonaInput = {
   linkedInstanceBehaviorPatch?: PersonaBehaviorInput;
 };
 // ── Team types ────────────────────────────────────────────────────────────────
-export type AgentTeam = {
-  id: string;
-  name: string;
-  description: string | null;
-  instructions: string | null;
-  personaIds: string[];
-  isBuiltin: boolean;
-  /** Absolute path to the team's backing directory (if directory-backed). */
-  sourceDir: string | null;
-  /** Whether sourceDir is a symlink to an external directory. */
-  isSymlink: boolean;
-  /** Resolved symlink target path (for display). Only set when isSymlink is true. */
-  symlinkTarget: string | null;
-  /** Version from the team's plugin.json manifest. */
-  version: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
+export type {
+  AgentTeam,
+  CreateTeamInput,
+  TeamCatalogSourceCoordinate,
+  UpdateTeamInput,
+} from "./teamTypes";
 
-export type CreateTeamInput = {
-  name: string;
-  description?: string;
-  instructions?: string;
-  personaIds: string[];
-};
-
-export type UpdateTeamInput = {
-  id: string;
-  name: string;
-  description?: string;
-  instructions?: string;
-  personaIds: string[];
-};
 // ── Channel Template types ─────────────────────────────────────────────────────
 
 export type TemplateBackend =
@@ -997,7 +973,9 @@ export type {
   CapabilitySubject,
 } from "./agentManagementDelegation";
 
-/** Global defaults. Precedence: baked floor < global < persona < per-agent. */
+type DelegationGrant =
+  import("./agentManagementDelegation").AgentManagementDelegationGrant;
+
 export type GlobalAgentConfig = {
   /** Global env vars injected into all agents unconditionally. */
   env_vars: Record<string, string>;
@@ -1008,10 +986,8 @@ export type GlobalAgentConfig = {
   /** Preferred ACP runtime for agents without a persona-specific runtime. */
   preferred_runtime: string | null;
   auto_approve_agent_drafts: boolean;
-  /** Owner-signed standing delegation; null revokes it immediately. */
-  agent_management_delegation:
-    | import("./agentManagementDelegation").AgentManagementDelegationGrant
-    | null;
+  agent_management_delegation: DelegationGrant | null;
+  agent_management_delegations: Record<string, DelegationGrant>;
 };
 
 /** Result from `set_global_agent_config`, mirroring Rust's save result. */

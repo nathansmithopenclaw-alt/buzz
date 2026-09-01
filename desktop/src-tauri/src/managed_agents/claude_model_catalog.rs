@@ -18,6 +18,7 @@ const BASE_ALIASES: &[&str] = &["opus", "sonnet", "haiku"];
 /// the recognizable entry lets the adapter carry capability metadata (native
 /// effort levels) onto dated targets.
 const CURATED: &[(&str, Option<&str>)] = &[
+    ("claude-fable-5-1", None),
     ("fable", Some("claude-fable-5")),
     ("claude-opus-5", None),
     ("claude-opus-4-8", None),
@@ -183,6 +184,7 @@ mod tests {
             "sonnet",
             "haiku",
             "claude-fable-5",
+            "claude-fable-5-1",
             "claude-opus-5",
             "claude-opus-4-8",
             "claude-opus-4-7",

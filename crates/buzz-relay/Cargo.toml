@@ -25,6 +25,7 @@ buzz-auth = { workspace = true }
 buzz-pubsub = { workspace = true }
 buzz-audit = { workspace = true }
 buzz-search = { workspace = true }
+buzz-memory = { workspace = true }
 buzz-relay-mesh = { workspace = true }
 async-trait = "0.1"
 postcard = { workspace = true }

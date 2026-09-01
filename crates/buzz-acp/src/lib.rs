@@ -7,6 +7,8 @@ mod filter;
 mod observer;
 mod pool;
 mod pool_lifecycle;
+mod prompt_framing;
+mod prompt_project;
 mod queue;
 mod relay;
 mod runtime_identity;
@@ -20,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acp::{AcpClient, BackgroundTask, EnvVar, McpServer};
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
     KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
@@ -66,6 +68,89 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Resolve the process working directory for ACP session metadata and prompts.
+///
+/// `std::env::current_dir()` returns an absolute path on every supported
+/// platform. Keep the explicit invariant check so a future source cannot
+/// silently introduce a relative path, and surface resolution failures instead
+/// of substituting a misleading Unix-specific fallback.
+fn current_working_directory() -> Result<String> {
+    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
+    ensure!(
+        cwd.is_absolute(),
+        "current working directory is not absolute: {}",
+        cwd.display()
+    );
+    Ok(cwd.to_string_lossy().into_owned())
+}
+
+/// Log directives applied when the operator has not set `RUST_LOG`.
+///
+/// `EnvFilter` has no implicit global level: an event whose target matches no
+/// directive is dropped, silently. Most diagnostics in this crate are emitted
+/// on *bare* targets (`acp::background`, `pool::prompt`, `canvas::fetch`, …)
+/// that share no prefix with `buzz_acp`, so a crate-only filter discards every
+/// warning and error they carry — including
+/// `background_task_monitoring_unconfirmed`, which exists specifically to say a
+/// real background task may have gone untracked.
+///
+/// Directives match by string prefix and the most specific one wins, so a
+/// namespace entry sets a floor for every bare target beneath it and the
+/// per-target entries lift the few that triage always needs. `warn` is the
+/// floor because it cannot be chatty by construction — it admits only what is
+/// already exceptional, leaving high-volume `debug`/`info` traffic muted.
+///
+/// Managed agents are spawned by the desktop with an explicit `RUST_LOG`, so
+/// this default does not reach them: the same list is built for child
+/// processes in `desktop/src-tauri/src/managed_agents/runtime/child_env.rs`
+/// (`CHILD_LOG_DIRECTIVES`). Keep the two in sync.
+const DEFAULT_LOG_FILTER: &str = "buzz_acp=info,\
+     acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn,\
+     acp::background=info,acp::session=info,pool::session=info,pool::model=info";
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::DEFAULT_LOG_FILTER;
+    use tracing::Level;
+    use tracing_subscriber::EnvFilter;
+
+    /// A background-work termination notice tells the operator to inspect the
+    /// local log. Prove the filter actually admits the lines they are sent to
+    /// find, that a per-target entry lifts its own target above the namespace
+    /// floor, and that buying the evidence did not also un-mute the
+    /// high-volume traffic the floor exists to leave alone.
+    #[test]
+    fn default_filter_admits_bare_target_diagnostics_without_unmuting_chatty_traffic() {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new(DEFAULT_LOG_FILTER))
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            // Background-task lifecycle: `acp::background=info` must beat the
+            // `acp=warn` floor for its own target.
+            assert!(tracing::enabled!(target: "acp::background", Level::INFO));
+            assert!(tracing::enabled!(target: "acp::session", Level::INFO));
+            assert!(tracing::enabled!(target: "pool::session", Level::INFO));
+            // Every other bare namespace keeps its warn/error diagnostics.
+            // `pool::prompt` alone carries seven error-level call sites.
+            assert!(tracing::enabled!(target: "pool::prompt", Level::ERROR));
+            assert!(tracing::enabled!(target: "acp::wire", Level::WARN));
+            assert!(tracing::enabled!(target: "canvas::fetch", Level::WARN));
+            assert!(tracing::enabled!(target: "engram::core", Level::WARN));
+            assert!(tracing::enabled!(target: "observer", Level::WARN));
+            // The floor stays a floor: per-message wire and prompt chatter is
+            // still dropped, so restoring the evidence cannot flood a log.
+            assert!(!tracing::enabled!(target: "acp::wire", Level::DEBUG));
+            assert!(!tracing::enabled!(target: "pool::prompt", Level::INFO));
+            assert!(!tracing::enabled!(target: "acp::usage", Level::DEBUG));
+            // The floors are scoped to this crate's targets, not to the
+            // dependency tree behind it.
+            assert!(!tracing::enabled!(target: "hyper::client", Level::WARN));
+            assert!(!tracing::enabled!(target: "nostr_relay_pool::relay", Level::WARN));
+        });
+    }
+}
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
@@ -306,7 +391,7 @@ pub(crate) async fn is_dm_channel(
     channel_id: Uuid,
     channel_info: &pool::ChannelInfoResolver,
 ) -> bool {
-    match channel_info.resolve(channel_id).await {
+    match channel_info.resolve_channel_metadata(channel_id).await {
         Some(info) => info.channel_type == "dm",
         None => {
             tracing::warn!(
@@ -1730,10 +1815,52 @@ struct ChannelPendingBackgroundTasks {
     monitoring_state: &'static str,
 }
 
+/// Why the main loop exited, carried from the break site to the shutdown
+/// notice.
+///
+/// Every exit used to be reported as "the agent harness was explicitly shut
+/// down", which is true of exactly two of these. A Desktop restart, a lost
+/// relay and a dead agent pool all read as deliberate, so an operator could
+/// not tell an expected teardown from an incident without going to the process
+/// table — and the log that would have said so is not in the notice's reach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownCause {
+    ConsoleInterrupt,
+    Sigterm,
+    OwnerCommand,
+    InactivityBound,
+    RelayStreamGone,
+    ResultChannelClosed,
+    AllAgentsDead,
+}
+
+impl ShutdownCause {
+    /// Operator-facing phrase completing "the agent harness exited because …".
+    fn describe(self) -> &'static str {
+        match self {
+            Self::ConsoleInterrupt => "it was interrupted at the console (Ctrl-C)",
+            // Parenthesised, not em-dashed: this phrase is spliced into a
+            // longer sentence, and a trailing dash clause collides with the
+            // ", so the ACP process was torn down …" continuation.
+            Self::Sigterm => {
+                "it received SIGTERM (typically a Buzz Desktop restart, an agent stop, \
+                 or an OS shutdown)"
+            }
+            Self::OwnerCommand => "the owner sent `!shutdown`",
+            Self::InactivityBound => "the configured inactivity bound elapsed",
+            Self::RelayStreamGone => "the relay connection ended and could not be re-established",
+            Self::ResultChannelClosed => "the agent worker pool closed its result channel",
+            Self::AllAgentsDead => "every agent slot died and could not be respawned",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum BackgroundTaskTerminationReason {
     HoldBoundExpired,
-    HarnessShutdown,
+    /// `None` when the loop broke without recording a cause — stated as
+    /// unrecorded rather than dressed up as a deliberate stop.
+    HarnessShutdown(Option<ShutdownCause>),
 }
 
 async fn drain_idle_agent_notifications(pool: &mut AgentPool) -> usize {
@@ -1807,13 +1934,19 @@ fn background_task_termination_notice(
 ) -> String {
     let task_count = pending.iter().map(|state| state.tasks.len()).sum::<usize>();
     let reason_text = match reason {
+        // Name the anchor. The hold is measured from the session's FIRST
+        // pending task, so with per-task ages below this line would otherwise
+        // read as a contradiction: "expired after 7200 seconds" next to a task
+        // that has been pending 30s.
         BackgroundTaskTerminationReason::HoldBoundExpired => format!(
-            "the bounded background-work hold expired after {} seconds",
+            "the session's bounded background-work hold expired {} seconds after its \
+             first pending task",
             hold_bound.as_secs()
         ),
-        BackgroundTaskTerminationReason::HarnessShutdown => {
-            "the agent harness was explicitly shut down".to_string()
-        }
+        BackgroundTaskTerminationReason::HarnessShutdown(cause) => match cause {
+            Some(cause) => format!("the agent harness exited because {}", cause.describe()),
+            None => "the agent harness main loop exited for a cause it did not record".to_string(),
+        },
     };
     // Each task carries its own first-observed timestamp: the hold in
     // reason_text is the SESSION's anti-pinning anchor, which a rolling task
@@ -2079,15 +2212,88 @@ mod idle_pool_sleep_tests {
         assert!(cap.contains("background_tasks_terminated"));
         assert!(cap.contains("7200 seconds"));
         assert!(cap.contains("Remote sign (task-1; pending 2h13m)"));
+        // The hold is measured from the session's first pending task, not from
+        // the task named on the line below it. Say so, or the two numbers read
+        // as a contradiction.
+        assert!(cap.contains("first pending task"));
 
         let shutdown = background_task_termination_notice(
             &states,
-            BackgroundTaskTerminationReason::HarnessShutdown,
+            BackgroundTaskTerminationReason::HarnessShutdown(Some(ShutdownCause::OwnerCommand)),
             Duration::from_secs(7200),
             now,
         );
-        assert!(shutdown.contains("explicitly shut down"));
+        assert!(shutdown.contains("!shutdown"));
         assert!(shutdown.contains("restart the commitment"));
+    }
+
+    /// A teardown notice is the operator's only account of why the work died.
+    /// Every exit must arrive under its own name, and the five that are NOT a
+    /// deliberate stop must never be dressed up as one.
+    #[test]
+    fn shutdown_notice_names_the_concrete_exit_cause() {
+        let started = tokio::time::Instant::now();
+        let now = started + Duration::from_secs(30);
+        let state = ChannelPendingBackgroundTasks {
+            channel_id: Some(Uuid::nil()),
+            session_id: "sess-1".to_string(),
+            first_observed_at: started,
+            monitoring_state: "typed-confirmed",
+            tasks: vec![BackgroundTask {
+                task_id: "task-1".to_string(),
+                task_type: "local_bash".to_string(),
+                description: "Wait for reply".to_string(),
+                first_observed_at: started,
+            }],
+        };
+        let states = [&state];
+        let notice = |cause| {
+            background_task_termination_notice(
+                &states,
+                BackgroundTaskTerminationReason::HarnessShutdown(cause),
+                Duration::from_secs(7200),
+                now,
+            )
+        };
+
+        // Distinct causes must not collapse into one another.
+        let all = [
+            ShutdownCause::ConsoleInterrupt,
+            ShutdownCause::Sigterm,
+            ShutdownCause::OwnerCommand,
+            ShutdownCause::InactivityBound,
+            ShutdownCause::RelayStreamGone,
+            ShutdownCause::ResultChannelClosed,
+            ShutdownCause::AllAgentsDead,
+        ];
+        let mut phrases = HashSet::new();
+        for cause in all {
+            let phrase = cause.describe();
+            assert!(!phrase.is_empty());
+            assert!(phrases.insert(phrase), "duplicate phrase for {cause:?}");
+            assert!(notice(Some(cause)).contains(phrase));
+        }
+
+        // The incident that started this: a Desktop restart delivers SIGTERM to
+        // every agent. It is not an "explicit" shutdown, and an operator has to
+        // be able to tell it from a lost relay.
+        let sigterm = notice(Some(ShutdownCause::Sigterm));
+        assert!(sigterm.contains("SIGTERM"));
+        assert!(sigterm.contains("Buzz Desktop restart"));
+        assert!(!sigterm.contains("explicitly shut down"));
+        // Every phrase is spliced mid-sentence, so the seam has to read as
+        // prose — a trailing dash clause would collide with the continuation.
+        assert!(
+            sigterm.contains("an OS shutdown), so the ACP process was torn down"),
+            "cause phrase must close cleanly before the sentence resumes: {sigterm}"
+        );
+        assert!(!notice(Some(ShutdownCause::RelayStreamGone)).contains("explicitly shut down"));
+
+        // An unrecorded cause is reported as unrecorded, never implied to be
+        // deliberate.
+        let unrecorded = notice(None);
+        assert!(unrecorded.contains("did not record"));
+        assert!(!unrecorded.contains("explicitly shut down"));
     }
 
     #[test]
@@ -2348,7 +2554,8 @@ async fn tokio_main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER)),
         )
         .compact()
         .init();
@@ -2576,6 +2783,13 @@ async fn tokio_main() -> Result<()> {
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
+    let subscribed_ids: Vec<Uuid> = channel_filters.keys().copied().collect();
+    let answered_event_ids =
+        load_answered_event_ids(&relay.rest_client(), &subscribed_ids, startup_watermark).await;
+    tracing::info!(
+        answered_events = answered_event_ids.len(),
+        "startup relay-derived answered state loaded"
+    );
     let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
@@ -2626,6 +2840,7 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
+    let cwd = current_working_directory()?;
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2644,10 +2859,7 @@ async fn tokio_main() -> Result<()> {
             Some(include_str!("base_prompt.md"))
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
-        cwd: std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string(),
+        cwd,
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
@@ -2769,12 +2981,15 @@ async fn tokio_main() -> Result<()> {
     let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
 
     // ── Step 7: Shutdown signal ───────────────────────────────────────────────
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+    // Carries the cause, not just the fact: the signal handlers are the only
+    // place that knows a teardown was a SIGTERM rather than an owner command,
+    // and the shutdown notice is posted long after they have run.
+    let (shutdown_tx, mut shutdown_rx) = watch::channel::<Option<ShutdownCause>>(None);
 
     let tx = shutdown_tx.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
-        let _ = tx.send(());
+        let _ = tx.send(Some(ShutdownCause::ConsoleInterrupt));
     });
 
     #[cfg(unix)]
@@ -2784,7 +2999,7 @@ async fn tokio_main() -> Result<()> {
             use tokio::signal::unix::{signal, SignalKind};
             let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
             sigterm.recv().await;
-            let _ = tx.send(());
+            let _ = tx.send(Some(ShutdownCause::Sigterm));
         });
     }
 
@@ -2843,6 +3058,12 @@ async fn tokio_main() -> Result<()> {
         SteerAck(SteerAckEvent),
         Wake(u32, Result<AgentPool, String>),
     }
+
+    // Read by the shutdown notice after the loop. Deliberately declared without
+    // an initializer: definite-assignment then makes it a compile error to add
+    // a new `break` out of this loop without naming why it fired — which is the
+    // defect this exists to close, restated as a type-checker rule.
+    let exit_cause: Option<ShutdownCause>;
 
     loop {
         // Whether buffered work is waiting on a lazy pool. Also gates the
@@ -2985,6 +3206,7 @@ async fn tokio_main() -> Result<()> {
                     Some(result) => Some(PoolEvent::Result(Box::new(result))),
                     None => {
                         tracing::info!("result channel closed — exiting main loop");
+                        exit_cause = Some(ShutdownCause::ResultChannelClosed);
                         break;
                     }
                 },
@@ -3200,6 +3422,16 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
+                            let replay_event_id = buzz_event.event.id.to_hex();
+                            if answered_event_ids.contains(&buzz_event.event) {
+                                tracing::info!(
+                                    channel_id = %buzz_event.channel_id,
+                                    event_id = %replay_event_id,
+                                    "startup replay skipped: relay already contains an agent answer"
+                                );
+                                continue;
+                            }
+
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
                             let is_shutdown = is_owner_control_command(
                                 &buzz_event.event,
@@ -3216,7 +3448,7 @@ async fn tokio_main() -> Result<()> {
                                             sender = %buzz_event.event.pubkey.to_hex(),
                                             "shutdown command from owner — exiting gracefully"
                                         );
-                                        let _ = shutdown_tx.send(());
+                                        let _ = shutdown_tx.send(Some(ShutdownCause::OwnerCommand));
                                         continue;
                                     }
                                 }
@@ -3413,33 +3645,47 @@ async fn tokio_main() -> Result<()> {
                                     owner_cache.get(),
                                 );
                                 if let Some(signal) = signal {
-                                    // Non-cancelling fork: when the mode
-                                    // wants a Steer, attempt the
-                                    // non-cancelling path first. On accept,
-                                    // withhold the queued event and spawn an
-                                    // ack watcher; the main loop's
-                                    // `PoolEvent::SteerAck` arm decides
-                                    // success/release/fallback. On reject
-                                    // (including agents that advertise no
-                                    // steer transport at all), fall through
-                                    // to the universal cancel+merge `Steer`
-                                    // signal so the event still reaches the
-                                    // agent.
-                                    let native_attempted = matches!(signal, ControlSignal::Steer)
-                                        && try_native_steer(
-                                            &mut pool,
-                                            &mut queue,
+                                    let same_thread_scope = !matches!(signal, ControlSignal::Steer)
+                                        || queue.in_flight_thread_scope_matches(
                                             buzz_event.channel_id,
-                                            event_for_steer,
-                                            prompt_tag_for_steer,
-                                            &steer_ack_tx,
+                                            &event_for_steer,
                                         );
-                                    if !native_attempted {
-                                        signal_in_flight_task(
-                                            &mut pool,
-                                            buzz_event.channel_id,
-                                            signal,
+                                    if !same_thread_scope {
+                                        tracing::info!(
+                                            channel_id = %buzz_event.channel_id,
+                                            event_id = %event_id_hex,
+                                            "cross-thread event queued for a separate turn"
                                         );
+                                    } else {
+                                        // Non-cancelling fork: when the mode
+                                        // wants a Steer, attempt the
+                                        // non-cancelling path first. On accept,
+                                        // withhold the queued event and spawn an
+                                        // ack watcher; the main loop's
+                                        // `PoolEvent::SteerAck` arm decides
+                                        // success/release/fallback. On reject
+                                        // (including agents that advertise no
+                                        // steer transport at all), fall through
+                                        // to the universal cancel+merge `Steer`
+                                        // signal so the event still reaches the
+                                        // agent.
+                                        let native_attempted =
+                                            matches!(signal, ControlSignal::Steer)
+                                                && try_native_steer(
+                                                    &mut pool,
+                                                    &mut queue,
+                                                    buzz_event.channel_id,
+                                                    event_for_steer,
+                                                    prompt_tag_for_steer,
+                                                    &steer_ack_tx,
+                                                );
+                                        if !native_attempted {
+                                            signal_in_flight_task(
+                                                &mut pool,
+                                                buzz_event.channel_id,
+                                                signal,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -3456,6 +3702,7 @@ async fn tokio_main() -> Result<()> {
                             if let Err(e) = relay.reconnect().await {
                                 tracing::error!("relay background task is gone: {e} — exiting");
                                 tokio::time::sleep(Duration::from_secs(1)).await;
+                                exit_cause = Some(ShutdownCause::RelayStreamGone);
                                 break;
                             }
                         }
@@ -3479,7 +3726,7 @@ async fn tokio_main() -> Result<()> {
                             inactivity_seconds = config.exit_after_inactivity_secs,
                             "inactivity bound reached — exiting gracefully"
                         );
-                        let _ = shutdown_tx.send(());
+                        let _ = shutdown_tx.send(Some(ShutdownCause::InactivityBound));
                     }
                     None
                 }
@@ -3651,7 +3898,10 @@ async fn tokio_main() -> Result<()> {
                     None
                 }
                 _ = shutdown_rx.changed() => {
-                    tracing::info!("shutting down");
+                    // Read through the sender: the watch value is the cause the
+                    // signal handler / control path recorded when it fired.
+                    exit_cause = *shutdown_tx.borrow();
+                    tracing::info!(cause = ?exit_cause, "shutting down");
                     break;
                 }
             }
@@ -3677,6 +3927,8 @@ async fn tokio_main() -> Result<()> {
                     Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
+                    // The only Exit any of these return is the dead-pool case.
+                    exit_cause = Some(ShutdownCause::AllAgentsDead);
                     break;
                 }
                 if drain_ready_join_results(
@@ -3693,6 +3945,7 @@ async fn tokio_main() -> Result<()> {
                     Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
+                    exit_cause = Some(ShutdownCause::AllAgentsDead);
                     break;
                 }
                 for (channel_id, thread_tags) in
@@ -3719,6 +3972,7 @@ async fn tokio_main() -> Result<()> {
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
+                    exit_cause = Some(ShutdownCause::AllAgentsDead);
                     break;
                 }
                 for (channel_id, thread_tags) in
@@ -3927,16 +4181,22 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // A deliberate harness shutdown is allowed to terminate background work,
-    // but never silently. Drain any final lifecycle frames first, then surface
-    // one notice per affected channel through the existing failure seam.
+    // A harness exit is allowed to terminate background work, but never
+    // silently and never anonymously — the notice names which of the exits
+    // below actually happened, since a Desktop restart and a lost relay are
+    // very different news. Drain any final lifecycle frames first, then
+    // surface one notice per affected channel through the existing failure
+    // seam.
     let _ = drain_idle_agent_notifications(&mut pool).await;
+    let interrupted_batches = interrupt_in_flight_for_shutdown(&mut pool);
+    post_shutdown_interruption_notices(&ctx.rest_client, interrupted_batches).await;
+
     let shutdown_pending_background = channel_pending_background_tasks(&mut pool);
     if !shutdown_pending_background.is_empty() {
         post_background_task_termination_notices(
             &ctx,
             &shutdown_pending_background,
-            BackgroundTaskTerminationReason::HarnessShutdown,
+            BackgroundTaskTerminationReason::HarnessShutdown(exit_cause),
             ctx.max_turn_duration,
         )
         .await;
@@ -3950,8 +4210,10 @@ async fn tokio_main() -> Result<()> {
     // comment exists to prevent. Fire the watch first so exits that bypass the
     // signal handlers (result channel closed, LoopAction::Exit) cancel the wake
     // just as promptly. Timeout is a backstop for a slot stuck outside the
-    // select (e.g. in spawn); only then do we fall back to aborting.
-    let _ = shutdown_tx.send(());
+    // select (e.g. in spawn); only then do we fall back to aborting. `send`
+    // always notifies, so re-sending the cause a signal handler already
+    // stored still wakes the receivers.
+    let _ = shutdown_tx.send(exit_cause);
     let wake_drain = tokio::time::timeout(Duration::from_secs(30), async {
         while wake_tasks.join_next().await.is_some() {}
     })
@@ -4079,6 +4341,323 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     })
 }
 
+/// Harness-authored channel reports that describe a delivery failure are not
+/// successful answers. Keep them eligible for startup replay: the notice gives
+/// the human immediate visibility, while a later healthy process still gets a
+/// chance to finish the original mention.
+fn is_delivery_failure_report(event: &nostr::Event) -> bool {
+    event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.first().map(String::as_str) == Some("buzz-acp")
+            && parts.get(1).map(String::as_str) == Some("delivery-failure")
+    }) || event
+        .content
+        .starts_with("⚠️ Addressed turn delivery failed")
+        || event
+            .content
+            .starts_with("⚠️ Background work was terminated")
+        || event
+            .content
+            .starts_with("⚠️ I can't take this conversation right now")
+        || event.content.starts_with("⚠️ I couldn't process")
+        || event.content.starts_with("⚠️ I couldn't finish")
+}
+
+#[derive(Debug, Default)]
+struct AnsweredEventIds {
+    exact: HashSet<String>,
+    legacy_thread_roots: HashMap<String, u64>,
+}
+
+impl AnsweredEventIds {
+    fn contains(&self, event: &nostr::Event) -> bool {
+        let event_id = event.id.to_hex();
+        if self.exact.contains(&event_id) {
+            return true;
+        }
+        let Some((root, _)) = buzz_core::nip10::parse_thread_markers(&event.tags).resolve() else {
+            return false;
+        };
+        self.legacy_thread_roots
+            .get(&root)
+            .is_some_and(|answer_ts| event.created_at.as_secs() <= *answer_ts)
+    }
+
+    fn len(&self) -> usize {
+        self.exact.len()
+    }
+}
+
+fn answered_event_ids_from_reports(
+    reports: impl IntoIterator<Item = serde_json::Value>,
+) -> Result<AnsweredEventIds> {
+    let mut answered = AnsweredEventIds::default();
+    for raw in reports {
+        let event: nostr::Event = serde_json::from_value(raw)
+            .context("startup answered-state query returned an invalid event")?;
+        if !pool::is_channel_report_kind(event.kind.as_u16() as u32)
+            || is_delivery_failure_report(&event)
+        {
+            continue;
+        }
+        // Only the NIP-10 reply marker names what this report directly
+        // answered. A root marker is ancestry, and a bare `e` tag can be an
+        // unrelated reference. Historical flat replies used the thread root
+        // as their reply marker; the timestamped compatibility map below
+        // prevents that legacy ambiguity from suppressing later mentions.
+        let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
+        if let Some(reply) = markers.reply {
+            let reply = reply.to_ascii_lowercase();
+            answered.exact.insert(reply.clone());
+            // Historical human-facing prompts told agents to reply directly
+            // to the thread root. Those reports cannot name the exact nested
+            // mention, so retain a timestamped compatibility entry: only
+            // mentions in that root at or before the report are suppressed.
+            // Later mentions in the same conversation remain eligible.
+            if markers.root.is_none() {
+                answered
+                    .legacy_thread_roots
+                    .entry(reply)
+                    .and_modify(|ts| *ts = (*ts).max(event.created_at.as_secs()))
+                    .or_insert(event.created_at.as_secs());
+            }
+        }
+    }
+    Ok(answered)
+}
+
+/// Load restart-durable answered state from the relay before subscriptions can
+/// replay historical mentions. One paginated multi-channel filter avoids the
+/// per-mention REQ storm that would otherwise exceed the relay frame budget.
+async fn load_answered_event_ids(
+    rest: &relay::RestClient,
+    channel_ids: &[Uuid],
+    since: u64,
+) -> AnsweredEventIds {
+    if channel_ids.is_empty() {
+        return AnsweredEventIds::default();
+    }
+    let filter = serde_json::json!({
+        "authors": [rest.keys.public_key().to_hex()],
+        "kinds": [
+            buzz_core::kind::KIND_STREAM_MESSAGE,
+            buzz_core::kind::KIND_STREAM_MESSAGE_V2,
+            buzz_core::kind::KIND_FORUM_POST,
+            buzz_core::kind::KIND_FORUM_COMMENT,
+        ],
+        "#h": channel_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+        "since": since,
+    });
+    match tokio::time::timeout(Duration::from_secs(15), rest.query_raw_all(filter)).await {
+        Ok(Ok(reports)) => match answered_event_ids_from_reports(reports) {
+            Ok(answered) => answered,
+            Err(error) => {
+                tracing::warn!(%error, "startup answered-state parse failed; replaying at least once");
+                AnsweredEventIds::default()
+            }
+        },
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "startup answered-state query failed; replaying at least once");
+            AnsweredEventIds::default()
+        }
+        Err(_) => {
+            tracing::warn!("startup answered-state query timed out; replaying at least once");
+            AnsweredEventIds::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod restart_delivery_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn reply_event(
+        keys: &Keys,
+        channel_id: Uuid,
+        root: nostr::EventId,
+        content: &str,
+        failure_marker: bool,
+    ) -> nostr::Event {
+        let thread_ref = buzz_sdk::ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let mut builder =
+            buzz_sdk::build_message(channel_id, content, Some(&thread_ref), &[], false, &[])
+                .unwrap();
+        if failure_marker {
+            builder = builder.tag(Tag::parse(["buzz-acp", "delivery-failure"]).unwrap());
+        }
+        builder.sign_with_keys(keys).unwrap()
+    }
+
+    #[test]
+    fn relay_answered_state_excludes_marked_and_legacy_failure_notices() {
+        let keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let answered_root = EventBuilder::new(Kind::Custom(9), "answered")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let marked_failure_root = EventBuilder::new(Kind::Custom(9), "marked failure")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let legacy_failure_root = EventBuilder::new(Kind::Custom(9), "legacy failure")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let ancestry_root = EventBuilder::new(Kind::Custom(9), "thread ancestry")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let nested_answered = EventBuilder::new(Kind::Custom(9), "nested mention")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let unrelated_reference = EventBuilder::new(Kind::Custom(9), "reference")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let nested_thread_ref = buzz_sdk::ThreadRef {
+            root_event_id: ancestry_root.id,
+            parent_event_id: nested_answered.id,
+        };
+        let nested_reply = buzz_sdk::build_message(
+            channel_id,
+            "nested answer",
+            Some(&nested_thread_ref),
+            &[],
+            false,
+            &[],
+        )
+        .unwrap()
+        .tag(Tag::event(unrelated_reference.id))
+        .sign_with_keys(&keys)
+        .unwrap();
+        let reports = vec![
+            reply_event(&keys, channel_id, answered_root.id, "finished", false),
+            nested_reply,
+            reply_event(
+                &keys,
+                channel_id,
+                marked_failure_root.id,
+                "⚠️ future wording can change",
+                true,
+            ),
+            reply_event(
+                &keys,
+                channel_id,
+                legacy_failure_root.id,
+                "⚠️ I couldn't process the last request after multiple retries.",
+                false,
+            ),
+        ];
+
+        let answered = answered_event_ids_from_reports(
+            reports
+                .into_iter()
+                .map(|event| serde_json::to_value(event).unwrap()),
+        )
+        .unwrap();
+
+        assert!(answered.contains(&answered_root));
+        assert!(answered.contains(&nested_answered));
+        assert!(!answered.contains(&ancestry_root));
+        assert!(!answered.contains(&unrelated_reference));
+        assert!(!answered.contains(&marked_failure_root));
+        assert!(!answered.contains(&legacy_failure_root));
+    }
+
+    #[test]
+    fn legacy_flat_reply_suppresses_only_earlier_mentions_in_its_thread() {
+        let agent_keys = Keys::generate();
+        let human_keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let root = EventBuilder::new(Kind::Custom(9), "root")
+            .custom_created_at(nostr::Timestamp::from(100))
+            .sign_with_keys(&human_keys)
+            .unwrap();
+        let thread_ref = buzz_sdk::ThreadRef {
+            root_event_id: root.id,
+            parent_event_id: root.id,
+        };
+        let earlier = buzz_sdk::build_message(
+            channel_id,
+            "earlier mention",
+            Some(&thread_ref),
+            &[],
+            false,
+            &[],
+        )
+        .unwrap()
+        .custom_created_at(nostr::Timestamp::from(150))
+        .sign_with_keys(&human_keys)
+        .unwrap();
+        let legacy_flat_reply =
+            buzz_sdk::build_message(channel_id, "answer", Some(&thread_ref), &[], false, &[])
+                .unwrap()
+                .custom_created_at(nostr::Timestamp::from(200))
+                .sign_with_keys(&agent_keys)
+                .unwrap();
+        let later = buzz_sdk::build_message(
+            channel_id,
+            "later mention",
+            Some(&thread_ref),
+            &[],
+            false,
+            &[],
+        )
+        .unwrap()
+        .custom_created_at(nostr::Timestamp::from(250))
+        .sign_with_keys(&human_keys)
+        .unwrap();
+
+        let answered =
+            answered_event_ids_from_reports([serde_json::to_value(legacy_flat_reply).unwrap()])
+                .unwrap();
+
+        assert!(answered.contains(&earlier));
+        assert!(!answered.contains(&later));
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_channel_turn_and_returns_replay_anchor() {
+        let keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "work")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![queue::BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let mut pool = AgentPool::from_slots(vec![]);
+        let task = tokio::spawn(async {});
+        pool.task_map_mut().insert(
+            task.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "shutdown-test".into(),
+                recoverable_batch: Some(batch.clone()),
+                control_tx: Some(control_tx),
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        let interrupted = interrupt_in_flight_for_shutdown(&mut pool);
+
+        assert_eq!(control_rx.await.unwrap(), ControlSignal::Cancel);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].events[0].event.id, batch.events[0].event.id);
+        task.await.unwrap();
+    }
+}
+
 fn is_owner_control_command(
     event: &nostr::Event,
     kind_u32: u32,
@@ -4140,6 +4719,61 @@ fn signal_in_flight_task(
     false
 }
 
+/// Cancel checked-out channel turns at process shutdown while retaining a
+/// relay anchor for every interrupted batch. The in-process queue is mortal;
+/// restart recovery therefore comes from the original unanswered mentions,
+/// not from pretending this batch can survive process teardown.
+fn interrupt_in_flight_for_shutdown(pool: &mut AgentPool) -> Vec<FlushBatch> {
+    let mut interrupted = Vec::new();
+    for meta in pool.task_map_mut().values_mut() {
+        let Some(batch) = meta.recoverable_batch.clone() else {
+            continue;
+        };
+        interrupted.push(batch);
+        if let Some(tx) = meta.control_tx.take() {
+            let _ = tx.send(ControlSignal::Cancel);
+        }
+    }
+    interrupted
+}
+
+async fn post_shutdown_interruption_notices(rest: &relay::RestClient, batches: Vec<FlushBatch>) {
+    let mut notices = tokio::task::JoinSet::new();
+    for batch in batches {
+        let rest = rest.clone();
+        notices.spawn(async move {
+            let mut thread_tags = batch
+                .events
+                .last()
+                .map(|event| queue::parse_thread_tags(&event.event))
+                .unwrap_or_default();
+            if thread_tags.root_event_id.is_none() {
+                if let Some(trigger) = batch.events.last() {
+                    let trigger_id = trigger.event.id.to_hex();
+                    thread_tags.root_event_id = Some(trigger_id.clone());
+                    thread_tags.parent_event_id = Some(trigger_id);
+                }
+            }
+            pool::post_failure_notice(
+                &rest,
+                batch.channel_id,
+                &thread_tags,
+                "⚠️ Addressed turn delivery failed (`failure_shape: harness_shutdown_interrupted`). The harness stopped before this turn completed; the unanswered mention will be retried after restart.",
+            )
+            .await;
+        });
+    }
+    if tokio::time::timeout(Duration::from_secs(6), async {
+        while notices.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        tracing::warn!("shutdown interruption notices did not drain before relay teardown");
+        notices.shutdown().await;
+    }
+}
+
 /// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
 ///
 /// Caller invariants:
@@ -4185,7 +4819,7 @@ fn try_native_steer(
     // channel context and the actor's profile in the original prompt,
     // duplicating it here would defeat the point of non-cancelling
     // steering (which is to inject only what's new).
-    let (header, closing) = queue::native_steer_framing();
+    let (tag, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
     let be = queue::BatchEvent {
         event,
@@ -4193,7 +4827,13 @@ fn try_native_steer(
         received_at: std::time::Instant::now(),
     };
     let event_block = queue::format_event_block(channel_id, None, &be, None);
-    let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
+    let new_message = prompt_framing::semantic_section(tag, "");
+    let event_section = prompt_framing::semantic_section_with_attributes(
+        "buzz-event",
+        &[("type", prompt_tag.as_str())],
+        &event_block,
+    );
+    let body = format!("{new_message}\n\n{event_section}\n\n{closing}");
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
@@ -4686,6 +5326,7 @@ fn handle_prompt_result(
                     }
                     PromptOutcome::AgentExited => "the agent process exited".to_string(),
                     PromptOutcome::Error(e) => format!("{e}"),
+                    PromptOutcome::ProjectContextIndeterminate(reason) => reason.clone(),
                     _ => "repeated failures".to_string(),
                 };
                 let content = format!(
@@ -4722,6 +5363,7 @@ fn handle_prompt_result(
     let outcome_label = match &result.outcome {
         PromptOutcome::Ok(_) => "ok",
         PromptOutcome::Error(_) => "error",
+        PromptOutcome::ProjectContextIndeterminate(_) => "project_context_indeterminate",
         PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
         PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "hard_timeout",
         PromptOutcome::AgentExited => "exited",
@@ -4898,6 +5540,16 @@ fn handle_prompt_result(
                 pid = harness_pid,
                 "agent_returned (cancelled)"
             );
+            pool.return_agent(result.agent);
+        }
+        PromptOutcome::ProjectContextIndeterminate(reason) => {
+            tracing::warn!(
+                agent = agent_index,
+                outcome = outcome_label,
+                reason,
+                "agent_returned (local project context indeterminate — pipe intact)"
+            );
+            emit_turn_error(&reason, None);
             pool.return_agent(result.agent);
         }
         PromptOutcome::Error(ref e) => {
@@ -5165,6 +5817,14 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_names_current_context_framing() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("UUID from `<context>`"));
+        assert!(prompt.contains("reply destination supplied in the `<context>` block"));
+        assert!(!prompt.contains("`[Context]`"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_real_newlines_for_multiline_messages() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("pass real newline bytes through stdin"));
@@ -5183,6 +5843,14 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("CI and live workflow evidence answer different questions"));
         assert!(prompt.contains("record the invariant in the same session"));
         assert!(prompt.contains("update the team's shared guidance"));
+    }
+
+    #[test]
+    fn shared_base_prompt_teaches_not_to_duplicate_projects() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("do **not** run `buzz projects create`"));
+        assert!(prompt.contains("buzz issues create --channel"));
+        assert!(prompt.contains("is not a Buzz repository"));
     }
 
     #[test]
@@ -5341,7 +6009,9 @@ impl PoolStartup {
 
 async fn initialize_agent_pool(
     startup: &PoolStartup,
-    mut shutdown: Option<watch::Receiver<()>>,
+    // Only the change notification matters here; the cause rides along for the
+    // shutdown notice the main loop posts.
+    mut shutdown: Option<watch::Receiver<Option<ShutdownCause>>>,
 ) -> Result<AgentPool> {
     // One agent failing to start must not kill the whole pool.
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
@@ -5617,10 +6287,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     };
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-        .to_string_lossy()
-        .to_string();
+    let cwd = current_working_directory()?;
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
@@ -5840,8 +6507,8 @@ mod heartbeat_base_prompt_tests {
     use super::*;
 
     // Pins the heartbeat dispatch path (dispatch_heartbeat, ~line 2359): a
-    // legacy agent WITH a base_prompt must get [Base] prepended to the
-    // heartbeat user message, composed as `[Base]\n{bp}\n\n{prompt}`. This is
+    // legacy agent WITH a base_prompt must get <base> prepended to the
+    // heartbeat user message. This is
     // the second half of the round-2 regression (the first being initial_message).
 
     fn heartbeat_standing() -> queue::StandingContext<'static> {
@@ -5854,12 +6521,12 @@ mod heartbeat_base_prompt_tests {
     #[test]
     fn test_heartbeat_legacy_agent_gets_base_prepended() {
         // protocol_version 1 + Some(base_prompt): heartbeat prompt is prefixed
-        // with the [Base] section exactly as the legacy session/new path would.
+        // with the <base> section exactly as the legacy session/new path would.
         let prompt = "[System: Heartbeat]\nrun feed get";
         let composed = pool::prepend_standing_for_legacy(1, &heartbeat_standing(), prompt);
         assert_eq!(
             composed,
-            "[Base]\nyou are a helpful agent\n\n[System: Heartbeat]\nrun feed get"
+            "<base>\nyou are a helpful agent\n</base>\n\n[System: Heartbeat]\nrun feed get"
         );
     }
 
@@ -6486,7 +7153,7 @@ mod author_gate_tests {
         assert_eq!(
             requests.load(Ordering::SeqCst),
             1,
-            "second resolution uses cache"
+            "author-gate DM classification resolves and caches channel metadata only"
         );
         server.abort();
     }
@@ -9062,6 +9729,94 @@ mod error_outcome_emission_tests {
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
     }
 
+    #[tokio::test]
+    async fn indeterminate_project_context_requeues_without_poisoning_agent_or_circuit() {
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "project work")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "healthy-session".into());
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "indeterminate-project".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "indeterminate-project".into(),
+            outcome: PromptOutcome::ProjectContextIndeterminate(
+                "project context is indeterminate".into(),
+            ),
+            batch: Some(batch),
+        };
+
+        assert!(matches!(
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                None,
+            ),
+            LoopAction::Continue
+        ));
+
+        let returned = pool.agents_mut()[0]
+            .as_ref()
+            .expect("healthy agent returns to its slot");
+        assert_eq!(
+            returned.state.sessions.get(&channel_id).map(String::as_str),
+            Some("healthy-session")
+        );
+        assert_eq!(queue.queued_event_count(&channel_id), 1);
+        assert!(crash_history[0].crash_times.is_empty());
+        assert!(crash_history[0].open_until.is_none());
+        assert!(!crash_history[0].respawn_in_flight);
+        assert!(respawn_tasks.is_empty());
+    }
+
     // ── is_auth_error classification ───────────────────────────────────────
 
     #[test]
@@ -9374,7 +10129,7 @@ mod observer_payload_trim_tests {
         // to 1).
         let sections = [
             "[Base]\nyou are a helpful agent".to_string(),
-            "[System]\npersona text".to_string(),
+            "[Agent Instructions]\npersona text".to_string(),
             "[Agent Memory — core]\nremember this".to_string(),
             "[Context]\nScope: thread".to_string(),
             // The triggering event body, oversized on its own.
@@ -9411,7 +10166,7 @@ mod observer_payload_trim_tests {
         let texts: Vec<&str> = blocks.iter().map(|b| b["text"].as_str().unwrap()).collect();
         for header in [
             "[Base]",
-            "[System]",
+            "[Agent Instructions]",
             "[Agent Memory — core]",
             "[Context]",
             "[Buzz event: @mention]",

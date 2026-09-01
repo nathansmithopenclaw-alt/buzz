@@ -3,9 +3,11 @@
 pub mod admin;
 pub mod bridge;
 pub mod events;
+pub mod gifs;
 pub mod git;
 pub mod invites;
 pub mod media;
+pub mod memory;
 pub mod mesh_demo;
 pub mod nip05;
 pub mod operator;

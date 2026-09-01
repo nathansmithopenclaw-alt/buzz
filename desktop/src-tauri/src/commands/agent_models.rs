@@ -8,11 +8,11 @@ use super::agent_model_process::run_agent_models_command;
 use super::managed_agent_definition::apply_model_provider_prompt_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
-#[cfg(test)]
-use super::agent_models_env::env_value;
 use super::agent_models_env::{
     effective_discovery_provider, env_or_process_value, redaction_env_with_value, DiscoveryProvider,
 };
+#[cfg(test)]
+use super::agent_models_env::{env_value, env_value_or_process_if_absent};
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
 use crate::{
@@ -713,6 +713,8 @@ async fn discover_anthropic_models(
 
 #[path = "agent_models_databricks.rs"]
 mod databricks;
+#[cfg(test)]
+use databricks::databricks_models_response;
 use databricks::{discover_databricks_models, DatabricksAuthIntent};
 
 #[path = "agent_models_update.rs"]

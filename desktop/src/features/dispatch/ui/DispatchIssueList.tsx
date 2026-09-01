@@ -3,8 +3,8 @@ import { Clock3, Hash, Inbox, UserRound } from "lucide-react";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
-import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
 import { Skeleton } from "@/shared/ui/skeleton";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type { DispatchIssue, DispatchProject } from "../types";
 
 function triageAge(enteredAt: number, now = Math.floor(Date.now() / 1_000)) {
@@ -69,14 +69,14 @@ function AssigneeAvatar({
   const profile = profiles?.[issue.assignee.toLowerCase()];
   const label = resolveUserLabel({ pubkey: issue.assignee, profiles });
   return (
-    <Avatar className="h-6 w-6" title={label}>
-      {profile?.avatarUrl ? (
-        <AvatarImage alt="" src={profile.avatarUrl} />
-      ) : null}
-      <AvatarFallback className="text-2xs font-semibold">
-        {label.slice(0, 1).toUpperCase()}
-      </AvatarFallback>
-    </Avatar>
+    // The name only exists on hover here — the row shows the avatar alone.
+    <span className="inline-flex" title={label}>
+      <UserAvatar
+        avatarUrl={profile?.avatarUrl ?? null}
+        displayName={label}
+        size="sm"
+      />
+    </span>
   );
 }
 

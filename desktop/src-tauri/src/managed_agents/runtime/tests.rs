@@ -1,19 +1,43 @@
 use crate::managed_agents::known_acp_runtime;
 
+/// Keep in sync with `DEFAULT_LOG_FILTER` in `crates/buzz-acp/src/lib.rs` —
+/// a managed child and a hand-run harness must log the same things.
+const EXPECTED_DEFAULTS: &str = "buzz_acp=info,\
+     acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn,\
+     acp::background=info,acp::session=info,pool::session=info,pool::model=info";
+
 #[test]
-fn child_logs_always_include_model_application_evidence() {
-    assert_eq!(
-        super::child_rust_log_filter_from(None),
-        "buzz_acp=info,pool::model=info"
-    );
+fn child_logs_always_include_teardown_and_model_application_evidence() {
+    assert_eq!(super::child_rust_log_filter_from(None), EXPECTED_DEFAULTS);
+    // An operator level/crate directive is preserved; the rest is still added.
     assert_eq!(
         super::child_rust_log_filter_from(Some("warn,buzz_acp=debug")),
-        "warn,buzz_acp=debug,pool::model=info"
+        "warn,buzz_acp=debug,\
+         acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn,\
+         acp::background=info,acp::session=info,pool::session=info,pool::model=info"
     );
     assert_eq!(
         super::child_rust_log_filter_from(Some("pool::model=debug")),
-        "pool::model=debug,buzz_acp=info"
+        "pool::model=debug,buzz_acp=info,\
+         acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn,\
+         acp::background=info,acp::session=info,pool::session=info"
     );
+}
+
+/// An operator directive overrides its own target and nothing else. Under a
+/// `starts_with` dedup a supplied `acp::background=debug` also matches the
+/// `acp` floor, which would silently re-mute every *other* `acp::*` target —
+/// re-creating the defect this list exists to fix, in the one situation where
+/// someone is actively debugging.
+#[test]
+fn operator_directive_overrides_its_target_without_eating_the_namespace_floor() {
+    let filter = super::child_rust_log_filter_from(Some("acp::background=debug"));
+    let directives: Vec<&str> = filter.split(',').collect();
+
+    assert!(directives.contains(&"acp::background=debug"));
+    assert!(!directives.contains(&"acp::background=info"));
+    assert!(directives.contains(&"acp=warn"));
+    assert!(directives.contains(&"acp::session=info"));
 }
 
 #[test]
@@ -46,6 +70,9 @@ fn spawn_effort_provenance_marks_global_defaults_but_not_explicit_overrides() {
     let explicit_env = String::from_utf8(explicit_command.output().unwrap().stdout).unwrap();
     assert!(!explicit_env.lines().any(|line| line.starts_with(MARKER)));
 }
+
+#[path = "cli_tests.rs"]
+mod cli_tests;
 
 // ── desktop binary name tests ───────────────────────────────────────────
 
@@ -330,6 +357,7 @@ fn persona_with_provider(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -460,10 +488,8 @@ fn agent_env_overrides_win_over_persona_env_at_spawn() {
 #[test]
 fn orphaned_agent_refused_at_spawn_boundary() {
     // Persona deleted: `spawn_agent_child` must refuse before any process
-    // side effect, not silently degrade to the record's stale overrides.
-    // `require_resolved` on the shared resolver is the pure predicate
-    // `spawn_agent_child` checks first — this pins the contract without
-    // needing a real `AppHandle`.
+    // side effect. `require_resolved` on the shared resolver is the pure
+    // predicate checked first — pins the contract without a real `AppHandle`.
     let persona = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "persona-key")]);
     let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
     record.env_vars = BTreeMap::from([("EXTRA".to_string(), "agent-value".to_string())]);
@@ -626,36 +652,6 @@ fn name_matches_interpreter_rejects_node_prefix() {
     assert!(!super::name_matches_interpreter("node_modules"));
     assert!(!super::name_matches_interpreter("nodejs"));
     assert!(!super::name_matches_interpreter("node-gyp"));
-}
-
-#[test]
-fn claude_spawn_uses_the_probed_cli_executable() {
-    let _guard = crate::managed_agents::lock_path_mutex();
-    let temp = tempfile::tempdir().expect("temp dir");
-    let cli = temp
-        .path()
-        .join(format!("claude{}", std::env::consts::EXE_SUFFIX));
-    std::fs::write(&cli, "").expect("write fake cli");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake cli executable");
-    }
-    let original_path = std::env::var_os("PATH");
-    std::env::set_var("PATH", temp.path());
-
-    let mut command = std::process::Command::new("buzz-acp");
-    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
-
-    if let Some(path) = original_path {
-        std::env::set_var("PATH", path);
-    } else {
-        std::env::remove_var("PATH");
-    }
-    assert!(command
-        .get_envs()
-        .any(|(key, value)| { key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str()) }));
 }
 
 #[test]

@@ -29,7 +29,16 @@ export type SupportedLinkPreview = {
   href: string;
   provider: string;
   title: string;
-  /** Sanitized native-fetched bitmap; never a remote URL. */
+  /**
+   * Sanitized native-fetched bitmap on the metadata path
+   * (`resolveLinkPreview`) — but **not always a data URL**. On the snapshot
+   * path `parseLinkPreviewSnapshots` puts a relay `/media/` URL here, having
+   * validated it as one via `isRelayMediaPair`. WKWebView cannot load that
+   * directly (Cloudflare Access 403s it), so it must reach an `<img>` through
+   * `rewriteRelayUrl`. `LinkPreviewAttachment` is the single place that does
+   * the rewrite, for this field and `faviconDataUrl` both; render either one
+   * from anywhere else and the snapshot case fails to an empty box.
+   */
   imageDataUrl?: string | null;
   imageDomain?: string | null;
   typeLabel:
@@ -665,7 +674,17 @@ export function extractSupportedLinkPreviews(
   const relayOrigin = activeRelayOrigin ?? null;
   for (const candidate of candidates) {
     const preview = parseSupportedLinkPreview(candidate.href, relayOrigin);
-    if (!preview || seen.has(preview.href)) continue;
+    // Buzz-native links render as inline entity chips. Their relay-backed
+    // metadata is available from the chip on hover, so a second standalone
+    // preview would duplicate the same entity presentation. This also covers
+    // same-relay clone URLs, which parseSupportedLinkPreview normalizes to a
+    // buzz://repo href. External web links continue through the snapshot path.
+    if (
+      !preview ||
+      preview.href.startsWith("buzz://") ||
+      seen.has(preview.href)
+    )
+      continue;
 
     seen.add(preview.href);
     previews.push(

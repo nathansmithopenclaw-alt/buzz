@@ -11,8 +11,8 @@ pub(crate) struct DeadInstanceReapReport {
     pub process_count: usize,
 }
 
-pub(crate) fn emit_dead_instance_reap_reports(
-    app: &tauri::AppHandle,
+pub(crate) fn emit_dead_instance_reap_reports<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     reports: Vec<DeadInstanceReapReport>,
 ) {
     for report in reports {

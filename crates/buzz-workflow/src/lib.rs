@@ -591,13 +591,15 @@ impl WorkflowEngine {
                     schema::TriggerDef::Schedule {
                         cron: Some(expr),
                         interval: None,
-                    } => match cron_fire_instant(expr, now, 60, workflow.id) {
+                        timezone,
+                    } => match cron_fire_instant(expr, timezone.as_deref(), now, 60, workflow.id) {
                         Some(instant) => (instant, "cron"),
                         None => continue,
                     },
                     schema::TriggerDef::Schedule {
                         cron: None,
                         interval: Some(dur),
+                        timezone: _,
                     } => {
                         // Cheap pre-filter: skip the claim attempt when the
                         // in-memory clock says we're clearly mid-interval. The
@@ -813,24 +815,57 @@ impl WorkflowEngine {
 /// is due in the window.
 fn cron_fire_instant(
     expr: &str,
+    timezone: Option<&str>,
     now: DateTime<Utc>,
     window_secs: i64,
     workflow_id: Uuid,
 ) -> Option<DateTime<Utc>> {
     let normalized = schema::normalize_cron(expr);
-    match normalized.parse::<cron::Schedule>() {
-        Ok(sched) => {
-            let window_start = now - chrono::Duration::seconds(window_secs);
-            sched.after(&window_start).next().filter(|t| *t <= now)
-        }
+    let sched = match normalized.parse::<cron::Schedule>() {
+        Ok(sched) => sched,
         Err(e) => {
             tracing::warn!(
                 workflow_id = %workflow_id,
                 "Cron tick: invalid cron expression '{expr}': {e}"
             );
-            None
+            return None;
         }
+    };
+    let window_start = now - chrono::Duration::seconds(window_secs);
+    let tz_name = timezone
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "UTC");
+    let Some(name) = tz_name else {
+        return sched.after(&window_start).next().filter(|t| *t <= now);
+    };
+    let tz: chrono_tz::Tz = match name.parse() {
+        Ok(tz) => tz,
+        Err(_) => {
+            tracing::warn!(
+                workflow_id = %workflow_id,
+                "Cron tick: invalid timezone '{name}'"
+            );
+            return None;
+        }
+    };
+    // Walk UTC minute boundaries in (window_start, now] and match the cron
+    // against the IANA local time. `Schedule::after` on a local DateTime
+    // skips the second copy of a fall-back hour (01:00 EDT then 01:00 EST);
+    // matching `includes` on each UTC instant keeps those as distinct
+    // `scheduled_for` claims. Spring-forward's nonexistent hour simply
+    // never includes.
+    let mut ts = (window_start.timestamp().div_euclid(60) + 1) * 60;
+    let end = now.timestamp();
+    while ts <= end {
+        let Some(utc) = DateTime::from_timestamp(ts, 0) else {
+            break;
+        };
+        if sched.includes(utc.with_timezone(&tz)) {
+            return Some(utc);
+        }
+        ts += 60;
     }
+    None
 }
 
 /// Quantize `now` to the interval bucket boundary, yielding a deterministic
@@ -1046,8 +1081,22 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         timestamp: event.event.created_at.as_secs().to_string(),
         emoji,
         message_id,
+        is_reply: event_is_reply(&event.event),
         webhook_fields: HashMap::new(),
     }
+}
+
+/// True when an event is a threaded reply — it carries a valid NIP-10 `reply`
+/// marker. Delegates to the shared [`buzz_core::nip10`] parser so this stays in
+/// lockstep with ingest's `resolve_nip10_thread_meta`: a `root` marker alone is
+/// top-level, and a marker with a malformed (non-64-hex) event id is ignored by
+/// ingest, so it must not flip `trigger_is_reply` either — else a
+/// `trigger_is_reply == false` workflow would skip a message ingest stored as a
+/// new top-level post.
+fn event_is_reply(event: &nostr::Event) -> bool {
+    buzz_core::nip10::parse_thread_markers(&event.tags)
+        .reply
+        .is_some()
 }
 
 /// Pure authority decision for [`WorkflowEngine::check_owner_authority`].
@@ -1094,7 +1143,7 @@ mod tests {
         let wf_id = Uuid::new_v4();
         // The matched instant is the minute boundary 12:00:00, NOT `now`.
         assert_eq!(
-            cron_fire_instant("* * * * *", now, 60, wf_id),
+            cron_fire_instant("* * * * *", None, now, 60, wf_id),
             Some(
                 chrono::DateTime::parse_from_rfc3339("2026-06-15T12:00:00Z")
                     .unwrap()
@@ -1109,7 +1158,7 @@ mod tests {
         let now = Utc::now();
         let wf_id = Uuid::new_v4();
         assert!(
-            cron_fire_instant("not-a-cron", now, 60, wf_id).is_none(),
+            cron_fire_instant("not-a-cron", None, now, 60, wf_id).is_none(),
             "invalid cron should return None"
         );
     }
@@ -1123,7 +1172,7 @@ mod tests {
         let wf_id = Uuid::new_v4();
         // "0 0 1 1 *" = midnight on Jan 1 only — June 15 is definitely outside.
         assert!(
-            cron_fire_instant("0 0 1 1 *", now, 60, wf_id).is_none(),
+            cron_fire_instant("0 0 1 1 *", None, now, 60, wf_id).is_none(),
             "Jan-1-only cron should not fire on June 15"
         );
     }
@@ -1137,7 +1186,7 @@ mod tests {
             .with_timezone(&Utc);
         let wf_id = Uuid::new_v4();
         assert_eq!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id),
+            cron_fire_instant("0 9 * * *", None, now, 60, wf_id),
             Some(now),
             "cron should fire at exact minute boundary, anchored on 09:00:00"
         );
@@ -1154,7 +1203,7 @@ mod tests {
             .with_timezone(&Utc);
         let wf_id = Uuid::new_v4();
         assert_eq!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id),
+            cron_fire_instant("0 9 * * *", None, now, 60, wf_id),
             Some(
                 chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
                     .unwrap()
@@ -1173,8 +1222,77 @@ mod tests {
             .with_timezone(&Utc);
         let wf_id = Uuid::new_v4();
         assert!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id).is_none(),
+            cron_fire_instant("0 9 * * *", None, now, 60, wf_id).is_none(),
             "cron should not fire 61s after the scheduled time"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_honors_iana_timezone() {
+        // 15 June 2026 is EDT (UTC-4). 09:00 America/New_York is 13:00 UTC.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T13:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let wf_id = Uuid::new_v4();
+        assert_eq!(
+            cron_fire_instant("0 9 * * *", Some("America/New_York"), now, 60, wf_id),
+            Some(now),
+            "09:00 Eastern must fire at 13:00 UTC in June"
+        );
+        assert!(cron_fire_instant("0 9 * * *", Some("America/New_York"), now, 60, wf_id).is_some());
+        let utc_morning = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(
+            cron_fire_instant(
+                "0 9 * * *",
+                Some("America/New_York"),
+                utc_morning,
+                60,
+                wf_id
+            )
+            .is_none(),
+            "09:00 UTC is 05:00 Eastern and must not fire the Eastern 09:00 cron"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_fall_back_uses_distinct_scheduled_for_claims() {
+        // 2026-11-01 America/New_York: 01:00 happens twice (EDT then EST).
+        // Distinct UTC instants must be the claim keys so the second 01:00
+        // is not swallowed as a duplicate of the first.
+        let wf_id = Uuid::new_v4();
+        let first = chrono::DateTime::parse_from_rfc3339("2026-11-01T05:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let second = chrono::DateTime::parse_from_rfc3339("2026-11-01T06:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let first_claim =
+            cron_fire_instant("0 1 * * *", Some("America/New_York"), first, 60, wf_id);
+        let second_claim =
+            cron_fire_instant("0 1 * * *", Some("America/New_York"), second, 60, wf_id);
+        assert_eq!(first_claim, Some(first), "first 01:00 EDT must fire");
+        assert_eq!(second_claim, Some(second), "second 01:00 EST must fire");
+        assert_ne!(
+            first_claim, second_claim,
+            "fall-back double 01:00 must not share a scheduled_for claim"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_spring_forward_nonexistent_hour_does_not_panic() {
+        // 2026-03-08 America/New_York: 02:00 does not exist (01:59 EST → 03:00 EDT).
+        let wf_id = Uuid::new_v4();
+        let skipped = chrono::DateTime::parse_from_rfc3339("2026-03-08T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = std::panic::catch_unwind(|| {
+            cron_fire_instant("0 2 * * *", Some("America/New_York"), skipped, 60, wf_id)
+        });
+        assert!(
+            result.is_ok(),
+            "spring-forward nonexistent 02:00 must not panic"
         );
     }
 
@@ -1443,6 +1561,7 @@ steps:
         let trigger = TriggerDef::Schedule {
             cron: Some("0 9 * * 1-5".to_owned()),
             interval: None,
+            timezone: None,
         };
         // Schedule triggers are fired by the cron loop, not by events.
         assert!(!trigger_matches_event(
@@ -1555,6 +1674,7 @@ steps:
         let sched_trigger = TriggerDef::Schedule {
             cron: None,
             interval: Some("1h".to_owned()),
+            timezone: None,
         };
         let webhook_trigger = TriggerDef::Webhook;
 
@@ -1637,6 +1757,144 @@ steps:
         // Non-reaction events have empty emoji.
         assert_eq!(ctx.emoji, "");
         assert!(ctx.webhook_fields.is_empty());
+        // A top-level message (no e-tags) is not a reply.
+        assert!(!ctx.is_reply);
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_true_for_threaded_message() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let root = Keys::generate();
+        let root_event = EventBuilder::new(Kind::Custom(9), "root")
+            .tags([])
+            .sign_with_keys(&root)
+            .expect("sign root");
+        let root_hex = root_event.id.to_hex();
+
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "a threaded reply")
+            .tags([
+                Tag::parse(["e", &root_hex, "", "root"]).expect("root tag"),
+                Tag::parse(["e", &root_hex, "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(ctx.is_reply, "message with reply/root e-tags is a reply");
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_true_for_reply_only_marker() {
+        // A NIP-10 `reply` marker without a `root` marker (the fallback ingest
+        // treats as `root == reply`) is still a threaded reply.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let parent = Keys::generate();
+        let parent_event = EventBuilder::new(Kind::Custom(9), "parent")
+            .sign_with_keys(&parent)
+            .expect("sign parent");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "reply only")
+            .tags([Tag::parse(["e", &parent_event.id.to_hex(), "", "reply"]).expect("reply tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(ctx.is_reply, "a lone `reply` marker is a reply");
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_root_only_marker() {
+        // Ingest treats `(root=Some, reply=None)` as top-level, so
+        // `event_is_reply` must too — otherwise `trigger_is_reply == false`
+        // would skip a message the relay stored as a new top-level post.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let root = Keys::generate();
+        let root_event = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&root)
+            .expect("sign root");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "root marker only")
+            .tags([Tag::parse(["e", &root_event.id.to_hex(), "", "root"]).expect("root tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(
+            !ctx.is_reply,
+            "a lone `root` marker is top-level to ingest, not a reply"
+        );
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_unmarked_e_tag() {
+        // A bare `e` tag with no NIP-10 marker (e.g. a plain mention/quote) is
+        // not treated as a thread reply — only `reply`/`root` markers count.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let other = Keys::generate();
+        let other_event = EventBuilder::new(Kind::Custom(9), "other")
+            .tags([])
+            .sign_with_keys(&other)
+            .expect("sign");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "quotes another")
+            .tags([Tag::parse(["e", &other_event.id.to_hex()]).expect("bare e tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(!ctx.is_reply, "unmarked e-tag must not count as a reply");
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_malformed_reply_id() {
+        // Ingest gates a marker on a valid 64-hex event id; a malformed reply
+        // id is not a thread link, so ingest stores the event top-level. The
+        // predicate must agree, or `trigger_is_reply == false` would skip it.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "malformed reply marker")
+            .tags([Tag::parse(["e", "bad", "", "reply"]).expect("reply tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(
+            !ctx.is_reply,
+            "a malformed reply id is ignored by ingest, so it is top-level"
+        );
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_valid_root_malformed_reply() {
+        // A valid `root` marker but a malformed `reply` id: ingest ignores the
+        // reply and stores the event as root-only, i.e. top-level. The predicate
+        // must not flip to reply on the malformed marker.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let root = Keys::generate();
+        let root_event = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&root)
+            .expect("sign root");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "valid root, malformed reply")
+            .tags([
+                Tag::parse(["e", &root_event.id.to_hex(), "", "root"]).expect("root tag"),
+                Tag::parse(["e", "bad", "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(
+            !ctx.is_reply,
+            "a valid root with a malformed reply id is top-level to ingest"
+        );
     }
 
     #[test]

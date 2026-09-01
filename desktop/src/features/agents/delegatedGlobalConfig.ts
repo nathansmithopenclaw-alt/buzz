@@ -13,7 +13,7 @@ import {
   applyDelegatedGlobalAgentConfig,
   getGlobalAgentConfig,
 } from "@/shared/api/tauriGlobalAgentConfig";
-import { discoverAcpRuntimes } from "@/shared/api/tauri";
+import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 
 type GlobalRequest = Extract<
   AgentManagementRequest,

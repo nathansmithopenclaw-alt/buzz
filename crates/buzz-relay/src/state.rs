@@ -642,6 +642,9 @@ pub struct AppState {
     pub auth: Arc<AuthService>,
     /// Full-text search service.
     pub search: Arc<SearchService>,
+    /// Provider-neutral shared-memory engine. The upstream default is the
+    /// transparent naive provider; deployments may replace it behind the trait.
+    pub memory_provider: Arc<dyn buzz_memory::MemoryProvider>,
     /// Registry of active client subscriptions.
     pub sub_registry: Arc<SubscriptionRegistry>,
     /// Registry of active WebSocket connections.
@@ -722,6 +725,9 @@ pub struct AppState {
     /// replace this with process-local caching; replay freshness must survive
     /// cross-pod routing.
     pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
+    /// Shared HTTP client for relay-proxied GIF provider requests. Reusing the
+    /// connection pool avoids a fresh TLS handshake for every search/share.
+    pub gif_http_client: reqwest::Client,
     /// Shared Redis-backed admission limits for ordinary HTTP and WebSocket work.
     pub admission_rate_limiter: Arc<RedisRateLimiter>,
 
@@ -852,6 +858,7 @@ impl AppState {
         );
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
+        let gif_http_client = crate::api::gifs::build_gif_http_client();
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
         let state = Self {
@@ -862,6 +869,7 @@ impl AppState {
             pubsub,
             auth: Arc::new(auth),
             search: search_arc,
+            memory_provider: Arc::new(buzz_memory::NaiveProvider::new()),
             sub_registry: Arc::new(SubscriptionRegistry::new()),
             conn_manager: Arc::new(ConnectionManager::new()),
             community_connections: Arc::new(CommunityConnectionRegistry::new()),
@@ -912,6 +920,7 @@ impl AppState {
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
             nip98_replay,
+            gif_http_client,
             admission_rate_limiter,
             observer_rate_limiter: Arc::new(DashMap::new()),
             media_upload_rate_limiter: Arc::new(DashMap::new()),
@@ -948,6 +957,15 @@ impl AppState {
                 handle: audit_worker_handle,
             },
         )
+    }
+
+    /// Replace the bundled naive provider before wrapping state in `Arc`.
+    ///
+    /// External governance engines implement the generic provider trait; no
+    /// engine name or storage assumption crosses into Buzz.
+    pub fn with_memory_provider(mut self, provider: Arc<dyn buzz_memory::MemoryProvider>) -> Self {
+        self.memory_provider = provider;
+        self
     }
 
     /// Inter-relay mesh handle. `None` ⇒ mesh-off / single-instance: callers

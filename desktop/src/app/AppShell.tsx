@@ -34,8 +34,10 @@ import {
   useHideDmMutation,
   useOpenDmMutation,
 } from "@/features/channels/hooks";
+import { useDmResurfaceFromMessages } from "@/features/channels/useDmResurfaceFromMessages";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
+import { useDispatchWorkspacePrefetch } from "@/features/dispatch/hooks";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
 import {
@@ -214,6 +216,10 @@ export function AppShell() {
   // startup frames can be replayed, so there's no ordering constraint.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useAgentMetricArchiveSeed(deferredPubkey);
+  // Warm Dispatch's workspace list so the first click doesn't pay discovery.
+  // Deferred: it is speculative, and boot already spends the relay's frame
+  // budget on channel re-subscription.
+  useDispatchWorkspacePrefetch(deferredPubkey);
   const profileQuery = useProfileQuery();
   useRelayAutoHeal();
   usePresenceSubscription();
@@ -506,6 +512,11 @@ export function AppShell() {
   const { applyCanvas, applyAgents } = useApplyTemplate();
   const openDmMutation = useOpenDmMutation();
   const hideDmMutation = useHideDmMutation();
+  useDmResurfaceFromMessages({
+    pubkey: identityQuery.data?.pubkey,
+    relayUrl: communitiesHook.activeCommunity?.relayUrl,
+    reopen: openDmMutation.mutateAsync,
+  });
   const {
     browseDialogType,
     openBrowseChannels: handleOpenBrowseChannels,
@@ -649,8 +660,8 @@ export function AppShell() {
   );
 
   const handleOpenSearchResult = React.useCallback(
-    (hit: SearchHit) => {
-      void openSearchHit(hit);
+    (hit: SearchHit, query: string) => {
+      void openSearchHit(hit, { query });
     },
     [openSearchHit],
   );

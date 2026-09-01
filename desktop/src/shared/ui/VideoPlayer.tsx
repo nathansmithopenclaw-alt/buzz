@@ -18,6 +18,7 @@ import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
@@ -1697,7 +1698,7 @@ function VideoReviewDialog({
               ref={videoAreaRef}
             >
               <div
-                className="relative isolate flex max-h-full min-w-0 max-w-full items-center justify-center"
+                className="video-review-media-surface relative isolate flex max-h-full min-w-0 max-w-full items-center justify-center"
                 style={fittedVideoStyle}
               >
                 <VideoGlow videoRef={videoRef} />
@@ -1764,7 +1765,7 @@ function VideoReviewDialog({
                     visible={!hasVisibleFrame}
                   />
                 </div>
-                <div className="absolute inset-x-2 bottom-2 z-20 sm:inset-x-4 sm:bottom-3">
+                <div className="video-review-controls absolute inset-x-2 bottom-2 z-20 sm:inset-x-4 sm:bottom-3">
                   <div className="relative isolate flex items-center gap-2 rounded-xl px-2 py-1.5">
                     <GlassSurface />
                     <button
@@ -2186,7 +2187,11 @@ function VideoReviewCommentBody({
               }}
             >
               {reaction.emojiUrl ? (
-                <img alt="" className="h-4 w-4" src={reaction.emojiUrl} />
+                <img
+                  alt=""
+                  className="h-4 w-4"
+                  src={rewriteRelayUrl(reaction.emojiUrl)}
+                />
               ) : (
                 <span>{reaction.emoji}</span>
               )}

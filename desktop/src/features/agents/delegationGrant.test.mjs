@@ -7,6 +7,8 @@ import {
   allSubjects,
   emptySubjects,
   grantSubjects,
+  grantedPubkeys,
+  removeGranteeFromSubjects,
   subjectSummary,
   subjectsAreEmpty,
   toggleGrantedAgent,
@@ -36,6 +38,48 @@ test("v1 grant renders as a one-agent set on the true bits", () => {
   assert.equal(subjectSummary(subjects.agent_creation), "1 agent");
   assert.equal(subjectSummary(subjects.teams), "1 agent");
   assert.equal(subjectSummary(subjects.env_vars), "Off");
+});
+
+test("legacy and keyed grants merge without changing either signed proof", () => {
+  const legacy = {
+    granteePubkey: FIRST,
+    auditChannelId: "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+    capabilities: {
+      agent_config: true,
+      agent_creation: false,
+      env_vars: false,
+      global_config: true,
+      teams: false,
+    },
+    signedEvent: "legacy-proof",
+  };
+  const keyed = {
+    granteePubkey: SECOND,
+    auditChannelId: "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+    capabilities: {
+      agent_config: true,
+      agent_creation: true,
+      env_vars: false,
+      global_config: false,
+      teams: false,
+    },
+    signedEvent: "second-proof",
+  };
+  const subjects = grantSubjects(legacy, { [SECOND]: keyed });
+  assert.deepEqual(subjects.agent_config, {
+    scope: "set",
+    grantees: [FIRST, SECOND],
+  });
+  assert.deepEqual(grantedPubkeys(subjects, ROSTER), [FIRST, SECOND]);
+
+  const revoked = removeGranteeFromSubjects(subjects, SECOND, ROSTER);
+  assert.deepEqual(revoked.agent_config, {
+    scope: "set",
+    grantees: [FIRST],
+  });
+  assert.equal(revoked.agent_creation.scope, "none");
+  assert.equal(legacy.signedEvent, "legacy-proof");
+  assert.equal(keyed.signedEvent, "second-proof");
 });
 
 test("unchecking one name while all is on writes set minus that name", () => {

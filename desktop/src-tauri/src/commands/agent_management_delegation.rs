@@ -182,6 +182,23 @@ fn grant_authorizes_request(
         .allows_named(source_pubkey, name, request_has_env_vars)
 }
 
+fn matching_grant<'a>(
+    config: &'a crate::managed_agents::GlobalAgentConfig,
+    source_pubkey: &str,
+    owner: &PublicKey,
+) -> Option<&'a AgentManagementDelegationGrant> {
+    if let Some(grant) = config.agent_management_delegations.get(source_pubkey) {
+        return grant
+            .validate_for_grantee_key(source_pubkey, owner)
+            .is_ok()
+            .then_some(grant);
+    }
+    config
+        .agent_management_delegation
+        .as_ref()
+        .filter(|grant| grant.validate(owner).is_ok())
+}
+
 struct NewLedgerRequest {
     source_pubkey: String,
     capability: DelegatedCapability,
@@ -319,15 +336,31 @@ pub fn register_agent_management_request(
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    let grant = load_global_agent_config(&app)?
-        .agent_management_delegation
-        .filter(|grant| grant.validate(&owner).is_ok());
+    let config = load_global_agent_config(&app)?;
+    let grant = matching_grant(&config, &source, &owner);
     let audit_channel_id = grant
-        .as_ref()
-        .map(|grant| grant.payload.audit_channel_id().to_string());
+        .map(|grant| grant.payload.audit_channel_id().to_string())
+        .or_else(|| {
+            config
+                .agent_management_delegation
+                .as_ref()
+                .filter(|grant| grant.validate(&owner).is_ok())
+                .or_else(|| {
+                    config
+                        .agent_management_delegations
+                        .iter()
+                        .find_map(|(grantee, grant)| {
+                            grant
+                                .validate_for_grantee_key(grantee, &owner)
+                                .is_ok()
+                                .then_some(grant)
+                        })
+                })
+                .map(|grant| grant.payload.audit_channel_id().to_string())
+        });
     let env_vars = request_env_vars(&payload)?;
     let authorized = intent == "apply"
-        && grant.as_ref().is_some_and(|grant| {
+        && grant.is_some_and(|grant| {
             grant_authorizes_request(grant, &source, capability, env_vars.is_some())
         });
     let rejection = if authorized {

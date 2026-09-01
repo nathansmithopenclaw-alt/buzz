@@ -5,7 +5,6 @@ import { REMOTE_CONTROL_FEATURE_ID } from "@/features/agents/lib/remoteControlFe
 import { useFleetVisibilitySettings } from "@/features/agents/lib/useFleetVisibilitySettings";
 import type {
   AgentPersona,
-  ChannelMember,
   ChannelType,
   ManagedAgent,
 } from "@/shared/api/types";
@@ -18,13 +17,13 @@ export function useFleetMentionProjection({
   channelType,
   currentPubkey,
   managedAgents,
-  members,
+  memberPubkeys,
   personas,
 }: {
   channelType?: ChannelType | null;
   currentPubkey: string | null;
   managedAgents: readonly ManagedAgent[];
-  members: readonly ChannelMember[];
+  memberPubkeys: ReadonlySet<string>;
   personas: readonly AgentPersona[];
 }) {
   const experimentEnabled = useFeatureEnabled(REMOTE_CONTROL_FEATURE_ID);
@@ -35,10 +34,6 @@ export function useFleetMentionProjection({
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
     : null;
-  const memberPubkeys = React.useMemo(
-    () => new Set(members.map((member) => normalizePubkey(member.pubkey))),
-    [members],
-  );
   const projectionOwners = React.useMemo(
     () => (enabled ? fleetProjection.owners : []),
     [enabled, fleetProjection.owners],

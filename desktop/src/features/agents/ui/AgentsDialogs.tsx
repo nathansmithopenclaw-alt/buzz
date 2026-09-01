@@ -12,7 +12,7 @@ import { AgentDialog } from "./AgentDialog";
 import { AgentSnapshotExportDialog } from "./AgentSnapshotExportDialog";
 import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { buildAgentMemorySources } from "./agentDeployments";
-import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
+import { CommunityCatalogDialog } from "./CommunityCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
@@ -28,10 +28,12 @@ type AgentsDialogsProps = {
   agents: ReturnType<typeof useManagedAgentActions>;
   aiDefaultsOpen: boolean;
   aiDefaultsReturnFocusRef: React.RefObject<HTMLButtonElement | null>;
+  catalogLaunchTarget: "agents" | "teams" | null;
   personas: ReturnType<typeof usePersonaActions>;
   snapshotImportInputRef: React.RefObject<HTMLInputElement | null>;
   teamActions: ReturnType<typeof useTeamActions>;
   onAiDefaultsOpenChange: (open: boolean) => void;
+  onCatalogLaunchTargetChange: (target: "agents" | "teams" | null) => void;
   onOpenPersonaProfile: (persona: AgentPersona) => void;
 };
 
@@ -39,10 +41,12 @@ export function AgentsDialogs({
   agents,
   aiDefaultsOpen,
   aiDefaultsReturnFocusRef,
+  catalogLaunchTarget,
   personas,
   snapshotImportInputRef,
   teamActions,
   onAiDefaultsOpenChange,
+  onCatalogLaunchTargetChange,
   onOpenPersonaProfile,
 }: AgentsDialogsProps) {
   const personaShareDeployments = personas.personaToShare?.deployments;
@@ -248,8 +252,8 @@ export function AgentsDialogs({
         />
       ) : null}
 
-      {personas.isCatalogDialogOpen ? (
-        <PersonaCatalogDialog
+      {catalogLaunchTarget !== null ? (
+        <CommunityCatalogDialog
           createContent={({ onDirtyChange, onRequestClose }) => (
             <AgentDialog
               definitionError={
@@ -276,11 +280,14 @@ export function AgentsDialogs({
               submitLabel="Add agent"
             />
           )}
-          error={
+          personas={personas.catalogPersonas}
+          personasError={
             personas.catalogQuery.error instanceof Error
               ? personas.catalogQuery.error
               : null
           }
+          personasLoading={personas.catalogQuery.isLoading}
+          personasPending={personas.isPending}
           feedbackErrorMessage={
             personas.personaFeedbackSurface === "catalog"
               ? personas.personaErrorMessage
@@ -291,13 +298,10 @@ export function AgentsDialogs({
               ? personas.personaNoticeMessage
               : null
           }
-          isLoading={personas.catalogQuery.isLoading}
-          isPending={personas.isPending}
           onClearFeedback={() => personas.clearFeedback("catalog")}
           onImportFile={(fileBytes, fileName) => {
             void personas.handleImportSnapshotFile(fileBytes, fileName);
           }}
-          onOpenChange={personas.setIsCatalogDialogOpen}
           onSelectPersona={async (persona, active) => {
             const addedPersona = await personas.handleSetActive(
               persona,
@@ -305,11 +309,27 @@ export function AgentsDialogs({
               "catalog",
             );
             if (!active || !addedPersona) return;
-            personas.setIsCatalogDialogOpen(false);
+            onCatalogLaunchTargetChange(null);
             onOpenPersonaProfile(addedPersona);
           }}
+          teams={teamActions.catalogTeams}
+          teamsError={
+            teamActions.catalogQuery.error instanceof Error
+              ? teamActions.catalogQuery.error
+              : null
+          }
+          teamsLoading={teamActions.catalogQuery.isLoading}
+          teamsAdding={teamActions.isAddingFromCatalog}
+          onAddTeam={(team) => {
+            void teamActions.handleAddTeamFromCatalog(team, () =>
+              onCatalogLaunchTargetChange(null),
+            );
+          }}
           open
-          personas={personas.catalogPersonas}
+          preferSection={catalogLaunchTarget}
+          onOpenChange={(open) => {
+            if (!open) onCatalogLaunchTargetChange(null);
+          }}
         />
       ) : null}
 
@@ -367,11 +387,20 @@ export function AgentsDialogs({
 
       {teamActions.teamToShare ? (
         <TeamShareDialog
+          catalogShareLevel={teamActions.getTeamCatalogShareLevel(
+            teamActions.teamToShare,
+          )}
           isPending={
             teamActions.createTeamMutation.isPending ||
             teamActions.updateTeamMutation.isPending ||
-            teamActions.deleteTeamMutation.isPending
+            teamActions.deleteTeamMutation.isPending ||
+            teamActions.isCatalogSharePending
           }
+          onCatalogShareLevelChange={(shareLevel) => {
+            const team = teamActions.teamToShare;
+            if (!team) return;
+            void teamActions.setTeamCatalogShareLevel(team, shareLevel);
+          }}
           onExport={() => {
             const team = teamActions.teamToShare;
             if (!team) return;

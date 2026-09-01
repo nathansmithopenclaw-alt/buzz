@@ -4,6 +4,12 @@ import { getProviderEffortConfig } from "./buzzAgentConfig";
 type CatalogModel = PersonaModelOption & { group: string };
 
 const ANTHROPIC_MODELS: readonly CatalogModel[] = [
+  { id: "claude-fable-5-1", label: "Claude Fable 5.1", group: "Fable" },
+  {
+    id: "claude-fable-5-1[1m]",
+    label: "Claude Fable 5.1 (1M context)",
+    group: "Fable",
+  },
   { id: "claude-fable-5", label: "Claude Fable 5", group: "Fable" },
   {
     id: "claude-fable-5[1m]",

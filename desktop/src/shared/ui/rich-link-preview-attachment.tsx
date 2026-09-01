@@ -1,3 +1,11 @@
+/**
+ * Presentation half of the rich link preview. Same constraint as the compact
+ * one: it renders `preview.imageDataUrl` / `preview.faviconDataUrl` raw, and
+ * relies on `LinkPreviewAttachment` — its sole value import site — having run
+ * `rewriteRelayUrl` over both. Snapshot-derived previews hold relay `/media/`
+ * URLs there, so a second value import would reintroduce the 403.
+ */
+
 import { ChevronDown, ChevronUp, ImageOff } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 import { useState } from "react";
