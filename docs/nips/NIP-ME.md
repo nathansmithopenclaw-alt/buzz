@@ -80,8 +80,8 @@ trait.
 The write plane is admission-first: only typed promotion-candidates ever enter the
 review queue. `fact_proposal`, corrections and supersessions of promoted facts, and
 `verified_working` claims are queue-eligible. Log-grade types (`observation`,
-`work_item`, `artifact`, `open_question`) cannot render `current`, never queue, and
-never request human attention. A record that merely corroborates the current winner of
+`work_item`, `artifact`, `build_report`, `open_question`) cannot render `current`,
+never queue, and never request human attention. A record that merely corroborates the current winner of
 its slot attaches as evidence and MUST NOT queue, because it cannot flip the slot.
 
 Promotion is always a deliberate, signed act. No timer, threshold, or policy executor
@@ -93,12 +93,20 @@ trail a human promotion does.
 
 ## Lifecycle
 
-`proposed → promoted | rejected | expired`, with `disputed` as a forced return to
-review. A pre-promotion dispute moves the candidate to `review`; it does not affect
-the record. A post-promotion dispute removes the receipt's green `current`
-presentation for that slot and opens the governed supersession or reaffirmation flow;
-the promoted event is never deleted or mutated, and the chain `proposed → promoted →
-disputed → superseded/reaffirmed` stays visible.
+The durable state set is exactly: `proposed` (ingested, not yet routed), `review`
+(routed for a decision — mandatory review or a pre-promotion dispute), `awaiting_human`
+(escalated by a delegated reviewer; durable until a human decides), `promoted`,
+`rejected`, and `expired`. `disputed` is not a durable state. A pre-promotion dispute
+moves the candidate to `review`; it does not affect the record. A post-promotion
+dispute removes the receipt's green `current` presentation for that slot and opens the
+governed supersession or reaffirmation flow; the promoted event is never deleted or
+mutated — it stays `promoted` — and the chain `proposed → promoted → disputed →
+superseded/reaffirmed` stays visible.
+
+Dispute honesty is protocol, not configuration: a member's self-dispute never resets a
+graduation window or any dispute counter, and repeat disputes on a reaffirmed slot
+rate-limit hard — dispute-spam is a denial of service on the queue itself. Per-member
+dispute quotas, where a deployment sets them, are workspace configuration.
 
 `review`-tier proposals lapse to `expired` after 30 days; the event is retained.
 Log-grade records do not pend and do not expire. An ignored escalation also lapses to
@@ -123,8 +131,8 @@ not in the agent's instructions: the engine authenticates the reviewer, resolves
 frozen policy, validates the typed proof bundle, and mints the governed promotion
 event itself. Provenance on the promoted record names both `verified_by` (the
 reviewer key) and `executed_by` (`memory_promotion_engine`). The reviewer never
-signs a `current_fact`, never holds the publisher key, and never receives generic
-kernel append.
+signs a `current_fact`, never holds the publisher key, and never receives a generic
+provider write path.
 
 Normative requirements:
 
@@ -156,6 +164,31 @@ Normative requirements:
   attempt, and transitions the item to durable `awaiting_human` with a recorded
   assignment. Escalations count separately in the workspace digest.
 
+### Validator rule identifiers
+
+On any typed rejection the validator names exactly one of these identifiers. The
+conformance fixtures ([`NIP-ME.promotion-fixtures.json`](NIP-ME.promotion-fixtures.json))
+name the rules each negative case must fire, so an implementation cannot pass by
+rejecting for an unrelated reason — the same device as NIP-MP's named ingest rules.
+
+| Identifier | Fires when |
+| --- | --- |
+| `promoter-not-proposer` | the approving key equals the proposing key |
+| `generation-binding` | the engine generation advanced within the claim's dependency set between evaluation and execution |
+| `proof-producer-bound` | the evidence was not produced and signed by the reviewer after admission (copied or proposer-supplied) |
+| `proof-after-admission` | the evidence signature predates the proposal's admission time |
+| `bound-verifier-equals-promoter` | the bundle's `bound_verifier` is not the promoting key |
+| `admission-routing-resolves` | routing resolved an empty reviewer set at admission |
+| `unknown-shape-loud` | a grant's version/shape combination is not a defined document (see NIP-SD) |
+| `memory-promotion-not-boolean-true` | `memory_promotion` was granted as bare `true` instead of a typed object |
+| `claim-types-in-vocabulary` | `claimTypes` includes a value outside the delegable vocabulary |
+| `claim-types-non-empty` | `claimTypes` is empty |
+| `allowlist-only-with-grant` | `humanFallbackAllowlist` is present on a proof that does not grant `memory_promotion` |
+
+These identifiers cover typed rejections only. Fail-closed outcomes that authorize
+nothing (`no_promotion_authorized`) and structural defaults that never leave `review`
+(`remains_review`) are not rejections and carry no rule identifier.
+
 ## Promotion policy and receipts
 
 Promotion policy is versioned governance, not config lookup. Each revision is an
@@ -163,7 +196,9 @@ engine-ledger object: `policy_id`, content hash, signer/authority, `effective_fr
 supersession link. Resolution happens once at admission and is stamped on the
 proposal and its receipts. Policy evaluation is engine-side normative; clients MUST
 NOT gate on locally-held policy. Promotion validation is a typed proof validator with
-its own conformance fixtures — never a generic boolean authority predicate.
+its own conformance fixtures
+([`NIP-ME.promotion-fixtures.json`](NIP-ME.promotion-fixtures.json)) — never a
+generic boolean authority predicate.
 
 Every promotion receipt carries the policy id and hash, the evaluated rule, and
 three audit labels: `authority ∈ {human_reviewed, delegated_agent}`;
@@ -197,6 +232,12 @@ restricted-realm facts; anything `disputed`; publisher/journal/genesis operation
 first-time or unmapped writers. Policy changes never apply retroactively to
 in-flight items.
 
+Where routing applies, admission MUST resolve a non-empty reviewer set for the item:
+a rule that fires against a configured destination resolving to nobody is a loud
+rejection at admission (`admission-routing-resolves`), and the queue never holds an
+item nobody owns. Routed review items p-tag the designated reviewer, so the item
+reaches that reviewer's inbox through the existing mention-join.
+
 ## Unconfigured default
 
 A deployment with no workspace policy MUST apply the distributed default: any member
@@ -208,11 +249,50 @@ person.
 
 ## Event kinds
 
-This stage reserves `40200` for immutable memory proposals, `40201` for
-publisher-signed status receipts, `40202` for generation checkpoints, and defines
-`40203 MemoryAction` for member-signed actions. No event in this NIP makes current
-truth authoritative on the relay: the relay stores and transports; only the engine's
+Memory uses four dedicated kinds. No event in this NIP makes current truth
+authoritative on the relay: the relay stores and transports; only the engine's
 governed promotion event, minted after a valid typed proof, promotes.
+
+### 40200 MemoryProposal
+
+Member-signed, immutable, `h`-scoped to the community. The content is NIP-44-
+encrypted to the community's ingestion identity; statement text is never public.
+Public tags carry only protocol, engine, and request identifiers plus the payload
+hash — nothing else is readable without the ingestion key.
+
+The envelope type is a closed set of six, carried inside the encrypted payload:
+`observation`, `work_item`, `artifact`, `build_report`, `fact_proposal`,
+`open_question`. The set is closed: an unknown envelope type is a loud ingest
+rejection, not an unparsed novelty.
+
+The encrypted payload names its own community, and ingest MUST reject a proposal
+whose payload community disagrees with its `h` tag. Because the NIP-44 recipient is
+this community's ingestion identity, the same bytes replayed against another
+community fail at decrypt or at the community check — cross-community replay is
+rejected at ingest, never at read.
+
+### 40201 MemoryReceipt
+
+Publisher-signed output of the deployment's publisher identity. The status set is
+closed: `accepted_proposal`, `rejected`, `promoted`, `superseded`, `expired`. A
+receipt conveys status, never authority: it is emitted after the fact, is never an
+input to a promotion decision, and MUST NOT carry member commands. It references the
+proposal id, carries the engine event id and generation high-water it reflects plus
+the redacted proof hash, and MUST NOT carry statement text into mixed channels — a
+reader without memory access learns that something happened, never what.
+
+### 40202 MemoryCheckpoint
+
+Publisher-signed binding of engine generation and transaction position to the relay
+journal: generation, tx, journal epoch, journal sequence, and journal tail hash. The
+latest valid checkpoint in durable ingest order defines the generation binding in
+force; older checkpoints remain as audit trail. Read-plane generation health and the
+green-`current` gate derive from checkpoints — a read served without a current
+checkpoint cannot render green `current`.
+
+### 40203 MemoryAction
+
+Member-signed actions are defined in [Memory actions](#memory-actions-40203) above.
 
 A structural alternative — generalizing the WF-08 approval gate (kinds 46010–46012)
 to typed subjects including `memory_promotion`, instead of a memory-only action pair
