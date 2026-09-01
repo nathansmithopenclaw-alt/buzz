@@ -1,0 +1,100 @@
+{
+  "$comment": "NIP-ME promotion-validator conformance fixtures — negative-cases-first shared oracle for the engine-side typed promotion validator. Unlike NIP-MP.fixtures.json (unsigned relay-ingest templates), these cases evaluate a promotion DECISION: the validator receives an admitted kind:40200 proposal, the reviewer's kind:40203 verdict with its proof bundle, the promotion-granting NIP-SD v3 keyed proofs, and engine state (generation, admission time, frozen policy snapshot), and MUST produce exactly the `expect` outcome. `expect` values: reject (the promotion is refused with a loud error naming one of `reject_rules`), no_promotion_authorized (fail-closed to human review across the whole grant set — validator authorizes nothing but is not a single-event error), remains_review (no proof exists; the item never left review — not an error), promote (governed promotion event minted; receipt labels asserted). Spec: docs/nips/NIP-ME.md (Delegated review verdicts, Promotion policy and receipts); grant shapes: docs/nips/NIP-SD.md (v3 payload).",
+  "version": 1,
+  "actors": {
+    "proposer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reviewer": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "other_reviewer": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "fallback_human_1": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "fallback_human_2": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "second_grantee": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "policy_snapshot": {
+    "policy_id": "pol-2026-09-01-a1",
+    "claim_types": ["fact_proposal", "verified_working"],
+    "human_fallback_allowlist": ["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]
+  },
+  "cases": [
+    {
+      "name": "reject_copied_proof",
+      "expect": "reject",
+      "reject_rules": ["proof-producer-bound"],
+      "note": "Evidence produced and signed by the proposer, pasted into the verdict. Producer-bound means the reviewer signs its own evidence after admission; proposer-supplied evidence is the laundering path."
+    },
+    {
+      "name": "reject_proof_predates_admission",
+      "expect": "reject",
+      "reject_rules": ["proof-after-admission"],
+      "note": "Valid-looking reviewer evidence whose signature predates the proposal's admission time — it cannot have been produced for this item."
+    },
+    {
+      "name": "reject_unbound_verifier",
+      "expect": "reject",
+      "reject_rules": ["bound-verifier-equals-promoter"],
+      "note": "The proof bundle's bound_verifier is another_reviewer while the verdict is signed by reviewer. The bundle must bind the promoting key itself."
+    },
+    {
+      "name": "reject_stale_generation",
+      "expect": "reject",
+      "reject_rules": ["generation-binding"],
+      "note": "The approve was evaluated at generation G; the engine generation advanced within the claim's dependency set before execution. Reject to re-verification at head — never queue, never warn."
+    },
+    {
+      "name": "reject_promoter_equals_proposer",
+      "expect": "reject",
+      "reject_rules": ["promoter-not-proposer"],
+      "note": "Approve key equals the proposing key. Protocol MUST: an actor's own approval never satisfies review."
+    },
+    {
+      "name": "reject_route_to_nobody",
+      "expect": "reject",
+      "reject_rules": ["admission-routing-resolves"],
+      "note": "Policy routes review but the resolved reviewer set is empty. Loud rejection at admission, never a void item nobody owns."
+    },
+    {
+      "name": "reject_v3_aggregate_shape",
+      "expect": "reject",
+      "reject_rules": ["unknown-shape-loud"],
+      "note": "A proof carrying version:3 in the v2 aggregate shape (per-capability subjects, no granteePubkey). Known version, unknown document: fails validation loud, same as an unknown version."
+    },
+    {
+      "name": "reject_memory_promotion_boolean_true",
+      "expect": "reject",
+      "reject_rules": ["memory-promotion-not-boolean-true"],
+      "note": "memory_promotion granted as bare true. Granting without naming claim types is not a shape its author can have meant; fail loud, never interpret as unrestricted."
+    },
+    {
+      "name": "reject_claim_type_outside_vocabulary",
+      "expect": "reject",
+      "reject_rules": ["claim-types-in-vocabulary"],
+      "note": "claimTypes includes identity_mapping — outside the delegable vocabulary. Fail loud rather than narrowing to the known subset: a reader that silently ignored an unrecognized claim type would widen the grant."
+    },
+    {
+      "name": "reject_empty_claim_types",
+      "expect": "reject",
+      "reject_rules": ["claim-types-non-empty"],
+      "note": "claimTypes is []. An empty grant is an authoring error, not a silent none."
+    },
+    {
+      "name": "reject_allowlist_on_non_granting_proof",
+      "expect": "reject",
+      "reject_rules": ["allowlist-only-with-grant"],
+      "note": "humanFallbackAllowlist carried by a keyed proof whose memory_promotion is false/absent. The field exists only on granting proofs; this needs an explicit deny check, not serde defaults."
+    },
+    {
+      "name": "no_promotion_disagreeing_allowlists",
+      "expect": "no_promotion_authorized",
+      "note": "Two keyed proofs both granting memory_promotion with differing humanFallbackAllowlist values (restored-backup / partial-write shape). Fail closed to human review: no promotion is authorized by any of them."
+    },
+    {
+      "name": "remains_review_no_probe",
+      "expect": "remains_review",
+      "note": "fact_proposal with no registered probe. The reviewer cannot verify, and absence of a valid proof means the item never leaves review — structural default, not an error and not an escalation requirement."
+    },
+    {
+      "name": "promote_valid_delegated_verdict",
+      "expect": "promote",
+      "note": "Positive control: current generation, promoter != proposer, reviewer-owned post-admission evidence bound to the 40200 payload hash, valid v3 keyed grant, allowlist agrees. Receipt must carry authority=delegated_agent, verification_class=reproduced_by_promoter, reproducible_by=privileged."
+    }
+  ]
+}
