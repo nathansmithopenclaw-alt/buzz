@@ -375,17 +375,32 @@ impl EventQueue {
             }
         };
 
-        // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
+        // Drain up to MAX_BATCH_EVENTS from one thread scope; leave other
+        // thread roots queued for their own turn. A single prompt has one
+        // reply destination, so combining two thread roots makes whichever
+        // request is not selected vulnerable to a wrong-root publication.
+        // Top-level events remain one shared scope to preserve the existing
+        // coalescing behavior for channel-root traffic.
         let queue = self.queues.entry(channel_id).or_default();
-        let drain_count = MAX_BATCH_EVENTS.min(queue.len());
-        let mut events: Vec<BatchEvent> = queue
-            .drain(..drain_count)
-            .map(|qe| BatchEvent {
-                event: qe.event,
-                prompt_tag: qe.prompt_tag,
-                received_at: qe.received_at,
-            })
-            .collect();
+        let scope = queue.front().map(|queued| thread_scope_root(&queued.event));
+        let original_len = queue.len();
+        let mut events = Vec::with_capacity(MAX_BATCH_EVENTS.min(original_len));
+        for _ in 0..original_len {
+            let Some(queued) = queue.pop_front() else {
+                break;
+            };
+            if events.len() < MAX_BATCH_EVENTS
+                && scope.as_ref() == Some(&thread_scope_root(&queued.event))
+            {
+                events.push(BatchEvent {
+                    event: queued.event,
+                    prompt_tag: queued.prompt_tag,
+                    received_at: queued.received_at,
+                });
+            } else {
+                queue.push_back(queued);
+            }
+        }
         // Relay replay delivers stored events newest-first (`ORDER BY
         // created_at DESC`), but batch consumers — `format_prompt` scope and
         // reply-anchor selection — require the LAST event to be the newest.
@@ -453,6 +468,23 @@ impl EventQueue {
                 self.retry_counts.remove(&channel_id);
             }
         }
+    }
+
+    /// Whether `event` belongs to the same reply-bearing thread scope as the
+    /// batch currently in flight for `channel_id`.
+    ///
+    /// Cross-thread events must wait for a separate turn: cancel+merge has one
+    /// reply anchor and cannot safely represent two independent thread roots.
+    /// Top-level events intentionally remain one scope, matching the queue's
+    /// existing channel-root batching behavior.
+    pub fn in_flight_thread_scope_matches(&self, channel_id: Uuid, event: &Event) -> bool {
+        let Some(batch) = self.in_flight_batches.get(&channel_id) else {
+            return false;
+        };
+        let Some(active) = batch.events.last() else {
+            return false;
+        };
+        thread_scope_root(&active.event) == thread_scope_root(event)
     }
 
     /// Re-queue a batch of events that failed to process.
@@ -973,6 +1005,13 @@ pub fn parse_thread_tags(event: &Event) -> ThreadTags {
     }
 }
 
+/// Thread-root identity used to keep reply-bearing work separable. `None`
+/// represents top-level channel traffic, which retains its historical batching
+/// semantics.
+fn thread_scope_root(event: &Event) -> Option<String> {
+    parse_thread_tags(event).root_event_id
+}
+
 /// Extract a leading slash command from message content.
 ///
 /// ACP connectors (claude-agent-acp, codex-acp) detect slash commands by
@@ -1305,7 +1344,8 @@ fn turn_is_human_facing(
 /// Resolve the `--reply-to` anchor for a non-DM turn.
 ///
 /// Returns `Some(id)` only for human-facing turns (see [`turn_is_human_facing`]):
-///   - in a thread → the thread ROOT, keeping the reply flat at layer 1
+///   - in a thread → the triggering event, preserving an exact reply marker
+///     while `buzz messages send` derives and retains the containing root
 ///   - top-level   → the triggering event id, which becomes the new thread root
 ///
 /// Returns `None` for agent↔agent turns, leaving the agent free to nest deeply
@@ -1319,12 +1359,7 @@ fn resolve_reply_anchor(
     if !turn_is_human_facing(sender_pubkey, thread_tags, profile_lookup) {
         return None;
     }
-    Some(
-        thread_tags
-            .root_event_id
-            .clone()
-            .unwrap_or_else(|| triggering_event_id.to_string()),
-    )
+    Some(triggering_event_id.to_string())
 }
 
 /// Maximum length (in characters) of a channel description rendered into `<context>`.
@@ -1881,8 +1916,8 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     // 2. Context hints (with a human-aware reply anchor).
     //
-    // Human-facing turns are anchored so replies stay readable at layer 1:
-    //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
+    // Human-facing turns are anchored so replies retain exact causality:
+    //   - in a thread  → anchor to the triggering event; the CLI derives root
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
     // there. DMs are always 1:1 with a human, so they always anchor.
@@ -2218,6 +2253,50 @@ mod tests {
     }
 
     #[test]
+    fn test_flush_separates_distinct_thread_roots() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let root_a = "a".repeat(64);
+        let root_b = "b".repeat(64);
+        let threaded = |content: &str, root: &str| QueuedEvent {
+            channel_id: ch,
+            event: make_event_with_tags(
+                content,
+                vec![vec!["e".into(), root.into(), "".into(), "reply".into()]],
+            ),
+            received_at: Instant::now(),
+            prompt_tag: "@mention".into(),
+        };
+
+        q.push(threaded("a1", &root_a));
+        q.push(threaded("b1", &root_b));
+        q.push(threaded("a2", &root_a));
+
+        let batch_a = q.flush_next().expect("thread A should flush");
+        assert_eq!(
+            batch_a
+                .events
+                .iter()
+                .map(|event| event.event.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a1", "a2"]
+        );
+        assert!(q.in_flight_thread_scope_matches(ch, &batch_a.events[0].event));
+        assert!(!q.in_flight_thread_scope_matches(
+            ch,
+            &make_event_with_tags(
+                "b2",
+                vec![vec!["e".into(), root_b.clone(), "".into(), "reply".into()]],
+            )
+        ));
+
+        q.mark_complete(ch);
+        let batch_b = q.flush_next().expect("thread B should remain queued");
+        assert_eq!(batch_b.events.len(), 1);
+        assert_eq!(batch_b.events[0].event.content, "b1");
+    }
+
+    #[test]
     fn test_flush_orders_replayed_events_chronologically() {
         // Relay replay after a reconnect/restart delivers stored events newest
         // first (`ORDER BY created_at DESC`), but `format_prompt` derives the
@@ -2492,11 +2571,10 @@ mod tests {
         assert!(!prompt.contains("supersedes"));
     }
 
-    /// Cross-thread steering: original work in thread A (cancelled), steering
-    /// message in thread B (new). Pins Perci's edge — the reply instruction
-    /// targets the *steering* message (the one the agent is responding to, where
-    /// the mentioner is waiting), while the steer framing still says "continue
-    /// your in-progress work." This is intended behavior, not a mismatch.
+    /// Defensive formatting for a cross-thread merged batch. The queue now
+    /// prevents this shape, but if one is constructed by a caller the reply
+    /// instruction still names the exact steering event so the CLI can retain
+    /// both its containing root and its immediate-parent marker.
     #[test]
     fn test_steer_cross_thread_reply_targets_steering_message() {
         let ch = Uuid::new_v4();
@@ -2521,7 +2599,7 @@ mod tests {
                 "reply".into(),
             ]],
         );
-        let _steering_id = steering.id.to_hex();
+        let steering_id = steering.id.to_hex();
 
         let batch = FlushBatch {
             channel_id: ch,
@@ -2540,13 +2618,11 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
-        // Reply instruction points at the thread root of the steering message
-        // (thread_b), not the steering event's own id — this matches the
-        // human-aware reply anchoring from PR #1281: for human-facing turns in
-        // a thread, the anchor is always the thread root.
+        // `buzz messages send` resolves this immediate parent and emits both
+        // root=thread_b and reply=steering_id.
         assert!(
-            prompt.contains(&format!("--reply-to {thread_b}")),
-            "reply instruction should target the steering thread root: {prompt}"
+            prompt.contains(&format!("--reply-to {steering_id}")),
+            "reply instruction should target the exact steering event: {prompt}"
         );
         assert!(
             !prompt.contains(&format!("--reply-to {thread_a}")),
@@ -3726,6 +3802,7 @@ mod tests {
             "yes go ahead",
             vec![vec!["e".into(), root.clone(), "".into(), "reply".into()]],
         );
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3771,7 +3848,7 @@ mod tests {
             .contains("<thread-context included=\"2\" total=\"2\" truncated=\"false\">"));
         assert!(complete_prompt.contains("Let's refactor auth"));
         assert!(complete_prompt.contains(&format!(
-            "IMPORTANT: For ordinary replies in this turn, use `--reply-to {root}`"
+            "IMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}`"
         )));
 
         let prompt_with_prior_delivery = format_prompt(
@@ -4089,11 +4166,12 @@ mod tests {
     }
 
     #[test]
-    fn test_anchor_human_in_thread_uses_root() {
-        // Human asks inside a thread → anchor to the thread ROOT (flat at L1).
+    fn test_anchor_human_in_thread_uses_triggering_event() {
+        // The CLI derives ROOT_ID from TRIGGER_ID and preserves TRIGGER_ID as
+        // the exact reply marker used by restart suppression.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK]);
         let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
-        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+        assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
     #[test]
@@ -4121,10 +4199,10 @@ mod tests {
 
     #[test]
     fn test_anchor_agent_sender_but_human_tagged_flattens() {
-        // Agent-authored, but a human is tagged → human-facing → anchor to root.
+        // Agent-authored, but a human is tagged → preserve exact causality.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK, HUMAN_PK]);
         let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
-        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+        assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
     #[test]
@@ -4132,7 +4210,7 @@ mod tests {
         // No profile lookup → fail open (treat as human so visibility is kept).
         let tags = thread_tags(Some(ROOT_ID), &[]);
         let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None);
-        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+        assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
     #[test]
@@ -4905,6 +4983,7 @@ mod tests {
             "@bot help",
             vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -4916,13 +4995,12 @@ mod tests {
             cancel_reason: None,
         };
 
-        // No profile lookup → sender treated as human → human-facing thread
-        // reply anchors to the thread ROOT (flat at layer 1), not the
-        // triggering event id.
+        // No profile lookup → sender treated as human. The CLI derives the
+        // containing root from this exact triggering-event anchor.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
-            "human-facing thread reply should anchor to the thread root"
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "human-facing thread reply should anchor to the triggering event"
         );
         assert!(
             prompt.contains("For ordinary replies in this turn"),
@@ -5044,7 +5122,7 @@ mod tests {
     }
 
     #[test]
-    fn test_human_thread_reply_anchors_to_root_not_triggering_or_parent() {
+    fn test_human_thread_reply_anchors_to_triggering_event() {
         let ch = Uuid::new_v4();
         let root_id = "a".repeat(64);
         let parent_id = "b".repeat(64);
@@ -5067,16 +5145,16 @@ mod tests {
             cancel_reason: None,
         };
 
-        // Human-facing (no lookup) deep reply: anchor to the thread ROOT to
-        // keep the conversation flat — NOT the triggering event or parent.
+        // The exact trigger is the immediate parent; `buzz messages send`
+        // preserves root_id as the containing thread root.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
-            "human-facing nested reply should anchor to the thread root"
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "human-facing nested reply should anchor to the triggering event"
         );
         assert!(
-            !prompt.contains(&format!("--reply-to {event_id}")),
-            "instruction should NOT anchor to the triggering event id"
+            !prompt.contains(&format!("--reply-to {root_id}")),
+            "instruction should not collapse the exact trigger to the root"
         );
         assert!(
             !prompt.contains(&format!("--reply-to {parent_id}")),
@@ -5092,6 +5170,7 @@ mod tests {
             "@bot post your summary in the channel root",
             vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -5105,8 +5184,8 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
-            "human-facing thread reply should anchor to the thread root"
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "human-facing thread reply should anchor to the triggering event"
         );
         assert!(
             prompt.contains("channel-root, top-level"),
@@ -5127,6 +5206,7 @@ mod tests {
             "@bot help",
             vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
+        let threaded_id = threaded.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![
@@ -5145,12 +5225,12 @@ mod tests {
             cancel_reason: None,
         };
 
-        // Scope derives from the last (threaded) event; human-facing → anchor
-        // to that thread's root.
+        // Scope derives from the last (threaded) event; human-facing → exact
+        // triggering-event anchor.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
-            "batched prompt should anchor to the last (threaded) event's root"
+            prompt.contains(&format!("--reply-to {threaded_id}")),
+            "batched prompt should anchor to the last threaded event"
         );
     }
 

@@ -3423,7 +3423,7 @@ async fn tokio_main() -> Result<()> {
                             }
 
                             let replay_event_id = buzz_event.event.id.to_hex();
-                            if answered_event_ids.contains(&replay_event_id) {
+                            if answered_event_ids.contains(&buzz_event.event) {
                                 tracing::info!(
                                     channel_id = %buzz_event.channel_id,
                                     event_id = %replay_event_id,
@@ -3645,33 +3645,47 @@ async fn tokio_main() -> Result<()> {
                                     owner_cache.get(),
                                 );
                                 if let Some(signal) = signal {
-                                    // Non-cancelling fork: when the mode
-                                    // wants a Steer, attempt the
-                                    // non-cancelling path first. On accept,
-                                    // withhold the queued event and spawn an
-                                    // ack watcher; the main loop's
-                                    // `PoolEvent::SteerAck` arm decides
-                                    // success/release/fallback. On reject
-                                    // (including agents that advertise no
-                                    // steer transport at all), fall through
-                                    // to the universal cancel+merge `Steer`
-                                    // signal so the event still reaches the
-                                    // agent.
-                                    let native_attempted = matches!(signal, ControlSignal::Steer)
-                                        && try_native_steer(
-                                            &mut pool,
-                                            &mut queue,
+                                    let same_thread_scope = !matches!(signal, ControlSignal::Steer)
+                                        || queue.in_flight_thread_scope_matches(
                                             buzz_event.channel_id,
-                                            event_for_steer,
-                                            prompt_tag_for_steer,
-                                            &steer_ack_tx,
+                                            &event_for_steer,
                                         );
-                                    if !native_attempted {
-                                        signal_in_flight_task(
-                                            &mut pool,
-                                            buzz_event.channel_id,
-                                            signal,
+                                    if !same_thread_scope {
+                                        tracing::info!(
+                                            channel_id = %buzz_event.channel_id,
+                                            event_id = %event_id_hex,
+                                            "cross-thread event queued for a separate turn"
                                         );
+                                    } else {
+                                        // Non-cancelling fork: when the mode
+                                        // wants a Steer, attempt the
+                                        // non-cancelling path first. On accept,
+                                        // withhold the queued event and spawn an
+                                        // ack watcher; the main loop's
+                                        // `PoolEvent::SteerAck` arm decides
+                                        // success/release/fallback. On reject
+                                        // (including agents that advertise no
+                                        // steer transport at all), fall through
+                                        // to the universal cancel+merge `Steer`
+                                        // signal so the event still reaches the
+                                        // agent.
+                                        let native_attempted =
+                                            matches!(signal, ControlSignal::Steer)
+                                                && try_native_steer(
+                                                    &mut pool,
+                                                    &mut queue,
+                                                    buzz_event.channel_id,
+                                                    event_for_steer,
+                                                    prompt_tag_for_steer,
+                                                    &steer_ack_tx,
+                                                );
+                                        if !native_attempted {
+                                            signal_in_flight_task(
+                                                &mut pool,
+                                                buzz_event.channel_id,
+                                                signal,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -4349,10 +4363,35 @@ fn is_delivery_failure_report(event: &nostr::Event) -> bool {
         || event.content.starts_with("⚠️ I couldn't finish")
 }
 
+#[derive(Debug, Default)]
+struct AnsweredEventIds {
+    exact: HashSet<String>,
+    legacy_thread_roots: HashMap<String, u64>,
+}
+
+impl AnsweredEventIds {
+    fn contains(&self, event: &nostr::Event) -> bool {
+        let event_id = event.id.to_hex();
+        if self.exact.contains(&event_id) {
+            return true;
+        }
+        let Some((root, _)) = buzz_core::nip10::parse_thread_markers(&event.tags).resolve() else {
+            return false;
+        };
+        self.legacy_thread_roots
+            .get(&root)
+            .is_some_and(|answer_ts| event.created_at.as_secs() <= *answer_ts)
+    }
+
+    fn len(&self) -> usize {
+        self.exact.len()
+    }
+}
+
 fn answered_event_ids_from_reports(
     reports: impl IntoIterator<Item = serde_json::Value>,
-) -> Result<HashSet<String>> {
-    let mut answered = HashSet::new();
+) -> Result<AnsweredEventIds> {
+    let mut answered = AnsweredEventIds::default();
     for raw in reports {
         let event: nostr::Event = serde_json::from_value(raw)
             .context("startup answered-state query returned an invalid event")?;
@@ -4361,12 +4400,27 @@ fn answered_event_ids_from_reports(
         {
             continue;
         }
-        // Only the NIP-10 reply marker names the exact event this report
+        // Only the NIP-10 reply marker names what this report directly
         // answered. A root marker is ancestry, and a bare `e` tag can be an
-        // unrelated reference; treating either as an answer can suppress a
-        // genuinely-unanswered mention after restart.
-        if let Some(reply) = buzz_core::nip10::parse_thread_markers(&event.tags).reply {
-            answered.insert(reply.to_ascii_lowercase());
+        // unrelated reference. Historical flat replies used the thread root
+        // as their reply marker; the timestamped compatibility map below
+        // prevents that legacy ambiguity from suppressing later mentions.
+        let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
+        if let Some(reply) = markers.reply {
+            let reply = reply.to_ascii_lowercase();
+            answered.exact.insert(reply.clone());
+            // Historical human-facing prompts told agents to reply directly
+            // to the thread root. Those reports cannot name the exact nested
+            // mention, so retain a timestamped compatibility entry: only
+            // mentions in that root at or before the report are suppressed.
+            // Later mentions in the same conversation remain eligible.
+            if markers.root.is_none() {
+                answered
+                    .legacy_thread_roots
+                    .entry(reply)
+                    .and_modify(|ts| *ts = (*ts).max(event.created_at.as_secs()))
+                    .or_insert(event.created_at.as_secs());
+            }
         }
     }
     Ok(answered)
@@ -4379,9 +4433,9 @@ async fn load_answered_event_ids(
     rest: &relay::RestClient,
     channel_ids: &[Uuid],
     since: u64,
-) -> HashSet<String> {
+) -> AnsweredEventIds {
     if channel_ids.is_empty() {
-        return HashSet::new();
+        return AnsweredEventIds::default();
     }
     let filter = serde_json::json!({
         "authors": [rest.keys.public_key().to_hex()],
@@ -4399,16 +4453,16 @@ async fn load_answered_event_ids(
             Ok(answered) => answered,
             Err(error) => {
                 tracing::warn!(%error, "startup answered-state parse failed; replaying at least once");
-                HashSet::new()
+                AnsweredEventIds::default()
             }
         },
         Ok(Err(error)) => {
             tracing::warn!(%error, "startup answered-state query failed; replaying at least once");
-            HashSet::new()
+            AnsweredEventIds::default()
         }
         Err(_) => {
             tracing::warn!("startup answered-state query timed out; replaying at least once");
-            HashSet::new()
+            AnsweredEventIds::default()
         }
     }
 }
@@ -4502,12 +4556,64 @@ mod restart_delivery_tests {
         )
         .unwrap();
 
-        assert!(answered.contains(&answered_root.id.to_hex()));
-        assert!(answered.contains(&nested_answered.id.to_hex()));
-        assert!(!answered.contains(&ancestry_root.id.to_hex()));
-        assert!(!answered.contains(&unrelated_reference.id.to_hex()));
-        assert!(!answered.contains(&marked_failure_root.id.to_hex()));
-        assert!(!answered.contains(&legacy_failure_root.id.to_hex()));
+        assert!(answered.contains(&answered_root));
+        assert!(answered.contains(&nested_answered));
+        assert!(!answered.contains(&ancestry_root));
+        assert!(!answered.contains(&unrelated_reference));
+        assert!(!answered.contains(&marked_failure_root));
+        assert!(!answered.contains(&legacy_failure_root));
+    }
+
+    #[test]
+    fn legacy_flat_reply_suppresses_only_earlier_mentions_in_its_thread() {
+        let agent_keys = Keys::generate();
+        let human_keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let root = EventBuilder::new(Kind::Custom(9), "root")
+            .custom_created_at(nostr::Timestamp::from(100))
+            .sign_with_keys(&human_keys)
+            .unwrap();
+        let thread_ref = buzz_sdk::ThreadRef {
+            root_event_id: root.id,
+            parent_event_id: root.id,
+        };
+        let earlier = buzz_sdk::build_message(
+            channel_id,
+            "earlier mention",
+            Some(&thread_ref),
+            &[],
+            false,
+            &[],
+        )
+        .unwrap()
+        .custom_created_at(nostr::Timestamp::from(150))
+        .sign_with_keys(&human_keys)
+        .unwrap();
+        let legacy_flat_reply =
+            buzz_sdk::build_message(channel_id, "answer", Some(&thread_ref), &[], false, &[])
+                .unwrap()
+                .custom_created_at(nostr::Timestamp::from(200))
+                .sign_with_keys(&agent_keys)
+                .unwrap();
+        let later = buzz_sdk::build_message(
+            channel_id,
+            "later mention",
+            Some(&thread_ref),
+            &[],
+            false,
+            &[],
+        )
+        .unwrap()
+        .custom_created_at(nostr::Timestamp::from(250))
+        .sign_with_keys(&human_keys)
+        .unwrap();
+
+        let answered =
+            answered_event_ids_from_reports([serde_json::to_value(legacy_flat_reply).unwrap()])
+                .unwrap();
+
+        assert!(answered.contains(&earlier));
+        assert!(!answered.contains(&later));
     }
 
     #[tokio::test]
