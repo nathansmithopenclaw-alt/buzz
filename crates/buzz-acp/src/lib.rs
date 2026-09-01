@@ -2783,6 +2783,13 @@ async fn tokio_main() -> Result<()> {
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
+    let subscribed_ids: Vec<Uuid> = channel_filters.keys().copied().collect();
+    let answered_event_ids =
+        load_answered_event_ids(&relay.rest_client(), &subscribed_ids, startup_watermark).await;
+    tracing::info!(
+        answered_events = answered_event_ids.len(),
+        "startup relay-derived answered state loaded"
+    );
     let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
@@ -3413,6 +3420,16 @@ async fn tokio_main() -> Result<()> {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                     continue;
                                 }
+                            }
+
+                            let replay_event_id = buzz_event.event.id.to_hex();
+                            if answered_event_ids.contains(&replay_event_id) {
+                                tracing::info!(
+                                    channel_id = %buzz_event.channel_id,
+                                    event_id = %replay_event_id,
+                                    "startup replay skipped: relay already contains an agent answer"
+                                );
+                                continue;
                             }
 
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
@@ -4157,6 +4174,9 @@ async fn tokio_main() -> Result<()> {
     // surface one notice per affected channel through the existing failure
     // seam.
     let _ = drain_idle_agent_notifications(&mut pool).await;
+    let interrupted_batches = interrupt_in_flight_for_shutdown(&mut pool);
+    post_shutdown_interruption_notices(&ctx.rest_client, interrupted_batches).await;
+
     let shutdown_pending_background = channel_pending_background_tasks(&mut pool);
     if !shutdown_pending_background.is_empty() {
         post_background_task_termination_notices(
@@ -4307,6 +4327,231 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     })
 }
 
+/// Harness-authored channel reports that describe a delivery failure are not
+/// successful answers. Keep them eligible for startup replay: the notice gives
+/// the human immediate visibility, while a later healthy process still gets a
+/// chance to finish the original mention.
+fn is_delivery_failure_report(event: &nostr::Event) -> bool {
+    event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.first().map(String::as_str) == Some("buzz-acp")
+            && parts.get(1).map(String::as_str) == Some("delivery-failure")
+    }) || event
+        .content
+        .starts_with("⚠️ Addressed turn delivery failed")
+        || event
+            .content
+            .starts_with("⚠️ Background work was terminated")
+        || event
+            .content
+            .starts_with("⚠️ I can't take this conversation right now")
+        || event.content.starts_with("⚠️ I couldn't process")
+        || event.content.starts_with("⚠️ I couldn't finish")
+}
+
+fn answered_event_ids_from_reports(
+    reports: impl IntoIterator<Item = serde_json::Value>,
+) -> Result<HashSet<String>> {
+    let mut answered = HashSet::new();
+    for raw in reports {
+        let event: nostr::Event = serde_json::from_value(raw)
+            .context("startup answered-state query returned an invalid event")?;
+        if !pool::is_channel_report_kind(event.kind.as_u16() as u32)
+            || is_delivery_failure_report(&event)
+        {
+            continue;
+        }
+        // Only the NIP-10 reply marker names the exact event this report
+        // answered. A root marker is ancestry, and a bare `e` tag can be an
+        // unrelated reference; treating either as an answer can suppress a
+        // genuinely-unanswered mention after restart.
+        if let Some(reply) = buzz_core::nip10::parse_thread_markers(&event.tags).reply {
+            answered.insert(reply.to_ascii_lowercase());
+        }
+    }
+    Ok(answered)
+}
+
+/// Load restart-durable answered state from the relay before subscriptions can
+/// replay historical mentions. One paginated multi-channel filter avoids the
+/// per-mention REQ storm that would otherwise exceed the relay frame budget.
+async fn load_answered_event_ids(
+    rest: &relay::RestClient,
+    channel_ids: &[Uuid],
+    since: u64,
+) -> HashSet<String> {
+    if channel_ids.is_empty() {
+        return HashSet::new();
+    }
+    let filter = serde_json::json!({
+        "authors": [rest.keys.public_key().to_hex()],
+        "kinds": [
+            buzz_core::kind::KIND_STREAM_MESSAGE,
+            buzz_core::kind::KIND_STREAM_MESSAGE_V2,
+            buzz_core::kind::KIND_FORUM_POST,
+            buzz_core::kind::KIND_FORUM_COMMENT,
+        ],
+        "#h": channel_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+        "since": since,
+    });
+    match tokio::time::timeout(Duration::from_secs(15), rest.query_raw_all(filter)).await {
+        Ok(Ok(reports)) => match answered_event_ids_from_reports(reports) {
+            Ok(answered) => answered,
+            Err(error) => {
+                tracing::warn!(%error, "startup answered-state parse failed; replaying at least once");
+                HashSet::new()
+            }
+        },
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "startup answered-state query failed; replaying at least once");
+            HashSet::new()
+        }
+        Err(_) => {
+            tracing::warn!("startup answered-state query timed out; replaying at least once");
+            HashSet::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod restart_delivery_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn reply_event(
+        keys: &Keys,
+        channel_id: Uuid,
+        root: nostr::EventId,
+        content: &str,
+        failure_marker: bool,
+    ) -> nostr::Event {
+        let thread_ref = buzz_sdk::ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let mut builder =
+            buzz_sdk::build_message(channel_id, content, Some(&thread_ref), &[], false, &[])
+                .unwrap();
+        if failure_marker {
+            builder = builder.tag(Tag::parse(["buzz-acp", "delivery-failure"]).unwrap());
+        }
+        builder.sign_with_keys(keys).unwrap()
+    }
+
+    #[test]
+    fn relay_answered_state_excludes_marked_and_legacy_failure_notices() {
+        let keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let answered_root = EventBuilder::new(Kind::Custom(9), "answered")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let marked_failure_root = EventBuilder::new(Kind::Custom(9), "marked failure")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let legacy_failure_root = EventBuilder::new(Kind::Custom(9), "legacy failure")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let ancestry_root = EventBuilder::new(Kind::Custom(9), "thread ancestry")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let nested_answered = EventBuilder::new(Kind::Custom(9), "nested mention")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let unrelated_reference = EventBuilder::new(Kind::Custom(9), "reference")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let nested_thread_ref = buzz_sdk::ThreadRef {
+            root_event_id: ancestry_root.id,
+            parent_event_id: nested_answered.id,
+        };
+        let nested_reply = buzz_sdk::build_message(
+            channel_id,
+            "nested answer",
+            Some(&nested_thread_ref),
+            &[],
+            false,
+            &[],
+        )
+        .unwrap()
+        .tag(Tag::event(unrelated_reference.id))
+        .sign_with_keys(&keys)
+        .unwrap();
+        let reports = vec![
+            reply_event(&keys, channel_id, answered_root.id, "finished", false),
+            nested_reply,
+            reply_event(
+                &keys,
+                channel_id,
+                marked_failure_root.id,
+                "⚠️ future wording can change",
+                true,
+            ),
+            reply_event(
+                &keys,
+                channel_id,
+                legacy_failure_root.id,
+                "⚠️ I couldn't process the last request after multiple retries.",
+                false,
+            ),
+        ];
+
+        let answered = answered_event_ids_from_reports(
+            reports
+                .into_iter()
+                .map(|event| serde_json::to_value(event).unwrap()),
+        )
+        .unwrap();
+
+        assert!(answered.contains(&answered_root.id.to_hex()));
+        assert!(answered.contains(&nested_answered.id.to_hex()));
+        assert!(!answered.contains(&ancestry_root.id.to_hex()));
+        assert!(!answered.contains(&unrelated_reference.id.to_hex()));
+        assert!(!answered.contains(&marked_failure_root.id.to_hex()));
+        assert!(!answered.contains(&legacy_failure_root.id.to_hex()));
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_channel_turn_and_returns_replay_anchor() {
+        let keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "work")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![queue::BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let mut pool = AgentPool::from_slots(vec![]);
+        let task = tokio::spawn(async {});
+        pool.task_map_mut().insert(
+            task.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "shutdown-test".into(),
+                recoverable_batch: Some(batch.clone()),
+                control_tx: Some(control_tx),
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        let interrupted = interrupt_in_flight_for_shutdown(&mut pool);
+
+        assert_eq!(control_rx.await.unwrap(), ControlSignal::Cancel);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].events[0].event.id, batch.events[0].event.id);
+        task.await.unwrap();
+    }
+}
+
 fn is_owner_control_command(
     event: &nostr::Event,
     kind_u32: u32,
@@ -4366,6 +4611,61 @@ fn signal_in_flight_task(
         }
     }
     false
+}
+
+/// Cancel checked-out channel turns at process shutdown while retaining a
+/// relay anchor for every interrupted batch. The in-process queue is mortal;
+/// restart recovery therefore comes from the original unanswered mentions,
+/// not from pretending this batch can survive process teardown.
+fn interrupt_in_flight_for_shutdown(pool: &mut AgentPool) -> Vec<FlushBatch> {
+    let mut interrupted = Vec::new();
+    for meta in pool.task_map_mut().values_mut() {
+        let Some(batch) = meta.recoverable_batch.clone() else {
+            continue;
+        };
+        interrupted.push(batch);
+        if let Some(tx) = meta.control_tx.take() {
+            let _ = tx.send(ControlSignal::Cancel);
+        }
+    }
+    interrupted
+}
+
+async fn post_shutdown_interruption_notices(rest: &relay::RestClient, batches: Vec<FlushBatch>) {
+    let mut notices = tokio::task::JoinSet::new();
+    for batch in batches {
+        let rest = rest.clone();
+        notices.spawn(async move {
+            let mut thread_tags = batch
+                .events
+                .last()
+                .map(|event| queue::parse_thread_tags(&event.event))
+                .unwrap_or_default();
+            if thread_tags.root_event_id.is_none() {
+                if let Some(trigger) = batch.events.last() {
+                    let trigger_id = trigger.event.id.to_hex();
+                    thread_tags.root_event_id = Some(trigger_id.clone());
+                    thread_tags.parent_event_id = Some(trigger_id);
+                }
+            }
+            pool::post_failure_notice(
+                &rest,
+                batch.channel_id,
+                &thread_tags,
+                "⚠️ Addressed turn delivery failed (`failure_shape: harness_shutdown_interrupted`). The harness stopped before this turn completed; the unanswered mention will be retried after restart.",
+            )
+            .await;
+        });
+    }
+    if tokio::time::timeout(Duration::from_secs(6), async {
+        while notices.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        tracing::warn!("shutdown interruption notices did not drain before relay teardown");
+        notices.shutdown().await;
+    }
 }
 
 /// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
