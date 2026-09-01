@@ -4836,6 +4836,68 @@ mod tests {
     }
 
     #[test]
+    fn test_n_pending_survives_two_steer_fallbacks_exactly_once() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let original_contents = ["original-1", "original-2", "original-3", "original-4"];
+
+        for content in original_contents {
+            q.push(make_queued(ch, content));
+        }
+        let first = q.flush_next().expect("original batch must flush");
+        assert_eq!(first.events.len(), original_contents.len());
+
+        // First unsupported-steering fallback: the fresh event is already back
+        // in the regular queue before the checked-out batch is cancelled.
+        q.push(make_queued(ch, "fallback-1"));
+        q.requeue_as_cancelled(first, CancelReason::Steer);
+        q.mark_complete(ch);
+        let second = q.flush_next().expect("first merged batch must flush");
+
+        // A second fallback lands while the merged successor turn is active.
+        q.push(make_queued(ch, "fallback-2"));
+        q.requeue_as_cancelled(second, CancelReason::Steer);
+        q.mark_complete(ch);
+        let final_batch = q.flush_next().expect("second merged batch must flush");
+
+        assert_eq!(
+            final_batch
+                .events
+                .iter()
+                .map(|event| event.event.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fallback-2"]
+        );
+        assert_eq!(
+            final_batch
+                .cancelled_events
+                .iter()
+                .map(|event| event.event.content.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "original-1",
+                "original-2",
+                "original-3",
+                "original-4",
+                "fallback-1",
+            ]
+        );
+
+        let all_event_ids = final_batch
+            .cancelled_events
+            .iter()
+            .chain(final_batch.events.iter())
+            .map(|event| event.event.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            all_event_ids.len(),
+            original_contents.len() + 2,
+            "every original and fallback event must survive exactly once"
+        );
+        assert_eq!(final_batch.cancel_reason, Some(CancelReason::Steer));
+    }
+
+    #[test]
     fn test_reply_instruction_present_for_channel_thread_reply() {
         let ch = Uuid::new_v4();
         let root_id = "a".repeat(64);

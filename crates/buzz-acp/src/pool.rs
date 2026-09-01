@@ -79,7 +79,7 @@ impl ChannelPublicationTracker {
     }
 }
 
-fn is_channel_report_kind(kind: u32) -> bool {
+pub(crate) fn is_channel_report_kind(kind: u32) -> bool {
     matches!(
         kind,
         buzz_core::kind::KIND_STREAM_MESSAGE
@@ -5610,7 +5610,10 @@ pub(crate) async fn post_failure_notice(
     });
     let builder =
         match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
-            Ok(b) => b,
+            Ok(b) => b.tag(nostr::Tag::custom(
+                nostr::TagKind::custom("buzz-acp"),
+                ["delivery-failure"],
+            )),
             Err(e) => {
                 tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
                 return;
