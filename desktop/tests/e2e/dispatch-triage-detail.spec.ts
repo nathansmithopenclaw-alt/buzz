@@ -488,6 +488,53 @@ test("assignee picker still assigns a pasted key the directory cannot find", asy
   expect((await readAssigneeRevision(page)).set?.assignee).toBe(unpublished);
 });
 
+test("assignee picker prefers current colleagues, collapses stale names, and hides blanks", async ({
+  page,
+}) => {
+  const staleHelmA = "a".repeat(64);
+  const staleHelmB = "b".repeat(64);
+  const blank = "c".repeat(64);
+  const staleUniqueA = "d".repeat(64);
+  const staleUniqueB = "e".repeat(64);
+  await installMockBridge(page, {
+    dispatch: {
+      workspace: { id: WORKSPACE, name: "Dispatch Test Workspace" },
+      context: context(),
+    },
+    searchProfiles: [
+      { pubkey: OTHER, displayName: "Helm" },
+      { pubkey: staleHelmA, displayName: "Helm" },
+      { pubkey: staleHelmB, displayName: "Helm" },
+      { pubkey: blank, displayName: "  " },
+      { pubkey: staleUniqueA, displayName: "Retired Agent" },
+      { pubkey: staleUniqueB, displayName: "Retired Agent" },
+    ],
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-dispatch-view").click();
+  await openPrimaryIssue(page);
+  await page.getByTestId("dispatch-assignee").click();
+
+  await expect(
+    page.getByTestId(`dispatch-assignee-option-${OTHER}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`dispatch-assignee-option-${staleHelmA}`),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`dispatch-assignee-option-${staleHelmB}`),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`dispatch-assignee-option-${blank}`),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`dispatch-assignee-option-${staleUniqueA}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`dispatch-assignee-option-${staleUniqueB}`),
+  ).toHaveCount(0);
+});
+
 test("assignee picker and the channel members popup are the same shell", async ({
   page,
 }) => {
