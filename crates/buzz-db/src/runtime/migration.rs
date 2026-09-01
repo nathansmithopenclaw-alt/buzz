@@ -23,10 +23,23 @@ const COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL: &str = r#"
 CREATE OR REPLACE FUNCTION community_write_fence_excluded_table(target NAME) RETURNS BOOLEAN
 LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS $$
     SELECT target::TEXT = ANY (ARRAY[
-        'community_deletion_requests', 'community_deletion_approvals',
-        'community_deletion_checkpoints', 'community_serving_write_leases',
-        'community_deletion_executor_heartbeats', 'product_feedback',
-        'rate_limit_violations', 'community_hosts'
+        'community_deletion_requests',
+        'community_deletion_approvals',
+        'community_deletion_checkpoints',
+        'community_serving_write_leases',
+        'community_deletion_executor_heartbeats',
+        'product_feedback',
+        'rate_limit_violations',
+        'community_hosts',
+        'authorization_operation_receipts', 'identity_enrollment_policies',
+        'identity_bindings', 'identity_lifecycle_history',
+        'identity_lifecycle_selectors',
+        'authorization_invalidation_domains', 'authorization_invalidation_floors',
+        'authorization_authority_epochs', 'protected_object_authority',
+        'authorization_event_capacity', 'authorization_events',
+        'authorization_authentication_denial_attempts',
+        'authorization_operation_version_delta_manifests',
+        'authorization_operation_version_deltas', 'authorization_admission_results'
     ]::TEXT[])
 $$
 "#;
@@ -1523,11 +1536,11 @@ mod postgres_tests {
         );
 
         // NIP-FI core identity + base-lifecycle foundation (migration 0045) and
-        // final-admission foundation (0046). Both widen the single SQL source of
-        // truth `community_write_fence_excluded_table` so their durable,
-        // immutable ledger relations are never fence-attached, purged, or
-        // counted as tenant-scoped drift. schema.sql keeps one consolidated
-        // definition of that function whose body must match 0046's exactly.
+        // final-admission foundation (0046). Both widen the write-fence
+        // exclusions for their durable, immutable ledger relations. The
+        // upstream migration bodies remain byte-identical, so 0046 does not
+        // know about canonical migration 0032's `community_hosts`; startup
+        // reconciliation restores the exact desired-state union after SQLx.
         assert_eq!(migrations[44].version, 45);
         let identity_foundation = migrations[44].sql.as_str();
         assert!(identity_foundation.contains("CREATE TABLE identity_bindings"));
@@ -1543,8 +1556,8 @@ mod postgres_tests {
         assert!(authorization_foundation.contains("CREATE TABLE authorization_admission_results"));
 
         // The consolidated desired-state exclusion function must byte-match
-        // migration 0046's CREATE OR REPLACE body, or a future schema
-        // consolidation would silently drop NIP-FI relations from the ledger.
+        // startup's post-migration union. Comparing it directly with immutable
+        // upstream 0046 would incorrectly discard canonical `community_hosts`.
         fn extract_excluded_table_array(sql: &str) -> &str {
             let anchor = "community_write_fence_excluded_table(target NAME) RETURNS BOOLEAN";
             let start = sql.find(anchor).expect("exclusion function definition");
@@ -1555,10 +1568,13 @@ mod postgres_tests {
                 + array_start;
             &sql[array_start..array_end]
         }
+        assert!(
+            !extract_excluded_table_array(authorization_foundation).contains("'community_hosts'")
+        );
         assert_eq!(
-            extract_excluded_table_array(authorization_foundation),
+            extract_excluded_table_array(COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL),
             extract_excluded_table_array(desired_schema),
-            "schema.sql exclusion list drifted from migration 0046"
+            "schema.sql exclusion list drifted from post-migration union"
         );
 
         // Brownfield relay databases created through SQLx still carry the
@@ -3070,6 +3086,32 @@ mod postgres_tests {
                 (47, "push gateway dogfood profile".to_string()),
             ]
         );
+        for table in [
+            "community_hosts",
+            "authorization_operation_receipts",
+            "identity_enrollment_policies",
+            "identity_bindings",
+            "identity_lifecycle_history",
+            "identity_lifecycle_selectors",
+            "authorization_invalidation_domains",
+            "authorization_invalidation_floors",
+            "authorization_authority_epochs",
+            "protected_object_authority",
+            "authorization_event_capacity",
+            "authorization_events",
+            "authorization_authentication_denial_attempts",
+            "authorization_operation_version_delta_manifests",
+            "authorization_operation_version_deltas",
+            "authorization_admission_results",
+        ] {
+            let excluded: bool =
+                sqlx::query_scalar("SELECT community_write_fence_excluded_table($1::name)")
+                    .bind(table)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or_else(|error| panic!("read exclusion for {table}: {error}"));
+            assert!(excluded, "{table} must remain write-fence excluded");
+        }
     }
 
     #[tokio::test]

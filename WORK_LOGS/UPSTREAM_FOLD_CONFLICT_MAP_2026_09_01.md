@@ -153,6 +153,11 @@ The merged ACP suite passed with all ambient `BUZZ_ACP_*` variables removed:
 | `0043_push_gateway_dogfood_profile.sql` | `0047_push_gateway_dogfood_profile.sql` | byte-identical (`cmp` exit 0) |
 
 `migration.rs` now reconciles 47 migrations and tests the brownfield boundary.
+Because byte-identical upstream 0046 predates canonical `community_hosts`, its
+function replacement temporarily omits that table. The existing post-SQLx
+reconciliation now restores the desired-state union of `community_hosts` plus
+all NIP-FI ledger tables; the ledger-44 contract asserts every member remains
+write-fence excluded.
 The dedicated `buzz_bolt_fold` database on isolated Postgres port 5471 was
 prepared through ledger 44. A preserve-schema boot via
 `scripts/start-isolated-test-relay.sh` started the folded relay on ports
