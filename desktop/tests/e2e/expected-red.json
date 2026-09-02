@@ -225,7 +225,7 @@
       "class": "quarantined-flake",
       "reason": "Confirmed by the canonical-main gate at 7037a06e3: failed 0/5 confirm reruns.",
       "owner": "bolt",
-      "issue": null,
+      "issue": "16a7a010a13bbc3d847ecb97b17e77bb15a35e34184421ae8e5e080a9684ba85",
       "added": "2026-09-01",
       "expires": null
     }
