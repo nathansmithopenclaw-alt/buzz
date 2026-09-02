@@ -171,3 +171,31 @@ BUZZ_TEST_DATABASE_URL=postgres://buzz:***@localhost:5471/buzz_bolt_fold \
   runtime::migration::postgres_tests::ledger_44_upgrade_applies_exactly_0045_through_0047 \
   -- --ignored --exact --nocapture
 ```
+
+# Post-merge non-conflict edit audit
+
+Gate reproduction at canonical `63dc5e9656b0b2be8f9e12406bd0a76631bf3b99`
+identified eight paths where merge commit `af1fba63288ea3c2f3bc97c691906ce3e03fc953`
+differs from synthetic merge tree `71c99eba5`. The audit command was:
+
+```text
+git diff --name-only 71c99eba5 af1fba632
+```
+
+Disposition of every path:
+
+| Path | Diff from `71c99eba5` | Reason and disposition |
+|---|---|---|
+| `Justfile` | 21 lines changed | Retained. The synthetic tree contains unresolved `<<<<<<< 97f28497c` / `>>>>>>> 5aed49b50` markers. The resolution keeps upstream's whole-crate `buzz-agent` unit and OAuth test lane and canonical's explicit `buzz-sdk` and `buzz-dispatcher` lanes. This is a required conflict/verification integration, not a product-semantic override. |
+| `crates/buzz-relay/src/api/memory.rs` | 7 lines changed | Retained. Upstream changed bridge authentication to return `VerifiedBridgeAuth`, including `signed_created_at`, and relay-membership enforcement now consumes that timestamp. Destructuring and forwarding it are required to compile and preserve upstream's signed-time admission check on the canonical memory read plane. |
+| `desktop/src-tauri/src/commands/agents_avatar.rs` | 4 lines changed | Retained. Upstream added the required profile `about` reconciliation field and managed-agent `description` test fixture field. Supplying `record_effective_description` preserves the fork's public-description semantics when avatar reconciliation republishes a managed profile; the fixture initializer is the corresponding compile fix. |
+| `desktop/src-tauri/src/managed_agents/runtime/metadata.rs` | 11 lines removed | Retained. Upstream moved the child `RUST_LOG` policy to `runtime/child_env.rs`, where it is composed with the managed child environment and tested through `child_rust_log_filter_from`. Keeping the old metadata-local helper would leave two policies with the stale helper unused. The deletion makes the upstream child-env-aware implementation authoritative. |
+| `desktop/src/features/profile/ui/UserProfilePanel.tsx` | 14 lines changed | Reverted to `71c99eba5`. Neither parent required a conflict resolution here. The hand edit replaced `useProfilePanelActivity().openActivity` with `useOpenAgentActivity`, redirecting the profile action to the session pane and breaking the fork's A3 profile-contained focused view. The embedded profile view is authoritative; an upstream hook may only be used outside this embedded seam. This supersedes the earlier resolution-record statement that the profile control should open the full agent-session panel. |
+| `desktop/src/shared/api/personaTypes.ts` | 3 lines added | Retained. `personaId` is consumed by the fork's Nectar creation path to preserve its stable identity, and `linkedInstanceBehaviorPatch` is produced by agent-management updates and forwarded by `tauriPersonas.ts`. Both fields are required TypeScript bridge contracts for canonical callers. |
+| `desktop/src/shared/api/tauriWorkspace.ts` | 2 lines added | Retained. The fork's community initialization passes the fleet-visibility experiment state through `applyCommunity`; the added parameter and invoke payload keep that caller aligned with the Tauri `apply_workspace` contract while incorporating upstream's adjacent thread-scoped-session argument. |
+| `WORK_LOGS/UPSTREAM_FOLD_CONFLICT_MAP_2026_09_01.md` | file added | Retained and extended by this addendum. This is the fold evidence artifact itself and has no runtime semantics. |
+
+Separately, `desktop/tests/e2e/voice-note.spec.ts` used an absolute fixture URL
+on port 4173. It now derives the audio URL from `PREVIEW_ORIGIN`, so the full
+smoke project exercises the same checkout on any lane-specific
+`BUZZ_E2E_PORT`. This is an upstream-adoptable test-harness fix.

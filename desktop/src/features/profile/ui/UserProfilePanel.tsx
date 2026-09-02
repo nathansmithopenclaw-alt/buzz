@@ -62,7 +62,6 @@ import {
 import { AgentConfigurationFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 import { UserProfileAgentSettingsMenuSlot } from "@/features/profile/ui/UserProfileAgentActions";
 import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelDeletion";
-import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
 import { submitProfilePersonaDialog } from "@/features/profile/ui/UserProfilePanelPersonaSubmit";
 import {
@@ -349,8 +348,9 @@ export function UserProfilePanel({
   const targetKey = profilePanelTargetKey(pubkey, persona?.id);
   const {
     activityAgent,
-    canViewActivity: canViewEmbeddedActivity,
+    canViewActivity,
     channelId: activityChannelId,
+    openActivity: handleOpenActivity,
   } = useProfilePanelActivity({
     effectivePubkey,
     isBot,
@@ -361,16 +361,6 @@ export function UserProfilePanel({
     targetKey,
     viewerIsOwner,
   });
-  const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
-  const canViewActivity =
-    canViewEmbeddedActivity && canOpenAgentActivity(effectivePubkey);
-  const handleOpenActivity = React.useCallback(
-    (channelId?: string | null) => {
-      if (!effectivePubkey) return;
-      openAgentActivity(effectivePubkey, { channelId: channelId ?? null });
-    },
-    [effectivePubkey, openAgentActivity],
-  );
   const prevTargetKeyRef = React.useRef(targetKey);
   React.useEffect(() => {
     if (prevTargetKeyRef.current === targetKey) return;

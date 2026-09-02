@@ -67,26 +67,18 @@ async function openAgentActivity(
     await seedActiveTurn(page, channelId);
   }
 
-  const messageRow = page
-    .getByTestId("message-row")
-    .filter({ hasText: "Indexing the channel catalog now." });
-  await expect(messageRow.first()).toBeVisible({ timeout: 8_000 });
-  await messageRow.first().getByRole("button").first().click();
-
-  const profile = page.getByTestId("user-profile-panel");
-  await expect(profile).toBeVisible({ timeout: 10_000 });
-  if (activityChannelId !== CHANNEL_AGENTS) {
-    const dot = page.getByRole("tab", {
-      name: "Show #general activity",
-    });
-    await expect(dot).toBeVisible({ timeout: 5_000 });
-    await dot.click();
-  }
-  const activity = page.getByRole("button", {
-    name: /Open full activity\./,
-  });
-  await expect(activity).toBeVisible({ timeout: 5_000 });
-  await activity.click();
+  // The profile panel owns the fork's embedded A3 activity view. Exercise the
+  // upstream session-pane controls through their channel-native ingress so
+  // these control regressions do not require profile View activity to leave
+  // the profile.
+  const activityTrigger = page.getByTestId("bot-activity-composer-trigger");
+  await expect(activityTrigger).toBeVisible({ timeout: 8_000 });
+  await activityTrigger.click();
+  const activityItem = page.getByTestId(
+    `bot-activity-composer-item-${AGENT_PUBKEY}`,
+  );
+  await expect(activityItem).toBeVisible({ timeout: 5_000 });
+  await activityItem.click({ force: true });
 
   const panel = page.getByTestId("agent-session-thread-panel");
   await expect(panel).toBeVisible({ timeout: 10_000 });

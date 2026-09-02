@@ -4,8 +4,9 @@ import type { Page } from "@playwright/test";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 import { expectSmoothCorners } from "../helpers/css";
+import { PREVIEW_ORIGIN } from "./previewOrigin";
 
-const AUDIO_URL = "http://127.0.0.1:4173/sounds/ping.mp3";
+const AUDIO_URL = `${PREVIEW_ORIGIN}/sounds/ping.mp3`;
 
 async function openMoreActionsMenu(page: Page, messageId: string) {
   const row = page.locator(`[data-message-id="${messageId}"]`);
