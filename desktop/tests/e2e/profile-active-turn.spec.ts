@@ -8,6 +8,7 @@ import { installMockBridge } from "../helpers/bridge";
 // panel — the surface that renders the active-turn badges.
 const AGENT_PUBKEY =
   "554cef57437abac34522ac2c9f0490d685b72c80478cf9f7ed6f9570ee8624ea";
+const OFF_CHANNEL_AGENT_PUBKEY = "cc".repeat(32);
 
 // Channel IDs the seeded turns point at. The badge labels resolve these to
 // #general / #engineering via the channels query.
@@ -144,5 +145,38 @@ test.describe("profile active turn indicator", () => {
     const popover = page.getByTestId("user-profile-popover");
     await expect(popover).toBeVisible({ timeout: 5_000 });
     await expect(popover).toContainText("Working in #general");
+  });
+
+  test("04 — agents-page profile keeps embedded activity without an openable channel", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: OFF_CHANNEL_AGENT_PUBKEY,
+          name: "Off-channel agent",
+          status: "running",
+          channelNames: [],
+        },
+      ],
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.getByTestId("open-agents-view").click();
+    await expect(page.getByTestId("agents-fleet")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await page.getByTestId(`managed-agent-${OFF_CHANNEL_AGENT_PUBKEY}`).click();
+    const panel = page.getByTestId("user-profile-panel");
+    await expect(panel).toBeVisible({ timeout: 5_000 });
+
+    const activityButton = panel.getByTestId(
+      `user-profile-view-activity-${OFF_CHANNEL_AGENT_PUBKEY}`,
+    );
+    await expect(activityButton).toBeVisible();
+    await activityButton.click();
+
+    await expect(panel.getByTestId("user-profile-activity-view")).toBeVisible();
+    await expect(page.getByTestId("agent-session-thread-panel")).toHaveCount(0);
   });
 });
