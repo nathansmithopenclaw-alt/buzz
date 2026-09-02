@@ -217,6 +217,17 @@
       "issue": "D-6880b42e",
       "added": "2026-08-29",
       "expires": "2026-09-28"
+    },
+    {
+      "file": "tests/e2e/smoke.spec.ts",
+      "title": "create agent supports parallelism and system prompt overrides",
+      "line": 207,
+      "class": "quarantined-flake",
+      "reason": "Confirmed by the canonical-main gate at 7037a06e3: failed 0/5 confirm reruns.",
+      "owner": "bolt",
+      "issue": null,
+      "added": "2026-09-01",
+      "expires": null
     }
   ]
 }
