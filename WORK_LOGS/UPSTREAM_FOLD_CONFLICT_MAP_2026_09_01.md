@@ -200,3 +200,24 @@ Separately, `desktop/tests/e2e/voice-note.spec.ts` used an absolute fixture URL
 on port 4173. It now derives the audio URL from `PREVIEW_ORIGIN`, so the full
 smoke project exercises the same checkout on any lane-specific
 `BUZZ_E2E_PORT`. This is an upstream-adoptable test-harness fix.
+
+## Verifier reconciliation (Helm, 2026-09-02, at cb10b9a7b)
+
+`git diff --name-only 71c99eba5 af1fba632` lists 50 paths, not eight. 36 of
+them carry `<<<<<<<` markers in the synthetic tree and are the documented
+conflicts. The remaining 14 are the non-conflict edits; the table above
+disposes 8 of them (Justfile is a marker file and belongs to the conflict set).
+The other six, each checked hunk-by-hunk against the `71c99eba5` blob:
+
+| Path | Diff from `71c99eba5` | Disposition |
+|---|---|---|
+| `desktop/src-tauri/src/managed_agents/nest/tests.rs` | +2 (`description: None` in two fixtures) | Retained. Same class as `agents_avatar.rs`: compile fix for upstream's added `description` field on `AgentDefinition` / `ManagedAgentRecord`. |
+| `migrations/0045_nip_fi_identity_foundation.sql`, `0046_nip_fi_authorization_foundation.sql`, `0047_push_gateway_dogfood_profile.sql` | new files | Retained. The documented renumber of upstream 0041-0043 (byte-identical, see the migration table above); a pure merge tree cannot carry a rename resolution. |
+| `desktop/src/features/agents/ui/UnifiedAgentsSection.tsx`, `desktop/src/features/channels/ui/AddMemberSearchResultRow.tsx` | deleted | Retained. The two modify/delete conflicts (items 29-30 above); `merge-tree` leaves the modified side in place because it cannot mark a modify/delete. |
+| `scripts/start-isolated-test-relay.sh` | +17/-8 | Retained. Fork-side `BUZZ_HARNESS_PRESERVE_SCHEMA` opt-in used by the ledger-upgrade proof above; test harness only, no runtime semantics. |
+
+Correction to the `metadata.rs` row: `runtime/child_env.rs` is fork-side
+(added in `17635aff2`, absent from upstream `5aed49b50`), so the fold deleted a
+fork-stale duplicate of `child_rust_log_filter`, not a helper upstream had
+moved. Effect unchanged: the `child_env.rs` implementation is the single
+authoritative policy.
