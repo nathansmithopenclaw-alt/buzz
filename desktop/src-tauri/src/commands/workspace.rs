@@ -74,6 +74,7 @@ pub struct WorkspaceExperimentFlags {
     fleet_visibility: bool,
     thread_scoped_acp_sessions: bool,
     agent_session_residency: bool,
+    answered_event_watermark: bool,
 }
 
 /// Fetch a relay's workspace icon from its NIP-11 relay information document.
@@ -248,6 +249,10 @@ pub async fn apply_workspace(
         state
             .session_residency_enabled()
             .store(experiments.agent_session_residency, Ordering::Release);
+        state.answered_event_watermark_enabled().store(
+            experiments.answered_event_watermark,
+            Ordering::Release,
+        );
         crate::managed_agents::fleet_visibility::configure_runtime(
             &app,
             &state.fleet_visibility,

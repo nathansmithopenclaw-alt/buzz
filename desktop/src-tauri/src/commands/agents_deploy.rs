@@ -54,6 +54,7 @@ fn build_launch_block_for_policy(
     effective_model: Option<&str>,
     owner_pubkey: &str,
     session_policy: crate::managed_agents::AcpSessionPolicy,
+    answered_event_watermark: bool,
 ) -> serde_json::Value {
     use crate::managed_agents::{
         known_acp_runtime, resolve_session_title, DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
@@ -80,6 +81,10 @@ fn build_launch_block_for_policy(
         crate::managed_agents::acp_agents_value(&descriptor.command, record.parallelism),
     );
     crate::managed_agents::insert_acp_session_policy_env(&mut policy_env, session_policy);
+    policy_env.insert(
+        crate::managed_agents::ANSWERED_EVENT_WATERMARK_ENV_VAR.into(),
+        answered_event_watermark.to_string(),
+    );
 
     if let Some(value) = effective_prompt {
         policy_env.insert("BUZZ_ACP_SYSTEM_PROMPT".into(), value.to_string());
@@ -141,6 +146,7 @@ fn build_launch_block_for_policy(
     let is_claude = runtime.map(|r| r.id == "claude").unwrap_or(false);
     let strip_key = |k: &str| {
         k.eq_ignore_ascii_case(crate::managed_agents::ACP_SESSION_POLICY_ENV_VAR)
+            || k.eq_ignore_ascii_case(crate::managed_agents::ANSWERED_EVENT_WATERMARK_ENV_VAR)
             || (record.effort_level.is_some() && k.eq_ignore_ascii_case("BUZZ_ACP_EFFORT_LEVEL"))
             || (is_claude
                 && (k.eq_ignore_ascii_case("BUZZ_ACP_MODEL")
@@ -179,6 +185,7 @@ pub(super) fn build_launch_block(
         effective_model,
         owner_pubkey,
         crate::managed_agents::AcpSessionPolicy::Channel,
+        false,
     )
 }
 
@@ -229,6 +236,9 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
         effective.model.value.as_deref(),
         &owner_pubkey,
         crate::managed_agents::acp_session_policy(state),
+        state
+            .answered_event_watermark_enabled()
+            .load(std::sync::atomic::Ordering::Acquire),
     );
 
     let effective_parallelism =
@@ -390,9 +400,14 @@ mod tests {
             None,
             "owner-hex",
             crate::managed_agents::AcpSessionPolicy::Thread,
+            true,
         );
 
         assert_eq!(launch["policy_env"]["BUZZ_ACP_SESSION_POLICY"], "thread");
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_ANSWERED_WATERMARK"],
+            "true"
+        );
         assert!(
             launch["env"]["BUZZ_ACP_SESSION_POLICY"].is_null(),
             "desktop policy must not be shadowed by descriptor env"

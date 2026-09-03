@@ -868,6 +868,7 @@ pub fn spawn_agent_child(
     );
     // Resolve once and stamp the same value onto the snapshot below.
     let acp_session_policy = super::apply_app_acp_session_policy_env(app, &mut command);
+    super::apply_app_answered_event_watermark_env(app, &mut command);
 
     crate::build_identity::apply_demo_config_home(&mut command)?;
     // Apply canonical persisted effort after the descriptor so stale free-form values cannot win.

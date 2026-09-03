@@ -8,12 +8,14 @@ use tauri::{AppHandle, Manager};
 use crate::app_state::AppState;
 
 pub(crate) const ACP_SESSION_POLICY_ENV_VAR: &str = "BUZZ_ACP_SESSION_POLICY";
+pub(crate) const ANSWERED_EVENT_WATERMARK_ENV_VAR: &str = "BUZZ_ACP_ANSWERED_WATERMARK";
 
 /// Desktop experiment state that influences managed-agent lifecycle behavior.
 pub struct ManagedAgentExperimentState {
     pub(crate) profile_reconcile_enabled: AtomicBool,
     pub(crate) thread_scoped_acp_sessions_enabled: AtomicBool,
     pub(crate) session_residency_enabled: AtomicBool,
+    pub(crate) answered_event_watermark_enabled: AtomicBool,
 }
 
 impl Default for ManagedAgentExperimentState {
@@ -22,6 +24,7 @@ impl Default for ManagedAgentExperimentState {
             profile_reconcile_enabled: AtomicBool::new(true),
             thread_scoped_acp_sessions_enabled: AtomicBool::new(false),
             session_residency_enabled: AtomicBool::new(false),
+            answered_event_watermark_enabled: AtomicBool::new(false),
         }
     }
 }
@@ -39,6 +42,12 @@ impl AppState {
 
     pub(crate) fn session_residency_enabled(&self) -> &AtomicBool {
         &self.managed_agent_experiments.session_residency_enabled
+    }
+
+    pub(crate) fn answered_event_watermark_enabled(&self) -> &AtomicBool {
+        &self
+            .managed_agent_experiments
+            .answered_event_watermark_enabled
     }
 }
 
@@ -94,6 +103,28 @@ pub(crate) fn apply_app_acp_session_policy_env(
     policy
 }
 
+/// Apply the default-off replay-hygiene experiment at the managed-agent launch boundary.
+pub(crate) fn apply_app_answered_event_watermark_env(
+    app: &AppHandle,
+    command: &mut std::process::Command,
+) {
+    let enabled = app
+        .state::<AppState>()
+        .answered_event_watermark_enabled()
+        .load(Ordering::Acquire);
+    apply_answered_event_watermark_env(command, enabled);
+}
+
+pub(crate) fn apply_answered_event_watermark_env(
+    command: &mut std::process::Command,
+    enabled: bool,
+) {
+    command.env(
+        ANSWERED_EVENT_WATERMARK_ENV_VAR,
+        if enabled { "true" } else { "false" },
+    );
+}
+
 pub(crate) fn insert_acp_session_policy_env(
     policy_env: &mut BTreeMap<String, String>,
     policy: AcpSessionPolicy,
@@ -142,5 +173,19 @@ mod tests {
         apply_acp_session_policy_env(&mut command, AcpSessionPolicy::Thread);
 
         assert_eq!(command_policy(&command), Some("thread"));
+    }
+
+    #[test]
+    fn local_launch_env_receives_answered_watermark_state() {
+        let mut command = std::process::Command::new("true");
+        apply_answered_event_watermark_env(&mut command, true);
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == ANSWERED_EVENT_WATERMARK_ENV_VAR)
+                .and_then(|(_, value)| value)
+                .and_then(std::ffi::OsStr::to_str),
+            Some("true")
+        );
     }
 }

@@ -33,6 +33,20 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// Bounded history replay on harness startup. This closes the delivery gap for
 /// mentions published while the managed agent was stopped or respawning.
 pub(crate) const DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS: u64 = 86_400;
+/// Replay bound used by the answered-watermark experiment. A durable exact-id
+/// cache makes a long duplicate-prone startup window unnecessary.
+pub(crate) const ANSWERED_WATERMARK_FALLBACK_LOOKBACK_SECS: u64 = 900;
+
+pub(crate) fn effective_startup_replay_lookback_secs(
+    configured_secs: u64,
+    answered_watermark: bool,
+) -> u64 {
+    if answered_watermark {
+        configured_secs.min(ANSWERED_WATERMARK_FALLBACK_LOOKBACK_SECS)
+    } else {
+        configured_secs
+    }
+}
 
 /// Upper bound for `max_turn_duration` (7 days). Any higher is operationally
 /// meaningless and risks arithmetic overflow when deriving the in-flight
@@ -295,16 +309,26 @@ pub struct CliArgs {
 
     /// Seconds of channel history to replay when the harness starts.
     ///
-    /// Replay is intentionally at-least-once: duplicate delivery after an
-    /// unclean restart is preferable to silently losing a mention received
-    /// while the agent was down. The relay's in-process event-id cache removes
-    /// duplicates within a single connection lifecycle.
+    /// Without answered-watermark protection replay is intentionally
+    /// at-least-once. When that experiment is enabled, the effective window is
+    /// bounded to 900 seconds and exact relay-verified answer receipts suppress
+    /// already-handled mentions.
     #[arg(
         long,
         env = "BUZZ_ACP_STARTUP_REPLAY_LOOKBACK",
         default_value_t = DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS
     )]
     pub startup_replay_lookback_secs: u64,
+
+    /// Persist exact, relay-verified answer receipts across harness restarts.
+    /// Experimental and default-off until enabled from Settings → Experiments.
+    #[arg(long, env = "BUZZ_ACP_ANSWERED_WATERMARK", default_value_t = false)]
+    pub answered_watermark: bool,
+
+    /// Override the answered-watermark file location. Primarily for tests and
+    /// managed deployments that own their state directory.
+    #[arg(long, env = "BUZZ_ACP_ANSWERED_WATERMARK_PATH", hide = true)]
+    pub answered_watermark_path: Option<PathBuf>,
 
     /// Deprecated: alias for --idle-timeout. If both set, --idle-timeout wins.
     #[arg(long, env = "BUZZ_ACP_TURN_TIMEOUT", hide = true)]
@@ -621,6 +645,8 @@ pub struct Config {
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub startup_replay_lookback_secs: u64,
+    pub answered_watermark: bool,
+    pub answered_watermark_path: Option<PathBuf>,
     pub agents: u32,
     pub heartbeat_interval_secs: u64,
     /// Seconds between per-turn liveness pings. 0 = disabled. Distinct from
@@ -1352,6 +1378,8 @@ impl Config {
             idle_timeout_secs,
             max_turn_duration_secs,
             startup_replay_lookback_secs: args.startup_replay_lookback_secs,
+            answered_watermark: args.answered_watermark,
+            answered_watermark_path: args.answered_watermark_path,
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
@@ -1733,6 +1761,22 @@ mod tests {
     use crate::filter::{ChannelScope, SubscriptionRule};
     use clap::{Parser, ValueEnum};
 
+    #[test]
+    fn answered_watermark_is_default_off_and_bounds_fallback_to_900_seconds() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert!(!default.answered_watermark);
+        let enabled =
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--answered-watermark"]);
+        assert!(enabled.answered_watermark);
+        assert_eq!(
+            effective_startup_replay_lookback_secs(86_400, false),
+            86_400
+        );
+        assert_eq!(effective_startup_replay_lookback_secs(86_400, true), 900);
+        assert_eq!(effective_startup_replay_lookback_secs(300, true), 300);
+    }
+
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {
         Config {
@@ -1744,6 +1788,8 @@ mod tests {
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             startup_replay_lookback_secs: DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS,
+            answered_watermark: false,
+            answered_watermark_path: None,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,

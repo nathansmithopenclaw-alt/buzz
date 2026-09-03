@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod answered_watermark;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -3151,11 +3152,15 @@ async fn tokio_main() -> Result<()> {
     // first REQ; it silently loses mentions published while the harness was down.
     // A bounded at-least-once replay makes that failure recoverable. Duplicate
     // delivery after an unclean restart is the safer failure mode.
-    let startup_watermark: u64 = std::time::SystemTime::now()
+    let process_started_at: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
-        .saturating_sub(config.startup_replay_lookback_secs);
+        .as_secs();
+    let startup_replay_lookback_secs = config::effective_startup_replay_lookback_secs(
+        config.startup_replay_lookback_secs,
+        config.answered_watermark,
+    );
+    let startup_watermark = process_started_at.saturating_sub(startup_replay_lookback_secs);
 
     let pubkey_hex = config.keys.public_key().to_hex();
 
@@ -3178,7 +3183,8 @@ async fn tokio_main() -> Result<()> {
         tracing::warn!("failed to set startup watermark: {e}");
     }
     tracing::info!(
-        startup_replay_lookback_secs = config.startup_replay_lookback_secs,
+        configured_startup_replay_lookback_secs = config.startup_replay_lookback_secs,
+        startup_replay_lookback_secs,
         startup_watermark,
         "startup mention replay enabled"
     );
@@ -3312,12 +3318,43 @@ async fn tokio_main() -> Result<()> {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
     let subscribed_ids: Vec<Uuid> = channel_filters.keys().copied().collect();
-    let answered_event_ids =
+    let mut answered_watermark_store = if config.answered_watermark {
+        match answered_watermark::AnsweredWatermarkStore::open(
+            config.answered_watermark_path.as_deref(),
+            &pubkey_hex,
+            &config.relay_url,
+        ) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                tracing::warn!(%error, "answered-event watermark unavailable; using relay fallback only");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut answered_event_ids = AnsweredEventIds::default();
+    if let Some(store) = answered_watermark_store.as_ref() {
+        answered_event_ids
+            .exact
+            .extend(store.answered_ids_since(startup_watermark));
+    }
+    let relay_answered =
         load_answered_event_ids(&relay.rest_client(), &subscribed_ids, startup_watermark).await;
+    if let Some(store) = answered_watermark_store.as_mut() {
+        if let Err(error) =
+            store.merge_and_persist(relay_answered.receipts.iter().cloned(), startup_watermark)
+        {
+            tracing::warn!(%error, "answered-event watermark persist failed");
+        }
+    }
+    answered_event_ids.merge(relay_answered);
     tracing::info!(
         answered_events = answered_event_ids.len(),
         "startup relay-derived answered state loaded"
     );
+    let answered_watermark_store =
+        answered_watermark_store.map(|store| Arc::new(std::sync::Mutex::new(store)));
     let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
@@ -3421,6 +3458,8 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        process_started_at,
+        answered_watermark_store,
         publication_tracker: pool::ChannelPublicationTracker::default(),
     });
 
@@ -4884,6 +4923,9 @@ fn is_delivery_failure_report(event: &nostr::Event) -> bool {
 struct AnsweredEventIds {
     exact: HashSet<String>,
     legacy_thread_roots: HashMap<String, u64>,
+    /// Relay-verified exact receipts suitable for local persistence:
+    /// (channel, triggering event id, signed answer timestamp).
+    receipts: Vec<(Uuid, String, u64)>,
 }
 
 impl AnsweredEventIds {
@@ -4902,6 +4944,17 @@ impl AnsweredEventIds {
 
     fn len(&self) -> usize {
         self.exact.len()
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.exact.extend(other.exact);
+        for (root, timestamp) in other.legacy_thread_roots {
+            self.legacy_thread_roots
+                .entry(root)
+                .and_modify(|current| *current = (*current).max(timestamp))
+                .or_insert(timestamp);
+        }
+        self.receipts.extend(other.receipts);
     }
 }
 
@@ -4926,6 +4979,17 @@ fn answered_event_ids_from_reports(
         if let Some(reply) = markers.reply {
             let reply = reply.to_ascii_lowercase();
             answered.exact.insert(reply.clone());
+            if let Some(channel_id) = event.tags.iter().find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("h"))
+                    .then(|| parts.get(1))
+                    .flatten()
+                    .and_then(|value| value.parse::<Uuid>().ok())
+            }) {
+                answered
+                    .receipts
+                    .push((channel_id, reply.clone(), event.created_at.as_secs()));
+            }
             // Historical human-facing prompts told agents to reply directly
             // to the thread root. Those reports cannot name the exact nested
             // mention, so retain a timestamped compatibility entry: only
@@ -5079,6 +5143,11 @@ mod restart_delivery_tests {
         assert!(!answered.contains(&unrelated_reference));
         assert!(!answered.contains(&marked_failure_root));
         assert!(!answered.contains(&legacy_failure_root));
+        assert_eq!(answered.receipts.len(), 2);
+        assert!(answered
+            .receipts
+            .iter()
+            .all(|(receipt_channel, _, _)| *receipt_channel == channel_id));
     }
 
     #[test]
@@ -10316,6 +10385,8 @@ mod build_mcp_servers_tests {
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             startup_replay_lookback_secs: config::DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS,
+            answered_watermark: false,
+            answered_watermark_path: None,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -10550,6 +10621,8 @@ mod error_outcome_emission_tests {
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             startup_replay_lookback_secs: config::DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS,
+            answered_watermark: false,
+            answered_watermark_path: None,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,

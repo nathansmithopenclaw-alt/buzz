@@ -24,6 +24,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "answeredEventWatermark",
+      "name": "Agent Replay Hygiene",
+      "description": "Persist relay-verified answered mentions so managed agents do not replay them after restart. Applies when managed agents next start.",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "projects",
       "name": "Projects",
       "description": "Git repository browser and collaboration",

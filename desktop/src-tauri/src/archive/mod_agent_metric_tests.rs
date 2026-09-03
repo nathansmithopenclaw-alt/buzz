@@ -22,6 +22,7 @@ fn make_turn_metric_event(owner_keys: &Keys, agent_keys: &Keys) -> Event {
         session_id: Some("sess-1".to_string()),
         turn_id: Some("turn-1".to_string()),
         turn_seq: Some(1),
+        is_replay: None,
         timestamp: "2026-07-01T00:00:00Z".to_string(),
         turn: Some(TokenCounts {
             input_tokens: Some(100),

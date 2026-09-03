@@ -9,6 +9,7 @@ export async function applyCommunity(
   fleetVisibility?: boolean,
   threadScopedAcpSessions?: boolean,
   agentSessionResidency?: boolean,
+  answeredEventWatermark?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
@@ -20,6 +21,7 @@ export async function applyCommunity(
       fleetVisibility: fleetVisibility ?? false,
       threadScopedAcpSessions: threadScopedAcpSessions ?? false,
       agentSessionResidency: agentSessionResidency ?? false,
+      answeredEventWatermark: answeredEventWatermark ?? false,
     },
   });
 }
@@ -32,3 +34,6 @@ export const setThreadScopedAcpSessions = (enabled: boolean) =>
 
 export const setAgentSessionResidency = (enabled: boolean) =>
   invokeTauri("set_agent_session_residency", { enabled });
+
+export const setAnsweredEventWatermark = (enabled: boolean) =>
+  invokeTauri("set_answered_event_watermark", { enabled });

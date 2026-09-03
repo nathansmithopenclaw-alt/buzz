@@ -450,6 +450,7 @@ mod tests {
             payload.delta_reliable,
             "deltaReliable should default to true"
         );
+        assert_eq!(payload.is_replay, None);
     }
 
     #[test]

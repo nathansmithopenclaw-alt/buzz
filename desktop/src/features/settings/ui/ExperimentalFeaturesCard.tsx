@@ -2,6 +2,7 @@ import { setAgentManagedProfiles } from "@/shared/api/tauri";
 import { updateFleetVisibilityEnabled } from "@/features/agents/lib/useFleetVisibilitySettings";
 import {
   setAgentSessionResidency,
+  setAnsweredEventWatermark,
   setThreadScopedAcpSessions,
 } from "@/shared/api/tauriWorkspace";
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
@@ -58,6 +59,15 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
               toggle(!value);
               console.error(
                 "Failed to apply agent session residency setting:",
+                error,
+              );
+            });
+          }
+          if (feature.id === "answeredEventWatermark") {
+            void setAnsweredEventWatermark(value).catch((error) => {
+              toggle(!value);
+              console.error(
+                "Failed to apply answered-event watermark setting:",
                 error,
               );
             });
