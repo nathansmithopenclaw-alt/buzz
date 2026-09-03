@@ -124,14 +124,29 @@ The `content` field decrypts to a UTF-8 JSON object:
     "cacheClass": "ephemeral"                    // cache-write class; omit when not applicable
   },
 
-  "stopReason": "end_turn"               // optional
+  "stopReason": "end_turn",              // optional
+
+  // Context state at the end of this turn, as reported by the harness. These
+  // are STATE readings, not usage deltas: they are not summable across turns
+  // and MUST NOT be added to any token total. Omitted when unreported.
+  "contextTokens": 145213,     // OPTIONAL; context occupied after this turn
+  "contextWindow": 200000,     // OPTIONAL; the model's context window
+
+  // Harness-side provenance: how the publisher came to run this turn. All
+  // three are OPTIONAL and describe the publisher, not the model.
+  "attempt": 1,                // OPTIONAL; 1-based delivery attempt
+  "isReplay": false,           // OPTIONAL; every trigger predates publisher start
+  "sessionCreationCause": "rotation_turn_limit"  // OPTIONAL
 }
 ```
 
 `harness` and `timestamp` are REQUIRED. All other fields are OPTIONAL or
 nullable, except as constrained below: `pricingIdentity` is optional but not
-nullable (omit it entirely rather than set it to null). Consumers MUST ignore
-unknown fields (forward compatibility).
+nullable (omit it entirely rather than set it to null), and so are
+`contextTokens`, `contextWindow`, `attempt`, `isReplay`, and
+`sessionCreationCause` — each is omitted rather than set to null, `0`, or
+`false` when the publisher did not observe it. Consumers MUST ignore unknown
+fields (forward compatibility).
 
 ### Ordering and delta recomputation
 
@@ -213,6 +228,95 @@ unlabeled total.
 `stopReason`, when present, MUST be one of `end_turn`, `max_tokens`,
 `cancelled`, `error`, `unknown`. Consumers MUST treat unrecognized
 `stopReason` values as `unknown`; the token counts remain valid.
+
+### Context state
+
+`contextTokens` and `contextWindow` describe the conversation's context
+occupancy and the model's context-window size at the end of the turn. They are
+OPTIONAL and MUST be omitted when the harness does not observe them.
+
+Both are **state readings, not usage deltas.** A consumer MUST NOT sum them
+across turns, add them to any token counter, or treat them as a component of
+`inputTokens`. The meaningful aggregate over a set of turns is a maximum (peak
+occupancy), not a total.
+
+Publishers MUST NOT publish `0` for either field to mean "not tracked". A
+harness that reports a zero context window on the wire because it tracks none
+MUST have that normalized to omission before publication: a completed turn
+always occupies context, and a zero-width window is not a measurement. This is
+a deliberate exception to the "preserve an explicit zero" rule that governs the
+cache fields — there, zero is a provider-confirmed count; here, zero is only
+ever an absence in disguise.
+
+### Turn provenance
+
+Three OPTIONAL fields record how the publisher came to run this turn. They
+describe the *harness*, not the model or the provider, so a publisher that
+implements them SHOULD populate them identically across every adapter it drives.
+
+`attempt` is the 1-based delivery attempt of the work that triggered this turn:
+`1` on first delivery, `2` on the first retry, and so on. Omit it when the
+publisher has no attempt notion for the turn — for example a self-scheduled
+heartbeat that is never retried. Consumers MUST NOT treat `attempt > 1` as
+proof of duplicated token spend: a retry may follow a failure that never
+reached the model at all, so the field bounds an upper estimate of waste and
+does not measure it. A consumer displaying a retry count MUST also expose how
+many turns carried the field, because zero retries among zero reporting turns
+is not evidence that no retries occurred.
+
+`isReplay` is `true` when **every** event that triggered this turn predates the
+publisher's own startup — i.e. the turn happened only because the publisher
+restarted and replayed a bounded historical window. A batch mixing replayed and
+live triggers is NOT a replay: that turn would have happened anyway, so its
+tokens are not attributable to the restart. Publishers MUST omit the field
+rather than publish `false` when they have no replay notion for the turn.
+
+The field is scoped to a publisher's own startup replay. It does NOT claim to
+identify a duplicate delivered by a transport-level reconnect backfill after
+the publisher started; a consumer counting restart waste must not read it as a
+general duplicate-delivery flag.
+
+`sessionCreationCause` explains why the session this turn ran in had to be
+created. Publishers SHOULD emit it on **every** turn of a session, not only the
+first, so that a session's cache-write cost attributes to its cause and later
+turns show how far that session amortized. Its value is one of:
+
+| Value | Meaning |
+|---|---|
+| `worker_spawn` | The publisher process held no session state at all — a fresh or restarted process. |
+| `scope_first_turn` | The process already had sessions for other scopes; this scope had none yet. |
+| `rotation_turn_limit` | Proactive rotation at a configured per-session turn limit. |
+| `provider_limit` | The provider ended a turn at a limit that invalidates the session. |
+| `owner_rotate` | The owner explicitly asked for a rotation. |
+| `owner_interrupt` | The owner cancelled, steered, or interrupted the in-flight turn. |
+| `model_switch` | A model switch required a new session. |
+| `membership_change` | The agent's membership in the channel changed. |
+| `adapter_failure` | The adapter reported a runtime failure on the previous turn. |
+| `agent_exited` | The adapter process exited. |
+| `turn_timeout` | The previous turn hit an idle or hard-cap timeout. |
+| `error` | Any other error path invalidated the previous session. |
+| `unknown` | Cause is unknown. |
+
+Consumers MUST treat an unrecognized value as `unknown` and keep the token
+counts valid, exactly as for `stopReason`. A consumer that displays causes
+SHOULD surface an unrecognized value verbatim rather than collapsing it to
+`unknown`: this set extends by amendment, and a newer publisher's real teardown
+reason is more useful than a shrug.
+
+Every value except `worker_spawn` and `scope_first_turn` also names why the
+**previous** session in that scope ended, so a histogram of creation causes is
+also the teardown histogram — minus sessions that are still alive, and minus
+those two "no predecessor" values.
+
+### Consumer storage of decrypted payloads
+
+A consumer that keeps a decrypted copy of a turn metric MUST store the
+publisher's plaintext as received, not a re-serialization through its own
+payload type. Because consumers are REQUIRED to ignore unknown fields, a round
+trip through a type that predates a field silently deletes it. Where the stored
+copy is append-only and the ciphertext is not retained, that deletion is
+permanent and no later upgrade can recover it — and publishers are commonly
+upgraded far more often than the consumers reading them.
 
 ## Publisher Behavior
 
