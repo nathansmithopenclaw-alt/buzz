@@ -567,6 +567,16 @@ pub struct CliArgs {
     /// Requires `--lazy-pool`; ignored otherwise. 0 disables idle re-sleep.
     #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
     pub idle_pool_sleep: u64,
+
+    /// Before predictable session teardown, ask the current model for a
+    /// bounded continuity summary and inject it into the replacement session.
+    #[arg(long, env = "BUZZ_ACP_SLEEP_WITH_SUMMARY", default_value_t = false)]
+    pub sleep_with_summary: bool,
+
+    /// Pair-scoped local directory for bounded continuity summaries. Required
+    /// when sleep-with-summary is enabled; no implicit home-directory fallback.
+    #[arg(long, env = "BUZZ_ACP_SLEEP_SUMMARY_DIR")]
+    pub sleep_summary_dir: Option<PathBuf>,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -665,6 +675,10 @@ pub struct Config {
     /// woken lazy pool is torn back down to the empty-slot state. 0 = disabled.
     /// Only meaningful when `lazy_pool` is true.
     pub idle_pool_sleep_secs: u64,
+    /// Whether predictable teardown captures a compact continuity summary.
+    pub sleep_with_summary: bool,
+    /// Pair-scoped directory for the bounded local summary store.
+    pub sleep_summary_dir: Option<PathBuf>,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1294,6 +1308,12 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        if args.sleep_with_summary && args.sleep_summary_dir.is_none() {
+            return Err(ConfigError::ConfigFile(
+                "--sleep-with-summary requires --sleep-summary-dir".to_string(),
+            ));
+        }
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
@@ -1348,6 +1368,8 @@ impl Config {
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
+            sleep_with_summary: args.sleep_with_summary,
+            sleep_summary_dir: args.sleep_summary_dir,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1727,6 +1749,8 @@ mod tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            sleep_with_summary: false,
+            sleep_summary_dir: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2649,6 +2673,16 @@ channels = "ALL"
             "300",
         ]);
         assert_eq!(configured.idle_pool_sleep, 300);
+    }
+
+    #[test]
+    fn sleep_with_summary_requires_explicit_state_directory() {
+        let key = nostr::Keys::generate().secret_key().to_secret_hex();
+        let args =
+            CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--sleep-with-summary"])
+                .unwrap();
+        let error = Config::from_args(args).unwrap_err();
+        assert!(error.to_string().contains("requires --sleep-summary-dir"));
     }
 
     #[test]

@@ -19,8 +19,8 @@
     },
     {
       "id": "agentSessionResidency",
-      "name": "Agent Session Residency",
-      "description": "Tune how long idle agent sessions stay resident and when they rotate. Applies when managed agents next start.",
+      "name": "Agent Session Continuity",
+      "description": "Tune idle residency and turn-count rotation, with a bounded local handoff across predictable sleep. Applies when managed agents next start.",
       "platforms": ["desktop"]
     },
     {

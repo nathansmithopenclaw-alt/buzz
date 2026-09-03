@@ -6,10 +6,10 @@ use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 
 use crate::{
     managed_agents::{
-        append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        append_log_marker, known_acp_runtime, login_shell_path, managed_agent_continuity_dir,
+        managed_agent_log_path, missing_command_message, normalize_agent_args, open_log_file,
+        resolve_command, spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime,
+        ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -544,6 +544,22 @@ pub fn spawn_agent_child(
         }
         .to_string(),
     );
+    command.env(
+        "BUZZ_ACP_SLEEP_WITH_SUMMARY",
+        if session_residency_enabled {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    if session_residency_enabled {
+        command.env(
+            "BUZZ_ACP_SLEEP_SUMMARY_DIR",
+            managed_agent_continuity_dir(app, &runtime_key)?,
+        );
+    } else {
+        command.env_remove("BUZZ_ACP_SLEEP_SUMMARY_DIR");
+    }
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {

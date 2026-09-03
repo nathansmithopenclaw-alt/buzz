@@ -63,6 +63,8 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // the idle worker-reclamation window while the desktop launcher sets it.
     "BUZZ_ACP_IDLE_POOL_SLEEP",
     "BUZZ_ACP_MAX_TURNS_PER_SESSION",
+    "BUZZ_ACP_SLEEP_WITH_SUMMARY",
+    "BUZZ_ACP_SLEEP_SUMMARY_DIR",
     // Desktop experiment policy: the Settings toggle is the sole authority
     // for whether channel threads receive independent ACP sessions.
     "BUZZ_ACP_SESSION_POLICY",

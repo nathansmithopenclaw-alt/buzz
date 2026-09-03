@@ -14,6 +14,7 @@ mod relay;
 mod runtime_identity;
 mod scope;
 mod setup_mode;
+mod sleep_summary;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -3402,6 +3403,10 @@ async fn tokio_main() -> Result<()> {
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
+        sleep_summary_store: sleep_summary::SleepSummaryStore::new(
+            config.sleep_with_summary,
+            config.sleep_summary_dir.clone(),
+        ),
         permission_mode: config.permission_mode,
         thinking_effort: config.thinking_effort.clone(),
         thinking_effort_is_default: config.thinking_effort_is_default,
@@ -4092,12 +4097,20 @@ async fn tokio_main() -> Result<()> {
                                             "!rotate received — cancelling in-flight turn and rotating session"
                                         );
                                     } else {
+                                        let captured = pool
+                                            .capture_sleep_summary_for_scope(
+                                                &scope,
+                                                &ctx,
+                                                "owner_rotate",
+                                            )
+                                            .await;
                                         let invalidated =
                                             pool.invalidate_scope_session(&scope);
                                         tracing::info!(
                                             channel_id = %buzz_event.channel_id,
                                             scope = %scope.telemetry_label(),
                                             invalidated,
+                                            summary_captured = captured,
                                             "!rotate received — invalidated idle session for scope"
                                         );
                                     }
@@ -4300,6 +4313,13 @@ async fn tokio_main() -> Result<()> {
                         tracing::info!(
                             idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
                             "idle pool sleep bound reached — tearing pool back to lazy state"
+                        );
+                        let summaries_captured =
+                            pool.capture_sleep_summaries_before_idle(&ctx).await;
+                        tracing::info!(
+                            target: "pool::sleep_summary",
+                            summaries_captured,
+                            "finished bounded summary capture before idle teardown"
                         );
                         shutdown_agent_pool(&mut pool).await;
                         // Return to the exact pre-wake lazy state: empty slots,
@@ -10330,6 +10350,8 @@ mod build_mcp_servers_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            sleep_with_summary: false,
+            sleep_summary_dir: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -10559,6 +10581,8 @@ mod error_outcome_emission_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            sleep_with_summary: false,
+            sleep_summary_dir: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
