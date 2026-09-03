@@ -4,6 +4,7 @@ import { installMockBridge } from "../helpers/bridge";
 
 const FIRST = "11".repeat(32);
 const SECOND = "22".repeat(32);
+const GENERAL_CHANNEL = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
 async function openAgentDefaults(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -31,6 +32,145 @@ async function invokeMock<T>(
     ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.(cmd, null);
   }, command);
 }
+
+test("saving the first queued agent draft presents the second without dismissing it", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    globalAgentConfig: {
+      env_vars: { ANTHROPIC_API_KEY: "sk-ant-test-key" },
+      model: "claude-opus-4-5",
+      preferred_runtime: "goose",
+      provider: "anthropic",
+    },
+    managedAgents: [
+      {
+        pubkey: FIRST,
+        name: "Draft requester",
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_SEED_LIVE_OBSERVER_EVENTS__ === "function",
+  );
+  await page.waitForFunction(() =>
+    (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+      (entry) =>
+        entry.command === "agent_management_ledger" &&
+        (entry.payload as { command?: { action?: string } }).command?.action ===
+          "restore",
+    ),
+  );
+
+  await page.evaluate(
+    ({ agentPubkey, channelId }) => {
+      const now = new Date().toISOString();
+      window.__BUZZ_E2E_SEED_LIVE_OBSERVER_EVENTS__?.({
+        agentPubkey,
+        events: [
+          {
+            seq: 1,
+            timestamp: now,
+            kind: "agent_management_request",
+            agentIndex: 0,
+            channelId,
+            sessionId: null,
+            turnId: null,
+            payload: {
+              type: "agent_management_request",
+              action: "create",
+              requestId: "queued-create-1",
+              intent: "draft",
+              request: {
+                channelId,
+                displayName: "First queued draft",
+                systemPrompt: "Handle the first queued task.",
+                runtime: "goose",
+              },
+            },
+          },
+          {
+            seq: 2,
+            timestamp: now,
+            kind: "agent_management_request",
+            agentIndex: 0,
+            channelId,
+            sessionId: null,
+            turnId: null,
+            payload: {
+              type: "agent_management_request",
+              action: "create",
+              requestId: "queued-create-2",
+              intent: "draft",
+              request: {
+                channelId,
+                displayName: "Second queued draft",
+                systemPrompt: "Handle the second queued task.",
+                runtime: "goose",
+              },
+            },
+          },
+        ],
+      });
+    },
+    { agentPubkey: FIRST, channelId: GENERAL_CHANNEL },
+  );
+
+  const nameInput = page.locator("#persona-display-name");
+  await expect(nameInput).toHaveValue("First queued draft", {
+    timeout: 10_000,
+  });
+  await page.getByTestId("persona-dialog-submit").click();
+  await expect(nameInput).toHaveValue("Second queued draft", {
+    timeout: 10_000,
+  });
+  await page.getByTestId("persona-dialog-submit").click();
+  await expect(page.getByTestId("persona-dialog")).toHaveCount(0);
+
+  const secondRequestActions = await page.evaluate(() => {
+    const commands = window.__BUZZ_E2E_COMMAND_LOG__ ?? [];
+    const ledger = commands
+      .filter((entry) => entry.command === "agent_management_ledger")
+      .map(
+        (entry) =>
+          (
+            entry.payload as {
+              command?: { action?: string; requestId?: string };
+            }
+          ).command,
+      )
+      .filter((command) => command?.requestId === "queued-create-2")
+      .map((command) => command?.action);
+    const published = commands
+      .filter((entry) => entry.command === "publish_agent_management")
+      .map(
+        (entry) =>
+          (
+            entry.payload as {
+              command?: { action?: string; requestId?: string };
+            }
+          ).command,
+      )
+      .filter((command) => command?.requestId === "queued-create-2")
+      .map((command) => command?.action);
+    return { ledger, published };
+  });
+  expect(secondRequestActions.ledger).toEqual([
+    "register",
+    "begin_owner_review",
+    "complete",
+  ]);
+  expect(
+    secondRequestActions.published.filter((action) => action === "audit"),
+  ).toHaveLength(1);
+  expect(
+    secondRequestActions.published.filter(
+      (action) => action === "create_secret",
+    ),
+  ).toHaveLength(1);
+});
 
 test("hides pubkey and audit UUID fields", async ({ page }) => {
   await installMockBridge(page, {

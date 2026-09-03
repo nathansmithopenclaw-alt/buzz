@@ -48,6 +48,7 @@ import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStor
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
 import {
   injectObserverEventsForE2E,
+  injectLiveObserverEventsForE2E,
   syncAgentObserverEvents,
 } from "@/features/agents/observerRelayStore";
 import {
@@ -1514,6 +1515,7 @@ declare global {
         payload: unknown;
       }>;
     }) => void;
+    __BUZZ_E2E_SEED_LIVE_OBSERVER_EVENTS__?: Window["__BUZZ_E2E_SEED_OBSERVER_EVENTS__"];
     __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
       clientId: string;
       contexts: Record<string, number>;
@@ -12122,6 +12124,9 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
     injectObserverEventsForE2E(agentPubkey, events);
   };
+  window.__BUZZ_E2E_SEED_LIVE_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
+    injectLiveObserverEventsForE2E(agentPubkey, events);
+  };
   const meshModelName = (modelId: string) => {
     const basename = modelId.split("/").at(-1) ?? modelId;
     return basename
@@ -14222,6 +14227,20 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);
+      case "agent_management_ledger": {
+        const command = (
+          payload as {
+            command?: { action?: string };
+          }
+        ).command;
+        if (command?.action === "restore") return [];
+        if (command?.action === "register") {
+          return { disposition: "draft" };
+        }
+        return null;
+      }
+      case "publish_agent_management":
+        return null;
       case "get_agent_memory":
         return handleGetAgentMemory(
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},

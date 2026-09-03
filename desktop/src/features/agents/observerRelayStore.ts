@@ -938,6 +938,14 @@ export function injectObserverEventsForE2E(
   }
 }
 
+/** E2E-only: drive live observer side effects as well as retained transcript state. */
+export function injectLiveObserverEventsForE2E(
+  agentPubkey: string,
+  events: ObserverEvent[],
+) {
+  processLiveObserverEvents(agentPubkey, events);
+}
+
 /**
  * Synchronize the observer store with a sorted buffer of events for one agent.
  * Used by test harnesses and replay bridges that already hold decoded frames.

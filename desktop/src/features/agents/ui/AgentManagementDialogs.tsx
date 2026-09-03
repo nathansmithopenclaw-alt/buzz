@@ -10,6 +10,7 @@ import { AgentGlobalConfigReviewDialog } from "./AgentGlobalConfigReviewDialog";
 export function AgentManagementDialogs() {
   const management = useAgentManagement();
   const teamManagement = useAgentTeamManagement();
+  const requestId = management.request?.requestId;
 
   return (
     <>
@@ -20,9 +21,10 @@ export function AgentManagementDialogs() {
           }
           initialValues={management.createInitialValues}
           isDefinitionPending={management.isPending}
+          key={requestId}
           mode="definition"
           onOpenChange={(open) => {
-            if (!open) management.dismiss();
+            if (!open && requestId) management.dismiss(requestId);
           }}
           onSubmitDefinition={management.submitCreate}
           runtimes={management.runtimes}
@@ -35,9 +37,10 @@ export function AgentManagementDialogs() {
           error={management.editError ? new Error(management.editError) : null}
           initialValues={management.editInitialValues}
           isPending={management.isPending}
+          key={requestId}
           mode="definition-edit"
           onOpenChange={(open) => {
-            if (!open) management.dismiss();
+            if (!open && requestId) management.dismiss(requestId);
           }}
           onSubmit={management.submitUpdate}
           open
@@ -53,7 +56,9 @@ export function AgentManagementDialogs() {
         onApprove={() => {
           void management.approveGlobalConfig();
         }}
-        onDismiss={management.dismiss}
+        onDismiss={() => {
+          if (requestId) management.dismiss(requestId);
+        }}
         request={
           management.request?.action === "global_config"
             ? management.request

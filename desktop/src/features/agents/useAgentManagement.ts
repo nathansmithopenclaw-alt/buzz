@@ -416,6 +416,7 @@ export function useAgentManagement() {
     if (request?.action !== "create" || "id" in input) {
       return false;
     }
+    const requestId = request.requestId;
     setError(null);
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
@@ -461,7 +462,7 @@ export function useAgentManagement() {
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
       ]);
-      dismiss();
+      dismiss(requestId);
       return true;
     } catch (cause) {
       await onFailed?.(cause).catch(() => undefined);
@@ -480,6 +481,7 @@ export function useAgentManagement() {
     if (request?.action !== "update" || !("id" in input)) {
       return false;
     }
+    const requestId = request.requestId;
     setError(null);
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
@@ -505,7 +507,7 @@ export function useAgentManagement() {
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
       ]);
-      dismiss();
+      dismiss(requestId);
       return true;
     } catch (cause) {
       await onFailed?.(cause).catch(() => undefined);
@@ -520,8 +522,9 @@ export function useAgentManagement() {
     return performUpdate(input);
   }
 
-  function dismiss() {
+  function dismiss(expectedRequestId: string) {
     const activeRequestId = pendingRequestId.current;
+    if (activeRequestId !== expectedRequestId) return;
     const wasDelegatedApply = activeRequestId
       ? delegatedApplyIdsRef.current.delete(activeRequestId)
       : false;
@@ -761,7 +764,7 @@ export function useAgentManagement() {
             queryClient.invalidateQueries({ queryKey: personasQueryKey }),
             queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
           ]);
-          dismiss();
+          dismiss(requestId);
         } catch (cause) {
           await completeDelegatedAgentUpdateFailure(
             updateCompletionContext(requestId, sourcePubkey, request),
@@ -847,7 +850,7 @@ export function useAgentManagement() {
           request: globalRequest,
           saveResult: result,
         });
-        dismiss();
+        dismiss(requestId);
       } catch (cause) {
         await completeDelegatedGlobalConfigFailure({
           requestId,
