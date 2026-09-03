@@ -18,6 +18,8 @@
 //! == agent) is applied fail-closed.
 
 mod agent_usage;
+#[cfg(test)]
+mod agent_usage_live_evidence;
 mod archive_db;
 mod metric_store;
 mod pipeline;

@@ -23,6 +23,7 @@ import {
   peakContextSummary,
   provenanceRatio,
   sessionCauseLabel,
+  teardownSummary,
   totalSessions,
   usageDisplay,
   UNKNOWN_PLACEHOLDER,
@@ -160,7 +161,6 @@ function AgentSection({
     (max, b) => Math.max(max, b.reportCount),
     0,
   );
-  const teardowns = agent.sessionStarts.filter((s) => isTeardownCause(s.cause));
   const retries = provenanceRatio(
     agent.provenance.retriedTurns,
     agent.provenance.turnsWithAttempt,
@@ -250,9 +250,7 @@ function AgentSection({
             />
           ))}
           <p className="text-xs text-muted-foreground/60">
-            {teardowns.length > 0
-              ? `${totalSessions(teardowns).toLocaleString("en-US")} of these replaced a torn-down session.`
-              : "None of these replaced a torn-down session."}
+            {teardownSummary(agent.sessionStarts)}
           </p>
         </div>
       ) : null}

@@ -77,13 +77,20 @@ describe("lastNDaysBoundaries", () => {
 describe("areBoundariesValid", () => {
   it("accepts what lastNDaysBoundaries produces", () => {
     for (const days of [1, 7, 30, 366]) {
-      assert.equal(areBoundariesValid(lastNDaysBoundaries(days)), true, `${days}`);
+      assert.equal(
+        areBoundariesValid(lastNDaysBoundaries(days)),
+        true,
+        `${days}`,
+      );
     }
   });
 
   it("rejects a list that is too short, too long, or not increasing", () => {
     assert.equal(areBoundariesValid([1]), false);
-    assert.equal(areBoundariesValid(new Array(368).fill(0).map((_, i) => i * DAY)), false);
+    assert.equal(
+      areBoundariesValid(new Array(368).fill(0).map((_, i) => i * DAY)),
+      false,
+    );
     assert.equal(areBoundariesValid([DAY * 2, DAY]), false);
     assert.equal(areBoundariesValid([DAY, DAY]), false);
   });

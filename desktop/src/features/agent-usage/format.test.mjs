@@ -9,6 +9,7 @@ import {
   peakContextSummary,
   provenanceRatio,
   sessionCauseLabel,
+  teardownSummary,
   totalSessions,
   usageDisplay,
 } from "./format.ts";
@@ -93,7 +94,10 @@ describe("cacheHitRate", () => {
 
 describe("sessionCauseLabel", () => {
   it("labels the known causes", () => {
-    assert.equal(sessionCauseLabel("rotation_turn_limit"), "Turn-limit rotation");
+    assert.equal(
+      sessionCauseLabel("rotation_turn_limit"),
+      "Turn-limit rotation",
+    );
     assert.equal(sessionCauseLabel("owner_interrupt"), "Owner interrupted");
   });
 
@@ -141,6 +145,47 @@ describe("totalSessions", () => {
         { cause: null, sessions: 2 },
       ]),
       5,
+    );
+  });
+});
+
+describe("teardownSummary", () => {
+  it("says unknown when no session reported a cause", () => {
+    // The regression this function exists for: the panel used to render "None
+    // of these replaced a torn-down session" for an archive where the cause
+    // field did not exist yet, asserting as fact something it could not know.
+    const summary = teardownSummary([{ cause: null, sessions: 10 }]);
+    assert.match(summary, /unknown/);
+    assert.doesNotMatch(summary, /^None of/);
+  });
+
+  it("scopes the count to sessions that reported a cause", () => {
+    assert.equal(
+      teardownSummary([
+        { cause: "turn_timeout", sessions: 3 },
+        { cause: "worker_spawn", sessions: 2 },
+      ]),
+      "3 of the 5 sessions with a reported cause replaced a torn-down session.",
+    );
+  });
+
+  it("says none only when every reported cause has no predecessor", () => {
+    assert.equal(
+      teardownSummary([
+        { cause: "worker_spawn", sessions: 2 },
+        { cause: "scope_first_turn", sessions: 1 },
+      ]),
+      "None of the 3 sessions with a reported cause replaced a torn-down session.",
+    );
+  });
+
+  it("discloses the unreported remainder rather than folding it in", () => {
+    assert.equal(
+      teardownSummary([
+        { cause: "agent_exited", sessions: 4 },
+        { cause: null, sessions: 6 },
+      ]),
+      "4 of the 4 sessions with a reported cause replaced a torn-down session. 6 reported no cause.",
     );
   });
 });

@@ -123,6 +123,34 @@ export function totalSessions(starts: AgentSessionStarts[]): number {
 }
 
 /**
+ * One sentence about how many of a window's sessions replaced a torn-down one.
+ *
+ * Scoped to sessions that actually reported a cause. Counting an unreported
+ * cause as "not a teardown" would state as fact something the archive does not
+ * know — the same unknown-is-not-zero error this whole module exists to
+ * prevent, and one that reads especially wrong here because every session
+ * published before the field existed carries no cause at all.
+ */
+export function teardownSummary(starts: AgentSessionStarts[]): string {
+  const reported = starts.filter((s) => s.cause !== null);
+  const unreported = totalSessions(starts) - totalSessions(reported);
+  if (reported.length === 0) {
+    return "No session here reported why it was created, so whether any replaced a torn-down session is unknown.";
+  }
+  const teardowns = totalSessions(
+    reported.filter((s) => isTeardownCause(s.cause)),
+  );
+  const scope = totalSessions(reported).toLocaleString("en-US");
+  const head =
+    teardowns === 0
+      ? `None of the ${scope} sessions with a reported cause replaced a torn-down session.`
+      : `${teardowns.toLocaleString("en-US")} of the ${scope} sessions with a reported cause replaced a torn-down session.`;
+  return unreported > 0
+    ? `${head} ${unreported.toLocaleString("en-US")} reported no cause.`
+    : head;
+}
+
+/**
  * One-line summary of a provenance count against its denominator.
  *
  * Returns `null` when nothing reported the field, so the caller renders "not
