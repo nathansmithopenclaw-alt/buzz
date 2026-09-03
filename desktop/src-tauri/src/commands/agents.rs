@@ -1224,7 +1224,9 @@ use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
 mod profile;
 pub(crate) use profile::*;
 #[cfg(test)]
-use profile::{profile_needs_sync, resolve_legacy_avatar};
+use profile::{
+    profile_needs_sync, resolve_avatar_precedence, resolve_legacy_avatar, AvatarPrecedence,
+};
 
 #[cfg(test)]
 #[path = "agents_tests.rs"]

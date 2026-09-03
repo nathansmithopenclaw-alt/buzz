@@ -537,6 +537,170 @@ fn legacy_avatar_empty_when_nothing_resolves() {
     assert!(resolved.is_empty());
 }
 
+// ── Avatar precedence: adopt a chosen relay picture over a runtime default ──
+
+const CHOSEN_PICTURE: &str = "https://relay.example/media/portrait.png";
+
+fn runtime_default(command: &str) -> String {
+    crate::managed_agents::managed_agent_avatar_url(command)
+        .unwrap_or_else(|| panic!("{command} should have a runtime default avatar"))
+}
+
+#[test]
+fn default_record_adopts_a_chosen_relay_picture() {
+    // The regression: every launch republished the runtime default icon over a
+    // picture the owner had set relay-side, because the record still carried
+    // the default the harness table supplied when it was written.
+    let default_icon = runtime_default("codex");
+
+    let precedence = resolve_avatar_precedence(Some(default_icon.as_str()), Some(CHOSEN_PICTURE));
+
+    assert_eq!(
+        precedence,
+        AvatarPrecedence::AdoptRelay(CHOSEN_PICTURE.to_string())
+    );
+
+    // Adopting is what stops the clobber: with the adopted value as expected,
+    // the published picture is already current and is never republished.
+    let AvatarPrecedence::AdoptRelay(adopted) = precedence else {
+        unreachable!("asserted above");
+    };
+    assert!(!profile_needs_sync(
+        Some(&profile(Some("Duncan"), Some(CHOSEN_PICTURE))),
+        "Duncan",
+        Some(adopted.as_str()),
+        None
+    ));
+}
+
+#[test]
+fn explicit_record_avatar_still_republishes_over_a_diverging_relay() {
+    // Unchanged behavior: a picture on the record is a deliberate choice, so it
+    // wins outright and the diverging relay copy is republished.
+    let precedence = resolve_avatar_precedence(
+        Some("https://x/owner-choice.png"),
+        Some("https://x/something-else.png"),
+    );
+
+    assert_eq!(precedence, AvatarPrecedence::KeepRecord);
+    assert!(profile_needs_sync(
+        Some(&profile(
+            Some("Duncan"),
+            Some("https://x/something-else.png")
+        )),
+        "Duncan",
+        Some("https://x/owner-choice.png"),
+        None
+    ));
+}
+
+#[test]
+fn default_record_ignores_a_relay_picture_that_is_also_a_default() {
+    // A default on the relay carries no more intent than the record already
+    // has, so there is nothing to adopt and nothing to publish.
+    let default_icon = runtime_default("codex");
+
+    let precedence =
+        resolve_avatar_precedence(Some(default_icon.as_str()), Some(default_icon.as_str()));
+
+    assert_eq!(precedence, AvatarPrecedence::KeepRecord);
+    assert!(!profile_needs_sync(
+        Some(&profile(Some("Duncan"), Some(default_icon.as_str()))),
+        "Duncan",
+        Some(default_icon.as_str()),
+        None
+    ));
+}
+
+#[test]
+fn default_record_never_adopts_another_runtimes_default_icon() {
+    // A record whose harness was switched holds a stale default. The other
+    // runtime's icon on the relay is still a default, so the record's own
+    // default is republished rather than the stale one being adopted.
+    let record_icon = runtime_default("codex");
+    let relay_icon = runtime_default("goose");
+    assert_ne!(record_icon, relay_icon, "fixture needs two distinct icons");
+
+    let precedence =
+        resolve_avatar_precedence(Some(record_icon.as_str()), Some(relay_icon.as_str()));
+
+    assert_eq!(precedence, AvatarPrecedence::KeepRecord);
+    assert!(profile_needs_sync(
+        Some(&profile(Some("Duncan"), Some(relay_icon.as_str()))),
+        "Duncan",
+        Some(record_icon.as_str()),
+        None
+    ));
+}
+
+#[test]
+fn default_record_publishes_the_default_when_the_relay_has_no_profile() {
+    let default_icon = runtime_default("codex");
+
+    let precedence = resolve_avatar_precedence(Some(default_icon.as_str()), None);
+
+    assert_eq!(precedence, AvatarPrecedence::KeepRecord);
+    assert!(profile_needs_sync(
+        None,
+        "Duncan",
+        Some(default_icon.as_str()),
+        None
+    ));
+}
+
+#[test]
+fn default_record_ignores_a_blank_relay_picture() {
+    // A published `picture: ""` is not a choice; adopting it would erase the
+    // agent's icon instead of restoring one.
+    let default_icon = runtime_default("codex");
+
+    assert_eq!(
+        resolve_avatar_precedence(Some(default_icon.as_str()), Some("")),
+        AvatarPrecedence::KeepRecord
+    );
+    assert_eq!(
+        resolve_avatar_precedence(Some(default_icon.as_str()), Some("   ")),
+        AvatarPrecedence::KeepRecord
+    );
+}
+
+#[test]
+fn adoption_converges_on_the_next_launch() {
+    // Second launch: the record now holds the adopted picture, so it is no
+    // longer a default, precedence keeps it, and nothing is republished.
+    let adopted = CHOSEN_PICTURE;
+
+    assert_eq!(
+        resolve_avatar_precedence(Some(adopted), Some(CHOSEN_PICTURE)),
+        AvatarPrecedence::KeepRecord
+    );
+    assert!(!profile_needs_sync(
+        Some(&profile(Some("Duncan"), Some(CHOSEN_PICTURE))),
+        "Duncan",
+        Some(adopted),
+        None
+    ));
+}
+
+#[test]
+fn a_stale_name_still_republishes_carrying_the_adopted_picture() {
+    // Name and about reconciliation are unchanged. When the display name is
+    // stale the republish still happens — but with the adopted picture, so the
+    // fix does not reintroduce the clobber through the name path.
+    let default_icon = runtime_default("codex");
+    let precedence = resolve_avatar_precedence(Some(default_icon.as_str()), Some(CHOSEN_PICTURE));
+    let AvatarPrecedence::AdoptRelay(adopted) = precedence else {
+        panic!("a chosen relay picture should be adopted over a runtime default");
+    };
+
+    assert!(profile_needs_sync(
+        Some(&profile(Some("Old Name"), Some(CHOSEN_PICTURE))),
+        "Duncan",
+        Some(adopted.as_str()),
+        None
+    ));
+}
+
 // ── Provider deploy payload completeness ─────────────────────────────────────
 
 fn deploy_payload_for_policy(
