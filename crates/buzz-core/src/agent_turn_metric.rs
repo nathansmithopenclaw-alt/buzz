@@ -77,6 +77,73 @@ impl<'de> Deserialize<'de> for StopReason {
     }
 }
 
+/// Why the ACP session this turn ran in had to be created.
+///
+/// NIP-AM: consumers MUST treat unrecognized `sessionCreationCause` values as
+/// `Unknown` and keep the token counts valid, mirroring the `stopReason`
+/// contract. Custom deserialization maps any unrecognized string to `Unknown`
+/// instead of failing the whole payload.
+///
+/// Every variant except [`WorkerSpawn`](Self::WorkerSpawn) and
+/// [`ScopeFirstTurn`](Self::ScopeFirstTurn) also names the teardown cause of
+/// whatever session preceded this one in the same scope — those two are the
+/// "no predecessor" cases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCreationCause {
+    /// The publisher process held no session state at all — a fresh or
+    /// respawned worker. Nothing was cached anywhere in the process.
+    WorkerSpawn,
+    /// The worker already held sessions for other scopes; this scope simply
+    /// had none yet (new channel, new thread).
+    ScopeFirstTurn,
+    /// Proactive rotation after a configured per-session turn limit.
+    RotationTurnLimit,
+    /// The provider ended a turn at a limit that invalidates the session
+    /// (e.g. max tokens, max turn requests).
+    ProviderLimit,
+    /// The session owner explicitly asked for a rotation.
+    OwnerRotate,
+    /// The session owner cancelled, steered, or interrupted the in-flight
+    /// turn, and the session was invalidated as part of that cleanup.
+    OwnerInterrupt,
+    /// A model switch required a new session to take effect.
+    ModelSwitch,
+    /// The agent's membership in the channel changed.
+    MembershipChange,
+    /// The adapter reported a runtime failure during the previous turn.
+    AdapterFailure,
+    /// The adapter process exited.
+    AgentExited,
+    /// The previous turn hit an idle or hard-cap timeout.
+    TurnTimeout,
+    /// Any other error path invalidated the previous session.
+    Error,
+    /// Cause is unknown or unrecognized.
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for SessionCreationCause {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "worker_spawn" => SessionCreationCause::WorkerSpawn,
+            "scope_first_turn" => SessionCreationCause::ScopeFirstTurn,
+            "rotation_turn_limit" => SessionCreationCause::RotationTurnLimit,
+            "provider_limit" => SessionCreationCause::ProviderLimit,
+            "owner_rotate" => SessionCreationCause::OwnerRotate,
+            "owner_interrupt" => SessionCreationCause::OwnerInterrupt,
+            "model_switch" => SessionCreationCause::ModelSwitch,
+            "membership_change" => SessionCreationCause::MembershipChange,
+            "adapter_failure" => SessionCreationCause::AdapterFailure,
+            "agent_exited" => SessionCreationCause::AgentExited,
+            "turn_timeout" => SessionCreationCause::TurnTimeout,
+            "error" => SessionCreationCause::Error,
+            _ => SessionCreationCause::Unknown,
+        })
+    }
+}
+
 /// Billing identity for a turn — present only when the publisher can prove
 /// applicability from the actual endpoint and actually-requested model.
 ///
@@ -157,6 +224,46 @@ pub struct AgentTurnMetricPayload {
     /// treat omission as "price unknown".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pricing_identity: Option<PricingIdentity>,
+
+    /// Context tokens occupied by the conversation at the end of this turn, as
+    /// reported by the harness. Omitted (never null, never a fabricated zero)
+    /// when the harness does not report context occupancy.
+    ///
+    /// This is a *state* reading, not a usage delta — it is not summable
+    /// across turns and MUST NOT be added to any token total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+
+    /// Size of the model's context window for this turn, as reported by the
+    /// harness. Omitted when unreported. Same non-summable contract as
+    /// `context_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+
+    /// 1-based delivery attempt of the work that triggered this turn: `1` on
+    /// first delivery, `2` on the first retry, and so on. Omitted when the
+    /// publisher has no attempt notion for this turn (e.g. a self-scheduled
+    /// heartbeat that is never retried).
+    ///
+    /// Attribution only. A value above `1` does NOT prove the provider ran the
+    /// earlier attempt — a retry may follow a failure that never reached the
+    /// model. Consumers MUST NOT treat `attempt > 1` as duplicated token spend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+
+    /// `true` when every event that triggered this turn predates the
+    /// publisher's own startup — i.e. the turn happened only because the
+    /// publisher restarted and replayed a bounded historical window. Omitted
+    /// when the publisher has no replay notion for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_replay: Option<bool>,
+
+    /// Why the session this turn ran in had to be created. Constant for every
+    /// turn of one `sessionId`, so consumers can attribute a session's
+    /// cache-write cost to its cause and see how far it amortized. Omitted
+    /// when the publisher cannot determine it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_creation_cause: Option<SessionCreationCause>,
 }
 
 fn default_delta_reliable() -> bool {
@@ -256,6 +363,11 @@ mod tests {
             delta_reliable: true,
             stop_reason: Some(StopReason::EndTurn),
             pricing_identity: None,
+            context_tokens: None,
+            context_window: None,
+            attempt: None,
+            is_replay: None,
+            session_creation_cause: None,
         }
     }
 
@@ -331,6 +443,141 @@ mod tests {
     }
 
     #[test]
+    fn session_creation_cause_round_trips() {
+        for (variant, json_val) in [
+            (SessionCreationCause::WorkerSpawn, "\"worker_spawn\""),
+            (SessionCreationCause::ScopeFirstTurn, "\"scope_first_turn\""),
+            (
+                SessionCreationCause::RotationTurnLimit,
+                "\"rotation_turn_limit\"",
+            ),
+            (SessionCreationCause::ProviderLimit, "\"provider_limit\""),
+            (SessionCreationCause::OwnerRotate, "\"owner_rotate\""),
+            (SessionCreationCause::OwnerInterrupt, "\"owner_interrupt\""),
+            (SessionCreationCause::ModelSwitch, "\"model_switch\""),
+            (
+                SessionCreationCause::MembershipChange,
+                "\"membership_change\"",
+            ),
+            (SessionCreationCause::AdapterFailure, "\"adapter_failure\""),
+            (SessionCreationCause::AgentExited, "\"agent_exited\""),
+            (SessionCreationCause::TurnTimeout, "\"turn_timeout\""),
+            (SessionCreationCause::Error, "\"error\""),
+            (SessionCreationCause::Unknown, "\"unknown\""),
+        ] {
+            let serialized = serde_json::to_string(&variant).unwrap();
+            assert_eq!(serialized, json_val);
+            let deserialized: SessionCreationCause = serde_json::from_str(json_val).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    #[test]
+    fn unknown_session_creation_cause_maps_to_unknown_not_error() {
+        // Same forward-compat contract as stopReason: a cause this build has
+        // never heard of must not reject the payload or void its counters.
+        let json = r#"{
+            "harness": "buzz-acp",
+            "timestamp": "2026-07-01T20:11:03Z",
+            "sessionCreationCause": "quantum_realignment",
+            "turn": { "inputTokens": 1234, "outputTokens": 567, "totalTokens": null, "costUsd": null }
+        }"#;
+        let payload: AgentTurnMetricPayload =
+            serde_json::from_str(json).expect("payload with future cause must parse");
+        assert_eq!(
+            payload.session_creation_cause,
+            Some(SessionCreationCause::Unknown)
+        );
+        let turn = payload.turn.expect("turn must be present");
+        assert_eq!(turn.input_tokens, Some(1234));
+    }
+
+    #[test]
+    fn provenance_fields_are_omitted_not_null_when_absent() {
+        // Absence must be omission, never `null` and never a fabricated zero —
+        // the same contract the cache fields already hold. A `"attempt":0`
+        // or `"contextTokens":0` on the wire would be read as a real reading.
+        let payload = sample_payload();
+        assert!(payload.attempt.is_none(), "fixture must leave these unset");
+        let json = serde_json::to_string(&payload).unwrap();
+        for field in [
+            "contextTokens",
+            "contextWindow",
+            "attempt",
+            "isReplay",
+            "sessionCreationCause",
+        ] {
+            assert!(
+                !json.contains(field),
+                "{field} must be omitted entirely when unset, got: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn provenance_fields_round_trip_through_encryption() {
+        // Positive control for the omission test above: when the publisher DOES
+        // set them, all five survive encrypt → decrypt with their exact values,
+        // including the `attempt: 1` / `isReplay: false` cases that a
+        // skip-if-falsy bug would silently drop.
+        let mut payload = sample_payload();
+        payload.context_tokens = Some(145_213);
+        payload.context_window = Some(200_000);
+        payload.attempt = Some(1);
+        payload.is_replay = Some(false);
+        payload.session_creation_cause = Some(SessionCreationCause::RotationTurnLimit);
+
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let ciphertext = encrypt_agent_turn_metric(&agent_keys, &owner_keys.public_key(), &payload)
+            .expect("encrypt");
+        let event = EventBuilder::new(Kind::Custom(44200), ciphertext)
+            .tags([
+                Tag::parse(["p", &owner_keys.public_key().to_hex()]).unwrap(),
+                Tag::parse(["agent", &agent_keys.public_key().to_hex()]).unwrap(),
+            ])
+            .sign_with_keys(&agent_keys)
+            .expect("sign");
+
+        let decoded = decrypt_agent_turn_metric(&owner_keys, &event).expect("decrypt");
+        assert_eq!(decoded, payload);
+        assert_eq!(decoded.attempt, Some(1));
+        assert_eq!(decoded.is_replay, Some(false));
+        assert_eq!(decoded.context_tokens, Some(145_213));
+        assert_eq!(decoded.context_window, Some(200_000));
+        assert_eq!(
+            decoded.session_creation_cause,
+            Some(SessionCreationCause::RotationTurnLimit)
+        );
+    }
+
+    #[test]
+    fn payload_without_provenance_fields_still_parses() {
+        // An older publisher emits none of the new fields. A new consumer must
+        // read that payload unchanged, with every new field absent.
+        let json = r#"{
+            "harness": "goose",
+            "model": null,
+            "channelId": null,
+            "sessionId": "s1",
+            "turnId": null,
+            "turnSeq": 1,
+            "timestamp": "2026-07-01T20:11:03Z",
+            "turn": { "inputTokens": 10, "outputTokens": 20, "totalTokens": 30, "costUsd": 0.01 },
+            "cumulative": null,
+            "deltaReliable": true,
+            "stopReason": "end_turn"
+        }"#;
+        let payload: AgentTurnMetricPayload = serde_json::from_str(json).expect("parse");
+        assert_eq!(payload.context_tokens, None);
+        assert_eq!(payload.context_window, None);
+        assert_eq!(payload.attempt, None);
+        assert_eq!(payload.is_replay, None);
+        assert_eq!(payload.session_creation_cause, None);
+        assert_eq!(payload.turn.and_then(|t| t.input_tokens), Some(10));
+    }
+
+    #[test]
     fn null_token_counts_round_trip() {
         // Verify that None fields serialize to `null` (not absent), as required
         // by the NIP — consumers must distinguish "not reported" from "zero".
@@ -402,6 +649,11 @@ mod tests {
             delta_reliable: true,
             stop_reason: None,
             pricing_identity: None,
+            context_tokens: None,
+            context_window: None,
+            attempt: None,
+            is_replay: None,
+            session_creation_cause: None,
         }
     }
 
@@ -426,6 +678,11 @@ mod tests {
             delta_reliable: true,
             stop_reason: None,
             pricing_identity: None,
+            context_tokens: None,
+            context_window: None,
+            attempt: None,
+            is_replay: None,
+            session_creation_cause: None,
         }
     }
 

@@ -70,19 +70,37 @@ pub(crate) enum GooseSessionUpdateVariant {
     Other,
 }
 
+/// Normalise a harness-reported context reading.
+///
+/// Context occupancy and context-window size are *state* readings, not usage
+/// counters, so the codebase's usual "preserve an explicit zero" rule does not
+/// apply: a harness that does not track a context window reports `0` rather
+/// than omitting the field (buzz-agent), and a completed turn always occupies
+/// some context. Treating that `0` as a real reading would publish a false
+/// "context is empty" datapoint. Both absent and zero therefore collapse to
+/// `None` — unknown, never zero.
+pub(crate) fn reported_context_value(value: Option<u64>) -> Option<u64> {
+    value.filter(|v| *v > 0)
+}
+
 /// The `usage_update` payload.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UsageUpdatePayload {
-    /// Total tokens used (context-usage proxy). Optional — buzz-agent omits
-    /// this field or sends 0 because it does not track a context window limit.
+    /// Context tokens occupied after this turn. Optional — buzz-agent omits
+    /// this field or sends 0 because it does not track a context window.
+    ///
+    /// `Some(0)` is treated as "not tracked" rather than a real reading: a
+    /// completed turn always occupies context, and buzz-agent's documented
+    /// behaviour is to send 0 when it has nothing to report. See
+    /// [`reported_context_value`].
     #[serde(default)]
-    #[allow(dead_code)]
-    pub used: u64,
-    /// Context window size. Optional — buzz-agent omits this field.
+    pub used: Option<u64>,
+    /// Context window size. Optional — buzz-agent omits this field. Same
+    /// zero-means-absent contract as [`used`](Self::used); a zero-width
+    /// context window is not a meaningful reading.
     #[serde(default)]
-    #[allow(dead_code)]
-    pub context_limit: u64,
+    pub context_limit: Option<u64>,
     /// Session-cumulative inclusive input tokens.
     ///
     /// `None` when buzz-agent omitted the field — this happens when the
@@ -235,6 +253,13 @@ pub struct TurnUsage {
     /// `None` when the harness has never reported this field.
     /// `Some(0)` when the harness reported zero cache writes.
     pub cumulative_cache_write_tokens: Option<u64>,
+    /// Context tokens occupied at the end of this turn, as reported by the
+    /// harness (maps to NIP-AM `contextTokens`). `None` when the harness does
+    /// not report context occupancy. A *state* reading — never summable.
+    pub context_tokens: Option<u64>,
+    /// Model context-window size for this turn (maps to NIP-AM
+    /// `contextWindow`). `None` when the harness does not report it.
+    pub context_window: Option<u64>,
     /// Effective model id for this turn (maps to NIP-AM `model`). `None` if the
     /// harness did not include the model in its usage notification.
     pub model: Option<String>,
@@ -270,12 +295,25 @@ struct StandardSessionState {
     cost_poisoned: bool,
 }
 
+/// A harness-reported context reading for the in-flight turn: occupancy and
+/// window size, each already normalised by [`reported_context_value`].
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ContextReading {
+    pub tokens: Option<u64>,
+    pub window: Option<u64>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct StandardUsageTracker {
     sessions: HashMap<String, StandardSessionState>,
     in_flight_session: Option<String>,
     pending_cost: Option<(String, f64)>,
     pending_prompt: Option<(String, PromptResponseUsage, StandardAdapterKind)>,
+    pending_context: Option<(String, ContextReading)>,
+    /// Effective model id per session, learned from `session/new` and from
+    /// each successful model switch. The standard adapters do not put the
+    /// model on their usage notifications, so this is the only source.
+    session_models: HashMap<String, String>,
 }
 
 impl StandardUsageTracker {
@@ -293,6 +331,29 @@ impl StandardUsageTracker {
         self.in_flight_session = Some(session_id.to_string());
         self.pending_cost = None;
         self.pending_prompt = None;
+        self.pending_context = None;
+    }
+
+    /// Record the effective model for a session, as resolved by the adapter at
+    /// `session/new` or at a successful model switch. Overwrites any prior
+    /// value for the same session — the latest resolution wins.
+    pub(crate) fn record_session_model(&mut self, session_id: &str, model: &str) {
+        if model.is_empty() {
+            return;
+        }
+        self.session_models
+            .insert(session_id.to_string(), model.to_string());
+    }
+
+    /// Record a context-occupancy reading from the adapter's `usage_update`.
+    /// Last reading within a turn wins: the adapter emits one per assistant
+    /// result and the final one describes the post-turn context.
+    pub(crate) fn record_context(&mut self, session_id: &str, reading: ContextReading) {
+        if self.in_flight_session.as_deref() == Some(session_id)
+            && (reading.tokens.is_some() || reading.window.is_some())
+        {
+            self.pending_context = Some((session_id.to_string(), reading));
+        }
     }
 
     /// Claude's `usage_update.cost.amount` is a raw session-cumulative total.
@@ -318,6 +379,7 @@ impl StandardUsageTracker {
         self.in_flight_session = None;
         let prompt = self.pending_prompt.take();
         let cost = self.pending_cost.take();
+        let context = self.pending_context.take();
         let session_id = prompt
             .as_ref()
             .map(|(session_id, _, _)| session_id.clone())
@@ -370,6 +432,16 @@ impl StandardUsageTracker {
             return None;
         }
 
+        // Resolve everything keyed on `session_id` before the struct literal
+        // moves it. Only a context reading recorded against THIS session
+        // counts — one latched for a different session id would misattribute
+        // another conversation's context to this turn.
+        let model = self.session_models.get(&session_id).cloned();
+        let context = context
+            .filter(|(sid, _)| *sid == session_id)
+            .map(|(_, reading)| reading)
+            .unwrap_or_default();
+
         state.published_seq += 1;
         Some(TurnUsage {
             session_id,
@@ -390,7 +462,9 @@ impl StandardUsageTracker {
             cumulative_cost_usd: cumulative_cost,
             cumulative_cache_read_tokens: None,
             cumulative_cache_write_tokens: None,
-            model: None,
+            context_tokens: context.tokens,
+            context_window: context.window,
+            model,
             pricing_identity: None,
         })
     }
@@ -745,6 +819,8 @@ impl UsageTracker {
                 cumulative_cost_usd: current_cost,
                 cumulative_cache_read_tokens: current_cached_input,
                 cumulative_cache_write_tokens: current_cache_write,
+                context_tokens: reported_context_value(payload.used),
+                context_window: reported_context_value(payload.context_limit),
                 model: payload.model.clone(),
                 // The folded identity is written in take() — use a placeholder
                 // here and replace it before returning the record.
@@ -981,8 +1057,8 @@ mod tests {
 
     fn payload(input: u64, output: u64, cost: Option<f64>) -> UsageUpdatePayload {
         UsageUpdatePayload {
-            used: input + output,
-            context_limit: 200_000,
+            used: Some(input + output),
+            context_limit: Some(200_000),
             accumulated_input_tokens: Some(input),
             accumulated_output_tokens: Some(output),
             accumulated_cached_input_tokens: None,
@@ -996,8 +1072,8 @@ mod tests {
 
     fn payload_no_context(input: u64, output: u64, cost: Option<f64>) -> UsageUpdatePayload {
         UsageUpdatePayload {
-            used: 0,
-            context_limit: 0,
+            used: Some(0),
+            context_limit: Some(0),
             accumulated_input_tokens: Some(input),
             accumulated_output_tokens: Some(output),
             accumulated_cached_input_tokens: None,
@@ -1369,8 +1445,11 @@ mod tests {
             GooseSessionUpdateVariant::UsageUpdate(p) => {
                 assert_eq!(p.accumulated_input_tokens, Some(500));
                 assert_eq!(p.accumulated_output_tokens, Some(100));
-                assert_eq!(p.used, 0);
-                assert_eq!(p.context_limit, 0);
+                // Absent on the wire must deserialize to None, not Some(0):
+                // the context fields are state readings and a fabricated zero
+                // would publish "context is empty" as if it were measured.
+                assert_eq!(p.used, None);
+                assert_eq!(p.context_limit, None);
                 assert!(p.accumulated_cost.is_none());
             }
             GooseSessionUpdateVariant::Other => panic!("expected UsageUpdate"),
@@ -1497,8 +1576,8 @@ mod tests {
         model: Option<&str>,
     ) -> UsageUpdatePayload {
         UsageUpdatePayload {
-            used: input + output,
-            context_limit: 200_000,
+            used: Some(input + output),
+            context_limit: Some(200_000),
             accumulated_input_tokens: Some(input),
             accumulated_output_tokens: Some(output),
             accumulated_cached_input_tokens: None,
@@ -1563,8 +1642,8 @@ mod tests {
 
     fn payload_with_total(input: u64, output: u64, total: Option<u64>) -> UsageUpdatePayload {
         UsageUpdatePayload {
-            used: input + output,
-            context_limit: 200_000,
+            used: Some(input + output),
+            context_limit: Some(200_000),
             accumulated_input_tokens: Some(input),
             accumulated_output_tokens: Some(output),
             accumulated_cached_input_tokens: None,
@@ -1733,8 +1812,8 @@ mod tests {
         cached_input: Option<u64>,
     ) -> UsageUpdatePayload {
         UsageUpdatePayload {
-            used: input + output,
-            context_limit: 200_000,
+            used: Some(input + output),
+            context_limit: Some(200_000),
             accumulated_input_tokens: Some(input),
             accumulated_output_tokens: Some(output),
             accumulated_cached_input_tokens: cached_input,
@@ -1987,6 +2066,8 @@ mod tests {
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None, // harness did not report the field
             cumulative_cache_write_tokens: None,
+            context_tokens: None,
+            context_window: None,
             model: None,
             pricing_identity: None,
         };
@@ -2028,6 +2109,8 @@ mod tests {
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: Some(600),
             cumulative_cache_write_tokens: None,
+            context_tokens: None,
+            context_window: None,
             model: None,
             pricing_identity: None,
         };
@@ -2148,8 +2231,8 @@ mod tests {
         tracker.record(
             "sess-wire",
             &UsageUpdatePayload {
-                used: 12345,
-                context_limit: 200_000,
+                used: Some(12345),
+                context_limit: Some(200_000),
                 accumulated_input_tokens: Some(10000),
                 accumulated_output_tokens: Some(2345),
                 accumulated_cached_input_tokens: Some(500),
@@ -2234,8 +2317,8 @@ mod tests {
         model: &str,
     ) -> UsageUpdatePayload {
         UsageUpdatePayload {
-            used: input + output,
-            context_limit: 200_000,
+            used: Some(input + output),
+            context_limit: Some(200_000),
             accumulated_input_tokens: Some(input),
             accumulated_output_tokens: Some(output),
             accumulated_cached_input_tokens: None,
@@ -2397,8 +2480,8 @@ mod tests {
 
         // First snapshot: cache-read = 500, cache-write = 120.
         let payload = UsageUpdatePayload {
-            used: 1200,
-            context_limit: 200_000,
+            used: Some(1200),
+            context_limit: Some(200_000),
             accumulated_input_tokens: Some(1000),
             accumulated_output_tokens: Some(200),
             accumulated_cached_input_tokens: Some(500),
@@ -2552,8 +2635,8 @@ mod tests {
 
         // Publisher omitted accumulatedInputTokens (overflow-poisoned).
         let p = UsageUpdatePayload {
-            used: 0,
-            context_limit: 0,
+            used: Some(0),
+            context_limit: Some(0),
             accumulated_input_tokens: None, // overflow-poisoned
             accumulated_output_tokens: Some(200),
             accumulated_cached_input_tokens: None,
@@ -2595,8 +2678,8 @@ mod tests {
         tracker.begin_turn("sess-poison-out");
 
         let p = UsageUpdatePayload {
-            used: 0,
-            context_limit: 0,
+            used: Some(0),
+            context_limit: Some(0),
             accumulated_input_tokens: Some(1000),
             accumulated_output_tokens: None, // overflow-poisoned
             accumulated_cached_input_tokens: None,
@@ -2661,8 +2744,8 @@ mod tests {
         // Turn 2: overflow-poisoned (publisher omits input).
         tracker.begin_turn("sess-poison-mid");
         let poisoned = UsageUpdatePayload {
-            used: 0,
-            context_limit: 0,
+            used: Some(0),
+            context_limit: Some(0),
             accumulated_input_tokens: None,
             accumulated_output_tokens: Some(500),
             accumulated_cached_input_tokens: None,
@@ -2680,8 +2763,8 @@ mod tests {
         // Turn 3: subsequent snapshot also absent → still unreliable.
         tracker.begin_turn("sess-poison-mid");
         let also_poisoned = UsageUpdatePayload {
-            used: 0,
-            context_limit: 0,
+            used: Some(0),
+            context_limit: Some(0),
             accumulated_input_tokens: None,
             accumulated_output_tokens: Some(700),
             accumulated_cached_input_tokens: None,
@@ -2721,8 +2804,8 @@ mod tests {
         // Turn 2: publisher poisons (absent input).
         tracker.begin_turn("sess-sticky-input");
         let poisoned = UsageUpdatePayload {
-            used: 0,
-            context_limit: 0,
+            used: Some(0),
+            context_limit: Some(0),
             accumulated_input_tokens: None,
             accumulated_output_tokens: Some(300),
             accumulated_cached_input_tokens: None,
@@ -2780,8 +2863,8 @@ mod tests {
         // Turn 2: absent output poisons the session.
         tracker.begin_turn("sess-sticky-output");
         let poisoned = UsageUpdatePayload {
-            used: 0,
-            context_limit: 0,
+            used: Some(0),
+            context_limit: Some(0),
             accumulated_input_tokens: Some(600),
             accumulated_output_tokens: None, // <-- absent output
             accumulated_cached_input_tokens: None,
@@ -2824,8 +2907,8 @@ mod tests {
     /// mid-turn without building the full struct every time.
     fn payload_opt(input: Option<u64>, output: Option<u64>) -> UsageUpdatePayload {
         UsageUpdatePayload {
-            used: 0,
-            context_limit: 0,
+            used: Some(0),
+            context_limit: Some(0),
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
             accumulated_cached_input_tokens: None,
@@ -2852,8 +2935,8 @@ mod tests {
         cache_write: Option<u64>,
     ) -> UsageUpdatePayload {
         UsageUpdatePayload {
-            used: 0,
-            context_limit: 0,
+            used: Some(0),
+            context_limit: Some(0),
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
             accumulated_cached_input_tokens: cached_input,
