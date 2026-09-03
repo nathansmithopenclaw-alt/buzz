@@ -14,7 +14,7 @@
 //! live file: it writes.
 //!
 //! ```sh
-//! sqlite3 ~/.buzz/archive/archive.db ".backup '/tmp/copy.db'"
+//! sqlite3 <app-data>/archive/archive.db ".backup '/tmp/copy.db'"
 //! BUZZ_LIVE_ARCHIVE=/tmp/copy.db \
 //! BUZZ_LIVE_IDENTITY=<64-hex> \
 //! BUZZ_LIVE_RELAY=wss://relay.example \

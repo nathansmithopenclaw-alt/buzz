@@ -91,6 +91,42 @@ fn from_payload_parses_valid_row() {
 }
 
 #[test]
+fn from_payload_keeps_an_unrecognized_session_creation_cause_verbatim() {
+    // NIP-AM lets publishers add causes and requires consumers to surface an
+    // unrecognized one verbatim. `SessionCreationCause`'s Deserialize maps any
+    // unknown string to `Unknown` so the payload still parses — so the index
+    // MUST read the wire string, or a newer publisher's real teardown reason
+    // arrives indistinguishable from "never reported".
+    let json = r#"{"harness":"buzz-acp","model":null,"channelId":null,"sessionId":"s1","turnId":null,"turnSeq":1,"timestamp":"2026-07-01T00:00:00Z","turn":{"inputTokens":10,"outputTokens":20,"totalTokens":30,"costUsd":null},"cumulative":null,"deltaReliable":true,"stopReason":"end_turn","sessionCreationCause":"quantum_realignment"}"#;
+    let row = AgentMetricIndexRow::from_payload(json, "eid1", "agent1", 100, 200);
+    assert_eq!(row.parse_status, ParseStatus::Valid);
+    assert_eq!(
+        row.session_creation_cause.as_deref(),
+        Some("quantum_realignment"),
+        "an unrecognized cause must reach the index unchanged"
+    );
+}
+
+#[test]
+fn from_payload_distinguishes_a_reported_unknown_cause_from_an_absent_one() {
+    // Two different facts. A publisher that says `unknown` reported something;
+    // a payload with no field reported nothing. Collapsing both to NULL would
+    // make the panel's "Not reported" a lie for the first case.
+    let reported = r#"{"harness":"buzz-acp","timestamp":"2026-07-01T00:00:00Z","turn":{"inputTokens":10,"outputTokens":20,"totalTokens":null,"costUsd":null},"deltaReliable":true,"sessionCreationCause":"unknown"}"#;
+    let absent = r#"{"harness":"buzz-acp","timestamp":"2026-07-01T00:00:00Z","turn":{"inputTokens":10,"outputTokens":20,"totalTokens":null,"costUsd":null},"deltaReliable":true}"#;
+    assert_eq!(
+        AgentMetricIndexRow::from_payload(reported, "e1", "a1", 100, 200)
+            .session_creation_cause
+            .as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(
+        AgentMetricIndexRow::from_payload(absent, "e2", "a1", 100, 200).session_creation_cause,
+        None
+    );
+}
+
+#[test]
 fn from_payload_parses_harness_field() {
     let json = r#"{"harness":"claude-code","model":"claude-sonnet","timestamp":"2026-07-01T20:11:03Z","turn":{"inputTokens":5,"outputTokens":null,"totalTokens":null,"costUsd":null}}"#;
     let row = AgentMetricIndexRow::from_payload(json, "eid1", "agent1", 100, 200);

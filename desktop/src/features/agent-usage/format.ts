@@ -96,6 +96,9 @@ const CAUSE_LABELS: Record<string, string> = {
   agent_exited: "Agent exited",
   turn_timeout: "Turn timeout",
   error: "Error",
+  // A publisher that explicitly sent `unknown` is a different fact from a row
+  // that carried no cause at all, so this does not collapse into "Not reported".
+  unknown: "Unknown",
 };
 
 export function sessionCauseLabel(cause: string | null): string {

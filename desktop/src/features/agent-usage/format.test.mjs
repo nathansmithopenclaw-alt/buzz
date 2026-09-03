@@ -110,6 +110,13 @@ describe("sessionCauseLabel", () => {
   it("says a missing cause was not reported", () => {
     assert.equal(sessionCauseLabel(null), "Not reported");
   });
+
+  it("keeps a reported `unknown` distinct from an absent cause", () => {
+    // The archive stores the wire string, so these two reach the panel as
+    // different values and must not render identically.
+    assert.equal(sessionCauseLabel("unknown"), "Unknown");
+    assert.notEqual(sessionCauseLabel("unknown"), sessionCauseLabel(null));
+  });
 });
 
 describe("isTeardownCause", () => {

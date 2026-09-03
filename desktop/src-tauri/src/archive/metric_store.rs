@@ -45,20 +45,26 @@ fn parse_rfc3339_secs(timestamp: &str) -> Option<i64> {
         .map(|dt| dt.timestamp())
 }
 
-/// Wire label for a NIP-AM `sessionCreationCause`.
+/// The `sessionCreationCause` exactly as the publisher wrote it, read from the
+/// stored plaintext rather than from the parsed payload.
 ///
-/// Returns `None` for the `unknown` sentinel — an unrecognized cause carries no
-/// grouping information, and storing the literal string `"unknown"` would make
-/// it indistinguishable from a publisher that genuinely reported `unknown`
-/// versus a row that never had the field. Both are unknown; both stay NULL.
-fn session_creation_cause_label(
-    cause: &buzz_core_pkg::agent_turn_metric::SessionCreationCause,
-) -> Option<String> {
-    let value = serde_json::to_value(cause).ok()?;
-    match value.as_str()? {
-        "unknown" => None,
-        label => Some(label.to_string()),
-    }
+/// The parsed value cannot be used here. `SessionCreationCause`'s `Deserialize`
+/// maps every unrecognized string to `Unknown` — correct for a consumer that
+/// must not reject a newer publisher's payload, fatal for an index column,
+/// because re-serializing `Unknown` would store a cause this build has never
+/// heard of as indistinguishable from one that was never reported. NIP-AM
+/// requires consumers to surface an unrecognized cause verbatim, and the panel
+/// does; the index has to carry it that far.
+///
+/// `None` only when the field is genuinely absent from the wire. A publisher
+/// that explicitly sent `"unknown"` is recorded as `"unknown"` — a reported
+/// unknown and an unreported field are different facts.
+fn session_creation_cause_wire_value(raw_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw_json)
+        .ok()?
+        .get("sessionCreationCause")?
+        .as_str()
+        .map(str::to_string)
 }
 
 // ── Row type ──────────────────────────────────────────────────────────────
@@ -210,14 +216,10 @@ impl AgentMetricIndexRow {
             context_window: payload.context_window,
             attempt: payload.attempt,
             is_replay: payload.is_replay,
-            // Stored as the wire string rather than a parsed enum: an
-            // unrecognized cause from a newer publisher must survive the
-            // archive intact for a later build to interpret, and the accounting
-            // layer groups on it without needing to know the closed set.
-            session_creation_cause: payload
-                .session_creation_cause
-                .as_ref()
-                .and_then(session_creation_cause_label),
+            // Read off the wire, not off `payload`: see
+            // `session_creation_cause_wire_value` for why the parsed enum
+            // cannot round-trip an unrecognized cause.
+            session_creation_cause: session_creation_cause_wire_value(raw_json),
             parse_status: ParseStatus::Valid,
         }
     }
