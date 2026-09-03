@@ -19,8 +19,11 @@ test("thread-scoped ACP sessions is default-off, persists, and applies on reload
         const call = window.__BUZZ_E2E_COMMAND_LOG__?.find(
           ({ command }) => command === "apply_workspace",
         );
-        return (call?.payload as { threadScopedAcpSessions?: boolean } | null)
-          ?.threadScopedAcpSessions;
+        return (
+          call?.payload as {
+            experiments?: { threadScopedAcpSessions?: boolean };
+          } | null
+        )?.experiments?.threadScopedAcpSessions;
       }),
     )
     .toBe(false);
@@ -71,8 +74,11 @@ test("thread-scoped ACP sessions is default-off, persists, and applies on reload
         const call = window.__BUZZ_E2E_COMMAND_LOG__?.find(
           ({ command }) => command === "apply_workspace",
         );
-        return (call?.payload as { threadScopedAcpSessions?: boolean } | null)
-          ?.threadScopedAcpSessions;
+        return (
+          call?.payload as {
+            experiments?: { threadScopedAcpSessions?: boolean };
+          } | null
+        )?.experiments?.threadScopedAcpSessions;
       }),
     )
     .toBe(true);
