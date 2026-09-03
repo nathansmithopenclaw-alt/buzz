@@ -1,11 +1,9 @@
-use sha2::{Digest, Sha256};
-
 use crate::client::{
     extract_d_tag, extract_relay_response_field, normalize_write_response, print_create_response,
     BuzzClient,
 };
 use crate::error::CliError;
-use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
+use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_hex64, validate_uuid};
 
 // TODO(phase-4): Replace raw nostr::EventBuilder usage with buzz-sdk builder functions
 
@@ -191,18 +189,16 @@ pub async fn cmd_trigger_workflow(
 /// Approve or deny a workflow step — sign and submit a kind:46030 (grant) or 46031 (deny) event.
 pub async fn cmd_approve_step(
     client: &BuzzClient,
-    approval_token: &str,
+    approval_ref: &str,
     approved: bool,
     note: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_uuid(approval_token)?;
+    validate_hex64(approval_ref)?;
 
     let content = note.unwrap_or("");
 
-    // The relay expects d-tag = hex(SHA256(token)), not the raw token UUID.
-    let token_hash = hex::encode(Sha256::digest(approval_token.as_bytes()));
     let builder =
-        buzz_sdk::build_workflow_approval(&token_hash, approved, content).map_err(sdk_err)?;
+        buzz_sdk::build_workflow_approval(approval_ref, approved, content).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
@@ -231,12 +227,12 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
             cmd_get_workflow_runs(client, &workflow, limit).await
         }
         WorkflowsCmd::Approve {
-            token,
+            approval_ref,
             approved,
             note,
         } => {
             // approved is already a bool — no parse_bool_flag needed
-            cmd_approve_step(client, &token, approved, note.as_deref()).await
+            cmd_approve_step(client, &approval_ref, approved, note.as_deref()).await
         }
     }
 }

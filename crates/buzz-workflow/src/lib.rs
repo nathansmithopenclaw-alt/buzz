@@ -234,6 +234,16 @@ impl WorkflowEngine {
                     let setup = async {
                         let run = self.db.get_workflow_run(community_id, run_id).await?;
                         let workflow = self.db.get_workflow(community_id, run.workflow_id).await?;
+                        let owner_pubkey = hex::encode(&workflow.owner_pubkey);
+                        // `any` is resolved to one concrete recipient before
+                        // persistence. A community-wide bearer gate is not a
+                        // safe approval policy; the workflow owner is the
+                        // deterministic fallback approver.
+                        let approver_spec = if approval.approver_spec == "any" {
+                            owner_pubkey.as_str()
+                        } else {
+                            approval.approver_spec.as_str()
+                        };
                         self.db
                             .suspend_workflow_run_for_approval(
                                 CreateApprovalParams {
@@ -243,14 +253,15 @@ impl WorkflowEngine {
                                     run_id,
                                     step_id: &approval.step_id,
                                     step_index: step_count,
-                                    approver_spec: &approval.approver_spec,
+                                    definition_hash: &workflow.definition_hash,
+                                    approver_spec,
                                     expires_at: approval.expires_at,
                                 },
                                 &trace_json,
                             )
                             .await?;
 
-                        let owner_pubkey = hex::encode(&workflow.owner_pubkey);
+                        let approval_ref = buzz_db::workflow::approval_ref(&approval.token);
                         self.action_sink()?
                             .request_approval(ApprovalRequestEvent {
                                 community_id,
@@ -258,8 +269,9 @@ impl WorkflowEngine {
                                 workflow_id: workflow.id,
                                 run_id,
                                 step_id: &approval.step_id,
-                                token: &approval.token,
-                                approver_spec: &approval.approver_spec,
+                                definition_hash: &workflow.definition_hash,
+                                approval_ref: &approval_ref,
+                                approver_spec,
                                 owner_pubkey: &owner_pubkey,
                                 message: &approval.message,
                                 expires_at: approval.expires_at,

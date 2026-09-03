@@ -350,4 +350,22 @@ mod tests {
             "a community member must not read someone else's briefing report by id"
         );
     }
+
+    #[test]
+    fn reader_authorized_for_event_gates_workflow_approval_request_by_p() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let approver = Keys::generate().public_key().to_hex();
+        let non_approver = Keys::generate().public_key().to_hex();
+        let request = EventBuilder::new(
+            Kind::Custom(crate::kind::KIND_WORKFLOW_APPROVAL_REQUESTED as u16),
+            "Approve release?",
+        )
+        .tags([Tag::parse(["p", approver.as_str()]).unwrap()])
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+
+        assert!(reader_authorized_for_event(&request, &approver));
+        assert!(!reader_authorized_for_event(&request, &non_approver));
+    }
 }

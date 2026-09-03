@@ -155,6 +155,7 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
 pub const RESULT_GATED_KINDS: &[u32] = &[
     KIND_DM_VISIBILITY,
     KIND_AGENT_TURN_METRIC,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
     // NIP-BR: config, watermarks, and reports name private rooms and may
     // quote their contents. Knowing an event id is not authorization.
     KIND_BRIEF_CONFIG,
@@ -187,6 +188,9 @@ pub const P_GATED_KINDS: &[u32] = &[
     // readable by any unauthenticated or non-owner party, including via `ids`
     // filters — see NIP-AM §Relay Behavior.
     KIND_AGENT_TURN_METRIC,
+    // WF-08: approval requests expose an action capability reference and are
+    // readable only by their designated approver.
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
     // NIP-BR: personal briefing state. Owner + reporter via `#p`; other
     // community members must not REQ or NIP-50 the owner's digest.
     KIND_BRIEF_CONFIG,
@@ -1160,6 +1164,18 @@ mod tests {
                 "kind {kind} must be result-gated so a known id is not authorization"
             );
         }
+    }
+
+    #[test]
+    fn workflow_approval_requests_are_p_gated_and_result_gated() {
+        assert!(
+            P_GATED_KINDS.contains(&KIND_WORKFLOW_APPROVAL_REQUESTED),
+            "non-approvers must not be able to enumerate approval requests"
+        );
+        assert!(
+            RESULT_GATED_KINDS.contains(&KIND_WORKFLOW_APPROVAL_REQUESTED),
+            "knowing an approval request event id must not bypass its p-tag"
+        );
     }
 
     #[test]

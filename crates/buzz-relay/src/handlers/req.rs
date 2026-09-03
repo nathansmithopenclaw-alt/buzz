@@ -2122,6 +2122,27 @@ mod tests {
     }
 
     #[test]
+    fn workflow_approval_request_reader_must_match_p_tag_even_with_id() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let approver = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let non_approver = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let event_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let kind = nostr::Kind::Custom(buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED as u16);
+
+        let wrong_reader = Filter::new()
+            .kind(kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap())
+            .custom_tags(p_tag, [approver]);
+        assert!(!p_gated_filters_authorized(&[wrong_reader], non_approver));
+
+        let intended_reader = Filter::new()
+            .kind(kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap())
+            .custom_tags(p_tag, [approver]);
+        assert!(p_gated_filters_authorized(&[intended_reader], approver));
+    }
+
+    #[test]
     fn d_tag_pushdown_only_for_nip33_kinds() {
         let d_tag = SingleLetterTag::lowercase(Alphabet::D);
 

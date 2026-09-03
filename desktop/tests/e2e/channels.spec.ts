@@ -1980,13 +1980,12 @@ test("channel with messages shows content", async ({ page }) => {
 test("workflow approval card completes and preserves a decision round trip", async ({
   page,
 }) => {
-  const approvalToken = "123e4567-e89b-12d3-a456-426614174000";
   const tokenHash =
     "986c0dc956dc822b5d8f698661b9eb1ef880786ff9043c16744d2a420e99e9bb";
 
   const emitApproval = async () => {
     await page.evaluate(
-      ({ approverPubkey, expiresAt, senderPubkey, token, tokenHash }) => {
+      ({ approverPubkey, expiresAt, senderPubkey, tokenHash }) => {
         window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
           channelName: "general",
           content: "Approve the channel workflow proof?",
@@ -1996,7 +1995,6 @@ test("workflow approval card completes and preserves a decision round trip", asy
           extraTags: [
             ["p", approverPubkey],
             ["d", tokenHash],
-            ["token", token],
             ["expiration", expiresAt],
           ],
         });
@@ -2005,7 +2003,6 @@ test("workflow approval card completes and preserves a decision round trip", asy
         approverPubkey: MOCK_IDENTITY_PUBKEY,
         expiresAt: String(Math.floor(Date.now() / 1_000) + 3_600),
         senderPubkey: TEST_IDENTITIES.alice.pubkey,
-        token: approvalToken,
         tokenHash,
       },
     );

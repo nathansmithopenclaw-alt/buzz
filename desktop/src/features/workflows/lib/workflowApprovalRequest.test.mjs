@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { parseWorkflowApprovalRequest } from "./workflowApprovalRequest.ts";
 
-test("parses the targeted approver, raw token, and expiration", () => {
+test("parses the targeted approver, opaque reference, and expiration", () => {
   const request = parseWorkflowApprovalRequest([
     ["p", "a".repeat(64)],
     ["d", "f".repeat(64)],
@@ -12,8 +12,7 @@ test("parses the targeted approver, raw token, and expiration", () => {
   ]);
 
   assert.equal(request.approverPubkey, "a".repeat(64));
-  assert.equal(request.token, "123e4567-e89b-12d3-a456-426614174000");
-  assert.equal(request.tokenHash, "f".repeat(64));
+  assert.equal(request.approvalRef, "f".repeat(64));
   assert.equal(request.expiresAt?.toISOString(), "2026-08-02T04:25:26.000Z");
 });
 
@@ -21,8 +20,7 @@ test("fails closed when action tags are absent or malformed", () => {
   assert.deepEqual(parseWorkflowApprovalRequest([]), {
     approverPubkey: null,
     expiresAt: null,
-    token: null,
-    tokenHash: null,
+    approvalRef: null,
   });
   assert.equal(
     parseWorkflowApprovalRequest([["expiration", "not-a-number"]]).expiresAt,
@@ -38,8 +36,7 @@ test("fails closed when action tags are absent or malformed", () => {
     {
       approverPubkey: null,
       expiresAt: null,
-      token: null,
-      tokenHash: null,
+      approvalRef: null,
     },
   );
 });

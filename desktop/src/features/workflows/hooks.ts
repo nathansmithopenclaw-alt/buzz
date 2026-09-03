@@ -100,9 +100,9 @@ export const workflowRunsQueryKey = (workflowId: string) =>
 export const runApprovalsQueryKey = (workflowId: string, runId: string) =>
   ["run-approvals", workflowId, runId] as const;
 export const approvalResolutionQueryKey = (
-  tokenHash: string,
+  approvalRef: string,
   approverPubkey: string,
-) => ["approval-resolution", tokenHash, approverPubkey] as const;
+) => ["approval-resolution", approvalRef, approverPubkey] as const;
 
 function invalidateWorkflowListQueries(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -179,14 +179,14 @@ export function useRunApprovalsQuery(
 }
 
 export function useApprovalResolutionQuery(
-  tokenHash: string | null,
+  approvalRef: string | null,
   approverPubkey: string | null,
 ) {
   return useQuery({
-    queryKey: approvalResolutionQueryKey(tokenHash ?? "", approverPubkey ?? ""),
-    queryFn: ({ queryKey: [, resolvedTokenHash, resolvedApproverPubkey] }) =>
-      getApprovalResolution(resolvedTokenHash, resolvedApproverPubkey),
-    enabled: tokenHash !== null && approverPubkey !== null,
+    queryKey: approvalResolutionQueryKey(approvalRef ?? "", approverPubkey ?? ""),
+    queryFn: ({ queryKey: [, resolvedApprovalRef, resolvedApproverPubkey] }) =>
+      getApprovalResolution(resolvedApprovalRef, resolvedApproverPubkey),
+    enabled: approvalRef !== null && approverPubkey !== null,
     staleTime: 1_000,
     refetchInterval: (query) => (query.state.data ? false : 2_000),
   });
@@ -251,13 +251,13 @@ export function useApprovalMutation() {
 
   return useMutation({
     mutationFn: (input: {
-      token: string;
+      approvalRef: string;
       action: "grant" | "deny";
       note?: string;
     }) =>
       input.action === "grant"
-        ? grantApproval(input.token, input.note)
-        : denyApproval(input.token, input.note),
+        ? grantApproval(input.approvalRef, input.note)
+        : denyApproval(input.approvalRef, input.note),
     onSuccess: (_data, _variables) => {
       void queryClient.invalidateQueries({
         predicate: (query) =>

@@ -57,6 +57,7 @@ import {
 } from "@/shared/api/customEmoji";
 import {
   KIND_AGENT_OBSERVER_FRAME,
+  KIND_APPROVAL_REQUEST,
   KIND_CHANNEL_THREAD_SUMMARY,
   KIND_CHANNEL_WINDOW_BOUNDS,
   KIND_DM_VISIBILITY,
@@ -4224,39 +4225,25 @@ function persistedMockApprovalResolutions() {
   }
 }
 
-async function approvalTokenHash(token: string) {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(token),
-  );
-  return Array.from(new Uint8Array(digest), (value) =>
-    value.toString(16).padStart(2, "0"),
-  ).join("");
-}
-
 async function handleApprovalDecision(
-  args: { token: string; note?: string | null },
+  args: { approvalRef: string; note?: string | null },
   status: "granted" | "denied",
 ) {
-  const tokenHash = await approvalTokenHash(args.token);
   const resolution = {
     status,
     note: args.note ?? null,
     created_at: Math.floor(Date.now() / 1_000),
   };
-  mockApprovalResolutions.set(tokenHash, resolution);
+  mockApprovalResolutions.set(args.approvalRef, resolution);
   localStorage.setItem(
     MOCK_APPROVAL_RESOLUTIONS_STORAGE_KEY,
     JSON.stringify({
       ...persistedMockApprovalResolutions(),
-      [tokenHash]: resolution,
+      [args.approvalRef]: resolution,
     }),
   );
   return {
-    token: args.token,
-    status,
-    run_id: "mock-approval-run",
-    workflow_id: "mock-approval-workflow",
+    event_id: "d".repeat(64),
   };
 }
 
@@ -5642,6 +5629,7 @@ const P_GATED_KINDS = new Set([
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_GIFT_WRAP,
   KIND_DM_VISIBILITY,
+  46010,
 ]);
 const P_GATED_REJECTION_MESSAGE =
   "restricted: p-gated kinds require #p tag matching your pubkey";
@@ -5903,7 +5891,7 @@ async function handleGetChannelReconnectRepair(
   config: E2eConfig | undefined,
 ): Promise<RelayEvent[]> {
   const kinds = new Set([
-    5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003, 46010,
+    5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003,
     48100, 48101, 48102, 48103,
   ]);
   const filter: Record<string, unknown> = {
@@ -5915,7 +5903,19 @@ async function handleGetChannelReconnectRepair(
   if (args.until != null) filter.until = args.until;
   if (args.beforeId != null) filter.before_id = args.beforeId;
 
-  if (getIdentity(config)) return relayQuery(config, [filter]);
+  const identity = getIdentity(config);
+  if (identity) {
+    const approvalFilter = {
+      "#h": [args.channelId],
+      "#p": [identity.pubkey],
+      kinds: [KIND_APPROVAL_REQUEST],
+      since: args.since,
+      limit: args.limit,
+      ...(args.until == null ? {} : { until: args.until }),
+      ...(args.beforeId == null ? {} : { before_id: args.beforeId }),
+    };
+    return relayQuery(config, [filter, approvalFilter]);
+  }
   return getMockMessageStore(args.channelId)
     .filter(
       (event) =>
@@ -6014,7 +6014,18 @@ async function handleGetChannelWindow(
       filter.until = args.cursor.created_at;
       filter.before_id = args.cursor.event_id;
     }
-    return relayQuery(config, [filter]);
+    const approvalFilter: Record<string, unknown> = {
+      "#h": [args.channelId],
+      "#p": [identity.pubkey],
+      kinds: [KIND_APPROVAL_REQUEST],
+      limit: cap,
+      top_level: true,
+    };
+    if (args.cursor) {
+      approvalFilter.until = args.cursor.created_at;
+      approvalFilter.before_id = args.cursor.event_id;
+    }
+    return relayQuery(config, [filter, approvalFilter]);
   };
 
   const probe = window as unknown as {
@@ -15399,10 +15410,10 @@ export function maybeInstallE2eTauriMocks() {
       case "get_approval_resolution":
         return (
           mockApprovalResolutions.get(
-            (payload as { tokenHash: string }).tokenHash,
+            (payload as { approvalRef: string }).approvalRef,
           ) ??
           persistedMockApprovalResolutions()[
-            (payload as { tokenHash: string }).tokenHash
+            (payload as { approvalRef: string }).approvalRef
           ] ??
           null
         );

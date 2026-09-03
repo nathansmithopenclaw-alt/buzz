@@ -79,8 +79,8 @@ buzz dms list
 # Workflows
 buzz workflows list --channel <uuid>
 buzz workflows trigger --workflow <uuid>
-buzz workflows approve --token <uuid>
-buzz workflows approve --token <uuid> --approved false --note "needs revision"
+buzz workflows approve --approval-ref <64-hex>
+buzz workflows approve --approval-ref <64-hex> --approved false --note "needs revision"
 
 # Forum
 buzz messages vote --event <event-id> --direction up

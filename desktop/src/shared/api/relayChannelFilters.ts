@@ -9,6 +9,7 @@ import {
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
   KIND_STREAM_MESSAGE_EDIT,
+  KIND_APPROVAL_REQUEST,
 } from "@/shared/constants/kinds";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 
@@ -39,6 +40,23 @@ export function buildChannelFilter(
     filter.until = until;
   }
 
+  return filter;
+}
+
+/** Targeted workflow approval requests for one channel and approver. */
+export function buildChannelApprovalFilter(
+  channelId: string,
+  approverPubkey: string,
+  limit: number,
+  since?: number,
+): RelaySubscriptionFilter {
+  const filter: RelaySubscriptionFilter = {
+    kinds: [KIND_APPROVAL_REQUEST],
+    "#h": [channelId],
+    "#p": [approverPubkey],
+    limit,
+  };
+  if (since !== undefined) filter.since = since;
   return filter;
 }
 
@@ -77,7 +95,9 @@ export function buildChannelHistoryFilter(
   until?: number,
 ): RelaySubscriptionFilter {
   const filter: RelaySubscriptionFilter = {
-    kinds: [...CHANNEL_TIMELINE_CONTENT_KINDS],
+    kinds: CHANNEL_TIMELINE_CONTENT_KINDS.filter(
+      (kind) => kind !== KIND_APPROVAL_REQUEST,
+    ),
     "#h": [channelId],
     limit,
   };

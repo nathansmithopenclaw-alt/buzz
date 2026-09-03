@@ -22,11 +22,13 @@ pub struct ApprovalRequestEvent<'a> {
     pub run_id: Uuid,
     /// Step identifier.
     pub step_id: &'a str,
-    /// Raw approval capability token.
-    pub token: &'a str,
-    /// Normalized approver spec (`any` or a pubkey).
+    /// Canonical workflow definition hash that owns this gate.
+    pub definition_hash: &'a [u8],
+    /// Opaque lowercase SHA-256 reference to the approval capability.
+    pub approval_ref: &'a str,
+    /// Normalized approver pubkey.
     pub approver_spec: &'a str,
-    /// Workflow owner pubkey, used as the notification recipient for `any`.
+    /// Workflow owner pubkey, used for relay-authored event provenance.
     pub owner_pubkey: &'a str,
     /// Human-readable prompt.
     pub message: &'a str,

@@ -1648,18 +1648,17 @@ pub fn build_workflow_trigger(workflow_id: Uuid) -> Result<EventBuilder, SdkErro
 
 /// Build a workflow approval event — kind 46030 (grant) or 46031 (deny).
 ///
-/// - `token_hash`: hex-encoded SHA-256 of the approval token UUID (d-tag).
-///   Must be exactly 64 hex characters.
+/// - `approval_ref`: opaque 64-hex approval reference (d-tag).
 /// - `approved`: `true` emits kind 46030 (grant), `false` emits kind 46031 (deny)
 /// - `note`: optional human-readable note as event content
 pub fn build_workflow_approval(
-    token_hash: &str,
+    approval_ref: &str,
     approved: bool,
     note: &str,
 ) -> Result<EventBuilder, SdkError> {
-    if token_hash.len() != 64 || !token_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+    if approval_ref.len() != 64 || !approval_ref.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(SdkError::InvalidInput(
-            "token_hash must be a 64-character hex SHA-256 digest".into(),
+            "approval_ref must be a 64-character hex value".into(),
         ));
     }
     let kind = if approved {
@@ -1667,7 +1666,8 @@ pub fn build_workflow_approval(
     } else {
         KIND_APPROVAL_DENY
     };
-    let tags = vec![tag(&["d", token_hash])?];
+    let approval_ref = approval_ref.to_ascii_lowercase();
+    let tags = vec![tag(&["d", &approval_ref])?];
     Ok(EventBuilder::new(Kind::Custom(kind as u16), note).tags(tags))
 }
 
@@ -4032,13 +4032,13 @@ mod tests {
     }
 
     #[test]
-    fn workflow_approval_rejects_bad_token_hash() {
+    fn workflow_approval_rejects_bad_reference() {
         let err = build_workflow_approval("not-hex", true, "").unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 
     #[test]
-    fn workflow_approval_rejects_short_hash() {
+    fn workflow_approval_rejects_short_reference() {
         let short = "a".repeat(32);
         let err = build_workflow_approval(&short, true, "").unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));

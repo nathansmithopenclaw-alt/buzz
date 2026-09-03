@@ -988,17 +988,11 @@ async fn handle_workflow_trigger(
 /// Enforce the approver_spec field against the requesting pubkey.
 ///
 /// Accepted specs:
-/// - `""` or `"any"` — any authenticated user may approve.
 /// - 64-char lowercase hex string — only that exact pubkey may approve.
 ///
 /// All other formats are rejected (fail-closed).
 fn check_approver_spec(approver_spec: &str, requester_hex: &str) -> Result<(), IngestError> {
     let spec = approver_spec.trim();
-
-    // Empty or "any" — anyone may approve
-    if spec.is_empty() || spec == "any" {
-        return Ok(());
-    }
 
     // Exact pubkey match (64-char hex, case-insensitive)
     if spec.len() == 64 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -1026,16 +1020,14 @@ async fn handle_approval_grant(
     let self_bytes = auth.pubkey().to_bytes().to_vec();
     let self_hex = hex::encode(&self_bytes);
 
-    // 1. Extract approval reference from `e` tag (references the approval-requested event)
-    //    or `d` tag (contains the token hash hex)
-    let token_hash_hex = extract_d_tag(event)
-        .or_else(|| extract_e_tag(event))
-        .ok_or_else(|| {
-            IngestError::Rejected("invalid: missing approval reference (d or e tag)".into())
-        })?;
+    // 1. Extract the opaque approval reference. An approval-request event ID
+    // is not a capability reference and must not be accepted as one.
+    let token_hash_hex = extract_d_tag(event).ok_or_else(|| {
+        IngestError::Rejected("invalid: missing approval reference (d tag)".into())
+    })?;
 
     let token_hash = hex::decode(&token_hash_hex)
-        .map_err(|_| IngestError::Rejected("invalid: bad approval token hash hex".into()))?;
+        .map_err(|_| IngestError::Rejected("invalid: bad approval reference hex".into()))?;
 
     // 2. Look up the approval record
     let approval = state
@@ -1053,12 +1045,28 @@ async fn handle_approval_grant(
     }
     if Utc::now() > approval.expires_at {
         return Err(IngestError::Rejected(
-            "invalid: approval token has expired".into(),
+            "invalid: approval request has expired".into(),
         ));
     }
 
     // 4. Validate caller is authorized approver
     check_approver_spec(&approval.approver_spec, &self_hex)?;
+
+    // Bind the capability to the exact stored workflow revision and gate step.
+    // This check happens before the approval mutation; resume repeats it after
+    // commit to close the edit-between-check-and-resume race.
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), approval.workflow_id)
+        .await
+        .map_err(|_| IngestError::Rejected("invalid: approval workflow not found".into()))?;
+    bound_workflow_definition(
+        &workflow,
+        &approval.definition_hash,
+        approval.step_index,
+        &approval.step_id,
+    )
+    .map_err(|reason| IngestError::Rejected(format!("invalid: {reason}")))?;
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(&state.db, tenant, event, None).await? {
@@ -1107,12 +1115,25 @@ async fn handle_approval_grant(
     let run_id = approval.run_id;
     let workflow_id = approval.workflow_id;
     let resume_index = approval.step_index as usize + 1;
+    let definition_hash = approval.definition_hash;
+    let step_index = approval.step_index;
+    let step_id = approval.step_id;
     let engine = Arc::clone(&state.workflow_engine);
     let db = state.db.clone();
 
     tokio::spawn(async move {
-        resume_workflow_after_approval(engine, db, community_id, run_id, workflow_id, resume_index)
-            .await;
+        resume_workflow_after_approval(
+            engine,
+            db,
+            community_id,
+            run_id,
+            workflow_id,
+            resume_index,
+            definition_hash,
+            step_index,
+            step_id,
+        )
+        .await;
     });
 
     // 7. Return response
@@ -1139,14 +1160,12 @@ async fn handle_approval_deny(
     let self_hex = hex::encode(&self_bytes);
 
     // 1. Extract approval reference
-    let token_hash_hex = extract_d_tag(event)
-        .or_else(|| extract_e_tag(event))
-        .ok_or_else(|| {
-            IngestError::Rejected("invalid: missing approval reference (d or e tag)".into())
-        })?;
+    let token_hash_hex = extract_d_tag(event).ok_or_else(|| {
+        IngestError::Rejected("invalid: missing approval reference (d tag)".into())
+    })?;
 
     let token_hash = hex::decode(&token_hash_hex)
-        .map_err(|_| IngestError::Rejected("invalid: bad approval token hash hex".into()))?;
+        .map_err(|_| IngestError::Rejected("invalid: bad approval reference hex".into()))?;
 
     // 2. Look up the approval record
     let approval = state
@@ -1164,7 +1183,7 @@ async fn handle_approval_deny(
     }
     if Utc::now() > approval.expires_at {
         return Err(IngestError::Rejected(
-            "invalid: approval token has expired".into(),
+            "invalid: approval request has expired".into(),
         ));
     }
 
@@ -1277,6 +1296,9 @@ async fn resume_workflow_after_approval(
     run_id: Uuid,
     workflow_id: Uuid,
     resume_index: usize,
+    definition_hash: Vec<u8>,
+    step_index: i32,
+    step_id: String,
 ) {
     let run = match db.get_workflow_run(community_id, run_id).await {
         Ok(r) => r,
@@ -1303,11 +1325,10 @@ async fn resume_workflow_after_approval(
         }
     };
 
-    let def: buzz_workflow::WorkflowDef = match serde_json::from_value(workflow.definition.clone())
-    {
+    let def = match bound_workflow_definition(&workflow, &definition_hash, step_index, &step_id) {
         Ok(d) => d,
-        Err(e) => {
-            tracing::error!("resume_workflow: failed to parse workflow definition: {e}");
+        Err(reason) => {
+            tracing::error!("resume_workflow: approval binding check failed: {reason}");
             if let Err(db_err) = db
                 .update_workflow_run(
                     community_id,
@@ -1316,8 +1337,8 @@ async fn resume_workflow_after_approval(
                     run.current_step,
                     &run.execution_trace,
                     Some(buzz_db::workflow::WorkflowRunFailure {
-                        code: "invalid_definition",
-                        message: &format!("definition parse error: {e}"),
+                        code: "approval_binding_mismatch",
+                        message: &reason,
                     }),
                 )
                 .await
@@ -1384,9 +1405,73 @@ async fn resume_workflow_after_approval(
         .await;
 }
 
+fn bound_workflow_definition(
+    workflow: &buzz_db::workflow::WorkflowRecord,
+    definition_hash: &[u8],
+    step_index: i32,
+    step_id: &str,
+) -> Result<buzz_workflow::WorkflowDef, String> {
+    if workflow.definition_hash != definition_hash {
+        return Err("approval workflow revision no longer matches".into());
+    }
+    let def: buzz_workflow::WorkflowDef = serde_json::from_value(workflow.definition.clone())
+        .map_err(|error| format!("approval workflow definition is invalid: {error}"))?;
+    let index =
+        usize::try_from(step_index).map_err(|_| "approval step index is invalid".to_string())?;
+    let Some(step) = def.steps.get(index) else {
+        return Err("approval step no longer exists at the bound index".into());
+    };
+    if step.id != step_id {
+        return Err("approval step id no longer matches the bound index".into());
+    }
+    Ok(def)
+}
+
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+
+    fn bound_workflow(hash: Vec<u8>) -> buzz_db::workflow::WorkflowRecord {
+        let now = Utc::now();
+        buzz_db::workflow::WorkflowRecord {
+            id: Uuid::new_v4(),
+            community_id: CommunityId::from_uuid(Uuid::new_v4()),
+            name: "bound".into(),
+            owner_pubkey: vec![0x11; 32],
+            channel_id: Some(Uuid::new_v4()),
+            definition: serde_json::json!({
+                "name": "bound",
+                "trigger": {"on": "webhook"},
+                "steps": [{"id": "review", "action": "request_approval", "from": "any", "message": "Approve?"}],
+                "enabled": true
+            }),
+            definition_hash: hash,
+            status: buzz_db::workflow::WorkflowStatus::Active,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn approval_authority_requires_the_designated_pubkey() {
+        let approver = "a".repeat(64);
+        let non_approver = "b".repeat(64);
+        assert!(check_approver_spec(&approver, &approver).is_ok());
+        assert!(check_approver_spec(&approver, &non_approver).is_err());
+        assert!(check_approver_spec("any", &non_approver).is_err());
+        assert!(check_approver_spec("", &non_approver).is_err());
+    }
+
+    #[test]
+    fn approval_binding_requires_exact_revision_and_step() {
+        let hash = vec![0x42; 32];
+        let workflow = bound_workflow(hash.clone());
+        assert!(bound_workflow_definition(&workflow, &hash, 0, "review").is_ok());
+        assert!(bound_workflow_definition(&workflow, &[0x43; 32], 0, "review").is_err());
+        assert!(bound_workflow_definition(&workflow, &hash, 0, "renamed").is_err());
+        assert!(bound_workflow_definition(&workflow, &hash, 1, "review").is_err());
+    }
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     async fn persistence_test_context() -> (buzz_db::Db, TenantContext) {

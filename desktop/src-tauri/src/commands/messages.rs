@@ -32,7 +32,7 @@ use crate::{
 /// (`p_gated_filters_authorized`) without a `#p` tag — load-bearing for the
 /// thread-subtree read, whose relay routing keys off `#e`+`depth_limit` (not
 /// kind) but still passes through the p-gate before it runs.
-const TIMELINE_KINDS: [u32; 12] = [
+const TIMELINE_KINDS: [u32; 11] = [
     9,
     40002,
     40008,
@@ -43,7 +43,6 @@ const TIMELINE_KINDS: [u32; 12] = [
     43004,
     43005,
     43006,
-    buzz_core_pkg::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
     buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
 ];
 

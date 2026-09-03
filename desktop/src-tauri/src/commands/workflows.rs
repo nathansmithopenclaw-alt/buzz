@@ -349,13 +349,13 @@ pub async fn get_run_approvals(
 
 #[tauri::command]
 pub async fn get_approval_resolution(
-    token_hash: String,
+    approval_ref: String,
     approver_pubkey: String,
     state: State<'_, AppState>,
 ) -> Result<Option<Value>, String> {
-    let token_hash = token_hash.trim().to_ascii_lowercase();
-    if token_hash.len() != 64 || !token_hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err("invalid approval token hash".to_string());
+    let approval_ref = approval_ref.trim().to_ascii_lowercase();
+    if approval_ref.len() != 64 || !approval_ref.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("invalid approval reference".to_string());
     }
     let approver_pubkey = approver_pubkey.trim().to_ascii_lowercase();
     if approver_pubkey.len() != 64 || !approver_pubkey.chars().all(|ch| ch.is_ascii_hexdigit()) {
@@ -369,7 +369,7 @@ pub async fn get_approval_resolution(
                 buzz_core_pkg::kind::KIND_APPROVAL_GRANT,
                 buzz_core_pkg::kind::KIND_APPROVAL_DENY,
             ],
-            "#d": [token_hash],
+            "#d": [approval_ref],
             "authors": [approver_pubkey],
             "limit": 10,
         })],
@@ -392,22 +392,22 @@ pub async fn get_approval_resolution(
 
 #[tauri::command]
 pub async fn grant_approval(
-    token: String,
+    approval_ref: String,
     note: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    let builder = events::build_approval_grant(&token, note.as_deref())?;
+    let builder = events::build_approval_grant(&approval_ref, note.as_deref())?;
     let result = submit_event(builder, &state).await?;
     Ok(serde_json::json!({ "event_id": result.event_id }))
 }
 
 #[tauri::command]
 pub async fn deny_approval(
-    token: String,
+    approval_ref: String,
     note: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    let builder = events::build_approval_deny(&token, note.as_deref())?;
+    let builder = events::build_approval_deny(&approval_ref, note.as_deref())?;
     let result = submit_event(builder, &state).await?;
     Ok(serde_json::json!({ "event_id": result.event_id }))
 }

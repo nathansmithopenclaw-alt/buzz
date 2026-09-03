@@ -44,7 +44,7 @@ export function WorkflowApprovalRequestCard({
     isApprover && request.expiresAt && !isExpired,
   );
   const approvalResolutionQuery = useApprovalResolutionQuery(
-    canResolvePersistedDecision ? request.tokenHash : null,
+    canResolvePersistedDecision ? request.approvalRef : null,
     canResolvePersistedDecision ? request.approverPubkey : null,
   );
   const persistedOutcome: ApprovalOutcome = approvalResolutionQuery.data?.status
@@ -54,8 +54,7 @@ export function WorkflowApprovalRequestCard({
     : null;
   const displayedOutcome = outcome ?? persistedOutcome;
   const isActionable = Boolean(
-    request.token &&
-      request.tokenHash &&
+    request.approvalRef &&
       request.expiresAt &&
       isApprover &&
       !isExpired &&
@@ -69,10 +68,10 @@ export function WorkflowApprovalRequestCard({
     : null;
 
   const decide = (action: "grant" | "deny") => {
-    if (!request.token) return;
+    if (!request.approvalRef) return;
     approvalMutation.mutate(
       {
-        token: request.token,
+        approvalRef: request.approvalRef,
         action,
         note: note.trim() || undefined,
       },
@@ -125,9 +124,9 @@ export function WorkflowApprovalRequestCard({
         <p className="mt-3 text-sm font-medium text-muted-foreground">
           This approval request has expired.
         </p>
-      ) : !request.token || !request.tokenHash ? (
+      ) : !request.approvalRef ? (
         <p className="mt-3 text-sm font-medium text-destructive">
-          This approval request is missing its decision token.
+          This approval request is missing its decision reference.
         </p>
       ) : !isApprover ? (
         <p className="mt-3 text-xs text-muted-foreground">

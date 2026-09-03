@@ -3,9 +3,8 @@ use tauri::State;
 use crate::{app_state::AppState, relay::query_relay};
 
 const MAX_REPAIR_PAGE_LIMIT: u32 = 500;
-const CHANNEL_REPAIR_KINDS: [u32; 16] = [
-    5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003, 46010, 48100, 48101, 48102,
-    48103,
+const CHANNEL_REPAIR_KINDS: [u32; 15] = [
+    5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003, 48100, 48101, 48102, 48103,
 ];
 
 fn build_channel_reconnect_repair_filter(
@@ -61,7 +60,26 @@ pub async fn get_channel_reconnect_repair(
         until,
         before_id.as_deref(),
     )?;
-    Ok(query_relay(&state, &[filter])
+    let my_pubkey = state
+        .keys
+        .lock()
+        .map_err(|error| error.to_string())?
+        .public_key()
+        .to_hex();
+    let mut approval_filter = serde_json::json!({
+        "kinds": [buzz_core_pkg::kind::KIND_WORKFLOW_APPROVAL_REQUESTED],
+        "#h": [channel_id],
+        "#p": [my_pubkey],
+        "since": since,
+        "limit": limit,
+    });
+    if let Some(value) = until {
+        approval_filter["until"] = serde_json::json!(value);
+    }
+    if let Some(value) = before_id {
+        approval_filter["before_id"] = serde_json::json!(value);
+    }
+    Ok(query_relay(&state, &[filter, approval_filter])
         .await?
         .iter()
         .filter_map(|event| serde_json::to_value(event).ok())

@@ -219,9 +219,9 @@ CREATE TABLE events (
     -- Privacy: encrypted/private routing wrappers and p-gated membership notices
     -- must never be discoverable through NIP-50 full-text search. NULL tsvector
     -- never matches `@@`.
-    -- Keep in sync with migrations (final state: 0001 + 0005 + 0014 + 0036 + 0038).
+    -- Keep in sync with migrations (final state: 0001 + 0005 + 0014 + 0036 + 0038 + 0048 + 0049).
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
-        CASE WHEN kind IN (1059, 30179, 30300, 30350, 30622, 30623, 30624, 40030, 44100, 44101, 44200) THEN NULL::tsvector
+        CASE WHEN kind IN (1059, 30179, 30300, 30350, 30622, 30623, 30624, 40030, 44100, 44101, 44200, 46010) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
         END
     ) STORED,
@@ -417,6 +417,7 @@ CREATE TABLE workflow_approvals (
     run_id          UUID NOT NULL,
     step_id         VARCHAR(64) NOT NULL,
     step_index      INT NOT NULL,
+    definition_hash BYTEA NOT NULL,
     approver_spec   TEXT NOT NULL,
     status          approval_status NOT NULL DEFAULT 'pending',
     approver_pubkey BYTEA,
@@ -435,6 +436,9 @@ CREATE TABLE workflow_approvals (
 CREATE INDEX idx_workflow_approvals_workflow ON workflow_approvals (community_id, workflow_id);
 CREATE INDEX idx_workflow_approvals_run ON workflow_approvals (community_id, run_id);
 CREATE INDEX idx_workflow_approvals_status ON workflow_approvals (community_id, status);
+CREATE INDEX idx_workflow_approvals_pending_expiry
+    ON workflow_approvals (expires_at, community_id, token)
+    WHERE status = 'pending';
 
 -- ── Scheduled workflow fires (cron claim) ─────────────────────────────────────
 -- Plan §5: the at-most-once cron fire claim. UNIQUE (community_id, workflow_id,

@@ -13,7 +13,6 @@ use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError, ApprovalRequestEvent};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
-use sha2::{Digest, Sha256};
 use tracing::info;
 use uuid::Uuid;
 
@@ -497,44 +496,7 @@ impl ActionSink for RelayActionSink {
                 })?;
             let tenant = buzz_core::tenant::TenantContext::resolved(request.community_id, host);
 
-            let owner = nostr::PublicKey::from_hex(request.owner_pubkey).map_err(|e| {
-                ActionSinkError::InvalidInput(format!("invalid workflow owner pubkey: {e}"))
-            })?;
-            let recipient = if request.approver_spec == "any" {
-                owner
-            } else {
-                nostr::PublicKey::from_hex(request.approver_spec).map_err(|e| {
-                    ActionSinkError::InvalidInput(format!("invalid approver pubkey: {e}"))
-                })?
-            };
-            let token_hash = hex::encode(Sha256::digest(request.token.as_bytes()));
-            let mut tags = vec![
-                Tag::parse(["d", token_hash.as_str()])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("d tag: {e}")))?,
-                Tag::parse(["token", request.token])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("token tag: {e}")))?,
-                Tag::parse(["p", recipient.to_hex().as_str()])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
-                Tag::parse(["workflow", request.workflow_id.to_string().as_str()])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
-                Tag::parse(["run", request.run_id.to_string().as_str()])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("run tag: {e}")))?,
-                Tag::parse(["step", request.step_id])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("step tag: {e}")))?,
-                Tag::parse([
-                    "expiration",
-                    request.expires_at.timestamp().to_string().as_str(),
-                ])
-                .map_err(|e| ActionSinkError::EventBuild(format!("expires tag: {e}")))?,
-                Tag::parse(["buzz:workflow", "true"])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
-            ];
-            if let Some(channel_id) = request.channel_id {
-                tags.push(
-                    Tag::parse(["h", channel_id.to_string().as_str()])
-                        .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
-                );
-            }
+            let tags = approval_request_tags(&request)?;
 
             let event = EventBuilder::new(
                 Kind::from(KIND_WORKFLOW_APPROVAL_REQUESTED as u16),
@@ -570,6 +532,55 @@ impl ActionSink for RelayActionSink {
     }
 }
 
+fn approval_request_tags(request: &ApprovalRequestEvent<'_>) -> Result<Vec<Tag>, ActionSinkError> {
+    let recipient = nostr::PublicKey::from_hex(request.approver_spec)
+        .map_err(|e| ActionSinkError::InvalidInput(format!("invalid approver pubkey: {e}")))?;
+    if request.approval_ref.len() != 64
+        || !request
+            .approval_ref
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+    {
+        return Err(ActionSinkError::InvalidInput(
+            "approval_ref must be 64 lowercase hex characters".into(),
+        ));
+    }
+    if request.definition_hash.len() != 32 {
+        return Err(ActionSinkError::InvalidInput(
+            "definition_hash must be 32 bytes".into(),
+        ));
+    }
+    let revision = hex::encode(request.definition_hash);
+    let mut tags = vec![
+        Tag::parse(["d", request.approval_ref])
+            .map_err(|e| ActionSinkError::EventBuild(format!("d tag: {e}")))?,
+        Tag::parse(["p", recipient.to_hex().as_str()])
+            .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+        Tag::parse(["workflow", request.workflow_id.to_string().as_str()])
+            .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+        Tag::parse(["run", request.run_id.to_string().as_str()])
+            .map_err(|e| ActionSinkError::EventBuild(format!("run tag: {e}")))?,
+        Tag::parse(["step", request.step_id])
+            .map_err(|e| ActionSinkError::EventBuild(format!("step tag: {e}")))?,
+        Tag::parse(["revision", revision.as_str()])
+            .map_err(|e| ActionSinkError::EventBuild(format!("revision tag: {e}")))?,
+        Tag::parse([
+            "expiration",
+            request.expires_at.timestamp().to_string().as_str(),
+        ])
+        .map_err(|e| ActionSinkError::EventBuild(format!("expires tag: {e}")))?,
+        Tag::parse(["buzz:workflow", "true"])
+            .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+    ];
+    if let Some(channel_id) = request.channel_id {
+        tags.push(
+            Tag::parse(["h", channel_id.to_string().as_str()])
+                .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+        );
+    }
+    Ok(tags)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,6 +592,34 @@ mod tests {
     // A 64-char hex pubkey built from a single repeated nibble, for readable tests.
     fn pk(nibble: char) -> String {
         std::iter::repeat_n(nibble, 64).collect()
+    }
+
+    #[test]
+    fn approval_request_tags_never_publish_raw_capability() {
+        let approval_ref = "ab".repeat(32);
+        let approver = pk('c');
+        let owner = pk('d');
+        let request = ApprovalRequestEvent {
+            community_id: CommunityId::from_uuid(uuid::Uuid::nil()),
+            channel_id: Some(uuid::Uuid::nil()),
+            workflow_id: uuid::Uuid::nil(),
+            run_id: uuid::Uuid::nil(),
+            step_id: "gate",
+            definition_hash: &[0x42; 32],
+            approval_ref: &approval_ref,
+            approver_spec: &approver,
+            owner_pubkey: &owner,
+            message: "Approve?",
+            expires_at: Utc::now(),
+        };
+        let tags = approval_request_tags(&request).expect("valid approval request tags");
+        let tags: Vec<Vec<String>> = tags.iter().map(|tag| tag.as_slice().to_vec()).collect();
+        assert!(tags.contains(&vec!["d".into(), approval_ref]));
+        assert!(tags.contains(&vec!["p".into(), approver]));
+        assert!(tags.contains(&vec!["revision".into(), "42".repeat(32)]));
+        assert!(!tags
+            .iter()
+            .any(|tag| tag.first().is_some_and(|name| name == "token")));
     }
 
     #[test]
@@ -879,6 +918,7 @@ mod postgres_tests {
     use super::*;
     use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
     use buzz_db::CreateCommunityWithOwnerResult;
+    use sha2::{Digest, Sha256};
     use std::sync::Arc;
 
     /// Real-PG state mirroring `handlers::event::tests::test_state_with_redis_url`.
@@ -1145,7 +1185,7 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn workflow_approval_request_publishes_capability_and_hash() {
+    async fn workflow_approval_request_publishes_reference_without_capability() {
         let state = test_state().await;
         let owner = nostr::Keys::generate();
         let approver = nostr::Keys::generate();
@@ -1171,7 +1211,8 @@ mod postgres_tests {
                 workflow_id: uuid::Uuid::new_v4(),
                 run_id: uuid::Uuid::new_v4(),
                 step_id: "gate",
-                token: &token,
+                definition_hash: &[0x42; 32],
+                approval_ref: &expected_hash,
                 approver_spec: &approver_hex,
                 owner_pubkey: &owner_hex,
                 message: "Approve release?",
@@ -1195,7 +1236,15 @@ mod postgres_tests {
         assert_eq!(stored.event.kind, Kind::Custom(46010));
         assert_eq!(stored.event.content, "Approve release?");
         assert!(tags.contains(&vec!["d".into(), expected_hash]));
-        assert!(tags.contains(&vec!["token".into(), token]));
+        assert!(tags.contains(&vec!["revision".into(), "42".repeat(32)]));
+        assert_ne!(stored.event.content, token);
+        assert!(!tags.iter().flatten().any(|value| value == &token));
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "token")),
+            "persistent approval requests must never publish the raw capability"
+        );
         assert!(tags.contains(&vec!["p".into(), approver_hex]));
     }
 

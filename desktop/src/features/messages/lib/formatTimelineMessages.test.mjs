@@ -287,7 +287,6 @@ test("workflow approval recipient is not presented as the request author", () =>
         ["h", CHANNEL_ID],
         ["p", PUBKEY_A],
         ["d", "c".repeat(64)],
-        ["token", "123e4567-e89b-12d3-a456-426614174000"],
       ],
     },
     RELAY_SECRET,

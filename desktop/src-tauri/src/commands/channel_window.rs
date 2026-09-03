@@ -2,7 +2,7 @@ use tauri::State;
 
 use crate::{app_state::AppState, models::ChannelPageCursor, relay::query_relay};
 
-const TIMELINE_KINDS: [u32; 12] = [
+const TIMELINE_KINDS: [u32; 11] = [
     9,
     40002,
     40008,
@@ -13,7 +13,6 @@ const TIMELINE_KINDS: [u32; 12] = [
     43004,
     43005,
     43006,
-    buzz_core_pkg::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
     buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
 ];
 
@@ -49,7 +48,24 @@ pub async fn get_channel_window(
         limit_rows.unwrap_or(50).min(200),
         cursor.as_ref(),
     );
-    Ok(query_relay(&state, &[filter])
+    let my_pubkey = state
+        .keys
+        .lock()
+        .map_err(|error| error.to_string())?
+        .public_key()
+        .to_hex();
+    let mut approval_filter = serde_json::json!({
+        "kinds": [buzz_core_pkg::kind::KIND_WORKFLOW_APPROVAL_REQUESTED],
+        "#h": [channel_id],
+        "#p": [my_pubkey],
+        "limit": limit_rows.unwrap_or(50).min(200),
+        "top_level": true,
+    });
+    if let Some(cursor) = cursor.as_ref() {
+        approval_filter["until"] = serde_json::json!(cursor.created_at);
+        approval_filter["before_id"] = serde_json::json!(cursor.event_id);
+    }
+    Ok(query_relay(&state, &[filter, approval_filter])
         .await?
         .iter()
         .filter_map(|event| serde_json::to_value(event).ok())

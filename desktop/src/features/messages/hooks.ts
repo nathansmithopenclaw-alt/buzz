@@ -56,6 +56,7 @@ import {
   sendChannelMessage,
 } from "@/shared/api/tauri";
 import { getChannelWindowEvents } from "@/shared/api/channelWindow";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 // Same .mjs the renderer uses, so the cache-update projection can't drift
 // from the on-render overlay.
@@ -317,6 +318,7 @@ export function useChannelMessagesQuery(channel: Channel | null) {
 
 export function useChannelSubscription(channel: Channel | null) {
   const queryClient = useQueryClient();
+  const identityQuery = useIdentityQuery();
   const channelId = channel?.id ?? null;
   const channelType = channel?.channelType ?? null;
   const refreshNewestWindow = useEffectEvent(async () => {
@@ -410,7 +412,7 @@ export function useChannelSubscription(channel: Channel | null) {
     }
 
     let isDisposed = false;
-    let cleanup: (() => Promise<void>) | undefined;
+    const cleanups: Array<() => Promise<void>> = [];
     const disposeReconnectListener = relayClient.subscribeToReconnects(() => {
       void refreshNewestWindow().catch((error) => {
         if (!isDisposed) {
@@ -454,7 +456,7 @@ export function useChannelSubscription(channel: Channel | null) {
             void dispose();
             return;
           }
-          cleanup = dispose;
+          cleanups.push(dispose);
           refreshAfterSubscribe("subscribing");
         },
         (error) => {
@@ -463,14 +465,33 @@ export function useChannelSubscription(channel: Channel | null) {
         },
       );
 
+    const approverPubkey = identityQuery.data?.pubkey;
+    if (approverPubkey) {
+      relayClient
+        .subscribeToChannelApprovals(channelId, approverPubkey, (event) => {
+          if (!isDisposed) appendMessage(event);
+        })
+        .then(
+          (dispose) => {
+            if (isDisposed) void dispose();
+            else cleanups.push(dispose);
+          },
+          (error) => {
+            console.error(
+              "Failed to subscribe to channel approvals",
+              channelId,
+              error,
+            );
+          },
+        );
+    }
+
     return () => {
       isDisposed = true;
       disposeReconnectListener();
-      if (cleanup) {
-        void cleanup();
-      }
+      for (const cleanup of cleanups) void cleanup();
     };
-  }, [channelId, channelType]);
+  }, [channelId, channelType, identityQuery.data?.pubkey]);
 }
 
 export function useSendMessageMutation(

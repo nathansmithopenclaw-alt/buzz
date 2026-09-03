@@ -25,6 +25,7 @@ import {
 } from "@/shared/api/relayClientShared";
 import {
   buildChannelAuxDeletionFilter,
+  buildChannelApprovalFilter,
   buildChannelFilter,
   buildChannelHistoryFilter,
   buildChannelMentionFilter,
@@ -360,6 +361,22 @@ export class RelayClient {
         limit: 1000,
         since: Math.floor(Date.now() / 1_000),
       },
+      onEvent,
+    );
+  }
+
+  async subscribeToChannelApprovals(
+    channelId: string,
+    approverPubkey: string,
+    onEvent: (event: RelayEvent) => void,
+  ) {
+    return this.subscribe(
+      buildChannelApprovalFilter(
+        channelId,
+        approverPubkey,
+        100,
+        Math.floor(Date.now() / 1_000),
+      ),
       onEvent,
     );
   }

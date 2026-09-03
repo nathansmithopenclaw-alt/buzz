@@ -675,6 +675,37 @@ async fn main() -> anyhow::Result<()> {
     let wf_cron = Arc::clone(&workflow_engine);
     tokio::spawn(async move { wf_cron.run().await });
 
+    // Approval expiry sweeper. The database transition claims a bounded batch
+    // with SKIP LOCKED and updates both approvals and waiting runs atomically,
+    // so concurrent relay pods are safe and repeat ticks are idempotent.
+    {
+        let approval_state = Arc::clone(&state);
+        let interval_secs = std::env::var("BUZZ_WORKFLOW_APPROVAL_SWEEP_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60)
+            .max(1);
+        tokio::spawn(async move {
+            info!(interval_secs, "Workflow approval expiry sweeper started");
+            loop {
+                match approval_state
+                    .db
+                    .expire_workflow_approvals(chrono::Utc::now(), 100)
+                    .await
+                {
+                    Ok(result) if result.approvals > 0 => info!(
+                        approvals = result.approvals,
+                        runs = result.runs,
+                        "Expired workflow approvals"
+                    ),
+                    Ok(_) => {}
+                    Err(error) => error!(%error, "Workflow approval expiry sweep failed"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+            }
+        });
+    }
+
     // Ephemeral channel reaper — archives channels whose TTL deadline has passed.
     // Runs every 60s, matching the workflow cron loop pattern. The SQL UPDATE
     // uses `archived_at IS NULL` as a guard, so concurrent runs from multiple

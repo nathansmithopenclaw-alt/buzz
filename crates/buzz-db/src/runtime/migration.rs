@@ -964,7 +964,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 47);
+        assert_eq!(migrations.len(), 49);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1167,7 +1167,7 @@ mod postgres_tests {
         // position below. Fresh desired state must carry the same exclusion.
         assert!(!migrations[0].sql.as_str().contains("30179"));
         assert!(include_str!("../../../../schema/schema.sql").contains(
-            "kind IN (1059, 30179, 30300, 30350, 30622, 30623, 30624, 40030, 44100, 44101, 44200)"
+            "kind IN (1059, 30179, 30300, 30350, 30622, 30623, 30624, 40030, 44100, 44101, 44200, 46010)"
         ));
 
         // Public push-gateway authority is intentionally deployment-global and
@@ -1588,6 +1588,18 @@ mod postgres_tests {
             .contains("DROP CONSTRAINT push_gateway_installations_app_profile_check"));
         assert!(dogfood_profile.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
         assert!(desired_schema.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
+
+        assert_eq!(migrations[47].version, 48);
+        let workflow_approval_fts = migrations[47].sql.as_str();
+        assert!(workflow_approval_fts.contains("kind = 46010"));
+        assert!(workflow_approval_fts.contains("search_tsv"));
+        assert!(desired_schema.contains("44200, 46010"));
+
+        assert_eq!(migrations[48].version, 49);
+        let workflow_approval_binding = migrations[48].sql.as_str();
+        assert!(workflow_approval_binding.contains("ADD COLUMN definition_hash"));
+        assert!(workflow_approval_binding.contains("pending_expiry"));
+        assert!(desired_schema.contains("idx_workflow_approvals_pending_expiry"));
     }
 
     #[test]
@@ -3037,7 +3049,7 @@ mod postgres_tests {
 
     /// Prepare the exact pre-fold ledger boundary for the isolated relay boot
     /// proof. This intentionally leaves the database at 0044 so starting the
-    /// folded relay must apply exactly 0045-0047.
+    /// folded relay must apply exactly 0045-0049.
     #[tokio::test]
     #[ignore = "requires isolated Postgres and intentionally leaves ledger at 44"]
     async fn prepare_ledger_44_schema_for_fold_boot() {
@@ -3053,10 +3065,10 @@ mod postgres_tests {
     }
 
     /// Brownfield fold contract: an already-applied canonical ledger at 0044
-    /// advances only through the three renumbered upstream migrations.
+    /// advances only through the renumbered upstream migrations and WF-08 FTS hardening.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn ledger_44_upgrade_applies_exactly_0045_through_0047() {
+    async fn ledger_44_upgrade_applies_exactly_0045_through_0049() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         run_migrations_through(&pool, 44)
@@ -3069,7 +3081,7 @@ mod postgres_tests {
 
         assert_eq!(
             applied_versions(&pool).await,
-            (1_i64..=47).collect::<Vec<_>>()
+            (1_i64..=49).collect::<Vec<_>>()
         );
         let fold_rows: Vec<(i64, String)> = sqlx::query_as(
             "SELECT version, description FROM _sqlx_migrations \
@@ -3084,6 +3096,8 @@ mod postgres_tests {
                 (45, "nip fi identity foundation".to_string()),
                 (46, "nip fi authorization foundation".to_string()),
                 (47, "push gateway dogfood profile".to_string()),
+                (48, "workflow approval request fts".to_string()),
+                (49, "workflow approval binding".to_string()),
             ]
         );
         for table in [

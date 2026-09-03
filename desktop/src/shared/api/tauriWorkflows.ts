@@ -91,10 +91,7 @@ type RawTriggerWorkflowResponse = {
 };
 
 type RawApprovalActionResponse = {
-  token: string;
-  status: string;
-  run_id: string;
-  workflow_id: string;
+  event_id: string;
 };
 
 // ── Conversion functions ──────────────────────────────────────────────────
@@ -176,10 +173,7 @@ function fromRawApprovalResponse(
   raw: RawApprovalActionResponse,
 ): ApprovalActionResponse {
   return {
-    token: raw.token,
-    status: raw.status,
-    runId: raw.run_id,
-    workflowId: raw.workflow_id,
+    eventId: raw.event_id,
   };
 }
 
@@ -269,12 +263,12 @@ export async function getRunApprovals(
 }
 
 export async function getApprovalResolution(
-  tokenHash: string,
+  approvalRef: string,
   approverPubkey: string,
 ): Promise<WorkflowApprovalResolution | null> {
   const raw = await invokeTauri<RawWorkflowApprovalResolution | null>(
     "get_approval_resolution",
-    { tokenHash, approverPubkey },
+    { approvalRef, approverPubkey },
   );
   return raw
     ? { status: raw.status, note: raw.note, createdAt: raw.created_at }
@@ -292,22 +286,22 @@ export async function triggerWorkflow(
 }
 
 export async function grantApproval(
-  token: string,
+  approvalRef: string,
   note?: string,
 ): Promise<ApprovalActionResponse> {
   const raw = await invokeTauri<RawApprovalActionResponse>("grant_approval", {
-    token,
+    approvalRef,
     note: note ?? null,
   });
   return fromRawApprovalResponse(raw);
 }
 
 export async function denyApproval(
-  token: string,
+  approvalRef: string,
   note?: string,
 ): Promise<ApprovalActionResponse> {
   const raw = await invokeTauri<RawApprovalActionResponse>("deny_approval", {
-    token,
+    approvalRef,
     note: note ?? null,
   });
   return fromRawApprovalResponse(raw);

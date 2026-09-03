@@ -36,6 +36,14 @@ fn hash_approval_token(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
+/// Derive the opaque public reference for an approval capability.
+///
+/// The raw token remains transient engine state; persistent rows and Nostr
+/// events carry only this lowercase SHA-256 reference.
+pub fn approval_ref(token: &str) -> String {
+    hex::encode(hash_approval_token(token))
+}
+
 // -- Status enums -------------------------------------------------------------
 
 /// Status of a workflow definition. Stored as ENUM('active','disabled','archived').
@@ -257,6 +265,8 @@ pub struct ApprovalRecord {
     pub step_id: String,
     /// Zero-based index of the step in the workflow.
     pub step_index: i32,
+    /// Workflow definition hash approved for this exact step.
+    pub definition_hash: Vec<u8>,
     /// Who may approve (user mention or role spec).
     pub approver_spec: String,
     /// Current status of this approval request.
@@ -979,6 +989,8 @@ pub struct CreateApprovalParams<'a> {
     pub step_id: &'a str,
     /// Zero-based index of the step in the workflow.
     pub step_index: i32,
+    /// SHA-256 hash of the exact workflow definition being gated.
+    pub definition_hash: &'a [u8],
     /// Who may approve (user mention or role spec).
     pub approver_spec: &'a str,
     /// When this approval request expires.
@@ -997,6 +1009,7 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
         run_id,
         step_id,
         step_index,
+        definition_hash,
         approver_spec,
         expires_at,
     } = params;
@@ -1005,8 +1018,8 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     sqlx::query(
         r#"
         INSERT INTO workflow_approvals
-            (community_id, token, workflow_id, run_id, step_id, step_index, approver_spec, status, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+            (community_id, token, workflow_id, run_id, step_id, step_index, definition_hash, approver_spec, status, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
         "#,
     )
     .bind(community_id.as_uuid())
@@ -1015,6 +1028,7 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     .bind(run_id)
     .bind(step_id)
     .bind(step_index)
+    .bind(definition_hash)
     .bind(approver_spec)
     .bind(expires_at)
     .execute(pool)
@@ -1036,8 +1050,8 @@ pub async fn suspend_workflow_run_for_approval(
     sqlx::query(
         r#"
         INSERT INTO workflow_approvals
-            (community_id, token, workflow_id, run_id, step_id, step_index, approver_spec, status, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+            (community_id, token, workflow_id, run_id, step_id, step_index, definition_hash, approver_spec, status, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
         "#,
     )
     .bind(params.community_id.as_uuid())
@@ -1046,6 +1060,7 @@ pub async fn suspend_workflow_run_for_approval(
     .bind(params.run_id)
     .bind(params.step_id)
     .bind(params.step_index)
+    .bind(params.definition_hash)
     .bind(params.approver_spec)
     .bind(params.expires_at)
     .execute(&mut *tx)
@@ -1109,7 +1124,7 @@ pub async fn get_approval_by_stored_hash(
 ) -> Result<ApprovalRecord> {
     let row = sqlx::query(
         r#"
-        SELECT token, workflow_id, run_id, step_id, step_index, approver_spec,
+        SELECT token, workflow_id, run_id, step_id, step_index, definition_hash, approver_spec,
                status::text AS status, approver_pubkey, note, expires_at, created_at
         FROM workflow_approvals
         WHERE community_id = $1 AND token = $2
@@ -1133,7 +1148,7 @@ pub async fn get_run_approvals(
 ) -> Result<Vec<ApprovalRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT token, workflow_id, run_id, step_id, step_index, approver_spec,
+        SELECT token, workflow_id, run_id, step_id, step_index, definition_hash, approver_spec,
                status::text AS status, approver_pubkey, note, expires_at, created_at
         FROM workflow_approvals
         WHERE community_id = $1 AND run_id = $2 AND workflow_id = $3
@@ -1222,6 +1237,74 @@ pub async fn update_approval_by_stored_hash(
     Ok(affected > 0)
 }
 
+/// Counts atomically expired approval rows and workflow runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpiredApprovalSweep {
+    /// Pending approval rows moved to `expired`.
+    pub approvals: i64,
+    /// Waiting workflow runs moved to terminal `failed`.
+    pub runs: i64,
+}
+
+/// Expire a bounded batch of pending approvals and their waiting runs.
+///
+/// The transition is idempotent (`status = 'pending'` / `waiting_approval`
+/// guards) and multi-pod safe (`FOR UPDATE SKIP LOCKED`).
+pub async fn expire_workflow_approvals(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+    limit: i64,
+) -> Result<ExpiredApprovalSweep> {
+    if !(1..=LIST_MAX_LIMIT).contains(&limit) {
+        return Err(DbError::InvalidData(format!(
+            "approval expiry limit must be between 1 and {LIST_MAX_LIMIT}"
+        )));
+    }
+    let row = sqlx::query(
+        r#"
+        WITH claimed AS (
+            SELECT community_id, token
+            FROM workflow_approvals
+            WHERE status = 'pending' AND expires_at <= $1
+            ORDER BY expires_at, community_id, token
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
+        ), expired AS (
+            UPDATE workflow_approvals a
+            SET status = 'expired',
+                note = COALESCE(a.note, 'approval request expired')
+            FROM claimed c
+            WHERE a.community_id = c.community_id AND a.token = c.token
+              AND a.status = 'pending'
+            RETURNING a.community_id, a.run_id, a.workflow_id, a.step_index
+        ), ended AS (
+            UPDATE workflow_runs r
+            SET status = 'failed',
+                current_step = e.step_index,
+                error_code = 'approval_expired',
+                error_message = 'workflow approval expired',
+                completed_at = $1
+            FROM expired e
+            WHERE r.community_id = e.community_id
+              AND r.id = e.run_id
+              AND r.workflow_id = e.workflow_id
+              AND r.status = 'waiting_approval'
+            RETURNING r.id
+        )
+        SELECT (SELECT COUNT(*) FROM expired) AS approvals,
+               (SELECT COUNT(*) FROM ended) AS runs
+        "#,
+    )
+    .bind(now)
+    .bind(limit)
+    .fetch_one(pool)
+    .await?;
+    Ok(ExpiredApprovalSweep {
+        approvals: row.try_get("approvals")?,
+        runs: row.try_get("runs")?,
+    })
+}
+
 // -- Row mappers --------------------------------------------------------------
 
 fn row_to_workflow_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRecord> {
@@ -1288,6 +1371,7 @@ fn row_to_approval_record(row: sqlx::postgres::PgRow) -> Result<ApprovalRecord> 
         run_id,
         step_id: row.try_get("step_id")?,
         step_index: row.try_get("step_index")?,
+        definition_hash: row.try_get("definition_hash")?,
         approver_spec: row.try_get("approver_spec")?,
         status,
         approver_pubkey: row.try_get("approver_pubkey")?,
@@ -1502,6 +1586,16 @@ impl Db {
             note,
         )
         .await
+    }
+
+    /// Expire a bounded batch of approvals and their waiting runs atomically.
+    #[datastore_span(name = "expire_workflow_approvals", system = "postgresql")]
+    pub async fn expire_workflow_approvals(
+        &self,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<crate::workflow::ExpiredApprovalSweep> {
+        crate::workflow::expire_workflow_approvals(&self.pool, now, limit).await
     }
 }
 
@@ -2133,6 +2227,7 @@ mod postgres_tests {
             run_id,
             step_id: "request_approval".to_owned(),
             step_index: 1,
+            definition_hash: vec![0x42; 32],
             approver_spec: "@engineering-lead".to_owned(),
             status: ApprovalStatus::Pending,
             approver_pubkey: None,
@@ -2163,6 +2258,7 @@ mod postgres_tests {
             run_id: Uuid::new_v4(),
             step_id: "gate".to_owned(),
             step_index: 0,
+            definition_hash: vec![0x42; 32],
             approver_spec: "@manager".to_owned(),
             status: ApprovalStatus::Granted,
             approver_pubkey: Some(approver_pubkey.clone()),
@@ -2186,6 +2282,7 @@ mod postgres_tests {
             run_id: Uuid::new_v4(),
             step_id: "gate".to_owned(),
             step_index: 0,
+            definition_hash: vec![0x42; 32],
             approver_spec: "@manager".to_owned(),
             status: ApprovalStatus::Denied,
             approver_pubkey: Some(vec![0xbb; 32]),
@@ -2207,6 +2304,7 @@ mod postgres_tests {
             run_id: Uuid::new_v4(),
             step_id: "gate".to_owned(),
             step_index: 0,
+            definition_hash: vec![0x42; 32],
             approver_spec: "@lead".to_owned(),
             status: ApprovalStatus::Pending,
             approver_pubkey: None,
@@ -2775,6 +2873,7 @@ mod postgres_tests {
                 run_id: run_a,
                 step_id: "gate",
                 step_index: 0,
+                definition_hash: &[0x42; 32],
                 approver_spec: "@anyone",
                 expires_at: expires,
             },
@@ -2790,6 +2889,7 @@ mod postgres_tests {
                 run_id: run_b,
                 step_id: "gate",
                 step_index: 0,
+                definition_hash: &[0x42; 32],
                 approver_spec: "@anyone",
                 expires_at: expires,
             },
@@ -2874,6 +2974,7 @@ mod postgres_tests {
                 run_id,
                 step_id: "gate",
                 step_index: 0,
+                definition_hash: &[0x42; 32],
                 approver_spec: "any",
                 expires_at: Utc::now() + chrono::Duration::minutes(5),
             },
@@ -2902,6 +3003,7 @@ mod postgres_tests {
                 run_id,
                 step_id: "other",
                 step_index: 1,
+                definition_hash: &[0x42; 32],
                 approver_spec: "any",
                 expires_at: Utc::now() + chrono::Duration::minutes(5),
             },
@@ -2918,6 +3020,91 @@ mod postgres_tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_approval_expiry_sweep_is_terminal_and_idempotent() {
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect isolated test DB");
+        crate::runtime::migration::run_migrations(&pool)
+            .await
+            .expect("apply current test schema");
+        let community = make_community(&pool).await;
+        let workflow_id = Uuid::new_v4();
+        insert_workflow_with_ids(
+            &pool,
+            community,
+            workflow_id,
+            Uuid::new_v4(),
+            "approval-expiry",
+        )
+        .await;
+        let run_id = create_workflow_run(&pool, community, workflow_id, None, None)
+            .await
+            .expect("create run");
+        update_workflow_run(
+            &pool,
+            community,
+            run_id,
+            RunStatus::Running,
+            0,
+            &serde_json::json!([]),
+            None,
+        )
+        .await
+        .expect("start run");
+        let token = Uuid::new_v4().to_string();
+        let approver = "a".repeat(64);
+        suspend_workflow_run_for_approval(
+            &pool,
+            CreateApprovalParams {
+                community_id: community,
+                token: &token,
+                workflow_id,
+                run_id,
+                step_id: "gate",
+                step_index: 0,
+                definition_hash: &[0x42; 32],
+                approver_spec: &approver,
+                expires_at: Utc::now() - chrono::Duration::seconds(1),
+            },
+            &serde_json::json!([{"step_id":"gate","status":"waiting_approval"}]),
+        )
+        .await
+        .expect("suspend for approval");
+
+        let first = expire_workflow_approvals(&pool, Utc::now(), 100)
+            .await
+            .expect("first expiry sweep");
+        assert_eq!(
+            first,
+            ExpiredApprovalSweep {
+                approvals: 1,
+                runs: 1
+            }
+        );
+        let approval = get_approval(&pool, community, &token)
+            .await
+            .expect("load expired approval");
+        assert_eq!(approval.status, ApprovalStatus::Expired);
+        let run = get_workflow_run(&pool, community, run_id)
+            .await
+            .expect("load terminal run");
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.error_code.as_deref(), Some("approval_expired"));
+
+        let second = expire_workflow_approvals(&pool, Utc::now(), 100)
+            .await
+            .expect("second expiry sweep");
+        assert_eq!(
+            second,
+            ExpiredApprovalSweep {
+                approvals: 0,
+                runs: 0
+            }
         );
     }
 
