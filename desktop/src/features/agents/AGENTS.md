@@ -299,10 +299,12 @@ that frontend inventory.
    reconcile instead of being clobbered. Persona-linked instances do not own a
    second description copy; snapshot export materializes the definition value
    only into the portable snapshot, and a dangling link resolves no description
-   rather than reviving stale instance metadata. The agents-page card face shows the
-   authored description as its second line, falling back to the model label
-   when none exists (`UnifiedAgentsSection.tsx` composes it;
-   `AgentIdentityCard` takes a presentational `subtitle`). The community catalog
+   rather than reviving stale instance metadata. The agents-page card face always
+   shows its runtime/model summary below the label, then the authored description
+   as a separate clamped line when present (`FleetSection.tsx`,
+   `ProjectedFleetAgentCard.tsx`, and `UndeployedPersonaCard.tsx` compose the
+   data; `AgentIdentityCard` takes presentational `modelLabel` and `subtitle`
+   props). The community catalog
    shows the same authored description before consent: a clamped two-line list
    subtitle for scanning and the full safely wrapped value in persona detail.
    The dialog field

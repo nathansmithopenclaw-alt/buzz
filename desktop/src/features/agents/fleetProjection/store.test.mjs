@@ -51,6 +51,7 @@ test("projection cache joins definitions and host liveness without runnable fiel
       content: {
         display_name: "Review Agent",
         avatar_url: "https://example.test/reviewer.png",
+        description: "Reviews risky changes before they ship.",
         runtime: "codex",
         model: "gpt-5",
         system_prompt: "must-not-survive-persona",
@@ -85,12 +86,17 @@ test("projection cache joins definitions and host liveness without runnable fiel
   assert.equal(snapshot.owners[0].agents[0].personaDisplayName, "Review Agent");
   assert.equal(snapshot.owners[0].agents[0].personaRuntime, "codex");
   assert.equal(snapshot.owners[0].agents[0].personaModel, "gpt-5");
+  assert.equal(
+    snapshot.owners[0].agents[0].personaDescription,
+    "Reviews risky changes before they ship.",
+  );
   assert.deepEqual(snapshot.owners[0].personas, [
     {
       ownerPubkey: OWNER,
       personaId: PERSONA,
       displayName: "Review Agent",
       avatarUrl: "https://example.test/reviewer.png",
+      description: "Reviews risky changes before they ship.",
       runtime: "codex",
       model: "gpt-5",
     },
