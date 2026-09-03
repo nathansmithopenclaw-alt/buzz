@@ -19,6 +19,7 @@ const agent = {
   personaId: "reviewer",
   personaDisplayName: "Persona name",
   personaAvatarUrl: "https://example.test/persona.png",
+  personaDescription: "Reviews risky changes.",
   personaRuntime: "codex",
   personaModel: "gpt-5",
   respondTo: "owner-only",

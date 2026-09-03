@@ -1,6 +1,7 @@
 import { Rocket } from "lucide-react";
 
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import type { FleetProjectionPersona } from "@/features/agents/fleetProjection/types";
 import type { AgentPersona } from "@/shared/api/types";
 import { Badge } from "@/shared/ui/badge";
@@ -85,6 +86,7 @@ export function HostUndeployedPersonaCard({
       dataTestId={`persona-agent-row-${persona.id}`}
       label={persona.displayName}
       modelLabel={`${runtimeLabel} · ${modelLabel}`}
+      subtitle={effectiveAgentDescription(persona)}
       statusBadge={<Badge variant="secondary">Not deployed</Badge>}
       onClick={() => onOpenPersonaProfile(persona)}
     />
@@ -101,6 +103,7 @@ export function ObserverUndeployedPersonaCard({
       dataTestId={`persona-agent-row-${persona.personaId}`}
       label={persona.displayName}
       modelLabel={`${persona.runtime?.trim() || "Default runtime"} · ${persona.model?.trim() || "Default model"}`}
+      subtitle={persona.description}
       statusBadge={<Badge variant="secondary">Not deployed</Badge>}
     />
   );

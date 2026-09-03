@@ -15,6 +15,7 @@ export type FleetProjectionAgent = {
   personaId: string | null;
   personaDisplayName: string | null;
   personaAvatarUrl: string | null;
+  personaDescription: string | null;
   personaRuntime: string | null;
   personaModel: string | null;
   respondTo: FleetProjectionRespondTo;
@@ -26,6 +27,7 @@ export type FleetProjectionPersona = {
   personaId: string;
   displayName: string;
   avatarUrl: string | null;
+  description: string | null;
   runtime: string | null;
   model: string | null;
 };

@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { fleetAgentHost } from "@/features/agents/fleetProjection/selectors";
 import type { FleetProjectionOwnerPresentation } from "@/features/agents/fleetProjection/useFleetProjectionPresentation";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
@@ -545,6 +546,7 @@ function FleetAgentCard({
       dataTestId={`managed-agent-${agent.pubkey}`}
       label={identity.displayName}
       modelLabel={`${runtimeLabel} · ${modelLabel}`}
+      subtitle={persona ? effectiveAgentDescription(persona) : null}
       onClick={() => {
         if (opensRuntimeTab) {
           onOpenAgentProfile(agent.pubkey, { tab: "runtime" });

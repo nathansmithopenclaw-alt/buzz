@@ -317,6 +317,11 @@ test("built-in persona edits persist", async ({ page }) => {
 
   await expect(dialog).toHaveCount(0);
   await expect(page.getByTestId("agents-fleet-grid")).toContainText("My Fizz");
+  const fleetCard = page.getByTestId("persona-agent-row-builtin:fizz");
+  await expect(fleetCard).toContainText(
+    "Default runtime · Default model (claude-opus-4-5)",
+  );
+  await expect(fleetCard).toContainText("Helps teams ship reliably.");
   const personas = await invokeTauri<
     Array<{
       id: string;

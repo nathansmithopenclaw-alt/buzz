@@ -84,6 +84,7 @@ export function ProjectedFleetAgentCard({
       dataTestId={`fleet-agent-${agent.agentPubkey}`}
       label={agent.displayName}
       modelLabel={`${runtimeLabel} · ${modelLabel}`}
+      subtitle={agent.personaDescription}
       onClick={() => onOpenAgentProfile(agent.agentPubkey, { source: "relay" })}
       statusBadge={
         <div className="flex flex-wrap gap-1.5">

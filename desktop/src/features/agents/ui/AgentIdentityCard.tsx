@@ -12,8 +12,9 @@ type AgentIdentityCardProps = {
   className?: string;
   dataTestId: string;
   label: string;
+  /** Runtime and model summary rendered directly below the card label. */
   modelLabel?: string | null;
-  /** Description when present; callers may fall back to the model label. */
+  /** Optional authored description rendered below the model summary. */
   subtitle?: string | null;
   onClick?: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
@@ -28,6 +29,7 @@ export function AgentIdentityCard({
   className,
   dataTestId,
   label,
+  modelLabel,
   subtitle,
   onClick,
   statusBadge,
@@ -81,6 +83,11 @@ export function AgentIdentityCard({
         <span className="min-w-0 truncate font-semibold text-foreground tracking-normal">
           {label}
         </span>
+        {modelLabel ? (
+          <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
+            {modelLabel}
+          </span>
+        ) : null}
         {subtitle ? (
           <span className="line-clamp-2 min-w-0 text-xs font-normal text-muted-foreground">
             {subtitle}

@@ -65,6 +65,7 @@ type PersonaHead = Version & {
   personaId: string;
   displayName: string;
   avatarUrl: string | null;
+  description: string | null;
   runtime: string | null;
   model: string | null;
 };
@@ -200,6 +201,10 @@ function parsePersonaHead(event: RelayEvent): PersonaHead | null {
     typeof content.avatar_url === "string" && content.avatar_url.trim()
       ? content.avatar_url.trim()
       : null;
+  const description =
+    typeof content.description === "string" && content.description.trim()
+      ? content.description.trim()
+      : null;
   const runtime =
     typeof content.runtime === "string" && content.runtime.trim()
       ? content.runtime.trim()
@@ -214,6 +219,7 @@ function parsePersonaHead(event: RelayEvent): PersonaHead | null {
     personaId,
     displayName,
     avatarUrl,
+    description,
     runtime,
     model,
     createdAt: event.created_at,
@@ -476,6 +482,7 @@ function buildSnapshot(
             personaId: agent.personaId,
             personaDisplayName: persona?.displayName ?? null,
             personaAvatarUrl: persona?.avatarUrl ?? null,
+            personaDescription: persona?.description ?? null,
             personaRuntime: persona?.runtime ?? null,
             personaModel: persona?.model ?? null,
             respondTo: agent.respondTo,
@@ -495,6 +502,7 @@ function buildSnapshot(
           personaId: persona.personaId,
           displayName: persona.displayName,
           avatarUrl: persona.avatarUrl,
+          description: persona.description,
           runtime: persona.runtime,
           model: persona.model,
         }));
