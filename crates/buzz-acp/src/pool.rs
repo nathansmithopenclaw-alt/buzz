@@ -976,6 +976,12 @@ pub struct PromptContext {
     pub max_turns_per_session: u32,
     /// Pair-local continuity summaries, disabled unless explicitly configured.
     pub sleep_summary_store: crate::sleep_summary::SleepSummaryStore,
+    /// Emit per-section standing-prefix measurements and budget warnings.
+    pub prefix_budget_warnings: bool,
+    /// Rendered core-memory warning threshold in UTF-8 bytes.
+    pub prefix_core_warning_bytes: u64,
+    /// Standing prompt plus configured MCP descriptor warning threshold.
+    pub prefix_total_warning_bytes: u64,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Native ACP effort value to apply after the model selection.
@@ -1766,6 +1772,119 @@ struct NewSessionChannelContext<'a> {
     channel_type: Option<&'a str>,
 }
 
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrefixBudgetReport {
+    base_bytes: usize,
+    workspace_bytes: usize,
+    system_bytes: usize,
+    team_bytes: usize,
+    core_bytes: usize,
+    huddle_bytes: usize,
+    canvas_bytes: usize,
+    sleep_summary_bytes: usize,
+    framing_bytes: usize,
+    standing_bytes: usize,
+    mcp_config_bytes: usize,
+    total_bytes: usize,
+    core_warning_bytes: u64,
+    total_warning_bytes: u64,
+    core_exceeded: bool,
+    total_exceeded: bool,
+}
+
+impl PrefixBudgetReport {
+    fn exceeded(&self) -> bool {
+        self.core_exceeded || self.total_exceeded
+    }
+}
+
+fn rendered_section_bytes(tag: &str, value: Option<&str>) -> usize {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| crate::prompt_framing::semantic_section(tag, value).len())
+        .unwrap_or(0)
+}
+
+fn prefix_budget_report(
+    ctx: &PromptContext,
+    agent_core: Option<&str>,
+    channel: &NewSessionChannelContext<'_>,
+    sleep_summary: Option<&str>,
+    combined_system_prompt: Option<&str>,
+    mcp_servers: &[McpServer],
+) -> PrefixBudgetReport {
+    let base_bytes = ctx
+        .base_prompt
+        .as_deref()
+        .map(crate::queue::base_section)
+        .map_or(0, |value| value.len());
+    let workspace_bytes = ctx
+        .base_prompt
+        .as_ref()
+        .map(|_| workspace_section(&ctx.cwd).len())
+        .unwrap_or(0);
+    let system_bytes = rendered_section_bytes("system", ctx.system_prompt.as_deref());
+    let team_bytes = rendered_section_bytes("team-instructions", ctx.team_instructions.as_deref());
+    let core_bytes = agent_core
+        .map(|core| {
+            crate::prompt_framing::normalize_semantic_section(
+                "core-memory",
+                "Agent Memory — core",
+                core,
+            )
+            .len()
+        })
+        .unwrap_or(0);
+    let huddle_bytes = rendered_section_bytes("huddle-instructions", channel.huddle_instructions);
+    let canvas_bytes = channel
+        .canvas
+        .map(|canvas| {
+            crate::prompt_framing::normalize_semantic_section(
+                "channel-canvas",
+                "Channel Canvas",
+                canvas,
+            )
+            .len()
+        })
+        .unwrap_or(0);
+    let sleep_summary_bytes = sleep_summary.map(str::len).unwrap_or(0);
+    let standing_bytes = combined_system_prompt.map(str::len).unwrap_or(0);
+    let section_bytes = base_bytes
+        + workspace_bytes
+        + system_bytes
+        + team_bytes
+        + core_bytes
+        + huddle_bytes
+        + canvas_bytes
+        + sleep_summary_bytes;
+    let framing_bytes = standing_bytes.saturating_sub(section_bytes);
+    // This measures the configured MCP descriptors sent by Buzz. Provider-owned
+    // built-in tools and dynamically discovered tool schemas are not observable
+    // at this boundary and are deliberately not estimated.
+    let mcp_config_bytes = serde_json::to_vec(mcp_servers).map_or(0, |value| value.len());
+    let total_bytes = standing_bytes.saturating_add(mcp_config_bytes);
+    PrefixBudgetReport {
+        base_bytes,
+        workspace_bytes,
+        system_bytes,
+        team_bytes,
+        core_bytes,
+        huddle_bytes,
+        canvas_bytes,
+        sleep_summary_bytes,
+        framing_bytes,
+        standing_bytes,
+        mcp_config_bytes,
+        total_bytes,
+        core_warning_bytes: ctx.prefix_core_warning_bytes,
+        total_warning_bytes: ctx.prefix_total_warning_bytes,
+        core_exceeded: core_bytes as u64 > ctx.prefix_core_warning_bytes,
+        total_exceeded: total_bytes as u64 > ctx.prefix_total_warning_bytes,
+    }
+}
+
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
@@ -1817,6 +1936,49 @@ async fn create_session_and_apply_model(
         channel.channel_type,
         ctx.session_title.as_deref(),
     );
+
+    if ctx.prefix_budget_warnings {
+        let report = prefix_budget_report(
+            ctx,
+            agent_core,
+            &channel,
+            sleep_summary.as_deref(),
+            combined_system_prompt.as_deref(),
+            &mcp_servers,
+        );
+        tracing::info!(
+            target: "pool::prefix_budget",
+            base_bytes = report.base_bytes,
+            workspace_bytes = report.workspace_bytes,
+            system_bytes = report.system_bytes,
+            team_bytes = report.team_bytes,
+            core_bytes = report.core_bytes,
+            huddle_bytes = report.huddle_bytes,
+            canvas_bytes = report.canvas_bytes,
+            sleep_summary_bytes = report.sleep_summary_bytes,
+            framing_bytes = report.framing_bytes,
+            standing_bytes = report.standing_bytes,
+            mcp_config_bytes = report.mcp_config_bytes,
+            total_bytes = report.total_bytes,
+            "PREFIX_BUDGET_MEASUREMENT standing prefix byte breakdown"
+        );
+        if report.exceeded() {
+            tracing::warn!(
+                target: "pool::prefix_budget",
+                core_bytes = report.core_bytes,
+                core_warning_bytes = report.core_warning_bytes,
+                core_exceeded = report.core_exceeded,
+                total_bytes = report.total_bytes,
+                total_warning_bytes = report.total_warning_bytes,
+                total_exceeded = report.total_exceeded,
+                "PREFIX_BUDGET_WARNING standing prefix exceeds configured byte budget"
+            );
+            agent.acp.observe(
+                "prefix_budget_warning",
+                serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({})),
+            );
+        }
+    }
 
     let resp = agent
         .acp
@@ -10520,6 +10682,9 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             context_message_limit: 0,
             max_turns_per_session: 0,
             sleep_summary_store: crate::sleep_summary::SleepSummaryStore::new(false, None),
+            prefix_budget_warnings: false,
+            prefix_core_warning_bytes: 12 * 1024,
+            prefix_total_warning_bytes: 200 * 1024,
             permission_mode: PermissionMode::Default,
             thinking_effort: None,
             thinking_effort_is_default: false,
@@ -12099,6 +12264,72 @@ done"#
         assert!(system.contains("<sleep-summary>"));
         assert!(system.contains("Goal: continue proof lane"));
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn low_prefix_budget_emits_structured_warning_without_truncation() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_test_writer()
+            .try_init();
+        let script = r#"
+read -r _request
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"sessionId":"budget-proof","configOptions":[]}}'
+"#;
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script.to_string()], &[], false)
+            .await
+            .expect("spawn prefix budget proof ACP");
+        let observer = crate::observer::ObserverHandle::in_process();
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "budget-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        agent.acp.set_observer(Some(observer.clone()), 0);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.base_prompt = Some("base sentinel".into());
+        ctx.system_prompt = Some("persona sentinel".into());
+        ctx.prefix_budget_warnings = true;
+        ctx.prefix_core_warning_bytes = 1;
+        ctx.prefix_total_warning_bytes = 1;
+
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            Some("<core-memory>core sentinel</core-memory>"),
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: Some("<channel-canvas>canvas sentinel</channel-canvas>"),
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed without truncating context");
+        agent.acp.shutdown().await;
+
+        let warning = observer
+            .snapshot()
+            .into_iter()
+            .find(|event| event.kind == "prefix_budget_warning")
+            .expect("low byte budgets emit a structured observer warning");
+        assert_eq!(warning.payload["coreExceeded"], true);
+        assert_eq!(warning.payload["totalExceeded"], true);
+        assert!(warning.payload["baseBytes"].as_u64().unwrap() > 0);
+        assert!(warning.payload["systemBytes"].as_u64().unwrap() > 0);
+        assert!(warning.payload["coreBytes"].as_u64().unwrap() > 0);
+        assert!(warning.payload["canvasBytes"].as_u64().unwrap() > 0);
+        assert!(warning.payload["totalBytes"].as_u64().unwrap() > 1);
     }
 }
 

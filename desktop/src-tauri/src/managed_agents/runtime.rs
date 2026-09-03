@@ -557,8 +557,14 @@ pub fn spawn_agent_child(
             "BUZZ_ACP_SLEEP_SUMMARY_DIR",
             managed_agent_continuity_dir(app, &runtime_key)?,
         );
+        command.env("BUZZ_ACP_PREFIX_BUDGET_WARNINGS", "true");
+        command.env("BUZZ_ACP_PREFIX_CORE_WARNING_BYTES", "12288");
+        command.env("BUZZ_ACP_PREFIX_TOTAL_WARNING_BYTES", "204800");
     } else {
         command.env_remove("BUZZ_ACP_SLEEP_SUMMARY_DIR");
+        command.env("BUZZ_ACP_PREFIX_BUDGET_WARNINGS", "false");
+        command.env_remove("BUZZ_ACP_PREFIX_CORE_WARNING_BYTES");
+        command.env_remove("BUZZ_ACP_PREFIX_TOTAL_WARNING_BYTES");
     }
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));

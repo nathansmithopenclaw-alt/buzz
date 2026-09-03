@@ -37,6 +37,13 @@ The reference environment variables are:
 - `BUZZ_ACP_SLEEP_WITH_SUMMARY`: enables local continuity capture.
 - `BUZZ_ACP_SLEEP_SUMMARY_DIR`: an explicit pair-local state directory. An
   implementation MUST reject summary capture when no directory is supplied.
+- `BUZZ_ACP_PREFIX_BUDGET_WARNINGS`: enables standing-prefix measurement and
+  warnings.
+- `BUZZ_ACP_PREFIX_CORE_WARNING_BYTES`: rendered core-memory warning threshold;
+  the reference default is 12 KiB.
+- `BUZZ_ACP_PREFIX_TOTAL_WARNING_BYTES`: rendered standing prompt plus
+  configured MCP-descriptor warning threshold; the reference default is 200
+  KiB.
 
 Settings are sampled when the managed process starts. A running process MUST
 NOT silently change residency policy because a profile is edited.
@@ -122,6 +129,30 @@ of private conversation state. It MUST NOT be published to a relay, included
 in logs, or exposed to another agent identity. Implementations SHOULD offer a
 clear deletion path and MUST treat local file permissions, bounds, escaping,
 and scope identity as security boundaries.
+
+## Prefix Budget Warnings
+
+When enabled, the runtime SHOULD measure the UTF-8 byte contribution of each
+standing section at every session creation. The reference breakdown includes
+base, workspace, persona/system, team instructions, core memory, huddle
+instructions, canvas, sleep summary, inter-section framing, and configured MCP
+descriptors. It emits a warning when rendered core memory exceeds 12 KiB or the
+rendered standing prompt plus MCP descriptors exceeds 200 KiB.
+
+These limits are warnings only. An implementation MUST NOT truncate or omit
+context, tools, memory, or reasoning merely because a budget is exceeded.
+Thresholds MUST be configurable so operators can test policy and accommodate
+different providers.
+
+The MCP measurement covers only the descriptors the runtime serializes into
+`session/new`. Provider-owned built-in tools and tool schemas discovered after
+session creation are not observable at this boundary and MUST NOT be guessed.
+Implementations MUST label the resulting total accordingly; it is not an exact
+provider-token count.
+
+Warning payloads MUST contain byte counts and thresholds only, never the
+section contents. A local observer feed MAY surface the same structured warning
+to a client UI without defining or changing a relay event kind.
 
 ## Relay Impact
 

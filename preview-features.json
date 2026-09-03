@@ -20,7 +20,7 @@
     {
       "id": "agentSessionResidency",
       "name": "Agent Session Continuity",
-      "description": "Tune idle residency and turn-count rotation, with a bounded local handoff across predictable sleep. Applies when managed agents next start.",
+      "description": "Tune idle residency and turn-count rotation, carry a bounded local handoff across predictable sleep, and warn on oversized standing prefixes. Applies when managed agents next start.",
       "platforms": ["desktop"]
     },
     {

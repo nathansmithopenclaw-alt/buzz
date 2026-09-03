@@ -65,6 +65,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_MAX_TURNS_PER_SESSION",
     "BUZZ_ACP_SLEEP_WITH_SUMMARY",
     "BUZZ_ACP_SLEEP_SUMMARY_DIR",
+    "BUZZ_ACP_PREFIX_BUDGET_WARNINGS",
+    "BUZZ_ACP_PREFIX_CORE_WARNING_BYTES",
+    "BUZZ_ACP_PREFIX_TOTAL_WARNING_BYTES",
     // Desktop experiment policy: the Settings toggle is the sole authority
     // for whether channel threads receive independent ACP sessions.
     "BUZZ_ACP_SESSION_POLICY",

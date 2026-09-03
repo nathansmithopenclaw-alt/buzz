@@ -577,6 +577,29 @@ pub struct CliArgs {
     /// when sleep-with-summary is enabled; no implicit home-directory fallback.
     #[arg(long, env = "BUZZ_ACP_SLEEP_SUMMARY_DIR")]
     pub sleep_summary_dir: Option<PathBuf>,
+
+    /// Emit per-section standing-prefix measurements and warn when configured
+    /// byte budgets are exceeded.
+    #[arg(long, env = "BUZZ_ACP_PREFIX_BUDGET_WARNINGS", default_value_t = false)]
+    pub prefix_budget_warnings: bool,
+
+    /// Warn when the rendered core-memory section exceeds this many UTF-8
+    /// bytes. Only active with `--prefix-budget-warnings`.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_PREFIX_CORE_WARNING_BYTES",
+        default_value_t = 12 * 1024
+    )]
+    pub prefix_core_warning_bytes: u64,
+
+    /// Warn when the rendered standing prompt plus configured MCP descriptors
+    /// exceeds this many UTF-8 bytes. Provider-owned tool schemas are excluded.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_PREFIX_TOTAL_WARNING_BYTES",
+        default_value_t = 200 * 1024
+    )]
+    pub prefix_total_warning_bytes: u64,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -679,6 +702,12 @@ pub struct Config {
     pub sleep_with_summary: bool,
     /// Pair-scoped directory for the bounded local summary store.
     pub sleep_summary_dir: Option<PathBuf>,
+    /// Whether per-section standing-prefix measurements and warnings are enabled.
+    pub prefix_budget_warnings: bool,
+    /// Rendered core-memory warning threshold in UTF-8 bytes.
+    pub prefix_core_warning_bytes: u64,
+    /// Rendered standing prompt plus MCP-config warning threshold in UTF-8 bytes.
+    pub prefix_total_warning_bytes: u64,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1370,6 +1399,9 @@ impl Config {
             idle_pool_sleep_secs: args.idle_pool_sleep,
             sleep_with_summary: args.sleep_with_summary,
             sleep_summary_dir: args.sleep_summary_dir,
+            prefix_budget_warnings: args.prefix_budget_warnings,
+            prefix_core_warning_bytes: args.prefix_core_warning_bytes,
+            prefix_total_warning_bytes: args.prefix_total_warning_bytes,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1751,6 +1783,9 @@ mod tests {
             idle_pool_sleep_secs: 0,
             sleep_with_summary: false,
             sleep_summary_dir: None,
+            prefix_budget_warnings: false,
+            prefix_core_warning_bytes: 12 * 1024,
+            prefix_total_warning_bytes: 200 * 1024,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2683,6 +2718,29 @@ channels = "ALL"
                 .unwrap();
         let error = Config::from_args(args).unwrap_err();
         assert!(error.to_string().contains("requires --sleep-summary-dir"));
+    }
+
+    #[test]
+    fn prefix_budget_warnings_are_opt_in_with_configurable_defaults() {
+        let key = "0".repeat(64);
+        let defaults = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert!(!defaults.prefix_budget_warnings);
+        assert_eq!(defaults.prefix_core_warning_bytes, 12 * 1024);
+        assert_eq!(defaults.prefix_total_warning_bytes, 200 * 1024);
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--prefix-budget-warnings",
+            "--prefix-core-warning-bytes",
+            "17",
+            "--prefix-total-warning-bytes",
+            "29",
+        ]);
+        assert!(configured.prefix_budget_warnings);
+        assert_eq!(configured.prefix_core_warning_bytes, 17);
+        assert_eq!(configured.prefix_total_warning_bytes, 29);
     }
 
     #[test]
