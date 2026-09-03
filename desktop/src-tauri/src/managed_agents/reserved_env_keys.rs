@@ -71,6 +71,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // Desktop experiment policy: the Settings toggle is the sole authority
     // for whether channel threads receive independent ACP sessions.
     "BUZZ_ACP_SESSION_POLICY",
+    // Desktop experiment policy: persisted answered-event suppression is
+    // controlled by the Settings toggle, not free-form agent env.
+    "BUZZ_ACP_ANSWERED_WATERMARK",
     "BUZZ_ACP_NO_PRESENCE",
     // Readiness handoff: desktop is the ONLY readiness source. A saved or
     // ambient env var must not be able to forge setup mode (NotReady) on a

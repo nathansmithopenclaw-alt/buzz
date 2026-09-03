@@ -295,16 +295,25 @@ pub struct CliArgs {
 
     /// Seconds of channel history to replay when the harness starts.
     ///
-    /// Replay is intentionally at-least-once: duplicate delivery after an
-    /// unclean restart is preferable to silently losing a mention received
-    /// while the agent was down. The relay's in-process event-id cache removes
-    /// duplicates within a single connection lifecycle.
+    /// Replay is intentionally at-least-once. When answered-watermark
+    /// protection is enabled, exact relay-verified receipts suppress already
+    /// handled mentions without shortening this configured recovery window.
     #[arg(
         long,
         env = "BUZZ_ACP_STARTUP_REPLAY_LOOKBACK",
         default_value_t = DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS
     )]
     pub startup_replay_lookback_secs: u64,
+
+    /// Persist exact, relay-verified answer receipts across harness restarts.
+    /// Experimental and default-off until enabled from Settings → Experiments.
+    #[arg(long, env = "BUZZ_ACP_ANSWERED_WATERMARK", default_value_t = false)]
+    pub answered_watermark: bool,
+
+    /// Override the answered-watermark file location. Primarily for tests and
+    /// managed deployments that own their state directory.
+    #[arg(long, env = "BUZZ_ACP_ANSWERED_WATERMARK_PATH", hide = true)]
+    pub answered_watermark_path: Option<PathBuf>,
 
     /// Deprecated: alias for --idle-timeout. If both set, --idle-timeout wins.
     #[arg(long, env = "BUZZ_ACP_TURN_TIMEOUT", hide = true)]
@@ -621,6 +630,8 @@ pub struct Config {
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub startup_replay_lookback_secs: u64,
+    pub answered_watermark: bool,
+    pub answered_watermark_path: Option<PathBuf>,
     pub agents: u32,
     pub heartbeat_interval_secs: u64,
     /// Seconds between per-turn liveness pings. 0 = disabled. Distinct from
@@ -1352,6 +1363,8 @@ impl Config {
             idle_timeout_secs,
             max_turn_duration_secs,
             startup_replay_lookback_secs: args.startup_replay_lookback_secs,
+            answered_watermark: args.answered_watermark,
+            answered_watermark_path: args.answered_watermark_path,
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
@@ -1733,6 +1746,16 @@ mod tests {
     use crate::filter::{ChannelScope, SubscriptionRule};
     use clap::{Parser, ValueEnum};
 
+    #[test]
+    fn answered_watermark_is_default_off() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert!(!default.answered_watermark);
+        let enabled =
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--answered-watermark"]);
+        assert!(enabled.answered_watermark);
+    }
+
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {
         Config {
@@ -1744,6 +1767,8 @@ mod tests {
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             startup_replay_lookback_secs: DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS,
+            answered_watermark: false,
+            answered_watermark_path: None,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,

@@ -74,6 +74,7 @@ pub struct WorkspaceExperimentFlags {
     fleet_visibility: bool,
     thread_scoped_acp_sessions: bool,
     agent_session_residency: bool,
+    answered_event_watermark: bool,
 }
 
 /// Fetch a relay's workspace icon from its NIP-11 relay information document.
@@ -248,6 +249,9 @@ pub async fn apply_workspace(
         state
             .session_residency_enabled()
             .store(experiments.agent_session_residency, Ordering::Release);
+        state
+            .answered_event_watermark_enabled()
+            .store(experiments.answered_event_watermark, Ordering::Release);
         crate::managed_agents::fleet_visibility::configure_runtime(
             &app,
             &state.fleet_visibility,
@@ -448,9 +452,11 @@ mod tests {
     fn workspace_experiment_flags_are_camel_case_and_default_off() {
         let enabled: WorkspaceExperimentFlags = serde_json::from_value(serde_json::json!({
             "agentSessionResidency": true,
+            "answeredEventWatermark": true,
         }))
         .unwrap();
         assert!(enabled.agent_session_residency);
+        assert!(enabled.answered_event_watermark);
         assert!(!enabled.agent_managed_profiles);
         assert!(!enabled.fleet_visibility);
         assert!(!enabled.thread_scoped_acp_sessions);
@@ -458,6 +464,7 @@ mod tests {
         let omitted: WorkspaceExperimentFlags =
             serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(!omitted.agent_session_residency);
+        assert!(!omitted.answered_event_watermark);
     }
 
     #[test]

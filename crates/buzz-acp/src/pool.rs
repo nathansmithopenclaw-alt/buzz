@@ -96,6 +96,7 @@ pub(crate) fn is_channel_report_kind(kind: u32) -> bool {
 struct PublicationWatch {
     channel_id: Uuid,
     trigger_event_id: String,
+    answered_event_ids: Vec<String>,
     is_dm: bool,
     observed_at_start: u64,
     turn_started_at: nostr::Timestamp,
@@ -1015,6 +1016,13 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Receipt retention follows the configured startup replay horizon. It
+    /// never narrows the relay subscription window.
+    pub answered_watermark_retention_secs: u64,
+    /// Optional restart-durable exact answered-event cache. Present only while
+    /// the default-off replay-hygiene experiment is enabled.
+    pub answered_watermark_store:
+        Option<Arc<std::sync::Mutex<crate::answered_watermark::AnsweredWatermarkStore>>>,
     /// Self-authored channel reports observed by the harness subscription.
     /// Used only to detect a successful mention-triggered turn that produced
     /// no visible report; never stores or republishes agent output content.
@@ -3004,6 +3012,12 @@ fn publication_watch_for_batch(
     Some(PublicationWatch {
         channel_id: batch.channel_id,
         trigger_event_id: trigger.event.id.to_hex(),
+        answered_event_ids: batch
+            .events
+            .iter()
+            .chain(batch.cancelled_events.iter())
+            .map(|event| event.event.id.to_hex())
+            .collect(),
         is_dm,
         observed_at_start: tracker.snapshot(batch.channel_id),
         turn_started_at: nostr::Timestamp::now(),
@@ -3033,17 +3047,24 @@ fn self_authored_report_filter(
             SingleLetterTag::lowercase(Alphabet::H),
             [watch.channel_id.to_string()],
         )
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::E),
+            watch.answered_event_ids.iter().cloned(),
+        )
         .since(watch.turn_started_at)
-        .limit(1)
+        .limit(watch.answered_event_ids.len())
 }
 
-/// Pull-verify a report when the subscription-fed tracker did not advance.
+/// Pull-verify reports whose NIP-10 reply marker names this turn's events.
 ///
 /// `None` means the relay could not give us a trustworthy answer. Callers must
 /// fail closed (skip the notice) in that case: a silence warning is only useful
 /// when absence was positively checked, and the warning itself uses the same
 /// REST path.
-async fn self_authored_report_exists(watch: &PublicationWatch, rest: &RestClient) -> Option<bool> {
+async fn self_authored_answer_receipts(
+    watch: &PublicationWatch,
+    rest: &RestClient,
+) -> Option<Vec<(Uuid, String, u64)>> {
     let filter = self_authored_report_filter(watch, rest.keys.public_key());
     match timeout(
         CONTEXT_FETCH_TIMEOUT,
@@ -3052,7 +3073,17 @@ async fn self_authored_report_exists(watch: &PublicationWatch, rest: &RestClient
     .await
     {
         Ok(Ok(events)) => match events.as_array() {
-            Some(events) => Some(!events.is_empty()),
+            Some(events) => match answered_receipts_for_watch(watch, events.iter().cloned()) {
+                Ok(receipts) => Some(receipts),
+                Err(error) => {
+                    tracing::warn!(
+                        channel = %watch.channel_id,
+                        %error,
+                        "publication pull verification returned an invalid event; suppressing silence notice"
+                    );
+                    None
+                }
+            },
             None => {
                 tracing::warn!(
                     channel = %watch.channel_id,
@@ -3076,6 +3107,25 @@ async fn self_authored_report_exists(watch: &PublicationWatch, rest: &RestClient
             None
         }
     }
+}
+
+fn answered_receipts_for_watch(
+    watch: &PublicationWatch,
+    reports: impl IntoIterator<Item = serde_json::Value>,
+) -> anyhow::Result<Vec<(Uuid, String, u64)>> {
+    let answered = crate::answered_event_ids_from_reports(reports)?;
+    let watched: HashSet<&str> = watch
+        .answered_event_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    Ok(answered
+        .receipts
+        .into_iter()
+        .filter(|(channel, event_id, _)| {
+            *channel == watch.channel_id && watched.contains(event_id.as_str())
+        })
+        .collect())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3169,16 +3219,29 @@ fn spawn_publication_silence_notice(
     let ctx = Arc::clone(ctx);
     let turn_id = turn_id.to_string();
     tokio::spawn(async move {
+        if !publication_missing(&watch, &ctx.publication_tracker) {
+            if let Some(receipts) = self_authored_answer_receipts(&watch, &ctx.rest_client).await {
+                persist_answered_receipts(&ctx, receipts);
+            }
+            return;
+        }
         // A CLI send can return just before the relay fans the signed event
         // back to this WebSocket. Give that event one bounded settle window so
         // a successful report does not race its own failure notice.
         tokio::time::sleep(PUBLICATION_SETTLE_DELAY).await;
         if !publication_missing(&watch, &ctx.publication_tracker) {
+            if let Some(receipts) = self_authored_answer_receipts(&watch, &ctx.rest_client).await {
+                persist_answered_receipts(&ctx, receipts);
+            }
             return;
         }
-        match self_authored_report_exists(&watch, &ctx.rest_client).await {
-            Some(false) => {}
-            Some(true) | None => return,
+        match self_authored_answer_receipts(&watch, &ctx.rest_client).await {
+            Some(receipts) if receipts.is_empty() => {}
+            Some(receipts) => {
+                persist_answered_receipts(&ctx, receipts);
+                return;
+            }
+            None => return,
         }
         emit_publication_silence_surface(
             &ctx.rest_client,
@@ -3189,6 +3252,26 @@ fn spawn_publication_silence_notice(
         )
         .await;
     });
+}
+
+fn persist_answered_receipts(
+    ctx: &PromptContext,
+    receipts: impl IntoIterator<Item = (Uuid, String, u64)>,
+) {
+    let Some(store) = ctx.answered_watermark_store.as_ref() else {
+        return;
+    };
+    let Ok(mut store) = store.lock() else {
+        tracing::warn!("answered-event watermark lock poisoned");
+        return;
+    };
+    let now = nostr::Timestamp::now().as_secs();
+    if let Err(error) = store.merge_and_persist(
+        receipts,
+        now.saturating_sub(ctx.answered_watermark_retention_secs),
+    ) {
+        tracing::warn!(%error, "answered-event watermark persist failed");
+    }
 }
 
 /// Core async function spawned for each prompt.
@@ -3219,15 +3302,15 @@ pub async fn run_prompt_task(
     };
     let observer_channel_id = source.channel_id();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
+    // Derived before any arm can move `batch`, so every publish path below
+    // sees the same provenance regardless of how the turn ends.
+    let mut provenance = TurnProvenance::from_batch(batch.as_ref(), ctx.startup_epoch_secs);
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         None,
         turn_id.clone(),
         turn_started_at.clone(),
     ));
-    // Derived before any arm can move `batch`, so every publish path below
-    // sees the same provenance regardless of how the turn ends.
-    let mut provenance = TurnProvenance::from_batch(batch.as_ref(), ctx.startup_epoch_secs);
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
@@ -3253,6 +3336,7 @@ pub async fn run_prompt_task(
                 PromptSource::Channel(_) => "channel",
                 PromptSource::Heartbeat => "heartbeat",
             },
+            "isReplay": provenance.is_replay,
             "triggeringEventIds": triggering_event_ids,
             "mentionToTurnStartMs": mention_to_turn_start_ms,
             "queueWaitMs": queue_wait_ms,
@@ -8858,6 +8942,120 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     }
 
     #[test]
+    fn publication_watch_carries_every_handled_event_for_durable_receipts() {
+        let channel = Uuid::new_v4();
+        let agent = Keys::generate();
+        let first = signed_event_with_tags(vec![vec!["p".into(), agent.public_key().to_hex()]]);
+        let second = signed_event_with_tags(vec![vec!["p".into(), agent.public_key().to_hex()]]);
+        let expected = vec![first.id.to_hex(), second.id.to_hex()];
+        let mut batch = batch_with_scope(conv(channel), first);
+        batch.events.push(crate::queue::BatchEvent {
+            event: second,
+            prompt_tag: "test".into(),
+            received_at: std::time::Instant::now(),
+        });
+
+        let watch = publication_watch_for_batch(
+            Some(&batch),
+            &agent.public_key().to_hex(),
+            None,
+            &ChannelPublicationTracker::default(),
+        )
+        .expect("publication watch");
+        assert_eq!(watch.answered_event_ids, expected);
+    }
+
+    #[test]
+    fn publication_receipt_query_is_bound_to_this_turns_event_ids() {
+        let channel = Uuid::new_v4();
+        let agent = Keys::generate();
+        let event_ids = vec!["1".repeat(64), "2".repeat(64)];
+        let watch = PublicationWatch {
+            channel_id: channel,
+            trigger_event_id: event_ids[1].clone(),
+            answered_event_ids: event_ids.clone(),
+            is_dm: false,
+            observed_at_start: 0,
+            turn_started_at: nostr::Timestamp::from(100),
+            thread_tags: ThreadTags::default(),
+        };
+
+        let filter = serde_json::to_value(self_authored_report_filter(&watch, agent.public_key()))
+            .expect("serialize filter");
+        assert_eq!(filter["#h"], serde_json::json!([channel.to_string()]));
+        assert_eq!(filter["#e"], serde_json::json!(event_ids));
+        assert_eq!(filter["limit"], serde_json::json!(2));
+        assert_eq!(
+            filter["authors"],
+            serde_json::json!([agent.public_key().to_hex()])
+        );
+    }
+
+    #[test]
+    fn later_turn_report_does_not_persist_silent_turn_as_answered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("answered-watermark.json");
+        let agent = Keys::generate();
+        let human = Keys::generate();
+        let channel = Uuid::new_v4();
+        let silent_turn = EventBuilder::new(Kind::Custom(9), "silent A")
+            .sign_with_keys(&human)
+            .unwrap();
+        let publishing_turn = EventBuilder::new(Kind::Custom(9), "publishing B")
+            .sign_with_keys(&human)
+            .unwrap();
+        let now = nostr::Timestamp::now().as_secs();
+        let mut ctx = make_prompt_context_impl(&agent, None);
+        ctx.answered_watermark_store = Some(Arc::new(std::sync::Mutex::new(
+            crate::answered_watermark::AnsweredWatermarkStore::open(
+                Some(&path),
+                &agent.public_key().to_hex(),
+                &ctx.relay_url,
+            )
+            .expect("open watermark"),
+        )));
+        let watch = PublicationWatch {
+            channel_id: channel,
+            trigger_event_id: silent_turn.id.to_hex(),
+            answered_event_ids: vec![silent_turn.id.to_hex()],
+            is_dm: false,
+            observed_at_start: 0,
+            turn_started_at: nostr::Timestamp::from(now),
+            thread_tags: ThreadTags::default(),
+        };
+        let thread_ref = buzz_sdk::ThreadRef {
+            root_event_id: publishing_turn.id,
+            parent_event_id: publishing_turn.id,
+        };
+        let report_for_b =
+            buzz_sdk::build_message(channel, "answer B", Some(&thread_ref), &[], false, &[])
+                .unwrap()
+                .sign_with_keys(&agent)
+                .unwrap();
+        let receipts =
+            answered_receipts_for_watch(&watch, [serde_json::to_value(report_for_b).unwrap()])
+                .expect("valid report");
+        assert!(
+            receipts.is_empty(),
+            "B's answer must not become A's receipt"
+        );
+        persist_answered_receipts(&ctx, receipts);
+
+        let mut restarted = crate::answered_watermark::AnsweredWatermarkStore::open(
+            Some(&path),
+            &agent.public_key().to_hex(),
+            &ctx.relay_url,
+        )
+        .expect("reopen watermark after restart");
+        let merged = crate::merge_startup_answered_state(
+            Some(&mut restarted),
+            crate::AnsweredEventIds::default(),
+            now.saturating_sub(ctx.answered_watermark_retention_secs),
+        );
+        assert!(!merged.exact.contains(&silent_turn.id.to_hex()));
+    }
+
+    #[test]
     fn context_target_uses_thread_scope_root_not_last_event_tags() {
         let ch = Uuid::new_v4();
         let scope_root = "a".repeat(64);
@@ -10326,6 +10524,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             context_window: None,
         };
         // Will try to publish and fail (no real relay) but must not panic.
+        let provenance = TurnProvenance {
+            is_replay: Some(true),
+            ..TurnProvenance::default()
+        };
         publish_agent_turn_metric(
             &ctx,
             Some(usage),
@@ -10333,7 +10535,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
-            &TurnProvenance::default(),
+            &provenance,
         )
         .await;
     }
@@ -10694,6 +10896,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            answered_watermark_retention_secs: crate::config::DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS,
+            answered_watermark_store: None,
             publication_tracker: ChannelPublicationTracker::default(),
         }
     }

@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod answered_watermark;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -3151,11 +3152,12 @@ async fn tokio_main() -> Result<()> {
     // first REQ; it silently loses mentions published while the harness was down.
     // A bounded at-least-once replay makes that failure recoverable. Duplicate
     // delivery after an unclean restart is the safer failure mode.
-    let startup_watermark: u64 = std::time::SystemTime::now()
+    let process_started_at: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
-        .saturating_sub(config.startup_replay_lookback_secs);
+        .as_secs();
+    let startup_replay_lookback_secs = config.startup_replay_lookback_secs;
+    let startup_watermark = process_started_at.saturating_sub(startup_replay_lookback_secs);
 
     let pubkey_hex = config.keys.public_key().to_hex();
 
@@ -3178,7 +3180,8 @@ async fn tokio_main() -> Result<()> {
         tracing::warn!("failed to set startup watermark: {e}");
     }
     tracing::info!(
-        startup_replay_lookback_secs = config.startup_replay_lookback_secs,
+        configured_startup_replay_lookback_secs = config.startup_replay_lookback_secs,
+        startup_replay_lookback_secs,
         startup_watermark,
         "startup mention replay enabled"
     );
@@ -3312,12 +3315,34 @@ async fn tokio_main() -> Result<()> {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
     let subscribed_ids: Vec<Uuid> = channel_filters.keys().copied().collect();
-    let answered_event_ids =
+    let mut answered_watermark_store = if config.answered_watermark {
+        match answered_watermark::AnsweredWatermarkStore::open(
+            config.answered_watermark_path.as_deref(),
+            &pubkey_hex,
+            &config.relay_url,
+        ) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                tracing::warn!(%error, "answered-event watermark unavailable; using relay fallback only");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let relay_answered =
         load_answered_event_ids(&relay.rest_client(), &subscribed_ids, startup_watermark).await;
+    let answered_event_ids = merge_startup_answered_state(
+        answered_watermark_store.as_mut(),
+        relay_answered,
+        startup_watermark,
+    );
     tracing::info!(
         answered_events = answered_event_ids.len(),
         "startup relay-derived answered state loaded"
     );
+    let answered_watermark_store =
+        answered_watermark_store.map(|store| Arc::new(std::sync::Mutex::new(store)));
     let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
@@ -3421,6 +3446,8 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        answered_watermark_retention_secs: config.startup_replay_lookback_secs,
+        answered_watermark_store,
         publication_tracker: pool::ChannelPublicationTracker::default(),
     });
 
@@ -4881,9 +4908,12 @@ fn is_delivery_failure_report(event: &nostr::Event) -> bool {
 }
 
 #[derive(Debug, Default)]
-struct AnsweredEventIds {
-    exact: HashSet<String>,
+pub(crate) struct AnsweredEventIds {
+    pub(crate) exact: HashSet<String>,
     legacy_thread_roots: HashMap<String, u64>,
+    /// Relay-verified exact receipts suitable for local persistence:
+    /// (channel, triggering event id, signed answer timestamp).
+    pub(crate) receipts: Vec<(Uuid, String, u64)>,
 }
 
 impl AnsweredEventIds {
@@ -4903,9 +4933,20 @@ impl AnsweredEventIds {
     fn len(&self) -> usize {
         self.exact.len()
     }
+
+    fn merge(&mut self, other: Self) {
+        self.exact.extend(other.exact);
+        for (root, timestamp) in other.legacy_thread_roots {
+            self.legacy_thread_roots
+                .entry(root)
+                .and_modify(|current| *current = (*current).max(timestamp))
+                .or_insert(timestamp);
+        }
+        self.receipts.extend(other.receipts);
+    }
 }
 
-fn answered_event_ids_from_reports(
+pub(crate) fn answered_event_ids_from_reports(
     reports: impl IntoIterator<Item = serde_json::Value>,
 ) -> Result<AnsweredEventIds> {
     let mut answered = AnsweredEventIds::default();
@@ -4926,6 +4967,17 @@ fn answered_event_ids_from_reports(
         if let Some(reply) = markers.reply {
             let reply = reply.to_ascii_lowercase();
             answered.exact.insert(reply.clone());
+            if let Some(channel_id) = event.tags.iter().find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("h"))
+                    .then(|| parts.get(1))
+                    .flatten()
+                    .and_then(|value| value.parse::<Uuid>().ok())
+            }) {
+                answered
+                    .receipts
+                    .push((channel_id, reply.clone(), event.created_at.as_secs()));
+            }
             // Historical human-facing prompts told agents to reply directly
             // to the thread root. Those reports cannot name the exact nested
             // mention, so retain a timestamped compatibility entry: only
@@ -4941,6 +4993,26 @@ fn answered_event_ids_from_reports(
         }
     }
     Ok(answered)
+}
+
+pub(crate) fn merge_startup_answered_state(
+    store: Option<&mut answered_watermark::AnsweredWatermarkStore>,
+    relay_answered: AnsweredEventIds,
+    startup_watermark: u64,
+) -> AnsweredEventIds {
+    let mut answered = AnsweredEventIds::default();
+    if let Some(store) = store {
+        answered
+            .exact
+            .extend(store.answered_ids_since(startup_watermark));
+        if let Err(error) =
+            store.merge_and_persist(relay_answered.receipts.iter().cloned(), startup_watermark)
+        {
+            tracing::warn!(%error, "answered-event watermark persist failed");
+        }
+    }
+    answered.merge(relay_answered);
+    answered
 }
 
 /// Load restart-durable answered state from the relay before subscriptions can
@@ -5079,6 +5151,11 @@ mod restart_delivery_tests {
         assert!(!answered.contains(&unrelated_reference));
         assert!(!answered.contains(&marked_failure_root));
         assert!(!answered.contains(&legacy_failure_root));
+        assert_eq!(answered.receipts.len(), 2);
+        assert!(answered
+            .receipts
+            .iter()
+            .all(|(receipt_channel, _, _)| *receipt_channel == channel_id));
     }
 
     #[test]
@@ -5131,6 +5208,58 @@ mod restart_delivery_tests {
 
         assert!(answered.contains(&earlier));
         assert!(!answered.contains(&later));
+    }
+
+    #[test]
+    fn restart_merge_replays_unanswered_and_suppresses_verified_answer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("answered-watermark.json");
+        let agent = Keys::generate();
+        let channel = Uuid::new_v4();
+        let answered_id = "1".repeat(64);
+        let unanswered_id = "2".repeat(64);
+        let startup_watermark = 100;
+
+        {
+            let mut store = answered_watermark::AnsweredWatermarkStore::open(
+                Some(&path),
+                &agent.public_key().to_hex(),
+                "wss://relay.example",
+            )
+            .expect("open initial store");
+            store
+                .merge_and_persist([(channel, answered_id.clone(), 150)], startup_watermark)
+                .expect("persist verified answer");
+        }
+
+        let mut restarted = answered_watermark::AnsweredWatermarkStore::open(
+            Some(&path),
+            &agent.public_key().to_hex(),
+            "wss://relay.example",
+        )
+        .expect("reopen after restart");
+        let merged = merge_startup_answered_state(
+            Some(&mut restarted),
+            AnsweredEventIds::default(),
+            startup_watermark,
+        );
+        let answered_replay_candidates = [&answered_id]
+            .into_iter()
+            .filter(|event_id| !merged.exact.contains(*event_id))
+            .count();
+        eprintln!("restart answered replay candidates: {answered_replay_candidates}");
+        assert_eq!(answered_replay_candidates, 0);
+
+        let replay_candidates = [&answered_id, &unanswered_id]
+            .into_iter()
+            .filter(|event_id| !merged.exact.contains(*event_id))
+            .collect::<Vec<_>>();
+
+        eprintln!(
+            "restart replay candidates including unanswered: {}",
+            replay_candidates.len()
+        );
+        assert_eq!(replay_candidates, vec![&unanswered_id]);
     }
 
     #[tokio::test]
@@ -10316,6 +10445,8 @@ mod build_mcp_servers_tests {
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             startup_replay_lookback_secs: config::DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS,
+            answered_watermark: false,
+            answered_watermark_path: None,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -10550,6 +10681,8 @@ mod error_outcome_emission_tests {
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             startup_replay_lookback_secs: config::DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS,
+            answered_watermark: false,
+            answered_watermark_path: None,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,

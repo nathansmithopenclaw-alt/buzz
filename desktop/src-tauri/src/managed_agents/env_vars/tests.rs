@@ -242,6 +242,13 @@ fn reserved_keys_include_desktop_acp_session_policy() {
 }
 
 #[test]
+fn reserved_keys_include_desktop_answered_event_watermark() {
+    assert!(is_reserved_env_key("BUZZ_ACP_ANSWERED_WATERMARK"));
+    let agent = map(&[("BUZZ_ACP_ANSWERED_WATERMARK", "true")]);
+    assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
+}
+
+#[test]
 fn reserved_keys_include_code_execution_surface() {
     // The agent/MCP command + args are what Buzz actually exec's.
     // Overriding lets the user run arbitrary code as the agent.

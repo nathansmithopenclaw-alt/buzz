@@ -308,6 +308,7 @@ export function useCommunityInit(
           getOverrides().remoteControl === true,
           getOverrides().threadScopedAcpSessions === true,
           getOverrides().agentSessionResidency === true,
+          getOverrides().answeredEventWatermark === true,
         );
         notifyFleetVisibilitySettingsChanged();
       } catch (error) {
