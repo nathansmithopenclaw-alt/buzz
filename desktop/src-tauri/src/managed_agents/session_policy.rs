@@ -13,6 +13,7 @@ pub(crate) const ACP_SESSION_POLICY_ENV_VAR: &str = "BUZZ_ACP_SESSION_POLICY";
 pub struct ManagedAgentExperimentState {
     pub(crate) profile_reconcile_enabled: AtomicBool,
     pub(crate) thread_scoped_acp_sessions_enabled: AtomicBool,
+    pub(crate) session_residency_enabled: AtomicBool,
 }
 
 impl Default for ManagedAgentExperimentState {
@@ -20,6 +21,7 @@ impl Default for ManagedAgentExperimentState {
         Self {
             profile_reconcile_enabled: AtomicBool::new(true),
             thread_scoped_acp_sessions_enabled: AtomicBool::new(false),
+            session_residency_enabled: AtomicBool::new(false),
         }
     }
 }
@@ -33,6 +35,10 @@ impl AppState {
         &self
             .managed_agent_experiments
             .thread_scoped_acp_sessions_enabled
+    }
+
+    pub(crate) fn session_residency_enabled(&self) -> &AtomicBool {
+        &self.managed_agent_experiments.session_residency_enabled
     }
 }
 

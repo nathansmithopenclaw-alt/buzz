@@ -13,15 +13,16 @@ fn snapshot_with_policy(
     global: &GlobalAgentConfig,
     enforced_owner_only: bool,
 ) -> serde_json::Value {
-    prospective_spawn_config_snapshot(
+    prospective_spawn_config_snapshot(ProspectiveSpawnConfigInputs {
         record,
         personas,
         teams,
         workspace_relay,
         global,
         enforced_owner_only,
-        AcpSessionPolicy::Channel,
-    )
+        session_policy: AcpSessionPolicy::Channel,
+        session_residency_enabled: false,
+    })
     .canonical()
 }
 
@@ -39,6 +40,40 @@ fn snapshot(
 /// tests share, so their call sites read as `snap(&record)` instead of wrapping.
 fn snap(record: &ManagedAgentRecord) -> serde_json::Value {
     snapshot(record, &[], &[], "wss://ws.example", &Default::default())
+}
+
+#[test]
+fn residency_policy_is_effective_only_behind_experiment() {
+    let mut configured = record();
+    configured.idle_pool_sleep_seconds = Some(7_200);
+    configured.max_turns_per_session = Some(24);
+
+    let disabled = prospective_spawn_config_snapshot(ProspectiveSpawnConfigInputs {
+        record: &configured,
+        personas: &[],
+        teams: &[],
+        workspace_relay: "wss://ws.example",
+        global: &Default::default(),
+        enforced_owner_only: false,
+        session_policy: AcpSessionPolicy::Channel,
+        session_residency_enabled: false,
+    });
+    assert_eq!(disabled.idle_pool_sleep_seconds, 900);
+    assert_eq!(disabled.max_turns_per_session, 0);
+
+    let enabled = prospective_spawn_config_snapshot(ProspectiveSpawnConfigInputs {
+        record: &configured,
+        personas: &[],
+        teams: &[],
+        workspace_relay: "wss://ws.example",
+        global: &Default::default(),
+        enforced_owner_only: false,
+        session_policy: AcpSessionPolicy::Channel,
+        session_residency_enabled: true,
+    });
+    assert_eq!(enabled.idle_pool_sleep_seconds, 7_200);
+    assert_eq!(enabled.max_turns_per_session, 24);
+    assert_ne!(disabled.canonical(), enabled.canonical());
 }
 
 fn record() -> ManagedAgentRecord {
@@ -59,6 +94,8 @@ fn record() -> ManagedAgentRecord {
         turn_timeout_seconds: 320,
         idle_timeout_seconds: None,
         max_turn_duration_seconds: None,
+        idle_pool_sleep_seconds: None,
+        max_turns_per_session: None,
         parallelism: 1,
         system_prompt: Some("You are a test agent.".into()),
         model: None,

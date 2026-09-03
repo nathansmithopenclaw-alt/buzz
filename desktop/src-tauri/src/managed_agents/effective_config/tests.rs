@@ -58,6 +58,8 @@ fn record(
         turn_timeout_seconds: 300,
         idle_timeout_seconds: None,
         max_turn_duration_seconds: None,
+        idle_pool_sleep_seconds: None,
+        max_turns_per_session: None,
         parallelism: 1,
         system_prompt: prompt.map(str::to_string),
         model: model.map(str::to_string),

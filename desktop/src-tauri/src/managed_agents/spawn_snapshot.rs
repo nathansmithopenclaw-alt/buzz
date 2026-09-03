@@ -82,6 +82,20 @@ pub(crate) struct SpawnConfigInputs<'a> {
     /// drives the existing restart-required path (the harness only reads
     /// `BUZZ_ACP_SESSION_POLICY` at launch).
     pub session_policy: AcpSessionPolicy,
+    /// Whether per-agent residency/rotation fields are authoritative for this
+    /// launch. When false, the snapshot records the stable legacy defaults.
+    pub session_residency_enabled: bool,
+}
+
+pub(crate) struct ProspectiveSpawnConfigInputs<'a> {
+    pub record: &'a ManagedAgentRecord,
+    pub personas: &'a [AgentDefinition],
+    pub teams: &'a [TeamRecord],
+    pub workspace_relay: &'a str,
+    pub global: &'a GlobalAgentConfig,
+    pub enforced_owner_only: bool,
+    pub session_policy: AcpSessionPolicy,
+    pub session_residency_enabled: bool,
 }
 
 /// The effective spawn configuration of one managed-agent process.
@@ -132,6 +146,8 @@ pub(crate) struct SpawnConfigSnapshot {
     pub respond_to_allowlist: Option<Vec<String>>,
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
+    pub idle_pool_sleep_seconds: u64,
+    pub max_turns_per_session: u32,
     pub parallelism: u32,
     /// The startup effort the harness will actually apply, resolved by
     /// [`effective_effort`]: the persisted canonical `record.effort_level` when
@@ -181,6 +197,7 @@ impl SpawnConfigSnapshot {
             provider,
             enforced_owner_only,
             session_policy,
+            session_residency_enabled,
         } = inputs;
         let (respond_to, respond_to_allowlist) =
             super::projected_access_with_policy(record, enforced_owner_only);
@@ -222,6 +239,18 @@ impl SpawnConfigSnapshot {
             }),
             idle_timeout_seconds: record.idle_timeout_seconds,
             max_turn_duration_seconds: record.max_turn_duration_seconds,
+            idle_pool_sleep_seconds: if session_residency_enabled {
+                record
+                    .idle_pool_sleep_seconds
+                    .unwrap_or(super::agent_env::DEFAULT_IDLE_POOL_SLEEP_SECS)
+            } else {
+                super::agent_env::DEFAULT_IDLE_POOL_SLEEP_SECS
+            },
+            max_turns_per_session: if session_residency_enabled {
+                record.max_turns_per_session.unwrap_or(0)
+            } else {
+                0
+            },
             // Hash the effective parallelism so over-cap edits that don't change
             // the running pool size (e.g. 10 → 8, both clamp to 5 on OpenClaw)
             // do not raise a spurious "restart required" badge. Cap crossings
@@ -269,14 +298,18 @@ impl std::fmt::Debug for SpawnConfigSnapshot {
 /// of the comparison; the stamped side is built at spawn from the values that
 /// actually fed the child's `Command`.
 pub(crate) fn prospective_spawn_config_snapshot(
-    record: &ManagedAgentRecord,
-    personas: &[AgentDefinition],
-    teams: &[TeamRecord],
-    workspace_relay: &str,
-    global: &GlobalAgentConfig,
-    enforced_owner_only: bool,
-    session_policy: AcpSessionPolicy,
+    inputs: ProspectiveSpawnConfigInputs<'_>,
 ) -> SpawnConfigSnapshot {
+    let ProspectiveSpawnConfigInputs {
+        record,
+        personas,
+        teams,
+        workspace_relay,
+        global,
+        enforced_owner_only,
+        session_policy,
+        session_residency_enabled,
+    } = inputs;
     // Prospective re-snapshot: apply the same `apply_persona_snapshot` the
     // start/restore paths run right before spawning, so this describes what a
     // restart would actually run. Idempotent, so a spawn-time stamp taken
@@ -327,6 +360,7 @@ pub(crate) fn prospective_spawn_config_snapshot(
         provider: provider.as_deref(),
         enforced_owner_only,
         session_policy,
+        session_residency_enabled,
     })
 }
 

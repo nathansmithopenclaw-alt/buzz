@@ -13,17 +13,27 @@ use base64::Engine as _;
 /// The next accepted event re-wakes it through the same lazy path. Matches the
 /// harness's own 15-minute per-turn idle window so a warm pool survives a
 /// normal back-and-forth but a truly quiet harness stops paying for workers.
-const IDLE_POOL_SLEEP_SECS: &str = "900";
+pub(super) const DEFAULT_IDLE_POOL_SLEEP_SECS: u64 = 900;
 
 /// Value for `BUZZ_ACP_IDLE_POOL_SLEEP`. Idle re-sleep is only meaningful for
 /// lazy harnesses (the harness ignores it otherwise); gate to `lazy` here so
 /// the env reads inert (`"0"` = disabled) for eager harnesses. This is a
-/// desktop-owned lifetime policy (reserved key), not user-tunable.
-pub(super) fn idle_pool_sleep_env(lazy: bool) -> &'static str {
-    if lazy {
-        IDLE_POOL_SLEEP_SECS
+/// desktop-owned lifetime policy (reserved key). Per-agent tuning is only
+/// honored while the residency experiment is enabled.
+pub(super) fn idle_pool_sleep_env(
+    lazy: bool,
+    experiment_enabled: bool,
+    configured_seconds: Option<u64>,
+) -> String {
+    if !lazy {
+        return "0".to_string();
+    }
+    if experiment_enabled {
+        configured_seconds
+            .unwrap_or(DEFAULT_IDLE_POOL_SLEEP_SECS)
+            .to_string()
     } else {
-        "0"
+        DEFAULT_IDLE_POOL_SLEEP_SECS.to_string()
     }
 }
 
@@ -141,8 +151,32 @@ pub(crate) fn parse_agent_env_lines(raw: &str) -> Vec<(&str, &str)> {
 mod tests {
     use super::{
         baked_build_env, build_buzz_agent_provider_defaults, build_env_map,
-        discovery_env_with_baked_floor, parse_agent_env_lines,
+        discovery_env_with_baked_floor, idle_pool_sleep_env, parse_agent_env_lines,
+        DEFAULT_IDLE_POOL_SLEEP_SECS,
     };
+
+    #[test]
+    fn idle_pool_sleep_keeps_legacy_default_when_experiment_is_off() {
+        assert_eq!(
+            idle_pool_sleep_env(true, false, Some(7_200)),
+            DEFAULT_IDLE_POOL_SLEEP_SECS.to_string()
+        );
+    }
+
+    #[test]
+    fn idle_pool_sleep_uses_per_agent_value_only_when_enabled() {
+        assert_eq!(idle_pool_sleep_env(true, true, Some(7_200)), "7200");
+        assert_eq!(idle_pool_sleep_env(true, true, Some(0)), "0");
+        assert_eq!(
+            idle_pool_sleep_env(true, true, None),
+            DEFAULT_IDLE_POOL_SLEEP_SECS.to_string()
+        );
+    }
+
+    #[test]
+    fn idle_pool_sleep_is_inert_for_eager_harnesses() {
+        assert_eq!(idle_pool_sleep_env(false, true, Some(7_200)), "0");
+    }
 
     #[test]
     fn buzz_agent_provider_defaults_empty_in_oss_build() {

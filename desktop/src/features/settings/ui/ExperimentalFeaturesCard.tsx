@@ -1,6 +1,9 @@
 import { setAgentManagedProfiles } from "@/shared/api/tauri";
 import { updateFleetVisibilityEnabled } from "@/features/agents/lib/useFleetVisibilitySettings";
-import { setThreadScopedAcpSessions } from "@/shared/api/tauriWorkspace";
+import {
+  setAgentSessionResidency,
+  setThreadScopedAcpSessions,
+} from "@/shared/api/tauriWorkspace";
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
 import type { FeatureDefinition } from "@/shared/features";
 import { Switch } from "@/shared/ui/switch";
@@ -46,6 +49,15 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
               toggle(!value);
               console.error(
                 "Failed to apply thread-scoped ACP sessions setting:",
+                error,
+              );
+            });
+          }
+          if (feature.id === "agentSessionResidency") {
+            void setAgentSessionResidency(value).catch((error) => {
+              toggle(!value);
+              console.error(
+                "Failed to apply agent session residency setting:",
                 error,
               );
             });

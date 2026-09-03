@@ -127,6 +127,8 @@ impl AgentDefinition {
             turn_timeout_seconds: DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
             idle_timeout_seconds: None,
             max_turn_duration_seconds: None,
+            idle_pool_sleep_seconds: None,
+            max_turns_per_session: None,
             parallelism: default_agent_parallelism(),
             system_prompt: (!self.system_prompt.is_empty()).then_some(self.system_prompt),
             model: self.model,
@@ -292,6 +294,16 @@ pub struct ManagedAgentRecord {
     /// Absolute wall-clock cap per turn.
     #[serde(default)]
     pub max_turn_duration_seconds: Option<u64>,
+    /// Seconds a woken lazy ACP pool stays resident while idle. `None` keeps
+    /// Desktop's 900-second default; `0` disables idle teardown. Applied only
+    /// while the Agent Session Residency experiment is enabled.
+    #[serde(default)]
+    pub idle_pool_sleep_seconds: Option<u64>,
+    /// Successful turns allowed per provider session before rotation. `None`
+    /// or `0` disables count-based rotation. Applied only while the Agent
+    /// Session Residency experiment is enabled.
+    #[serde(default)]
+    pub max_turns_per_session: Option<u32>,
     #[serde(default = "default_agent_parallelism")]
     pub parallelism: u32,
     pub system_prompt: Option<String>,
@@ -505,6 +517,8 @@ pub struct ManagedAgentSummary {
     pub turn_timeout_seconds: u64,
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
+    pub idle_pool_sleep_seconds: Option<u64>,
+    pub max_turns_per_session: Option<u32>,
     pub parallelism: u32,
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,

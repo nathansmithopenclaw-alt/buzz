@@ -180,6 +180,8 @@ mod tests {
             turn_timeout_seconds: 320,
             idle_timeout_seconds: None,
             max_turn_duration_seconds: None,
+            idle_pool_sleep_seconds: None,
+            max_turns_per_session: None,
             parallelism: 24,
             system_prompt: Some("You are a test agent.".to_string()),
             model: Some("claude-opus-4".to_string()),

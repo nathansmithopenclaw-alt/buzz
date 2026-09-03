@@ -619,6 +619,8 @@ pub async fn confirm_agent_snapshot_import(
             turn_timeout_seconds: 0,
             idle_timeout_seconds: snapshot.definition.idle_timeout_seconds,
             max_turn_duration_seconds: snapshot.definition.max_turn_duration_seconds,
+            idle_pool_sleep_seconds: None,
+            max_turns_per_session: None,
             parallelism: minted_parallelism
                 .unwrap_or(crate::managed_agents::DEFAULT_AGENT_PARALLELISM),
             system_prompt: snapshot.definition.system_prompt.clone(),

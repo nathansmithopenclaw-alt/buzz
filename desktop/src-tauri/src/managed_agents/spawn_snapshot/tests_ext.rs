@@ -189,22 +189,23 @@ fn canonical_effort_edit_changes_snapshot() {
 }
 
 use crate::managed_agents::spawn_snapshot::{
-    eligible_restart_diff, prospective_spawn_config_snapshot, RestartDiffEntry,
-    SpawnConfigSnapshot, TrackedSpawnState,
+    eligible_restart_diff, prospective_spawn_config_snapshot, ProspectiveSpawnConfigInputs,
+    RestartDiffEntry, SpawnConfigSnapshot, TrackedSpawnState,
 };
 use crate::managed_agents::AcpSessionPolicy;
 
 /// Build the prospective snapshot for a bare record under one session policy.
 fn snapshot_under(policy: AcpSessionPolicy) -> SpawnConfigSnapshot {
-    prospective_spawn_config_snapshot(
-        &record(),
-        &[],
-        &[],
-        "wss://ws.example",
-        &Default::default(),
-        false,
-        policy,
-    )
+    prospective_spawn_config_snapshot(ProspectiveSpawnConfigInputs {
+        record: &record(),
+        personas: &[],
+        teams: &[],
+        workspace_relay: "wss://ws.example",
+        global: &Default::default(),
+        enforced_owner_only: false,
+        session_policy: policy,
+        session_residency_enabled: false,
+    })
 }
 
 /// Restart-badge entries for a stamped→current session-policy transition,

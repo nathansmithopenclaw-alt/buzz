@@ -327,6 +327,8 @@ export type ManagedAgent =
     turnTimeoutSeconds: number;
     idleTimeoutSeconds: number | null;
     maxTurnDurationSeconds: number | null;
+    idlePoolSleepSeconds: number | null;
+    maxTurnsPerSession: number | null;
     parallelism: number;
     systemPrompt: string | null;
     avatarUrl: string | null;

@@ -2928,6 +2928,34 @@ mod idle_pool_sleep_tests {
         ));
     }
 
+    #[test]
+    fn configured_long_residency_remains_awake_past_legacy_900_seconds() {
+        let started = tokio::time::Instant::now();
+        let configured = Duration::from_secs(7_200);
+        assert!(!idle_pool_sleep_due(
+            true,
+            started,
+            started + Duration::from_secs(901),
+            configured,
+            false,
+            false,
+            false,
+            false,
+            false,
+        ));
+        assert!(idle_pool_sleep_due(
+            true,
+            started,
+            started + configured,
+            configured,
+            false,
+            false,
+            false,
+            false,
+            false,
+        ));
+    }
+
     fn slot(respawn_in_flight: bool) -> SlotCircuit {
         SlotCircuit {
             crash_times: Vec::new(),

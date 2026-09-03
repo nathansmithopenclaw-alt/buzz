@@ -273,6 +273,22 @@ export async function setManagedAgentAutoRestart(
   return fromRawManagedAgent(response);
 }
 
+export async function setManagedAgentSessionResidencyPolicy(
+  pubkey: string,
+  idlePoolSleepSeconds: number | null,
+  maxTurnsPerSession: number | null,
+): Promise<ManagedAgent> {
+  const response = await invokeTauri<RawManagedAgent>(
+    "set_managed_agent_session_residency_policy",
+    {
+      pubkey,
+      idlePoolSleepSeconds,
+      maxTurnsPerSession,
+    },
+  );
+  return fromRawManagedAgent(response);
+}
+
 /**
  * B5: persist the canonical startup effort for a local managed agent. Applied
  * as `BUZZ_ACP_EFFORT_LEVEL` at the next spawn. Pass `null` to clear (reverts

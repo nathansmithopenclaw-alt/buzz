@@ -271,6 +271,8 @@ mod tests {
             turn_timeout_seconds: 120,
             idle_timeout_seconds: Some(30),
             max_turn_duration_seconds: Some(600),
+            idle_pool_sleep_seconds: None,
+            max_turns_per_session: None,
             parallelism: 1,
             system_prompt: Some(format!("You are {name}.")),
             model: Some("claude-opus-4".to_string()),

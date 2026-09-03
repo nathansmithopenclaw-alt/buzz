@@ -8,15 +8,19 @@ export async function applyCommunity(
   agentManagedProfiles?: boolean,
   fleetVisibility?: boolean,
   threadScopedAcpSessions?: boolean,
+  agentSessionResidency?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
     nsec: nsec ?? null,
     token: token ?? null,
     reposDir: reposDir ?? null,
-    agentManagedProfiles: agentManagedProfiles ?? false,
-    fleetVisibility: fleetVisibility ?? false,
-    threadScopedAcpSessions: threadScopedAcpSessions ?? false,
+    experiments: {
+      agentManagedProfiles: agentManagedProfiles ?? false,
+      fleetVisibility: fleetVisibility ?? false,
+      threadScopedAcpSessions: threadScopedAcpSessions ?? false,
+      agentSessionResidency: agentSessionResidency ?? false,
+    },
   });
 }
 
@@ -25,3 +29,6 @@ export const setAgentManagedProfiles = (enabled: boolean) =>
 
 export const setThreadScopedAcpSessions = (enabled: boolean) =>
   invokeTauri("set_thread_scoped_acp_sessions", { enabled });
+
+export const setAgentSessionResidency = (enabled: boolean) =>
+  invokeTauri("set_agent_session_residency", { enabled });

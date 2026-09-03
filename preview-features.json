@@ -18,6 +18,12 @@
       ]
     },
     {
+      "id": "agentSessionResidency",
+      "name": "Agent Session Residency",
+      "description": "Tune how long idle agent sessions stay resident and when they rotate. Applies when managed agents next start.",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "projects",
       "name": "Projects",
       "description": "Git repository browser and collaboration",
