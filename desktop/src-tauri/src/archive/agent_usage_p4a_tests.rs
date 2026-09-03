@@ -35,6 +35,12 @@ fn row(id: &str, agent: &str, session: &str, seq: u64, reported_at: i64) -> Agen
         pricing_authority: None,
         pricing_model: None,
         pricing_cache_class: None,
+        channel_id: None,
+        context_tokens: None,
+        context_window: None,
+        attempt: None,
+        is_replay: None,
+        session_creation_cause: None,
         parse_status: ParseStatus::Valid,
     }
 }

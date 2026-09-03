@@ -158,6 +158,53 @@ pub struct ModelUsage {
     pub has_unknown_usage: bool,
 }
 
+/// Per-channel slice of one agent's usage. `channel_id` is `None` for turns
+/// the publisher did not attribute to a channel (e.g. heartbeat turns).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelUsage {
+    pub channel_id: Option<String>,
+    pub usage: ReportedUsage,
+    pub report_count: i64,
+    pub has_unknown_usage: bool,
+}
+
+/// Sessions an agent started in the window, grouped by NIP-AM
+/// `sessionCreationCause`.
+///
+/// Every cause except `worker_spawn` and `scope_first_turn` also names why the
+/// *previous* session in that scope ended, so this doubles as the teardown
+/// histogram. `cause: None` counts sessions whose first in-window turn carried
+/// no cause — published before the field existed, or by a harness that does not
+/// report it. It is unknown, not "no reason".
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStarts {
+    pub cause: Option<String>,
+    pub sessions: i64,
+}
+
+/// Counts of harness-side provenance for one agent's in-window turns.
+///
+/// `turns_with_attempt` / `turns_with_replay_flag` are the denominators: a
+/// `retried_turns` of 0 against a denominator of 0 means "nothing reported it",
+/// which is a different claim from "no retries happened". Consumers must not
+/// collapse the two.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnProvenanceSummary {
+    pub turns_with_attempt: i64,
+    pub retried_turns: i64,
+    pub turns_with_replay_flag: i64,
+    pub replay_turns: i64,
+    /// Highest context occupancy observed. A state reading, so the maximum is
+    /// meaningful where a sum would not be. `None` when unreported.
+    pub peak_context_tokens: Option<String>,
+    /// Largest context window observed across the window's turns. `None` when
+    /// unreported.
+    pub context_window: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsage {
@@ -165,6 +212,9 @@ pub struct AgentUsage {
     pub usage: ReportedUsage,
     pub buckets: Vec<SeriesBucket>,
     pub models: Vec<ModelUsage>,
+    pub channels: Vec<ChannelUsage>,
+    pub session_starts: Vec<SessionStarts>,
+    pub provenance: TurnProvenanceSummary,
     pub report_count: i64,
     pub has_unknown_usage: bool,
 }
@@ -663,6 +713,66 @@ struct AgentScope {
     report_count: i64,
     /// Keyed by `(harness, model)` — same model via two harnesses → two rows.
     models: HashMap<(Option<String>, Option<String>), (UsageAccumulator, i64)>,
+    /// Keyed by channel id; `None` groups turns with no channel attribution.
+    channels: HashMap<Option<String>, (UsageAccumulator, i64)>,
+    /// Distinct session ids seen in the window, and the creation cause reported
+    /// with them. A session is counted once no matter how many of its turns
+    /// land in the window.
+    ///
+    /// Rows for one session should all carry the same cause, but the archive
+    /// cannot enforce that: a session whose turns straddle a publisher upgrade
+    /// has some rows with the field and some without. First non-`None` cause
+    /// wins so the upgrade does not split one session across two buckets.
+    session_causes: HashMap<String, Option<String>>,
+    provenance: ProvenanceAccumulator,
+}
+
+/// Counts NIP-AM provenance fields with explicit denominators.
+#[derive(Debug, Default, Clone)]
+struct ProvenanceAccumulator {
+    turns_with_attempt: i64,
+    retried_turns: i64,
+    turns_with_replay_flag: i64,
+    replay_turns: i64,
+    peak_context_tokens: Option<u64>,
+    context_window: Option<u64>,
+}
+
+impl ProvenanceAccumulator {
+    fn add(&mut self, row: &AgentMetricIndexRow) {
+        if let Some(attempt) = row.attempt {
+            self.turns_with_attempt += 1;
+            if attempt > 1 {
+                self.retried_turns += 1;
+            }
+        }
+        if let Some(is_replay) = row.is_replay {
+            self.turns_with_replay_flag += 1;
+            if is_replay {
+                self.replay_turns += 1;
+            }
+        }
+        if let Some(tokens) = row.context_tokens {
+            self.peak_context_tokens =
+                Some(self.peak_context_tokens.map_or(tokens, |v| v.max(tokens)));
+        }
+        if let Some(window) = row.context_window {
+            self.context_window = Some(self.context_window.map_or(window, |v| v.max(window)));
+        }
+    }
+
+    fn finish(self) -> TurnProvenanceSummary {
+        TurnProvenanceSummary {
+            turns_with_attempt: self.turns_with_attempt,
+            retried_turns: self.retried_turns,
+            turns_with_replay_flag: self.turns_with_replay_flag,
+            replay_turns: self.replay_turns,
+            // Serialized as strings for the same reason every other counter is:
+            // a u64 above 2^53 loses precision in JSON's number type.
+            peak_context_tokens: self.peak_context_tokens.map(|v| v.to_string()),
+            context_window: self.context_window.map(|v| v.to_string()),
+        }
+    }
 }
 
 /// Compute the full [`AgentUsageSeries`] from already-loaded rows.
@@ -741,6 +851,9 @@ pub(super) fn compute_series(
                 total: UsageAccumulator::default(),
                 report_count: 0,
                 models: HashMap::new(),
+                channels: HashMap::new(),
+                session_causes: HashMap::new(),
+                provenance: ProvenanceAccumulator::default(),
             });
         scope.buckets[bucket_idx].add(&outcome);
         scope.bucket_counts[bucket_idx] += 1;
@@ -753,6 +866,21 @@ pub(super) fn compute_series(
             .or_insert_with(|| (UsageAccumulator::default(), 0i64));
         model_entry.0.add(&outcome);
         model_entry.1 += 1;
+
+        let channel_entry = scope
+            .channels
+            .entry(row.channel_id.clone())
+            .or_insert_with(|| (UsageAccumulator::default(), 0i64));
+        channel_entry.0.add(&outcome);
+        channel_entry.1 += 1;
+
+        if let Some(session_id) = row.session_id.clone() {
+            let cause = scope.session_causes.entry(session_id).or_insert(None);
+            if cause.is_none() {
+                cause.clone_from(&row.session_creation_cause);
+            }
+        }
+        scope.provenance.add(row);
     }
 
     let overall_report_count: i64 = overall_bucket_counts.iter().sum();
@@ -838,6 +966,53 @@ pub(super) fn compute_series(
             });
             let models = model_rows.into_iter().map(|k| k.usage).collect();
 
+            // Channels use the same D6 ranking as models: known sort value
+            // descending, unknown after, id ascending (None last) as the
+            // deterministic tiebreak.
+            struct ChannelSortKey {
+                sort_val: Option<u64>,
+                channel_id: Option<String>,
+                usage: ChannelUsage,
+            }
+            let mut channel_rows: Vec<ChannelSortKey> = scope
+                .channels
+                .into_iter()
+                .map(|(channel_id, (acc, count))| {
+                    let sort_val = acc.sort_value();
+                    let has_unknown_usage = acc.has_unknown();
+                    ChannelSortKey {
+                        sort_val,
+                        channel_id: channel_id.clone(),
+                        usage: ChannelUsage {
+                            channel_id,
+                            usage: acc.finish(),
+                            report_count: count,
+                            has_unknown_usage,
+                        },
+                    }
+                })
+                .collect();
+            channel_rows.sort_by(|a, b| {
+                cmp_sort_value(a.sort_val, b.sort_val)
+                    .then_with(|| cmp_option_str_none_last(&a.channel_id, &b.channel_id))
+            });
+            let channels = channel_rows.into_iter().map(|k| k.usage).collect();
+
+            let mut cause_counts: HashMap<Option<String>, i64> = HashMap::new();
+            for cause in scope.session_causes.into_values() {
+                *cause_counts.entry(cause).or_insert(0) += 1;
+            }
+            let mut session_starts: Vec<SessionStarts> = cause_counts
+                .into_iter()
+                .map(|(cause, sessions)| SessionStarts { cause, sessions })
+                .collect();
+            // Most sessions first; cause ascending (unknown last) as tiebreak.
+            session_starts.sort_by(|a, b| {
+                b.sessions
+                    .cmp(&a.sessions)
+                    .then_with(|| cmp_option_str_none_last(&a.cause, &b.cause))
+            });
+
             (
                 sort_value,
                 agent_pubkey.clone(),
@@ -846,6 +1021,9 @@ pub(super) fn compute_series(
                     usage: scope.total.finish(),
                     buckets,
                     models,
+                    channels,
+                    session_starts,
+                    provenance: scope.provenance.finish(),
                     report_count: scope.report_count,
                     has_unknown_usage,
                 },

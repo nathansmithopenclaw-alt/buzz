@@ -115,6 +115,12 @@ CREATE TABLE IF NOT EXISTS agent_metric_index (
     pricing_model                TEXT,
     pricing_cache_class          TEXT,
     harness                      TEXT,
+    channel_id                   TEXT,
+    context_tokens               TEXT,
+    context_window               TEXT,
+    attempt                      INTEGER,
+    is_replay                    INTEGER,
+    session_creation_cause       TEXT,
     parse_status                 TEXT NOT NULL CHECK (parse_status IN ('valid','invalid')),
     PRIMARY KEY (identity_pubkey, relay_url, id)
 );

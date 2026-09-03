@@ -9,7 +9,10 @@
 use nostr::{Event, Keys, PublicKey};
 use serde::{Deserialize, Serialize};
 
-use crate::observer::{decrypt_observer_payload, encrypt_observer_payload, ObserverPayloadError};
+use crate::observer::{
+    decrypt_observer_payload, decrypt_observer_plaintext, encrypt_observer_payload,
+    ObserverPayloadError,
+};
 
 // Re-export for callers that only need the error type.
 pub use crate::observer::ObserverPayloadError as AgentTurnMetricError;
@@ -328,6 +331,29 @@ pub fn decrypt_agent_turn_metric(
     let payload: AgentTurnMetricPayload = decrypt_observer_payload(recipient_keys, event)?;
     payload.validate()?;
     Ok(payload)
+}
+
+/// Decrypt a `kind:44200` event, returning both the validated payload and the
+/// exact plaintext the publisher sent.
+///
+/// A store that keeps a decrypted copy must keep the publisher's bytes, not a
+/// re-serialization through this build's struct: NIP-AM requires consumers to
+/// ignore unknown fields, and re-serializing silently *deletes* them. Because
+/// an archive of these events is append-only, a build that predates a new field
+/// would otherwise destroy it permanently — the ciphertext is not retained, so
+/// no later upgrade could recover it.
+///
+/// Same validation contract as [`decrypt_agent_turn_metric`]: the plaintext is
+/// returned only for a payload that deserialized and passed numeric validation,
+/// so a caller can never persist an unvalidated blob.
+pub fn decrypt_agent_turn_metric_with_plaintext(
+    recipient_keys: &Keys,
+    event: &Event,
+) -> Result<(AgentTurnMetricPayload, String), ObserverPayloadError> {
+    let plaintext = decrypt_observer_plaintext(recipient_keys, event)?;
+    let payload: AgentTurnMetricPayload = serde_json::from_str(&plaintext)?;
+    payload.validate()?;
+    Ok((payload, plaintext))
 }
 
 #[cfg(test)]

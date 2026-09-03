@@ -93,6 +93,24 @@ pub fn decrypt_observer_payload<T: DeserializeOwned>(
     recipient_keys: &Keys,
     event: &Event,
 ) -> Result<T, ObserverPayloadError> {
+    let mut plaintext = decrypt_observer_plaintext(recipient_keys, event)?;
+    let result = serde_json::from_str(&plaintext);
+    plaintext.zeroize();
+    Ok(result?)
+}
+
+/// Decrypt an observer-family payload to its raw plaintext, enforcing the same
+/// ciphertext-shape and size limits as [`decrypt_observer_payload`].
+///
+/// Callers that only need a typed value should use `decrypt_observer_payload`,
+/// which zeroizes the plaintext for them. This variant exists for the one case
+/// where the publisher's exact bytes matter — persisting a durable record whose
+/// schema may grow — and hands the caller responsibility for the plaintext's
+/// lifetime.
+pub fn decrypt_observer_plaintext(
+    recipient_keys: &Keys,
+    event: &Event,
+) -> Result<String, ObserverPayloadError> {
     if !content_looks_like_nip44(&event.content) {
         return Err(ObserverPayloadError::InvalidCiphertextLength(
             event.content.len(),
@@ -112,10 +130,7 @@ pub fn decrypt_observer_payload<T: DeserializeOwned>(
             got,
         });
     }
-
-    let result = serde_json::from_str(&plaintext);
-    plaintext.zeroize();
-    Ok(result?)
+    Ok(plaintext)
 }
 
 #[cfg(test)]
