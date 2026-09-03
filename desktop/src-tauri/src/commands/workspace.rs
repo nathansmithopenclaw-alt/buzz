@@ -67,6 +67,15 @@ struct RelayInfoIcon {
     icon: Option<String>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WorkspaceExperimentFlags {
+    agent_managed_profiles: bool,
+    fleet_visibility: bool,
+    thread_scoped_acp_sessions: bool,
+    agent_session_residency: bool,
+}
+
 /// Fetch a relay's workspace icon from its NIP-11 relay information document.
 ///
 /// Works for any workspace (active or not) with a plain unauthenticated HTTP
@@ -154,11 +163,10 @@ pub async fn apply_workspace(
     relay_url: String,
     nsec: Option<String>,
     repos_dir: Option<String>,
-    agent_managed_profiles: Option<bool>,
-    fleet_visibility: Option<bool>,
-    thread_scoped_acp_sessions: Option<bool>,
+    experiments: Option<WorkspaceExperimentFlags>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let experiments = experiments.unwrap_or_default();
     let state = app.state::<AppState>();
     // Take the generation only after entering the serialized transaction. An
     // apply that is already running remains authoritative until it releases
@@ -233,15 +241,17 @@ pub async fn apply_workspace(
         // means the stable behavior: desktop remains authoritative.
         state
             .managed_agent_profile_reconcile_enabled()
-            .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
-        state.thread_scoped_acp_sessions_enabled().store(
-            thread_scoped_acp_sessions.unwrap_or(false),
-            Ordering::Release,
-        );
+            .store(!experiments.agent_managed_profiles, Ordering::Release);
+        state
+            .thread_scoped_acp_sessions_enabled()
+            .store(experiments.thread_scoped_acp_sessions, Ordering::Release);
+        state
+            .session_residency_enabled()
+            .store(experiments.agent_session_residency, Ordering::Release);
         crate::managed_agents::fleet_visibility::configure_runtime(
             &app,
             &state.fleet_visibility,
-            fleet_visibility.unwrap_or(false),
+            experiments.fleet_visibility,
         )?;
 
         // ── Filesystem side-effect (non-fatal) ────────────────────────────────
@@ -429,7 +439,26 @@ mod tests {
         Arc,
     };
 
-    use super::{assert_current_apply_generation, begin_workspace_apply, next_apply_generation};
+    use super::{
+        assert_current_apply_generation, begin_workspace_apply, next_apply_generation,
+        WorkspaceExperimentFlags,
+    };
+
+    #[test]
+    fn workspace_experiment_flags_are_camel_case_and_default_off() {
+        let enabled: WorkspaceExperimentFlags = serde_json::from_value(serde_json::json!({
+            "agentSessionResidency": true,
+        }))
+        .unwrap();
+        assert!(enabled.agent_session_residency);
+        assert!(!enabled.agent_managed_profiles);
+        assert!(!enabled.fleet_visibility);
+        assert!(!enabled.thread_scoped_acp_sessions);
+
+        let omitted: WorkspaceExperimentFlags =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!omitted.agent_session_residency);
+    }
 
     #[test]
     fn explicit_newer_generation_supersedes_older_ticket() {

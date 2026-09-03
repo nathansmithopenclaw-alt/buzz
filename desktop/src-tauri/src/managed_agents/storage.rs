@@ -86,6 +86,21 @@ pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, 
     Ok(managed_agents_logs_dir(app)?.join(format!("{pubkey}.log")))
 }
 
+/// Pair-scoped local state directory for experimental ACP continuity data.
+/// The runtime id is derived from a validated pubkey plus a relay hash, so it
+/// contains no path separators and cannot escape the agents directory.
+pub fn managed_agent_continuity_dir(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<PathBuf, String> {
+    let dir = managed_agents_base_dir(app)?
+        .join("continuity")
+        .join(key.runtime_id());
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("failed to create agent continuity dir: {error}"))?;
+    Ok(dir)
+}
+
 /// Pair-scoped log path for a managed runtime. The relay URL never appears in
 /// the filename; the suffix is a hash of the canonical URL.
 pub fn managed_agent_runtime_log_path(

@@ -29,6 +29,8 @@ fn minimal_record() -> ManagedAgentRecord {
         turn_timeout_seconds: 120,                     // deprecated, MUST NOT appear
         idle_timeout_seconds: Some(30),
         max_turn_duration_seconds: Some(600),
+        idle_pool_sleep_seconds: None,
+        max_turns_per_session: None,
         parallelism: 2,
         system_prompt: Some("You are a test agent.".to_string()),
         model: Some("claude-opus-4".to_string()),

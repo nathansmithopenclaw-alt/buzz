@@ -28,6 +28,7 @@ const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 /// This is deliberately small because the text may be surfaced in a failure notice.
 /// Tool inputs and outputs are never retained here.
 const FINAL_ANSWER_SNIPPET_CHARS: usize = 160;
+const MAX_PRIVATE_CAPTURE_BYTES: usize = 16 * 1024;
 
 /// Package name reported by the Claude ACP adapter. The adapter supports a
 /// filtered raw-SDK-message stream through `_meta.claudeCode.emitRawSDKMessages`.
@@ -463,6 +464,10 @@ pub struct AcpClient {
     /// Evidence used to distinguish an intentional silent completion from a
     /// failed or missing channel publication.
     turn_delivery_evidence: TurnDeliveryEvidence,
+    /// Bounded text sink used only by the private sleep-summary turn. While
+    /// armed, agent message chunks are collected here instead of being logged
+    /// as ordinary channel-facing final output.
+    private_capture: Option<String>,
     /// Per-turn prompt-response usage and Claude's optional cumulative cost.
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
@@ -873,6 +878,7 @@ impl AcpClient {
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             turn_delivery_evidence: TurnDeliveryEvidence::default(),
+            private_capture: None,
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
             claude_adapter: false,
@@ -1189,6 +1195,27 @@ impl AcpClient {
             max_duration,
         )
         .await
+    }
+
+    /// Run a private prompt and return its bounded agent-message text.
+    ///
+    /// The response is never treated as channel delivery evidence and its text
+    /// is not written to the ordinary ACP stream log. Callers must still give
+    /// the model an explicit no-tools instruction; this transport suppresses
+    /// output capture, not tool availability inside an existing session.
+    pub(crate) async fn session_prompt_capture_text(
+        &mut self,
+        session_id: &str,
+        prompt_text: &str,
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+    ) -> Result<(StopReason, String), AcpError> {
+        self.private_capture = Some(String::new());
+        let result = self
+            .session_prompt_with_idle_timeout(session_id, prompt_text, idle_timeout, max_duration)
+            .await;
+        let captured = self.private_capture.take().unwrap_or_default();
+        result.map(|stop_reason| (stop_reason, captured))
     }
 
     /// Like [`session_prompt_with_idle_timeout`](Self::session_prompt_with_idle_timeout),
@@ -2185,10 +2212,19 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
-                    let from_goose = update.pointer("/_meta/goose").is_some();
-                    self.turn_delivery_evidence
-                        .record_final_answer_chunk(text, from_goose);
-                    tracing::info!(target: "acp::stream", "{text}");
+                    if let Some(capture) = self.private_capture.as_mut() {
+                        append_bounded(capture, text, MAX_PRIVATE_CAPTURE_BYTES);
+                        tracing::debug!(
+                            target: "acp::stream",
+                            captured_bytes = capture.len(),
+                            "captured private agent output"
+                        );
+                    } else {
+                        let from_goose = update.pointer("/_meta/goose").is_some();
+                        self.turn_delivery_evidence
+                            .record_final_answer_chunk(text, from_goose);
+                        tracing::info!(target: "acp::stream", "{text}");
+                    }
                 }
                 false
             }
@@ -2751,6 +2787,22 @@ impl AcpClient {
         StopReason::from_str(raw)
             .ok_or_else(|| AcpError::Protocol(format!("unknown stopReason: {raw:?}")))
     }
+}
+
+fn append_bounded(target: &mut String, value: &str, max_bytes: usize) {
+    if target.len() >= max_bytes {
+        return;
+    }
+    let remaining = max_bytes - target.len();
+    if value.len() <= remaining {
+        target.push_str(value);
+        return;
+    }
+    let mut end = remaining;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    target.push_str(&value[..end]);
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
@@ -5122,6 +5174,29 @@ mod tests {
         );
         assert_eq!(evidence.publish_attempt_count, 0);
         assert!(!evidence.adapter_runtime_failure_present);
+    }
+
+    #[tokio::test]
+    async fn private_prompt_capture_returns_text_without_channel_delivery_evidence() {
+        let script = r#"
+read -r _request
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"Goal: resume the bounded lane"}}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+"#;
+        let mut client = spawn_script(script).await;
+        let (stop_reason, text) = client
+            .session_prompt_capture_text(
+                "summary-session",
+                "summarize",
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("private prompt succeeds");
+        assert_eq!(stop_reason, StopReason::EndTurn);
+        assert_eq!(text, "Goal: resume the bounded lane");
+        assert!(!client.turn_delivery_evidence().final_answer_present);
+        client.shutdown().await;
     }
 
     #[tokio::test]

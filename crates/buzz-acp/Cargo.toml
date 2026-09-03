@@ -67,6 +67,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Config file
 toml = "1.0"
+atomic-write-file = "0.3"
 
 # Filter expressions
 evalexpr = { workspace = true }

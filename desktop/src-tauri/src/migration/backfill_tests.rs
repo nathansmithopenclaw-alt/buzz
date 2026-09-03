@@ -1,5 +1,7 @@
 use super::backfill_standalone_agents_in_dir;
-use crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot;
+use crate::managed_agents::spawn_snapshot::{
+    prospective_spawn_config_snapshot, ProspectiveSpawnConfigInputs,
+};
 use crate::managed_agents::{AgentDefinition, ManagedAgentRecord};
 use crate::migration::test_support::{read_agents_json, write_agents_json};
 use std::path::Path;
@@ -131,15 +133,16 @@ fn backfill_of_promptless_record_keeps_spawn_snapshot_stable() {
 
     let pre_records = load_typed(dir.path());
     let pre_instance = pre_records.iter().find(|r| !r.pubkey.is_empty()).unwrap();
-    let before = prospective_spawn_config_snapshot(
-        pre_instance,
-        &[],
-        &[],
-        "wss://ws.example",
-        &Default::default(),
-        false,
-        crate::managed_agents::AcpSessionPolicy::Channel,
-    );
+    let before = prospective_spawn_config_snapshot(ProspectiveSpawnConfigInputs {
+        record: pre_instance,
+        personas: &[],
+        teams: &[],
+        workspace_relay: "wss://ws.example",
+        global: &Default::default(),
+        enforced_owner_only: false,
+        session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
+        session_residency_enabled: false,
+    });
 
     backfill_standalone_agents_in_dir(&base(dir.path())).unwrap();
 
@@ -149,15 +152,16 @@ fn backfill_of_promptless_record_keeps_spawn_snapshot_stable() {
         .iter()
         .filter_map(|r| r.to_definition_view())
         .collect();
-    let after = prospective_spawn_config_snapshot(
-        post_instance,
-        &personas,
-        &[],
-        "wss://ws.example",
-        &Default::default(),
-        false,
-        crate::managed_agents::AcpSessionPolicy::Channel,
-    );
+    let after = prospective_spawn_config_snapshot(ProspectiveSpawnConfigInputs {
+        record: post_instance,
+        personas: &personas,
+        teams: &[],
+        workspace_relay: "wss://ws.example",
+        global: &Default::default(),
+        enforced_owner_only: false,
+        session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
+        session_residency_enabled: false,
+    });
 
     assert_eq!(
         before.canonical(),
@@ -185,15 +189,16 @@ fn backfill_of_prompted_record_keeps_spawn_snapshot_stable() {
 
     let pre_records = load_typed(dir.path());
     let pre_instance = pre_records.iter().find(|r| !r.pubkey.is_empty()).unwrap();
-    let before = prospective_spawn_config_snapshot(
-        pre_instance,
-        &[],
-        &[],
-        "wss://ws.example",
-        &Default::default(),
-        false,
-        crate::managed_agents::AcpSessionPolicy::Channel,
-    );
+    let before = prospective_spawn_config_snapshot(ProspectiveSpawnConfigInputs {
+        record: pre_instance,
+        personas: &[],
+        teams: &[],
+        workspace_relay: "wss://ws.example",
+        global: &Default::default(),
+        enforced_owner_only: false,
+        session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
+        session_residency_enabled: false,
+    });
 
     backfill_standalone_agents_in_dir(&base(dir.path())).unwrap();
 
@@ -203,15 +208,16 @@ fn backfill_of_prompted_record_keeps_spawn_snapshot_stable() {
         .iter()
         .filter_map(|r| r.to_definition_view())
         .collect();
-    let after = prospective_spawn_config_snapshot(
-        post_instance,
-        &personas,
-        &[],
-        "wss://ws.example",
-        &Default::default(),
-        false,
-        crate::managed_agents::AcpSessionPolicy::Channel,
-    );
+    let after = prospective_spawn_config_snapshot(ProspectiveSpawnConfigInputs {
+        record: post_instance,
+        personas: &personas,
+        teams: &[],
+        workspace_relay: "wss://ws.example",
+        global: &Default::default(),
+        enforced_owner_only: false,
+        session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
+        session_residency_enabled: false,
+    });
 
     assert_eq!(before.canonical(), after.canonical());
 }

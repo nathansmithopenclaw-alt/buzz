@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::atomic::Ordering};
 
 use tauri::{AppHandle, Manager};
 
@@ -6,10 +6,10 @@ use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 
 use crate::{
     managed_agents::{
-        append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        append_log_marker, known_acp_runtime, login_shell_path, managed_agent_continuity_dir,
+        managed_agent_log_path, missing_command_message, normalize_agent_args, open_log_file,
+        resolve_command, spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime,
+        ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -223,13 +223,21 @@ pub fn build_managed_agent_summary(
     // agent has nothing to compare against.
     let tracked_spawn = pair_key.as_ref().zip(pair_runtime).map(|(key, runtime)| {
         let current = crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
-            record,
-            personas,
-            teams,
-            &key.relay_url,
-            global_config,
-            super::owner_only_access_build(),
-            super::acp_session_policy(app.state::<crate::app_state::AppState>().inner()),
+            crate::managed_agents::spawn_snapshot::ProspectiveSpawnConfigInputs {
+                record,
+                personas,
+                teams,
+                workspace_relay: &key.relay_url,
+                global: global_config,
+                enforced_owner_only: super::owner_only_access_build(),
+                session_policy: super::acp_session_policy(
+                    app.state::<crate::app_state::AppState>().inner(),
+                ),
+                session_residency_enabled: app
+                    .state::<crate::app_state::AppState>()
+                    .session_residency_enabled()
+                    .load(Ordering::Acquire),
+            },
         );
         (runtime, current)
     });
@@ -293,6 +301,8 @@ pub fn build_managed_agent_summary(
         turn_timeout_seconds: record.turn_timeout_seconds,
         idle_timeout_seconds: record.idle_timeout_seconds,
         max_turn_duration_seconds: record.max_turn_duration_seconds,
+        idle_pool_sleep_seconds: record.idle_pool_sleep_seconds,
+        max_turns_per_session: record.max_turns_per_session,
         parallelism: record.parallelism,
         system_prompt: effective_prompt,
         avatar_url: record.avatar_url.clone(),
@@ -394,6 +404,7 @@ pub fn spawn_agent_child(
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     let state = app.state::<crate::app_state::AppState>();
     crate::managed_agents::require_fleet_host(&state)?;
+    let session_residency_enabled = state.session_residency_enabled().load(Ordering::Acquire);
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
@@ -516,7 +527,45 @@ pub fn spawn_agent_child(
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
-    command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
+    command.env(
+        "BUZZ_ACP_IDLE_POOL_SLEEP",
+        idle_pool_sleep_env(
+            lazy,
+            session_residency_enabled,
+            record.idle_pool_sleep_seconds,
+        ),
+    );
+    command.env(
+        "BUZZ_ACP_MAX_TURNS_PER_SESSION",
+        if session_residency_enabled {
+            record.max_turns_per_session.unwrap_or(0)
+        } else {
+            0
+        }
+        .to_string(),
+    );
+    command.env(
+        "BUZZ_ACP_SLEEP_WITH_SUMMARY",
+        if session_residency_enabled {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    if session_residency_enabled {
+        command.env(
+            "BUZZ_ACP_SLEEP_SUMMARY_DIR",
+            managed_agent_continuity_dir(app, &runtime_key)?,
+        );
+        command.env("BUZZ_ACP_PREFIX_BUDGET_WARNINGS", "true");
+        command.env("BUZZ_ACP_PREFIX_CORE_WARNING_BYTES", "12288");
+        command.env("BUZZ_ACP_PREFIX_TOTAL_WARNING_BYTES", "204800");
+    } else {
+        command.env_remove("BUZZ_ACP_SLEEP_SUMMARY_DIR");
+        command.env("BUZZ_ACP_PREFIX_BUDGET_WARNINGS", "false");
+        command.env_remove("BUZZ_ACP_PREFIX_CORE_WARNING_BYTES");
+        command.env_remove("BUZZ_ACP_PREFIX_TOTAL_WARNING_BYTES");
+    }
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {
@@ -906,6 +955,7 @@ pub fn spawn_agent_child(
             provider: effective_provider.as_deref(),
             enforced_owner_only: super::owner_only_access_build(),
             session_policy: acp_session_policy,
+            session_residency_enabled,
         },
     );
 

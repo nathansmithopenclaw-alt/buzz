@@ -220,6 +220,12 @@ fn reserved_keys_include_remote_lifetime_policy() {
     for key in [
         "BUZZ_ACP_EXIT_AFTER_INACTIVITY",
         "BUZZ_ACP_IDLE_POOL_SLEEP",
+        "BUZZ_ACP_MAX_TURNS_PER_SESSION",
+        "BUZZ_ACP_SLEEP_WITH_SUMMARY",
+        "BUZZ_ACP_SLEEP_SUMMARY_DIR",
+        "BUZZ_ACP_PREFIX_BUDGET_WARNINGS",
+        "BUZZ_ACP_PREFIX_CORE_WARNING_BYTES",
+        "BUZZ_ACP_PREFIX_TOTAL_WARNING_BYTES",
         "BUZZ_ACP_NO_PRESENCE",
     ] {
         assert!(is_reserved_env_key(key), "{key} should be reserved");

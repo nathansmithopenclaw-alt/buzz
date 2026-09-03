@@ -21,6 +21,8 @@ pub(super) fn sample_record() -> ManagedAgentRecord {
         turn_timeout_seconds: 320,
         idle_timeout_seconds: None,
         max_turn_duration_seconds: None,
+        idle_pool_sleep_seconds: None,
+        max_turns_per_session: None,
         parallelism: 1,
         system_prompt: None,
         model: None,

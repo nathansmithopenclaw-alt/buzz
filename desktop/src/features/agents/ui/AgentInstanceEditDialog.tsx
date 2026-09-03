@@ -24,7 +24,11 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
-import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
+import {
+  setManagedAgentAutoRestart,
+  setManagedAgentSessionResidencyPolicy,
+} from "@/shared/api/tauriManagedAgents";
+import { useFeatureEnabled } from "@/shared/features";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import { AgentDialogEffortSection } from "./AgentDialogEffortField";
 import { EffortPickerField } from "./EffortPickerField";
@@ -140,6 +144,13 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
+  const [idlePoolSleepHours, setIdlePoolSleepHours] = React.useState(
+    String((agent.idlePoolSleepSeconds ?? 900) / 3600),
+  );
+  const [maxTurnsPerSession, setMaxTurnsPerSession] = React.useState(
+    String(agent.maxTurnsPerSession ?? 0),
+  );
+  const sessionResidencyEnabled = useFeatureEnabled("agentSessionResidency");
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
     () =>
@@ -186,6 +197,8 @@ export function AgentInstanceEditDialog({
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
+      setIdlePoolSleepHours(String((agent.idlePoolSleepSeconds ?? 900) / 3600));
+      setMaxTurnsPerSession(String(agent.maxTurnsPerSession ?? 0));
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
@@ -619,6 +632,16 @@ export function AgentInstanceEditDialog({
     provider: providerForDiscovery,
     runtimeId: prospectiveRuntimeId,
   });
+  const idlePoolSleepHoursNumber = Number(idlePoolSleepHours);
+  const maxTurnsPerSessionNumber = Number(maxTurnsPerSession);
+  const sessionResidencyValid =
+    !sessionResidencyEnabled ||
+    (Number.isFinite(idlePoolSleepHoursNumber) &&
+      idlePoolSleepHoursNumber >= 0 &&
+      idlePoolSleepHoursNumber <= 720 &&
+      Number.isInteger(maxTurnsPerSessionNumber) &&
+      maxTurnsPerSessionNumber >= 0 &&
+      maxTurnsPerSessionNumber <= 10000);
   const canSubmit =
     computeEditAgentFormValidity({
       name,
@@ -635,11 +658,17 @@ export function AgentInstanceEditDialog({
     providerValid &&
     !modelValidationError &&
     !effortValidationError &&
+    sessionResidencyValid &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
   async function handleSubmit() {
     try {
       const parsedParallelism = Number.parseInt(parallelism, 10);
+      const parsedIdlePoolSleepHours = Number(idlePoolSleepHours);
+      const parsedIdlePoolSleepSeconds = Math.round(
+        parsedIdlePoolSleepHours * 3600,
+      );
+      const parsedMaxTurnsPerSession = Number.parseInt(maxTurnsPerSession, 10);
       const parsedArgs = agentArgs
         .split(",")
         .map((v) => v.trim())
@@ -747,23 +776,37 @@ export function AgentInstanceEditDialog({
       };
 
       const result = await updateMutation.mutateAsync(input);
+      let savedAgent = result.agent;
       if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
         // Standalone setter (mirrors start-on-app-launch) — not part of
         // UpdateManagedAgentInput, so the frozen update shape stays frozen.
-        await setManagedAgentAutoRestart(
+        savedAgent = await setManagedAgentAutoRestart(
           agent.pubkey,
           autoRestartOnConfigChange,
         );
       }
+      if (
+        sessionResidencyEnabled &&
+        (parsedIdlePoolSleepSeconds !== (agent.idlePoolSleepSeconds ?? 900) ||
+          parsedMaxTurnsPerSession !== (agent.maxTurnsPerSession ?? 0))
+      ) {
+        savedAgent = await setManagedAgentSessionResidencyPolicy(
+          agent.pubkey,
+          parsedIdlePoolSleepSeconds === 900
+            ? null
+            : parsedIdlePoolSleepSeconds,
+          parsedMaxTurnsPerSession === 0 ? null : parsedMaxTurnsPerSession,
+        );
+      }
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
       handleOpenChange(false);
-      onUpdated?.(result.agent);
+      onUpdated?.(savedAgent);
       // The auto-restart policy deliberately never fires for a stopped or
       // failing agent (a broken agent must not auto-loop), so an edit meant
       // to FIX one silently waits for a manual start. Offer that start
       // explicitly instead of relying on the user to know the policy.
-      if (!isManagedAgentActive(result.agent)) {
-        const startedName = result.agent.name;
+      if (!isManagedAgentActive(savedAgent)) {
+        const startedName = savedAgent.name;
         toast(`${startedName} saved while stopped.`, {
           action: {
             label: "Start now",
@@ -1178,6 +1221,9 @@ export function AgentInstanceEditDialog({
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
+                      idlePoolSleepHours={idlePoolSleepHours}
+                      maxTurnsPerSession={maxTurnsPerSession}
+                      sessionResidencyEnabled={sessionResidencyEnabled}
                       disabled={updateMutation.isPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
@@ -1203,6 +1249,8 @@ export function AgentInstanceEditDialog({
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}
                       onAutoRestartChange={setAutoRestartOnConfigChange}
+                      onIdlePoolSleepHoursChange={setIdlePoolSleepHours}
+                      onMaxTurnsPerSessionChange={setMaxTurnsPerSession}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onParallelismChange={setParallelism}

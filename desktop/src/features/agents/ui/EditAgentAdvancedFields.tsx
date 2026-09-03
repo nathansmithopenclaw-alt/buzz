@@ -33,6 +33,9 @@ export function EditAgentAdvancedFields({
   acpCommand,
   agentArgs,
   autoRestartOnConfigChange,
+  idlePoolSleepHours,
+  maxTurnsPerSession,
+  sessionResidencyEnabled,
   disabled,
   envVars,
   fileSatisfiedEnvKeys,
@@ -55,11 +58,16 @@ export function EditAgentAdvancedFields({
   onInheritHarnessChange,
   onParallelismChange,
   onAutoRestartChange,
+  onIdlePoolSleepHoursChange,
+  onMaxTurnsPerSessionChange,
   onSystemPromptChange,
 }: {
   acpCommand: string;
   agentArgs: string;
   autoRestartOnConfigChange: boolean;
+  idlePoolSleepHours: string;
+  maxTurnsPerSession: string;
+  sessionResidencyEnabled: boolean;
   disabled: boolean;
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys: readonly string[];
@@ -106,6 +114,8 @@ export function EditAgentAdvancedFields({
   onInheritHarnessChange: (value: boolean) => void;
   onParallelismChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
+  onIdlePoolSleepHoursChange: (value: string) => void;
+  onMaxTurnsPerSessionChange: (value: string) => void;
   onSystemPromptChange: (value: string) => void;
 }) {
   // Numeric tuning descriptors — gate on catalog status so that loading/error
@@ -194,6 +204,59 @@ export function EditAgentAdvancedFields({
             : "Configuration changes only show the restart badge; restart manually to apply them."}
         </p>
       </div>
+
+      {sessionResidencyEnabled ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="edit-agent-idle-residency-hours"
+            >
+              Idle residency (hours)
+            </label>
+            <Input
+              disabled={disabled}
+              id="edit-agent-idle-residency-hours"
+              max="720"
+              min="0"
+              onChange={(event) =>
+                onIdlePoolSleepHoursChange(event.target.value)
+              }
+              step="0.25"
+              type="number"
+              value={idlePoolSleepHours}
+            />
+            <p className="text-xs text-muted-foreground">
+              Keeps a quiet lazy session in memory. Zero disables idle sleep;
+              the default is 0.25 hours.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="edit-agent-max-turns-per-session"
+            >
+              Rotate after turns
+            </label>
+            <Input
+              disabled={disabled}
+              id="edit-agent-max-turns-per-session"
+              max="10000"
+              min="0"
+              onChange={(event) =>
+                onMaxTurnsPerSessionChange(event.target.value)
+              }
+              step="1"
+              type="number"
+              value={maxTurnsPerSession}
+            />
+            <p className="text-xs text-muted-foreground">
+              Starts a fresh provider session after this many successful turns.
+              Zero disables count-based rotation.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       {/* Agent runtime args */}
       <div className="space-y-1.5">

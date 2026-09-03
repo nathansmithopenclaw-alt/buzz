@@ -974,6 +974,14 @@ pub struct PromptContext {
     pub context_message_limit: u32,
     /// Max turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
+    /// Pair-local continuity summaries, disabled unless explicitly configured.
+    pub sleep_summary_store: crate::sleep_summary::SleepSummaryStore,
+    /// Emit per-section standing-prefix measurements and budget warnings.
+    pub prefix_budget_warnings: bool,
+    /// Rendered core-memory warning threshold in UTF-8 bytes.
+    pub prefix_core_warning_bytes: u64,
+    /// Standing prompt plus configured MCP descriptor warning threshold.
+    pub prefix_total_warning_bytes: u64,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Native ACP effort value to apply after the model selection.
@@ -1278,6 +1286,90 @@ impl AgentPool {
         &mut self.agents
     }
 
+    /// Capture one bounded continuity summary for an idle scope before an
+    /// operator-requested rotation. Returns false when no live idle session
+    /// exists or the experiment is disabled.
+    pub async fn capture_sleep_summary_for_scope(
+        &mut self,
+        scope: &SessionScope,
+        ctx: &PromptContext,
+        reason: &'static str,
+    ) -> bool {
+        let Some(agent) = self
+            .agents
+            .iter_mut()
+            .flatten()
+            .find(|agent| agent.state.sessions.contains_key(scope))
+        else {
+            return false;
+        };
+        let Some(session_id) = agent.state.sessions.get(scope).cloned() else {
+            return false;
+        };
+        capture_sleep_summary(agent, ctx, scope, &session_id, reason).await
+    }
+
+    /// Capture summaries for a bounded set of idle sessions before lazy-pool
+    /// teardown. Total work is capped by both candidate count and deadline.
+    pub async fn capture_sleep_summaries_before_idle(&mut self, ctx: &PromptContext) -> usize {
+        const MAX_CANDIDATES: usize = 4;
+        const TOTAL_BUDGET: Duration = Duration::from_secs(30);
+        self.capture_sleep_summaries_before_idle_with_limits(ctx, MAX_CANDIDATES, TOTAL_BUDGET)
+            .await
+    }
+
+    async fn capture_sleep_summaries_before_idle_with_limits(
+        &mut self,
+        ctx: &PromptContext,
+        max_candidates: usize,
+        total_budget: Duration,
+    ) -> usize {
+        if max_candidates == 0 || total_budget.is_zero() {
+            return 0;
+        }
+        let deadline = tokio::time::Instant::now() + total_budget;
+        let mut candidates = Vec::new();
+        for (agent_index, slot) in self.agents.iter().enumerate() {
+            let Some(agent) = slot.as_ref() else { continue };
+            for (scope, session_id) in &agent.state.sessions {
+                candidates.push((agent_index, scope.clone(), session_id.clone()));
+                if candidates.len() == max_candidates {
+                    break;
+                }
+            }
+            if candidates.len() == max_candidates {
+                break;
+            }
+        }
+
+        let mut captured = 0;
+        for (agent_index, scope, session_id) in candidates {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let Some(agent) = self.agents.get_mut(agent_index).and_then(Option::as_mut) else {
+                continue;
+            };
+            match tokio::time::timeout(
+                remaining,
+                capture_sleep_summary(agent, ctx, &scope, &session_id, "idle_sleep"),
+            )
+            .await
+            {
+                Ok(true) => captured += 1,
+                Ok(false) => {}
+                Err(_) => {
+                    cancel_sleep_summary_capture(agent, &scope, &session_id, "idle_sleep_deadline")
+                        .await;
+                    let _ = agent.acp.take_turn_usage();
+                    break;
+                }
+            }
+        }
+        captured
+    }
+
     /// Remove the session for `channel_id` from all idle agents.
     ///
     /// Called when the agent is removed from a channel — stale sessions
@@ -1414,6 +1506,116 @@ impl AgentPool {
             .invalidate_scope(&scope, SessionCreationCause::ModelSwitch);
         self.session_owners.remove(&scope);
         IdleSwitchResult::Switched
+    }
+}
+
+async fn capture_sleep_summary(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    scope: &SessionScope,
+    session_id: &str,
+    reason: &'static str,
+) -> bool {
+    capture_sleep_summary_with_timeouts(
+        agent,
+        ctx,
+        scope,
+        session_id,
+        reason,
+        crate::sleep_summary::CAPTURE_IDLE_TIMEOUT,
+        crate::sleep_summary::CAPTURE_HARD_TIMEOUT,
+    )
+    .await
+}
+
+async fn capture_sleep_summary_with_timeouts(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    scope: &SessionScope,
+    session_id: &str,
+    reason: &'static str,
+    idle_timeout: Duration,
+    hard_timeout: Duration,
+) -> bool {
+    if !ctx.sleep_summary_store.is_enabled() {
+        return false;
+    }
+    let result = agent
+        .acp
+        .session_prompt_capture_text(
+            session_id,
+            crate::sleep_summary::SUMMARY_PROMPT,
+            idle_timeout,
+            hard_timeout,
+        )
+        .await;
+    let (stop_reason, text) = match result {
+        Ok(value) => value,
+        Err(error) => {
+            if matches!(
+                &error,
+                AcpError::IdleTimeout(_) | AcpError::HardTimeout { .. }
+            ) {
+                cancel_sleep_summary_capture(agent, scope, session_id, reason).await;
+            }
+            // A failed private prompt can still report partial usage. Discard
+            // it so the next user turn cannot inherit lifecycle overhead.
+            let _ = agent.acp.take_turn_usage();
+            tracing::warn!(
+                target: "pool::sleep_summary",
+                scope = %scope.telemetry_label(),
+                reason,
+                "sleep summary capture failed: {error}"
+            );
+            return false;
+        }
+    };
+    match ctx.sleep_summary_store.save(scope, &text, reason) {
+        Ok(entry) => {
+            // Summary prompt usage is intentionally not attributed to the
+            // preceding user turn. A future NIP-AM extension may report it as
+            // lifecycle overhead; today it is discarded explicitly.
+            let _ = agent.acp.take_turn_usage();
+            tracing::info!(
+                target: "pool::sleep_summary",
+                scope = %scope.telemetry_label(),
+                reason,
+                summary_bytes = entry.summary.len(),
+                ?stop_reason,
+                "captured sleep summary"
+            );
+            true
+        }
+        Err(error) => {
+            let _ = agent.acp.take_turn_usage();
+            tracing::warn!(
+                target: "pool::sleep_summary",
+                scope = %scope.telemetry_label(),
+                reason,
+                "sleep summary persistence failed: {error}"
+            );
+            false
+        }
+    }
+}
+
+async fn cancel_sleep_summary_capture(
+    agent: &mut OwnedAgent,
+    scope: &SessionScope,
+    session_id: &str,
+    reason: &'static str,
+) {
+    if let Err(error) = agent
+        .acp
+        .cancel_with_cleanup_grace(session_id, CONTROL_CANCEL_GRACE)
+        .await
+    {
+        tracing::warn!(
+            target: "pool::sleep_summary",
+            scope = %scope.telemetry_label(),
+            reason,
+            "sleep summary cancellation cleanup failed: {error}"
+        );
     }
 }
 
@@ -1570,6 +1772,119 @@ struct NewSessionChannelContext<'a> {
     channel_type: Option<&'a str>,
 }
 
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrefixBudgetReport {
+    base_bytes: usize,
+    workspace_bytes: usize,
+    system_bytes: usize,
+    team_bytes: usize,
+    core_bytes: usize,
+    huddle_bytes: usize,
+    canvas_bytes: usize,
+    sleep_summary_bytes: usize,
+    framing_bytes: usize,
+    standing_bytes: usize,
+    mcp_config_bytes: usize,
+    total_bytes: usize,
+    core_warning_bytes: u64,
+    total_warning_bytes: u64,
+    core_exceeded: bool,
+    total_exceeded: bool,
+}
+
+impl PrefixBudgetReport {
+    fn exceeded(&self) -> bool {
+        self.core_exceeded || self.total_exceeded
+    }
+}
+
+fn rendered_section_bytes(tag: &str, value: Option<&str>) -> usize {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| crate::prompt_framing::semantic_section(tag, value).len())
+        .unwrap_or(0)
+}
+
+fn prefix_budget_report(
+    ctx: &PromptContext,
+    agent_core: Option<&str>,
+    channel: &NewSessionChannelContext<'_>,
+    sleep_summary: Option<&str>,
+    combined_system_prompt: Option<&str>,
+    mcp_servers: &[McpServer],
+) -> PrefixBudgetReport {
+    let base_bytes = ctx
+        .base_prompt
+        .as_deref()
+        .map(crate::queue::base_section)
+        .map_or(0, |value| value.len());
+    let workspace_bytes = ctx
+        .base_prompt
+        .as_ref()
+        .map(|_| workspace_section(&ctx.cwd).len())
+        .unwrap_or(0);
+    let system_bytes = rendered_section_bytes("system", ctx.system_prompt.as_deref());
+    let team_bytes = rendered_section_bytes("team-instructions", ctx.team_instructions.as_deref());
+    let core_bytes = agent_core
+        .map(|core| {
+            crate::prompt_framing::normalize_semantic_section(
+                "core-memory",
+                "Agent Memory — core",
+                core,
+            )
+            .len()
+        })
+        .unwrap_or(0);
+    let huddle_bytes = rendered_section_bytes("huddle-instructions", channel.huddle_instructions);
+    let canvas_bytes = channel
+        .canvas
+        .map(|canvas| {
+            crate::prompt_framing::normalize_semantic_section(
+                "channel-canvas",
+                "Channel Canvas",
+                canvas,
+            )
+            .len()
+        })
+        .unwrap_or(0);
+    let sleep_summary_bytes = sleep_summary.map(str::len).unwrap_or(0);
+    let standing_bytes = combined_system_prompt.map(str::len).unwrap_or(0);
+    let section_bytes = base_bytes
+        + workspace_bytes
+        + system_bytes
+        + team_bytes
+        + core_bytes
+        + huddle_bytes
+        + canvas_bytes
+        + sleep_summary_bytes;
+    let framing_bytes = standing_bytes.saturating_sub(section_bytes);
+    // This measures the configured MCP descriptors sent by Buzz. Provider-owned
+    // built-in tools and dynamically discovered tool schemas are not observable
+    // at this boundary and are deliberately not estimated.
+    let mcp_config_bytes = serde_json::to_vec(mcp_servers).map_or(0, |value| value.len());
+    let total_bytes = standing_bytes.saturating_add(mcp_config_bytes);
+    PrefixBudgetReport {
+        base_bytes,
+        workspace_bytes,
+        system_bytes,
+        team_bytes,
+        core_bytes,
+        huddle_bytes,
+        canvas_bytes,
+        sleep_summary_bytes,
+        framing_bytes,
+        standing_bytes,
+        mcp_config_bytes,
+        total_bytes,
+        core_warning_bytes: ctx.prefix_core_warning_bytes,
+        total_warning_bytes: ctx.prefix_total_warning_bytes,
+        core_exceeded: core_bytes as u64 > ctx.prefix_core_warning_bytes,
+        total_exceeded: total_bytes as u64 > ctx.prefix_total_warning_bytes,
+    }
+}
+
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
@@ -1583,22 +1898,29 @@ async fn create_session_and_apply_model(
     // its own `<core-memory>` boundary, and canvas carries its own
     // `<channel-canvas>` boundary; both are appended with a blank-line separator.
     let is_goose = agent.agent_name == "goose";
-    let combined_system_prompt = with_canvas(
-        with_huddle_instructions(
-            with_core(
-                with_team(
-                    framed_system_prompt(
-                        &ctx.cwd,
-                        ctx.base_prompt.as_deref(),
-                        ctx.system_prompt.as_deref(),
+    let sleep_summary = channel
+        .scope
+        .and_then(|scope| ctx.sleep_summary_store.load(scope))
+        .map(|entry| crate::sleep_summary::render_section(&entry));
+    let combined_system_prompt = with_sleep_summary(
+        with_canvas(
+            with_huddle_instructions(
+                with_core(
+                    with_team(
+                        framed_system_prompt(
+                            &ctx.cwd,
+                            ctx.base_prompt.as_deref(),
+                            ctx.system_prompt.as_deref(),
+                        ),
+                        ctx.team_instructions.as_deref(),
                     ),
-                    ctx.team_instructions.as_deref(),
+                    agent_core,
                 ),
-                agent_core,
+                channel.huddle_instructions,
             ),
-            channel.huddle_instructions,
+            channel.canvas,
         ),
-        channel.canvas,
+        sleep_summary.as_deref(),
     );
 
     let session_title = ctx.session_title.as_deref().map(|agent_name| {
@@ -1614,6 +1936,49 @@ async fn create_session_and_apply_model(
         channel.channel_type,
         ctx.session_title.as_deref(),
     );
+
+    if ctx.prefix_budget_warnings {
+        let report = prefix_budget_report(
+            ctx,
+            agent_core,
+            &channel,
+            sleep_summary.as_deref(),
+            combined_system_prompt.as_deref(),
+            &mcp_servers,
+        );
+        tracing::info!(
+            target: "pool::prefix_budget",
+            base_bytes = report.base_bytes,
+            workspace_bytes = report.workspace_bytes,
+            system_bytes = report.system_bytes,
+            team_bytes = report.team_bytes,
+            core_bytes = report.core_bytes,
+            huddle_bytes = report.huddle_bytes,
+            canvas_bytes = report.canvas_bytes,
+            sleep_summary_bytes = report.sleep_summary_bytes,
+            framing_bytes = report.framing_bytes,
+            standing_bytes = report.standing_bytes,
+            mcp_config_bytes = report.mcp_config_bytes,
+            total_bytes = report.total_bytes,
+            "PREFIX_BUDGET_MEASUREMENT standing prefix byte breakdown"
+        );
+        if report.exceeded() {
+            tracing::warn!(
+                target: "pool::prefix_budget",
+                core_bytes = report.core_bytes,
+                core_warning_bytes = report.core_warning_bytes,
+                core_exceeded = report.core_exceeded,
+                total_bytes = report.total_bytes,
+                total_warning_bytes = report.total_warning_bytes,
+                total_exceeded = report.total_exceeded,
+                "PREFIX_BUDGET_WARNING standing prefix exceeds configured byte budget"
+            );
+            agent.acp.observe(
+                "prefix_budget_warning",
+                serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({})),
+            );
+        }
+    }
 
     let resp = agent
         .acp
@@ -2566,6 +2931,18 @@ fn with_canvas(prompt: Option<String>, canvas: Option<&str>) -> Option<String> {
     }
 }
 
+/// Append a local continuity handoff after all standing context. It remains
+/// ahead of dynamic turn text for both modern and legacy ACP transports.
+fn with_sleep_summary(prompt: Option<String>, summary: Option<&str>) -> Option<String> {
+    let summary = summary.map(str::trim).filter(|value| !value.is_empty());
+    match (prompt, summary) {
+        (Some(prompt), Some(summary)) => Some(format!("{prompt}\n\n{summary}")),
+        (None, Some(summary)) => Some(summary.to_string()),
+        (Some(prompt), None) => Some(prompt),
+        (None, None) => None,
+    }
+}
+
 /// Return `agent` to the pool via `result_tx`, clearing any steer receiver first.
 ///
 /// Every path that returns an `OwnedAgent` to the pool via `PromptResult` goes
@@ -3086,6 +3463,20 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => None,
     };
 
+    // Pair-local continuity is loaded before a replacement session is created
+    // and retained until the first successful user turn. That makes session/new
+    // failures and legacy first-prompt failures retryable without losing the
+    // handoff. Heartbeats never receive channel continuity.
+    let sleep_summary_entry = match &source {
+        PromptSource::Channel(scope) => ctx.sleep_summary_store.load(scope),
+        PromptSource::Heartbeat => None,
+    };
+    let sleep_summary_section = sleep_summary_entry
+        .as_ref()
+        .map(crate::sleep_summary::render_section);
+    let legacy_system_prompt =
+        with_sleep_summary(ctx.system_prompt.clone(), sleep_summary_section.as_deref());
+
     let (session_id, is_new_session) = match &source {
         PromptSource::Channel(scope) => {
             let cid = &scope.channel_id();
@@ -3246,7 +3637,7 @@ pub async fn run_prompt_task(
     // rather than leaving the agent unbriefed.
     let standing = crate::queue::StandingContext {
         base_prompt: ctx.base_prompt.as_deref(),
-        system_prompt: ctx.system_prompt.as_deref(),
+        system_prompt: legacy_system_prompt.as_deref(),
         team_instructions: ctx.team_instructions.as_deref(),
         agent_core: agent_core.as_deref(),
         huddle_instructions: huddle_instructions.as_deref(),
@@ -3671,13 +4062,26 @@ pub async fn run_prompt_task(
                         {
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
-                                agent
-                                    .state
-                                    .invalidate(&source, control_signal_creation_cause(&control_signal));
+                                let usage = agent.acp.take_turn_usage();
+                                if matches!(control_signal, ControlSignal::Rotate) {
+                                    if let PromptSource::Channel(scope) = &source {
+                                        capture_sleep_summary(
+                                            &mut agent,
+                                            &ctx,
+                                            scope,
+                                            &session_id,
+                                            "owner_rotate",
+                                        )
+                                        .await;
+                                    }
+                                }
+                                agent.state.invalidate(
+                                    &source,
+                                    control_signal_creation_cause(&control_signal),
+                                );
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
-                                let usage = agent.acp.take_turn_usage();
                                 publish_agent_turn_metric(
                                     &ctx,
                                     usage,
@@ -3900,52 +4304,38 @@ pub async fn run_prompt_task(
                     standing_sent,
                     &pending_delivered_event_ids,
                 );
+                if let Some(entry) = sleep_summary_entry.as_ref() {
+                    let age_seconds = chrono::Utc::now()
+                        .timestamp()
+                        .saturating_sub(entry.created_at)
+                        .max(0);
+                    match ctx.sleep_summary_store.remove(scope) {
+                        Ok(()) => tracing::info!(
+                            target: "pool::sleep_summary",
+                            scope = %scope.telemetry_label(),
+                            summary_bytes = entry.summary.len(),
+                            age_seconds,
+                            "injected and consumed sleep summary"
+                        ),
+                        Err(error) => tracing::warn!(
+                            target: "pool::sleep_summary",
+                            scope = %scope.telemetry_label(),
+                            "sleep summary was injected but could not be consumed: {error}"
+                        ),
+                    }
+                }
             } else if !agent.has_system_prompt_support() {
                 agent.state.heartbeat_standing_context_sent = true;
             }
 
-            let provider_forced_rotation = matches!(
+            let provider_requested_rotation = matches!(
                 stop_reason,
                 StopReason::MaxTokens | StopReason::MaxTurnRequests
             );
 
-            let should_rotate = provider_forced_rotation || {
-                let limit = ctx.max_turns_per_session;
-                if limit > 0 {
-                    match &source {
-                        PromptSource::Channel(scope) => {
-                            let count = agent.state.turn_counts.entry(scope.clone()).or_insert(0);
-                            *count += 1;
-                            *count >= limit
-                        }
-                        PromptSource::Heartbeat => {
-                            agent.state.heartbeat_turn_count += 1;
-                            agent.state.heartbeat_turn_count >= limit
-                        }
-                    }
-                } else {
-                    false
-                }
-            };
-
-            if should_rotate {
-                tracing::info!(
-                    target: "pool::session",
-                    "rotating session for {source:?} after {stop_reason:?}",
-                );
-                // A provider-imposed stop and a configured turn cap are
-                // different costs to the owner: one is the model ending the
-                // session, the other is our own rotation policy.
-                agent.state.invalidate(
-                    &source,
-                    if provider_forced_rotation {
-                        SessionCreationCause::ProviderLimit
-                    } else {
-                        SessionCreationCause::RotationTurnLimit
-                    },
-                );
-            }
-
+            // Snapshot the user turn before the private summary prompt resets
+            // ACP usage/evidence state. Summary cost is lifecycle overhead and
+            // must never replace the user's NIP-AM turn metric.
             let core_stop = acp_stop_to_core(&stop_reason);
             let usage = agent.acp.take_turn_usage();
             if let Err(error) = verify_response_model(
@@ -3973,6 +4363,53 @@ pub async fn run_prompt_task(
                     None,
                 );
                 return;
+            }
+
+            // Count only a successfully verified user turn. A provider/model
+            // mismatch reports PromptOutcome::Error above and must not move a
+            // session closer to configured rotation.
+            let count_rotation = {
+                let limit = ctx.max_turns_per_session;
+                if limit > 0 {
+                    match &source {
+                        PromptSource::Channel(scope) => {
+                            let count = agent.state.turn_counts.entry(scope.clone()).or_insert(0);
+                            *count += 1;
+                            *count >= limit
+                        }
+                        PromptSource::Heartbeat => {
+                            agent.state.heartbeat_turn_count += 1;
+                            agent.state.heartbeat_turn_count >= limit
+                        }
+                    }
+                } else {
+                    false
+                }
+            };
+
+            if should_capture_turn_limit_summary(count_rotation, provider_requested_rotation) {
+                if let PromptSource::Channel(scope) = &source {
+                    capture_sleep_summary(&mut agent, &ctx, scope, &session_id, "turn_limit").await;
+                }
+            }
+
+            let should_rotate = provider_requested_rotation || count_rotation;
+            if should_rotate {
+                tracing::info!(
+                    target: "pool::session",
+                    "rotating session for {source:?} after {stop_reason:?}",
+                );
+                // A provider-imposed stop and a configured turn cap are
+                // different costs to the owner: one is the model ending the
+                // session, the other is our own rotation policy.
+                agent.state.invalidate(
+                    &source,
+                    if provider_requested_rotation {
+                        SessionCreationCause::ProviderLimit
+                    } else {
+                        SessionCreationCause::RotationTurnLimit
+                    },
+                );
             }
             publish_agent_turn_metric(
                 &ctx,
@@ -4183,6 +4620,13 @@ pub async fn run_prompt_task(
         }
     }
     // _reaction_guard drops here → spawns clear_reactions for all exit paths.
+}
+
+fn should_capture_turn_limit_summary(
+    count_rotation: bool,
+    provider_requested_rotation: bool,
+) -> bool {
+    count_rotation && !provider_requested_rotation
 }
 
 /// Retry wrapper for context fetches: one retry with `CONTEXT_FETCH_RETRY_DELAY`
@@ -10237,6 +10681,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             ),
             context_message_limit: 0,
             max_turns_per_session: 0,
+            sleep_summary_store: crate::sleep_summary::SleepSummaryStore::new(false, None),
+            prefix_budget_warnings: false,
+            prefix_core_warning_bytes: 12 * 1024,
+            prefix_total_warning_bytes: 200 * 1024,
             permission_mode: PermissionMode::Default,
             thinking_effort: None,
             thinking_effort_is_default: false,
@@ -11416,6 +11864,472 @@ done"#
             .unwrap_err()
             .to_string()
             .contains("not available"));
+    }
+}
+
+#[cfg(test)]
+mod sleep_summary_integration_tests {
+    use super::*;
+    use crate::acp::AcpClient;
+    use tests::make_prompt_context_no_owner;
+
+    #[test]
+    fn provider_declared_limit_suppresses_colliding_count_rotation_summary() {
+        assert!(should_capture_turn_limit_summary(true, false));
+        assert!(!should_capture_turn_limit_summary(true, true));
+        assert!(!should_capture_turn_limit_summary(false, true));
+        assert!(!should_capture_turn_limit_summary(false, false));
+    }
+
+    async fn summary_test_agent(scope: &SessionScope, script: String) -> OwnedAgent {
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn summary test ACP");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "summary-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        agent
+            .state
+            .sessions
+            .insert(scope.clone(), scope.telemetry_label());
+        agent
+    }
+
+    #[tokio::test]
+    async fn idle_summary_sweep_stops_at_candidate_cap_and_total_deadline() {
+        let temp = std::env::temp_dir().join(format!("buzz-summary-bounds-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let scopes: Vec<_> = (0..5)
+            .map(|_| SessionScope::Conversation {
+                channel_id: Uuid::new_v4(),
+            })
+            .collect();
+        let immediate = r#"
+read -r _request
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"bounded summary"}}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+"#;
+        let mut slots = Vec::new();
+        for scope in &scopes {
+            slots.push(Some(summary_test_agent(scope, immediate.to_string()).await));
+        }
+        let mut pool = AgentPool::from_slots(slots);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.sleep_summary_store =
+            crate::sleep_summary::SleepSummaryStore::new(true, Some(temp.clone()));
+
+        assert_eq!(
+            pool.capture_sleep_summaries_before_idle_with_limits(&ctx, 4, Duration::from_secs(2),)
+                .await,
+            4,
+        );
+        for scope in &scopes[..4] {
+            assert!(ctx.sleep_summary_store.load(scope).is_some());
+        }
+        assert!(ctx.sleep_summary_store.load(&scopes[4]).is_none());
+        for agent in pool.agents_mut().iter_mut().flatten() {
+            agent.acp.shutdown().await;
+        }
+
+        let first_wire = temp.join("deadline-first.ndjson");
+        let second_wire = temp.join("deadline-second.ndjson");
+        let first_quoted = first_wire.to_string_lossy().replace('\'', "'\\''");
+        let second_quoted = second_wire.to_string_lossy().replace('\'', "'\\''");
+        let waiting = format!(
+            r#"read -r request
+printf '%s\n' "$request" >> '{first_quoted}'
+read -r cancel
+printf '%s\n' "$cancel" >> '{first_quoted}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"cancelled"}}}}'"#,
+        );
+        let second = format!(
+            r#"read -r request
+printf '%s\n' "$request" >> '{second_quoted}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"#,
+        );
+        let deadline_scopes = [
+            SessionScope::Conversation {
+                channel_id: Uuid::new_v4(),
+            },
+            SessionScope::Conversation {
+                channel_id: Uuid::new_v4(),
+            },
+        ];
+        let mut pool = AgentPool::from_slots(vec![
+            Some(summary_test_agent(&deadline_scopes[0], waiting).await),
+            Some(summary_test_agent(&deadline_scopes[1], second).await),
+        ]);
+        assert_eq!(
+            pool.capture_sleep_summaries_before_idle_with_limits(
+                &ctx,
+                4,
+                Duration::from_millis(30),
+            )
+            .await,
+            0,
+        );
+        assert_eq!(
+            std::fs::read_to_string(&first_wire)
+                .unwrap()
+                .lines()
+                .count(),
+            2,
+            "deadline expiry must send cancellation for the abandoned prompt",
+        );
+        assert!(
+            !second_wire.exists(),
+            "deadline expiry must stop before the next candidate",
+        );
+        for agent in pool.agents_mut().iter_mut().flatten() {
+            agent.acp.shutdown().await;
+        }
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn timed_out_summary_capture_cancels_and_drains_before_return() {
+        let temp = std::env::temp_dir().join(format!("buzz-summary-cancel-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let wire = temp.join("wire.ndjson");
+        let quoted = wire.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"read -r request
+printf '%s\n' "$request" >> '{quoted}'
+read -r cancel
+printf '%s\n' "$cancel" >> '{quoted}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"cancelled"}}}}'"#,
+        );
+        let scope = SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let mut agent = summary_test_agent(&scope, script).await;
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.sleep_summary_store =
+            crate::sleep_summary::SleepSummaryStore::new(true, Some(temp.clone()));
+        let session_id = scope.telemetry_label();
+
+        assert!(
+            !capture_sleep_summary_with_timeouts(
+                &mut agent,
+                &ctx,
+                &scope,
+                &session_id,
+                "timeout_test",
+                Duration::from_millis(30),
+                Duration::from_secs(1),
+            )
+            .await,
+        );
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&wire)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["method"], "session/prompt");
+        assert_eq!(requests[1]["method"], "session/cancel");
+        agent.acp.shutdown().await;
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_timeout_summary_capture_error_does_not_cancel_session() {
+        let temp =
+            std::env::temp_dir().join(format!("buzz-summary-non-timeout-error-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let wire = temp.join("wire.ndjson");
+        let quoted = wire.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"read -r request
+printf '%s\n' "$request" >> '{quoted}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32000,"message":"agent rejected summary"}}}}'"#,
+        );
+        let scope = SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let mut agent = summary_test_agent(&scope, script).await;
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.sleep_summary_store =
+            crate::sleep_summary::SleepSummaryStore::new(true, Some(temp.clone()));
+        let session_id = scope.telemetry_label();
+
+        assert!(
+            !capture_sleep_summary_with_timeouts(
+                &mut agent,
+                &ctx,
+                &scope,
+                &session_id,
+                "non_timeout_error_test",
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .await,
+        );
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&wire)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(requests.len(), 1, "non-timeout errors must not send cancel");
+        assert_eq!(requests[0]["method"], "session/prompt");
+        agent.acp.shutdown().await;
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn response_model_error_does_not_advance_rotation_counter() {
+        let script = r#"
+read -r _request
+printf '%s\n' '{"jsonrpc":"2.0","method":"_goose/unstable/session/update","params":{"sessionId":"live-session","update":{"sessionUpdate":"usage_update","accumulatedInputTokens":10,"accumulatedOutputTokens":2,"model":"unexpected-model"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+"#;
+        let scope = SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let mut agent = summary_test_agent(&scope, script.to_string()).await;
+        agent.state.heartbeat_session = Some("live-session".into());
+        agent.desired_model = Some("expected-model".into());
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.max_turns_per_session = 1;
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            None,
+            Some("heartbeat".into()),
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "model-mismatch".into(),
+        )
+        .await;
+        let mut result = result_rx.recv().await.unwrap();
+        assert!(matches!(result.outcome, PromptOutcome::Error(_)));
+        assert_eq!(result.agent.state.heartbeat_turn_count, 0);
+        result.agent.acp.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn channel_response_model_error_does_not_advance_rotation_counter() {
+        let channel_id = Uuid::new_v4();
+        let scope = SessionScope::Conversation { channel_id };
+        let session_id = scope.telemetry_label();
+        let script = format!(
+            r#"
+read -r _request
+printf '%s\n' '{{"jsonrpc":"2.0","method":"_goose/unstable/session/update","params":{{"sessionId":"{session_id}","update":{{"sessionUpdate":"usage_update","accumulatedInputTokens":10,"accumulatedOutputTokens":2,"model":"unexpected-model"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
+"#,
+        );
+        let mut agent = summary_test_agent(&scope, script).await;
+        agent.desired_model = Some("expected-model".into());
+        let batch = FlushBatch {
+            attempt: 1,
+            channel_id,
+            scope: scope.clone(),
+            events: vec![],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.max_turns_per_session = 1;
+        ctx.channel_info = ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "counter-test".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            ctx.rest_client.clone(),
+        );
+        ctx.channel_info.projects.write().unwrap().insert(
+            channel_id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now(),
+                value: None,
+            },
+        );
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            Some(batch),
+            None,
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "channel-model-mismatch".into(),
+        )
+        .await;
+        let mut result = result_rx.recv().await.unwrap();
+        assert!(matches!(result.outcome, PromptOutcome::Error(_)));
+        assert_eq!(result.agent.state.turn_counts.get(&scope), None);
+        result.agent.acp.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn captured_summary_is_injected_into_replacement_session_new() {
+        let temp = std::env::temp_dir().join(format!("buzz-summary-proof-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let wire_path = temp.join("wire.ndjson");
+        let quoted = wire_path.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted}'
+  if [ "$count" -eq 0 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"update":{{"sessionUpdate":"agent_message_chunk","content":{{"text":"Goal: continue proof lane\nNext: verify injection"}}}}}}}}'
+    printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
+  else
+    printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"replacement","configOptions":[]}}}}'
+  fi
+  count=$((count + 1))
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn summary proof ACP");
+        let scope = SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "summary-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        agent
+            .state
+            .sessions
+            .insert(scope.clone(), "old-session".into());
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.system_prompt = Some("persona sentinel".into());
+        ctx.sleep_summary_store =
+            crate::sleep_summary::SleepSummaryStore::new(true, Some(temp.clone()));
+
+        assert!(
+            capture_sleep_summary(&mut agent, &ctx, &scope, "old-session", "forced_test").await
+        );
+        agent
+            .state
+            .invalidate_scope(&scope, SessionCreationCause::OwnerRotate);
+        let replacement = create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: Some(&scope),
+                channel_type: Some("channel"),
+            },
+        )
+        .await
+        .expect("replacement session creation");
+        assert_eq!(replacement, "replacement");
+        agent.acp.shutdown().await;
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&wire_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["method"], "session/prompt");
+        assert_eq!(requests[1]["method"], "session/new");
+        let system = requests[1]["params"]["systemPrompt"].as_str().unwrap();
+        assert!(system.contains("persona sentinel"));
+        assert!(system.contains("<sleep-summary>"));
+        assert!(system.contains("Goal: continue proof lane"));
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn low_prefix_budget_emits_structured_warning_without_truncation() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_test_writer()
+            .try_init();
+        let script = r#"
+read -r _request
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"sessionId":"budget-proof","configOptions":[]}}'
+"#;
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script.to_string()], &[], false)
+            .await
+            .expect("spawn prefix budget proof ACP");
+        let observer = crate::observer::ObserverHandle::in_process();
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "budget-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        agent.acp.set_observer(Some(observer.clone()), 0);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.base_prompt = Some("base sentinel".into());
+        ctx.system_prompt = Some("persona sentinel".into());
+        ctx.prefix_budget_warnings = true;
+        ctx.prefix_core_warning_bytes = 1;
+        ctx.prefix_total_warning_bytes = 1;
+
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            Some("<core-memory>core sentinel</core-memory>"),
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: Some("<channel-canvas>canvas sentinel</channel-canvas>"),
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed without truncating context");
+        agent.acp.shutdown().await;
+
+        let warning = observer
+            .snapshot()
+            .into_iter()
+            .find(|event| event.kind == "prefix_budget_warning")
+            .expect("low byte budgets emit a structured observer warning");
+        assert_eq!(warning.payload["coreExceeded"], true);
+        assert_eq!(warning.payload["totalExceeded"], true);
+        assert!(warning.payload["baseBytes"].as_u64().unwrap() > 0);
+        assert!(warning.payload["systemBytes"].as_u64().unwrap() > 0);
+        assert!(warning.payload["coreBytes"].as_u64().unwrap() > 0);
+        assert!(warning.payload["canvasBytes"].as_u64().unwrap() > 0);
+        assert!(warning.payload["totalBytes"].as_u64().unwrap() > 1);
     }
 }
 

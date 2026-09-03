@@ -181,6 +181,8 @@ fn local_agent() -> ManagedAgentRecord {
         turn_timeout_seconds: 320,
         idle_timeout_seconds: None,
         max_turn_duration_seconds: None,
+        idle_pool_sleep_seconds: None,
+        max_turns_per_session: None,
         parallelism: 8,
         system_prompt: Some("local prompt".to_string()),
         model: Some("local-model".to_string()),

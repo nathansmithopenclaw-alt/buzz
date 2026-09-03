@@ -679,6 +679,8 @@ pub async fn create_managed_agent(
             // 0 or None → harness uses its own default (320s idle, 3600s max), and the CLI also clamps 0 → minimum.
             idle_timeout_seconds: input.idle_timeout_seconds.filter(|s| *s > 0),
             max_turn_duration_seconds: input.max_turn_duration_seconds.filter(|s| *s > 0),
+            idle_pool_sleep_seconds: None,
+            max_turns_per_session: None,
             parallelism: minted.parallelism.unwrap_or(DEFAULT_AGENT_PARALLELISM),
             system_prompt: snapshot_prompt.or_else(|| {
                 input

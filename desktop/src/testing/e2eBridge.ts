@@ -13045,8 +13045,11 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.linkPreviewMetadata ?? null;
       }
       case "apply_workspace": {
+        const experiments = (
+          payload as { experiments?: { fleetVisibility?: boolean } }
+        ).experiments;
         mockFleetVisibilitySettings.enabled =
-          (payload as { fleetVisibility?: boolean }).fleetVisibility ?? false;
+          experiments?.fleetVisibility ?? false;
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
           return new Promise((resolve) =>

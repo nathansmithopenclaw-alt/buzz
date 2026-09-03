@@ -128,6 +128,8 @@ export type RawManagedAgent =
     turn_timeout_seconds: number;
     idle_timeout_seconds: number | null;
     max_turn_duration_seconds: number | null;
+    idle_pool_sleep_seconds?: number | null;
+    max_turns_per_session?: number | null;
     parallelism: number;
     system_prompt: string | null;
     avatar_url?: string | null;
@@ -645,6 +647,8 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     turnTimeoutSeconds: agent.turn_timeout_seconds,
     idleTimeoutSeconds: agent.idle_timeout_seconds,
     maxTurnDurationSeconds: agent.max_turn_duration_seconds,
+    idlePoolSleepSeconds: agent.idle_pool_sleep_seconds ?? null,
+    maxTurnsPerSession: agent.max_turns_per_session ?? null,
     parallelism: agent.parallelism,
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
