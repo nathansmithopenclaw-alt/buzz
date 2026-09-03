@@ -53,11 +53,56 @@ export type AgentUsageModel = {
   hasUnknownUsage: boolean;
 };
 
+/**
+ * Per-channel slice of one agent's usage. `channelId` is `null` for turns the
+ * publisher did not attribute to a channel (e.g. heartbeat turns).
+ */
+export type AgentUsageChannel = {
+  channelId: string | null;
+  usage: ReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+/**
+ * Sessions started in the window, grouped by NIP-AM `sessionCreationCause`.
+ *
+ * Every cause except `worker_spawn` and `scope_first_turn` also names why the
+ * previous session in that scope ended, so this doubles as the teardown
+ * histogram. `cause: null` counts sessions whose turns carried no cause —
+ * published before the field existed, or by a harness that omits it. That is
+ * unknown, not "no reason".
+ */
+export type AgentSessionStarts = {
+  cause: string | null;
+  sessions: number;
+};
+
+/**
+ * Harness-side provenance counts, with explicit denominators.
+ *
+ * `retriedTurns: 0` against `turnsWithAttempt: 0` means nothing reported it,
+ * which is a different claim from "no retries happened". Never render the two
+ * as the same thing.
+ */
+export type AgentTurnProvenance = {
+  turnsWithAttempt: number;
+  retriedTurns: number;
+  turnsWithReplayFlag: number;
+  replayTurns: number;
+  /** Highest context occupancy observed — a state reading, so max, not sum. */
+  peakContextTokens: string | null;
+  contextWindow: string | null;
+};
+
 export type AgentUsage = {
   agentPubkey: string;
   usage: ReportedUsage;
   buckets: AgentUsageSeriesBucket[];
   models: AgentUsageModel[];
+  channels: AgentUsageChannel[];
+  sessionStarts: AgentSessionStarts[];
+  provenance: AgentTurnProvenance;
   reportCount: number;
   hasUnknownUsage: boolean;
 };

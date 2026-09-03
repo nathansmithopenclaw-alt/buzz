@@ -1076,6 +1076,10 @@ impl AcpClient {
                 self.background_mode.label()
             ),
         }
+        // Standard adapters (Claude, Codex) do not put the model on their usage
+        // notifications, so `models.currentModelId` here is the only source for
+        // the NIP-AM `model` field on those paths.
+        self.record_standard_session_model(&session_id, &result);
         tracing::info!(target: "acp::session", "session created: {session_id}");
         Ok(SessionNewResponse {
             session_id,
@@ -1143,7 +1147,28 @@ impl AcpClient {
             "sessionId": session_id,
             "modelId": model_id,
         });
-        self.send_request("session/set_model", params).await
+        let result = self.send_request("session/set_model", params).await?;
+        // Re-read the adapter's post-switch model rather than assuming the
+        // requested `model_id` took: an adapter may resolve an alias to a
+        // different id, and NIP-AM `model` must name what actually ran.
+        self.record_standard_session_model(session_id, &result);
+        Ok(result)
+    }
+
+    /// Record `models.currentModelId` from a `session/new` or `session/set_model`
+    /// response into the standard-adapter usage tracker. No-op for adapters that
+    /// report the model on their own usage notifications (goose, buzz-agent) and
+    /// for responses that carry no model state.
+    fn record_standard_session_model(&mut self, session_id: &str, result: &serde_json::Value) {
+        if self.standard_adapter.is_none() {
+            return;
+        }
+        if let Some(model) = result
+            .pointer("/models/currentModelId")
+            .and_then(serde_json::Value::as_str)
+        {
+            self.standard_usage.record_session_model(session_id, model);
+        }
     }
 
     /// Send `session/prompt` with idle-based timeout instead of wall-clock.
@@ -2527,8 +2552,12 @@ impl AcpClient {
     }
 
     /// Record the standard ACP cumulative cost notification when emitted by
-    /// Claude. Unlike Goose's payload, `used`/`size` are context occupancy and
-    /// are intentionally not mapped to token accounting.
+    /// Claude, plus the `used`/`size` context reading that rides the same
+    /// notification.
+    ///
+    /// `used`/`size` are context *occupancy* and window size, not token
+    /// accounting — they are published as NIP-AM `contextTokens` /
+    /// `contextWindow` and never folded into any token counter.
     fn handle_standard_usage_update(&mut self, msg: &serde_json::Value) {
         if self.standard_adapter != Some(StandardAdapterKind::Claude) {
             return;
@@ -2540,14 +2569,25 @@ impl AcpClient {
             Some(session_id) => session_id,
             None => return,
         };
-        let cost = match msg
+        let reading = crate::usage::ContextReading {
+            tokens: crate::usage::reported_context_value(
+                msg.pointer("/params/update/used")
+                    .and_then(serde_json::Value::as_u64),
+            ),
+            window: crate::usage::reported_context_value(
+                msg.pointer("/params/update/size")
+                    .and_then(serde_json::Value::as_u64),
+            ),
+        };
+        self.standard_usage.record_context(session_id, reading);
+        // Cost is optional on this notification; a reading without cost must
+        // still land, so the context record above happens first.
+        if let Some(cost) = msg
             .pointer("/params/update/cost/amount")
             .and_then(serde_json::Value::as_f64)
         {
-            Some(cost) => cost,
-            None => return,
-        };
-        self.standard_usage.record_cost(session_id, cost);
+            self.standard_usage.record_cost(session_id, cost);
+        }
     }
 
     /// Parse a `_goose/unstable/session/update` notification and record the

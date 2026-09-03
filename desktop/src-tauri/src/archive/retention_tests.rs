@@ -361,9 +361,11 @@ fn test_m4_two_conn_first_open_race_neither_times_out_and_marks_once() {
         })
         .collect();
     for h in handles {
+        let r = h.join().unwrap();
         assert!(
-            h.join().unwrap().is_ok(),
-            "both racing opens must complete within busy_timeout"
+            r.is_ok(),
+            "both racing opens must complete within busy_timeout: {:?}",
+            r.err()
         );
     }
 

@@ -45,6 +45,28 @@ fn parse_rfc3339_secs(timestamp: &str) -> Option<i64> {
         .map(|dt| dt.timestamp())
 }
 
+/// The `sessionCreationCause` exactly as the publisher wrote it, read from the
+/// stored plaintext rather than from the parsed payload.
+///
+/// The parsed value cannot be used here. `SessionCreationCause`'s `Deserialize`
+/// maps every unrecognized string to `Unknown` — correct for a consumer that
+/// must not reject a newer publisher's payload, fatal for an index column,
+/// because re-serializing `Unknown` would store a cause this build has never
+/// heard of as indistinguishable from one that was never reported. NIP-AM
+/// requires consumers to surface an unrecognized cause verbatim, and the panel
+/// does; the index has to carry it that far.
+///
+/// `None` only when the field is genuinely absent from the wire. A publisher
+/// that explicitly sent `"unknown"` is recorded as `"unknown"` — a reported
+/// unknown and an unreported field are different facts.
+fn session_creation_cause_wire_value(raw_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw_json)
+        .ok()?
+        .get("sessionCreationCause")?
+        .as_str()
+        .map(str::to_string)
+}
+
 // ── Row type ──────────────────────────────────────────────────────────────
 
 /// Parse status of a stored `agent_metric_index` row.
@@ -101,6 +123,19 @@ pub(super) struct AgentMetricIndexRow {
     pub pricing_authority: Option<String>,
     pub pricing_model: Option<String>,
     pub pricing_cache_class: Option<String>,
+    /// Channel the turn served, from the encrypted payload. Present in every
+    /// payload since NIP-AM's first release but only indexed from M4 onward,
+    /// which is why M4 rebuilds rather than only altering.
+    pub channel_id: Option<String>,
+    /// Post-turn context occupancy and window size. `None` when the publisher
+    /// did not report them. State readings — never summed across rows.
+    pub context_tokens: Option<u64>,
+    pub context_window: Option<u64>,
+    /// Harness-side provenance. All `None` for rows published before these
+    /// fields existed; absence is unknown, never a zero or a `false`.
+    pub attempt: Option<u32>,
+    pub is_replay: Option<bool>,
+    pub session_creation_cause: Option<String>,
     pub parse_status: ParseStatus,
 }
 
@@ -176,6 +211,15 @@ impl AgentMetricIndexRow {
                 .pricing_identity
                 .as_ref()
                 .and_then(|pi| pi.cache_class.clone()),
+            channel_id: payload.channel_id,
+            context_tokens: payload.context_tokens,
+            context_window: payload.context_window,
+            attempt: payload.attempt,
+            is_replay: payload.is_replay,
+            // Read off the wire, not off `payload`: see
+            // `session_creation_cause_wire_value` for why the parsed enum
+            // cannot round-trip an unrecognized cause.
+            session_creation_cause: session_creation_cause_wire_value(raw_json),
             parse_status: ParseStatus::Valid,
         }
     }
@@ -207,6 +251,12 @@ impl AgentMetricIndexRow {
             pricing_authority: None,
             pricing_model: None,
             pricing_cache_class: None,
+            channel_id: None,
+            context_tokens: None,
+            context_window: None,
+            attempt: None,
+            is_replay: None,
+            session_creation_cause: None,
             parse_status: ParseStatus::Invalid,
         }
     }
@@ -235,6 +285,10 @@ fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<AgentMetricIndexRow> {
     let cum_cache_read_text: Option<String> = row.get("cumulative_cache_read_tokens")?;
     let cum_cache_write_text: Option<String> = row.get("cumulative_cache_write_tokens")?;
     let delta_reliable_int: Option<i64> = row.get("delta_reliable")?;
+    let context_tokens_text: Option<String> = row.get("context_tokens")?;
+    let context_window_text: Option<String> = row.get("context_window")?;
+    let attempt_int: Option<i64> = row.get("attempt")?;
+    let is_replay_int: Option<i64> = row.get("is_replay")?;
     let parse_status_str: String = row.get("parse_status")?;
 
     Ok(AgentMetricIndexRow {
@@ -269,6 +323,12 @@ fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<AgentMetricIndexRow> {
         pricing_authority: row.get("pricing_authority")?,
         pricing_model: row.get("pricing_model")?,
         pricing_cache_class: row.get("pricing_cache_class")?,
+        channel_id: row.get("channel_id")?,
+        context_tokens: context_tokens_text.as_deref().and_then(decode_u64_sortable),
+        context_window: context_window_text.as_deref().and_then(decode_u64_sortable),
+        attempt: attempt_int.and_then(|v| u32::try_from(v).ok()),
+        is_replay: is_replay_int.map(|v| v != 0),
+        session_creation_cause: row.get("session_creation_cause")?,
         parse_status: ParseStatus::from_str(&parse_status_str),
     })
 }
@@ -278,7 +338,8 @@ const ROW_COLUMNS: &str = "id, agent_pubkey, event_created_at, archived_at, repo
      turn_total_tokens, turn_cost_usd, turn_cache_read_tokens, turn_cache_write_tokens, \
      cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens, \
      cumulative_cost_usd, cumulative_cache_read_tokens, cumulative_cache_write_tokens, \
-     pricing_authority, pricing_model, pricing_cache_class, parse_status";
+     pricing_authority, pricing_model, pricing_cache_class, channel_id, \
+     context_tokens, context_window, attempt, is_replay, session_creation_cause, parse_status";
 
 // ── Write path ───────────────────────────────────────────────────────────────
 
@@ -307,7 +368,10 @@ pub(super) fn insert_metric_index_row(
     let cum_total = row.cumulative_total_tokens.map(encode_u64_sortable);
     let cum_cache_read = row.cumulative_cache_read_tokens.map(encode_u64_sortable);
     let cum_cache_write = row.cumulative_cache_write_tokens.map(encode_u64_sortable);
+    let context_tokens = row.context_tokens.map(encode_u64_sortable);
+    let context_window = row.context_window.map(encode_u64_sortable);
     let delta_reliable = row.delta_reliable.map(|b| b as i64);
+    let is_replay = row.is_replay.map(|b| b as i64);
 
     let affected = conn
         .execute(
@@ -319,10 +383,13 @@ pub(super) fn insert_metric_index_row(
                   turn_cache_write_tokens, cumulative_input_tokens, cumulative_output_tokens,
                   cumulative_total_tokens, cumulative_cost_usd,
                   cumulative_cache_read_tokens, cumulative_cache_write_tokens,
-                  pricing_authority, pricing_model, pricing_cache_class, parse_status)
+                  pricing_authority, pricing_model, pricing_cache_class, channel_id,
+                  context_tokens, context_window, attempt, is_replay,
+                  session_creation_cause, parse_status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                      ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)
+                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
+                     ?31, ?32, ?33, ?34)
              ON CONFLICT (identity_pubkey, relay_url, id) DO NOTHING",
             params![
                 identity_pubkey,
@@ -352,6 +419,12 @@ pub(super) fn insert_metric_index_row(
                 row.pricing_authority,
                 row.pricing_model,
                 row.pricing_cache_class,
+                row.channel_id,
+                context_tokens,
+                context_window,
+                row.attempt,
+                is_replay,
+                row.session_creation_cause,
                 row.parse_status.as_str(),
             ],
         )

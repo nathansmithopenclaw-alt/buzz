@@ -3341,6 +3341,10 @@ async fn tokio_main() -> Result<()> {
     let base_prompt_content = config.base_prompt_content.take();
     let cwd = current_working_directory()?;
     let ctx = Arc::new(PromptContext {
+        // `startup_watermark` is already `now - lookback`; adding the lookback
+        // back recovers the instant this process started, which is the exact
+        // boundary between a replayed historical event and a live one.
+        startup_epoch_secs: startup_watermark.saturating_add(config.startup_replay_lookback_secs),
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
@@ -5086,6 +5090,7 @@ mod restart_delivery_tests {
             .sign_with_keys(&keys)
             .unwrap();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![queue::BatchEvent {
@@ -5684,6 +5689,7 @@ fn spawn_queue_loss_notices(queue: &mut EventQueue, rest_client: Option<&relay::
         match loss {
             queue::QueueLoss::Overflow(event) => {
                 let batch = FlushBatch {
+                    attempt: 1,
                     channel_id: event.channel_id,
                     scope: event.scope,
                     events: vec![queue::BatchEvent {
@@ -5911,7 +5917,10 @@ fn handle_prompt_result(
     // agent was checked out. This covers the gap where invalidate_channel_sessions
     // only touches idle agents.
     for ch in removed_channels {
-        result.agent.state.invalidate_channel(ch);
+        result.agent.state.invalidate_channel(
+            ch,
+            buzz_core::agent_turn_metric::SessionCreationCause::MembershipChange,
+        );
     }
 
     let outcome_label = match &result.outcome {
@@ -11202,6 +11211,7 @@ mod error_outcome_emission_tests {
                 .unwrap();
             let __cid = Uuid::new_v4();
             FlushBatch {
+                attempt: 1,
                 channel_id: __cid,
                 scope: scope::SessionScope::Conversation { channel_id: __cid },
                 events: vec![BatchEvent {
@@ -11311,6 +11321,7 @@ mod error_outcome_emission_tests {
                 .sign_with_keys(&keys)
                 .unwrap();
             FlushBatch {
+                attempt: 1,
                 channel_id,
                 scope: scope::SessionScope::Conversation { channel_id },
                 events: vec![BatchEvent {
@@ -11432,6 +11443,7 @@ mod error_outcome_emission_tests {
         let mut respawn_tasks = tokio::task::JoinSet::new();
         let observer = ObserverHandle::in_process();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
@@ -11528,6 +11540,7 @@ mod error_outcome_emission_tests {
         let mut respawn_tasks = tokio::task::JoinSet::new();
         let observer = ObserverHandle::in_process();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
@@ -11609,6 +11622,7 @@ mod error_outcome_emission_tests {
         );
         let channel_id = Uuid::new_v4();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
@@ -11880,6 +11894,7 @@ mod error_outcome_emission_tests {
             .sign_with_keys(&Keys::generate())
             .unwrap();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: session_scope.clone(),
             events: vec![BatchEvent {
@@ -12033,6 +12048,7 @@ mod error_outcome_emission_tests {
             .unwrap();
         let channel_id = uuid::Uuid::new_v4();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
@@ -12121,6 +12137,7 @@ mod error_outcome_emission_tests {
             .unwrap();
         let channel_id = uuid::Uuid::new_v4();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {

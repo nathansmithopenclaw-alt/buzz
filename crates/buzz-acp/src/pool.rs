@@ -29,6 +29,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use buzz_core::agent_turn_metric::SessionCreationCause;
+
 use crate::acp::{
     extract_model_config_options, extract_model_state, extract_thought_level_config_id,
     model_in_catalog, resolve_model_switch_method, session_advertises_model_catalog, AcpClient,
@@ -197,17 +199,42 @@ pub struct SessionState {
     /// Per-scope successful-delivery state. Created with the ACP session and
     /// cleared atomically with every invalidation path.
     pub deliveries: HashMap<SessionScope, ChannelDeliveryState>,
+    /// Why each live session was created. Written once at session creation and
+    /// read on every turn that session serves, so a session's cache-write cost
+    /// can be attributed to the reason it exists. Keyed and cleared exactly
+    /// like `sessions`.
+    session_causes: HashMap<SessionScope, SessionCreationCause>,
+    /// Creation cause of the live heartbeat session.
+    heartbeat_cause: Option<SessionCreationCause>,
+    /// Why each invalidated scope lost its session, held until that scope's
+    /// next `session/new` consumes it. Recorded only when a session was
+    /// actually torn down — a no-op invalidation must not fabricate a cause.
+    pending_causes: HashMap<SessionScope, SessionCreationCause>,
+    /// Same, for the heartbeat session.
+    heartbeat_pending_cause: Option<SessionCreationCause>,
+    /// Sessions this worker has created over its whole life. Distinguishes a
+    /// fresh/respawned worker (`0` — nothing was cached anywhere) from a warm
+    /// worker meeting a new scope. Never reset by invalidation: a respawn
+    /// builds a whole new `SessionState`, which is what zeroes it.
+    sessions_created: u64,
 }
 
 impl SessionState {
     /// Invalidate the session (and turn counter) for a specific prompt source.
-    pub fn invalidate(&mut self, source: &PromptSource) {
+    ///
+    /// `cause` explains the teardown and is carried to the scope's next
+    /// `session/new` as its NIP-AM `sessionCreationCause`. It is recorded only
+    /// when a live session was actually torn down.
+    pub fn invalidate(&mut self, source: &PromptSource, cause: SessionCreationCause) {
         match source {
             PromptSource::Channel(scope) => {
-                self.invalidate_scope(scope);
+                self.invalidate_scope(scope, cause);
             }
             PromptSource::Heartbeat => {
-                self.heartbeat_session = None;
+                if self.heartbeat_session.take().is_some() {
+                    self.heartbeat_pending_cause = Some(cause);
+                }
+                self.heartbeat_cause = None;
                 self.heartbeat_turn_count = 0;
                 self.heartbeat_standing_context_sent = false;
             }
@@ -216,18 +243,68 @@ impl SessionState {
 
     /// Invalidate a single session scope's session and turn counter.
     /// Returns `true` if the scope had an active session.
-    pub fn invalidate_scope(&mut self, scope: &SessionScope) -> bool {
+    pub fn invalidate_scope(&mut self, scope: &SessionScope, cause: SessionCreationCause) -> bool {
         self.turn_counts.remove(scope);
         self.core_sections.remove(scope);
         self.canvas_sections.remove(scope);
         self.deliveries.remove(scope);
-        self.sessions.remove(scope).is_some()
+        self.session_causes.remove(scope);
+        let had_session = self.sessions.remove(scope).is_some();
+        if had_session {
+            self.pending_causes.insert(scope.clone(), cause);
+        }
+        had_session
+    }
+
+    /// Consume the pending teardown cause for a scope that is about to get a
+    /// new session, recording it as that session's creation cause.
+    ///
+    /// With no pending cause the scope has no predecessor in this worker:
+    /// `WorkerSpawn` when the worker has never created a session (a fresh or
+    /// respawned process — nothing was cached), `ScopeFirstTurn` otherwise.
+    pub(crate) fn record_session_created(&mut self, source: &PromptSource) {
+        match source {
+            PromptSource::Channel(scope) => {
+                let cause = self
+                    .pending_causes
+                    .remove(scope)
+                    .unwrap_or(self.no_predecessor_cause());
+                self.session_causes.insert(scope.clone(), cause);
+            }
+            PromptSource::Heartbeat => {
+                let cause = self
+                    .heartbeat_pending_cause
+                    .take()
+                    .unwrap_or(self.no_predecessor_cause());
+                self.heartbeat_cause = Some(cause);
+            }
+        }
+        self.sessions_created = self.sessions_created.saturating_add(1);
+    }
+
+    fn no_predecessor_cause(&self) -> SessionCreationCause {
+        if self.sessions_created == 0 {
+            SessionCreationCause::WorkerSpawn
+        } else {
+            SessionCreationCause::ScopeFirstTurn
+        }
+    }
+
+    /// Why the live session serving `source` was created, if known.
+    ///
+    /// `None` for a session created before this build started tracking causes,
+    /// or for a scope with no live session.
+    pub(crate) fn creation_cause(&self, source: &PromptSource) -> Option<SessionCreationCause> {
+        match source {
+            PromptSource::Channel(scope) => self.session_causes.get(scope).cloned(),
+            PromptSource::Heartbeat => self.heartbeat_cause.clone(),
+        }
     }
 
     /// Invalidate every session scope belonging to `channel_id` (channel-wide
     /// cleanup, e.g. when the agent is removed from a channel). Returns the
     /// number of scopes that had an active session.
-    pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> usize {
+    pub fn invalidate_channel(&mut self, channel_id: &Uuid, cause: SessionCreationCause) -> usize {
         let scopes: Vec<SessionScope> = self
             .sessions
             .keys()
@@ -242,7 +319,7 @@ impl SessionState {
             .collect();
         let mut count = 0;
         for scope in scopes {
-            if self.invalidate_scope(&scope) {
+            if self.invalidate_scope(&scope, cause.clone()) {
                 count += 1;
             }
         }
@@ -250,7 +327,19 @@ impl SessionState {
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
-    pub fn invalidate_all(&mut self) {
+    ///
+    /// `cause` is recorded for every scope that actually held a session, so the
+    /// replacement session names the real teardown reason rather than falling
+    /// back to a no-predecessor value. `sessions_created` is deliberately NOT
+    /// reset: this worker has still created sessions, and only a real process
+    /// respawn (which builds a fresh `SessionState`) zeroes it.
+    pub fn invalidate_all(&mut self, cause: SessionCreationCause) {
+        for scope in self.sessions.keys().cloned().collect::<Vec<_>>() {
+            self.pending_causes.insert(scope, cause.clone());
+        }
+        if self.heartbeat_session.is_some() {
+            self.heartbeat_pending_cause = Some(cause);
+        }
         self.sessions.clear();
         self.turn_counts.clear();
         self.heartbeat_session = None;
@@ -259,6 +348,8 @@ impl SessionState {
         self.core_sections.clear();
         self.canvas_sections.clear();
         self.deliveries.clear();
+        self.session_causes.clear();
+        self.heartbeat_cause = None;
     }
 
     pub(crate) fn mark_scope_delivery_success(
@@ -314,7 +405,7 @@ fn invalidate_session_after_adapter_runtime_failure(
         return false;
     }
 
-    state.invalidate(source);
+    state.invalidate(source, SessionCreationCause::AdapterFailure);
     true
 }
 
@@ -487,7 +578,19 @@ fn apply_completed_before_control_signal(
         control_signal,
         ControlSignal::Rotate | ControlSignal::SwitchModel { .. }
     ) {
-        state.invalidate(source);
+        state.invalidate(source, control_signal_creation_cause(control_signal));
+    }
+}
+
+/// The NIP-AM creation cause an owner control signal stamps on the session that
+/// replaces the one it tore down.
+fn control_signal_creation_cause(signal: &ControlSignal) -> SessionCreationCause {
+    match signal {
+        ControlSignal::SwitchModel { .. } => SessionCreationCause::ModelSwitch,
+        ControlSignal::Rotate => SessionCreationCause::OwnerRotate,
+        ControlSignal::Cancel | ControlSignal::Interrupt | ControlSignal::Steer => {
+            SessionCreationCause::OwnerInterrupt
+        }
     }
 }
 
@@ -895,6 +998,11 @@ pub struct PromptContext {
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
+    /// Unix second at which this harness process began listening to the relay.
+    /// A triggering event older than this reached the agent through the bounded
+    /// startup replay window rather than arriving live, which is what NIP-AM
+    /// `isReplay` reports.
+    pub startup_epoch_secs: u64,
     /// Relay URL this harness is connected to. Rides in observer payloads that
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
@@ -1183,7 +1291,9 @@ impl AgentPool {
         for slot in &mut self.agents {
             if let Some(agent) = slot.as_mut() {
                 // Channel-wide: clears every child thread scope for the channel.
-                count += agent.state.invalidate_channel(&channel_id);
+                count += agent
+                    .state
+                    .invalidate_channel(&channel_id, SessionCreationCause::MembershipChange);
             }
         }
         // Drop every scope-owner entry for this channel so the directory does
@@ -1206,7 +1316,10 @@ impl AgentPool {
         let mut count = 0;
         for slot in &mut self.agents {
             if let Some(agent) = slot.as_mut() {
-                if agent.state.invalidate_scope(scope) {
+                if agent
+                    .state
+                    .invalidate_scope(scope, SessionCreationCause::OwnerRotate)
+                {
                     count += 1;
                 }
             }
@@ -1296,7 +1409,9 @@ impl AgentPool {
         // Carry the pick's correlator so a deferred-validation miss on the next
         // turn's session creation emits a late frame the Desktop can match.
         agent.desired_model_request_id = request_id;
-        agent.state.invalidate_scope(&scope);
+        agent
+            .state
+            .invalidate_scope(&scope, SessionCreationCause::ModelSwitch);
         self.session_owners.remove(&scope);
         IdleSwitchResult::Switched
     }
@@ -2733,6 +2848,9 @@ pub async fn run_prompt_task(
         turn_id.clone(),
         turn_started_at.clone(),
     ));
+    // Derived before any arm can move `batch`, so every publish path below
+    // sees the same provenance regardless of how the turn ends.
+    let mut provenance = TurnProvenance::from_batch(batch.as_ref(), ctx.startup_epoch_secs);
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
@@ -2998,6 +3116,7 @@ pub async fn run_prompt_task(
                             scope.telemetry_label()
                         );
                         agent.state.sessions.insert(scope.clone(), sid.clone());
+                        agent.state.record_session_created(&source);
                         agent
                             .state
                             .deliveries
@@ -3012,7 +3131,9 @@ pub async fn run_prompt_task(
                         (sid, true)
                     }
                     Err(AcpError::AgentExited) => {
-                        agent.state.invalidate_all();
+                        agent
+                            .state
+                            .invalidate_all(SessionCreationCause::AgentExited);
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -3064,12 +3185,15 @@ pub async fn run_prompt_task(
                             agent.index
                         );
                         agent.state.heartbeat_session = Some(sid.clone());
+                        agent.state.record_session_created(&source);
                         // Seed a zero usage baseline: buzz-acp spawned this session.
                         agent.acp.notify_session_spawned(&sid);
                         (sid, true)
                     }
                     Err(AcpError::AgentExited) => {
-                        agent.state.invalidate_all();
+                        agent
+                            .state
+                            .invalidate_all(SessionCreationCause::AgentExited);
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -3101,6 +3225,7 @@ pub async fn run_prompt_task(
         turn_id.clone(),
         turn_started_at,
     ));
+    provenance.session_creation_cause = agent.state.creation_cause(&source);
     // Backfill liveness's shared session ID so ticks after this point carry
     // it too, matching every other observer frame for this turn.
     liveness_guard.set_session_id(session_id.clone());
@@ -3189,11 +3314,14 @@ pub async fn run_prompt_task(
                         &session_id,
                         &format!("{turn_id}:initial"),
                         Some(acp_stop_to_core(&stop_reason)),
+                        &provenance,
                     )
                     .await;
                 }
                 Err(AcpError::AgentExited) => {
-                    agent.state.invalidate_all();
+                    agent
+                        .state
+                        .invalidate_all(SessionCreationCause::AgentExited);
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -3224,12 +3352,17 @@ pub async fn run_prompt_task(
                                 &session_id,
                                 &format!("{turn_id}:initial"),
                                 Some(acp_stop_to_core(&stop_reason)),
+                                &provenance,
                             )
                             .await;
-                            agent.state.invalidate(&source);
+                            agent
+                                .state
+                                .invalidate(&source, SessionCreationCause::TurnTimeout);
                         }
                         Err(AcpError::AgentExited) => {
-                            agent.state.invalidate_all();
+                            agent
+                                .state
+                                .invalidate_all(SessionCreationCause::AgentExited);
                             send_prompt_result(
                                 &result_tx,
                                 &turn_id,
@@ -3245,7 +3378,11 @@ pub async fn run_prompt_task(
                                 target: "pool::session",
                                 "cancel_with_cleanup failed during initial_message timeout: {e}"
                             );
-                            agent.state.invalidate(&source);
+                            // The idle timeout is what killed this session; the
+                            // cleanup failing is incidental to that cause.
+                            agent
+                                .state
+                                .invalidate(&source, SessionCreationCause::TurnTimeout);
                         }
                     }
                     send_prompt_result(
@@ -3265,7 +3402,9 @@ pub async fn run_prompt_task(
                         "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for channel {cid} — agent process is unrecoverable",
                         ctx.max_turn_duration.as_secs()
                     );
-                    agent.state.invalidate_all();
+                    agent
+                        .state
+                        .invalidate_all(SessionCreationCause::TurnTimeout);
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -3281,7 +3420,7 @@ pub async fn run_prompt_task(
                         target: "pool::session",
                         "initial_message failed for channel {cid}: {e} — invalidating session"
                     );
-                    agent.state.invalidate(&source);
+                    agent.state.invalidate(&source, SessionCreationCause::Error);
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -3532,7 +3671,9 @@ pub async fn run_prompt_task(
                         {
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
-                                agent.state.invalidate(&source);
+                                agent
+                                    .state
+                                    .invalidate(&source, control_signal_creation_cause(&control_signal));
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
@@ -3544,6 +3685,7 @@ pub async fn run_prompt_task(
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                                    &provenance,
                                 )
                                 .await;
                                 send_prompt_result(
@@ -3567,9 +3709,9 @@ pub async fn run_prompt_task(
                                     batch,
                                 );
                                 if failure.invalidate_all {
-                                    agent.state.invalidate_all();
+                                    agent.state.invalidate_all(SessionCreationCause::AgentExited);
                                 } else {
-                                    agent.state.invalidate(&source);
+                                    agent.state.invalidate(&source, SessionCreationCause::Error);
                                 }
 
                                 let usage = agent.acp.take_turn_usage();
@@ -3580,6 +3722,7 @@ pub async fn run_prompt_task(
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                    &provenance,
                                 )
                                 .await;
                                 send_prompt_result(
@@ -3655,6 +3798,7 @@ pub async fn run_prompt_task(
                                 &session_id,
                                 &turn_id,
                                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                &provenance,
                             )
                             .await;
                             spawn_publication_silence_notice(
@@ -3681,6 +3825,7 @@ pub async fn run_prompt_task(
                             &session_id,
                             &turn_id,
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+                            &provenance,
                         )
                         .await;
                         spawn_publication_silence_notice(
@@ -3725,6 +3870,7 @@ pub async fn run_prompt_task(
                     &session_id,
                     &turn_id,
                     Some(buzz_core::agent_turn_metric::StopReason::Error),
+                    &provenance,
                 )
                 .await;
                 spawn_publication_silence_notice(
@@ -3758,12 +3904,12 @@ pub async fn run_prompt_task(
                 agent.state.heartbeat_standing_context_sent = true;
             }
 
-            let should_rotate = matches!(
+            let provider_forced_rotation = matches!(
                 stop_reason,
                 StopReason::MaxTokens | StopReason::MaxTurnRequests
             );
 
-            let should_rotate = should_rotate || {
+            let should_rotate = provider_forced_rotation || {
                 let limit = ctx.max_turns_per_session;
                 if limit > 0 {
                     match &source {
@@ -3787,7 +3933,17 @@ pub async fn run_prompt_task(
                     target: "pool::session",
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
-                agent.state.invalidate(&source);
+                // A provider-imposed stop and a configured turn cap are
+                // different costs to the owner: one is the model ending the
+                // session, the other is our own rotation policy.
+                agent.state.invalidate(
+                    &source,
+                    if provider_forced_rotation {
+                        SessionCreationCause::ProviderLimit
+                    } else {
+                        SessionCreationCause::RotationTurnLimit
+                    },
+                );
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
@@ -3805,6 +3961,7 @@ pub async fn run_prompt_task(
                     &session_id,
                     &turn_id,
                     Some(buzz_core::agent_turn_metric::StopReason::Error),
+                    &provenance,
                 )
                 .await;
                 send_prompt_result(
@@ -3824,6 +3981,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(core_stop),
+                &provenance,
             )
             .await;
 
@@ -3846,7 +4004,9 @@ pub async fn run_prompt_task(
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
-            agent.state.invalidate_all();
+            agent
+                .state
+                .invalidate_all(SessionCreationCause::AgentExited);
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -3855,6 +4015,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+                &provenance,
             )
             .await;
             send_prompt_result(
@@ -3887,6 +4048,7 @@ pub async fn run_prompt_task(
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                        &provenance,
                     )
                     .await;
                     // Timeout triggers respawn in handle_prompt_result —
@@ -3906,7 +4068,9 @@ pub async fn run_prompt_task(
                         "agent {} exited during cancel_with_cleanup",
                         agent.index
                     );
-                    agent.state.invalidate_all();
+                    agent
+                        .state
+                        .invalidate_all(SessionCreationCause::AgentExited);
                     let usage = agent.acp.take_turn_usage();
                     publish_agent_turn_metric(
                         &ctx,
@@ -3915,6 +4079,7 @@ pub async fn run_prompt_task(
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
+                        &provenance,
                     )
                     .await;
                     send_prompt_result(
@@ -3931,7 +4096,11 @@ pub async fn run_prompt_task(
                         target: "pool::prompt",
                         "cancel_with_cleanup error: {e} — invalidating session"
                     );
-                    agent.state.invalidate(&source);
+                    // Reached only from the idle-timeout handler: the timeout is
+                    // the teardown cause, not the cleanup error.
+                    agent
+                        .state
+                        .invalidate(&source, SessionCreationCause::TurnTimeout);
                     let usage = agent.acp.take_turn_usage();
                     publish_agent_turn_metric(
                         &ctx,
@@ -3940,6 +4109,7 @@ pub async fn run_prompt_task(
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
+                        &provenance,
                     )
                     .await;
                     send_prompt_result(
@@ -3960,7 +4130,9 @@ pub async fn run_prompt_task(
                 "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) — agent process is unrecoverable, invalidating all sessions",
                 ctx.max_turn_duration.as_secs()
             );
-            agent.state.invalidate_all();
+            agent
+                .state
+                .invalidate_all(SessionCreationCause::TurnTimeout);
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -3969,6 +4141,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+                &provenance,
             )
             .await;
             send_prompt_result(
@@ -3986,7 +4159,7 @@ pub async fn run_prompt_task(
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
             if !matches!(e, AcpError::AgentError { .. }) {
-                agent.state.invalidate(&source);
+                agent.state.invalidate(&source, SessionCreationCause::Error);
             }
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
@@ -3996,6 +4169,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+                &provenance,
             )
             .await;
             send_prompt_result(
@@ -5556,6 +5730,60 @@ impl Drop for TurnCompletionGuard {
     }
 }
 
+/// Harness-side provenance for one turn, published as the NIP-AM `attempt`,
+/// `isReplay`, and `sessionCreationCause` fields.
+///
+/// These are facts about how buzz-acp came to run this turn, not about the
+/// adapter, so they are populated identically for every harness.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct TurnProvenance {
+    /// 1-based delivery attempt of the triggering batch. `None` for turns with
+    /// no batch (heartbeat), which are never retried.
+    pub attempt: Option<u32>,
+    /// Whether every triggering event predates this process's startup — i.e.
+    /// the turn happened only because the harness restarted. `None` for turns
+    /// with no batch.
+    pub is_replay: Option<bool>,
+    /// Why the session this turn ran in was created. `None` for a session this
+    /// process did not create (nothing to attribute).
+    pub session_creation_cause: Option<SessionCreationCause>,
+}
+
+impl TurnProvenance {
+    /// Derive the batch-shaped half of the provenance.
+    ///
+    /// `startup_epoch_secs` is the Unix second at which this process began
+    /// listening. An event older than that reached the agent through the
+    /// bounded startup replay window rather than arriving live.
+    ///
+    /// `isReplay` is true only when EVERY triggering event — including any
+    /// cancelled events merged into the re-prompt — predates startup: a batch
+    /// that mixes replayed and live events describes a turn that would have
+    /// happened anyway, so it is not attributable to the restart.
+    pub(crate) fn from_batch(batch: Option<&FlushBatch>, startup_epoch_secs: u64) -> Self {
+        let Some(batch) = batch else {
+            return Self::default();
+        };
+        let mut triggers = batch
+            .events
+            .iter()
+            .chain(batch.cancelled_events.iter())
+            .peekable();
+        // An empty batch cannot be called a replay: `all()` on an empty
+        // iterator is vacuously true, which would publish a false positive.
+        let is_replay = if triggers.peek().is_some() {
+            Some(triggers.all(|be| be.event.created_at.as_secs() < startup_epoch_secs))
+        } else {
+            None
+        };
+        Self {
+            attempt: Some(batch.attempt),
+            is_replay,
+            session_creation_cause: None,
+        }
+    }
+}
+
 /// Map an ACP `StopReason` to the NIP-AM `StopReason` used in kind 44200 payloads.
 fn acp_stop_to_core(r: &StopReason) -> buzz_core::agent_turn_metric::StopReason {
     use buzz_core::agent_turn_metric::StopReason as CoreStop;
@@ -5631,6 +5859,45 @@ pub(crate) fn build_turn_metric_counts(
     (turn_counts, cumulative_counts)
 }
 
+/// Assemble the NIP-AM `kind:44200` payload for one completed turn.
+///
+/// Extracted as a pure function, like [`build_turn_metric_counts`], so the
+/// field-by-field mapping — in particular the harness-side provenance, which
+/// has no other observable seam — can be asserted without relay or crypto
+/// infrastructure. [`publish_agent_turn_metric`] is the only production caller.
+pub(crate) fn build_turn_metric_payload(
+    harness_name: &str,
+    usage: &crate::usage::TurnUsage,
+    channel_id: Option<uuid::Uuid>,
+    turn_id: &str,
+    stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
+    provenance: &TurnProvenance,
+    timestamp: String,
+) -> buzz_core::agent_turn_metric::AgentTurnMetricPayload {
+    let (turn_counts, cumulative_counts) = build_turn_metric_counts(usage);
+    buzz_core::agent_turn_metric::AgentTurnMetricPayload {
+        harness: harness_name.to_string(),
+        model: usage.model.clone(),
+        channel_id: channel_id.map(|id| id.to_string()),
+        session_id: Some(usage.session_id.clone()),
+        turn_id: Some(turn_id.to_string()),
+        turn_seq: Some(usage.turn_seq),
+        timestamp,
+        turn: turn_counts,
+        cumulative: cumulative_counts,
+        delta_reliable: usage.delta_reliable,
+        stop_reason,
+        pricing_identity: usage.pricing_identity.clone(),
+        // Context readings pass through untouched: absent stays absent, so a
+        // harness that reports no context never publishes a fabricated zero.
+        context_tokens: usage.context_tokens,
+        context_window: usage.context_window,
+        attempt: provenance.attempt,
+        is_replay: provenance.is_replay,
+        session_creation_cause: provenance.session_creation_cause.clone(),
+    }
+}
+
 /// Best-effort: build and publish a `kind:44200` NIP-AM agent turn metric event.
 ///
 /// Does nothing when `usage` is `None` (goose emitted no usage notification
@@ -5644,8 +5911,8 @@ async fn publish_agent_turn_metric(
     session_id: &str,
     turn_id: &str,
     stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
+    provenance: &TurnProvenance,
 ) {
-    use buzz_core::agent_turn_metric::AgentTurnMetricPayload;
     use nostr::{EventBuilder, Kind, Tag};
 
     let (usage, owner_pk) = match (usage, ctx.agent_owner_pubkey.as_ref()) {
@@ -5653,22 +5920,16 @@ async fn publish_agent_turn_metric(
         _ => return,
     };
 
-    let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let payload = AgentTurnMetricPayload {
-        harness: ctx.harness_name.clone(),
-        model: usage.model.clone(),
-        channel_id: channel_id.map(|id| id.to_string()),
-        session_id: Some(usage.session_id.clone()),
-        turn_id: Some(turn_id.to_string()),
-        turn_seq: Some(usage.turn_seq),
-        timestamp,
-        turn: turn_counts,
-        cumulative: cumulative_counts,
-        delta_reliable: usage.delta_reliable,
+    let payload = build_turn_metric_payload(
+        &ctx.harness_name,
+        &usage,
+        channel_id,
+        turn_id,
         stop_reason,
-        pricing_identity: usage.pricing_identity.clone(),
-    };
+        provenance,
+        timestamp,
+    );
     let ciphertext = match buzz_core::agent_turn_metric::encrypt_agent_turn_metric(
         &ctx.agent_keys,
         owner_pk,
@@ -7213,6 +7474,7 @@ mod tests {
         let author_hex = event.pubkey.to_hex();
         let channel_id = Uuid::new_v4();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
@@ -7465,6 +7727,7 @@ done"#
                 .unwrap();
             let event_id = event.id.to_hex();
             let batch = FlushBatch {
+                attempt: 1,
                 channel_id,
                 scope: SessionScope::Conversation { channel_id },
                 events: vec![crate::queue::BatchEvent {
@@ -7548,6 +7811,7 @@ done"#
             .sign_with_keys(&keys)
             .unwrap();
         let merged_batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
@@ -7563,6 +7827,7 @@ done"#
             cancel_reason: Some(crate::queue::CancelReason::Steer),
         };
         let next_batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
@@ -7719,6 +7984,7 @@ done"#
             .sign_with_keys(&keys)
             .unwrap();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
@@ -7882,7 +8148,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         state.sessions.insert(conv(channel), "old-session".into());
         state.mark_scope_delivery_success(conv(channel), true, ["old-event".to_string()]);
 
-        assert!(state.invalidate_channel(&channel) > 0);
+        assert!(state.invalidate_channel(&channel, SessionCreationCause::MembershipChange) > 0);
         assert!(!state.deliveries.contains_key(&conv(channel)));
 
         state.sessions.insert(conv(channel), "new-session".into());
@@ -8116,7 +8382,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         s.sessions.insert(ta.clone(), "a".into());
         s.sessions.insert(tb.clone(), "b".into());
         s.turn_counts.insert(ta.clone(), 2);
-        assert!(s.invalidate_scope(&ta));
+        assert!(s.invalidate_scope(&ta, SessionCreationCause::OwnerRotate));
         assert!(!s.sessions.contains_key(&ta));
         assert!(!s.turn_counts.contains_key(&ta));
         // Sibling thread's session survives.
@@ -8125,6 +8391,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
     fn batch_with_scope(scope: SessionScope, event: nostr::Event) -> FlushBatch {
         FlushBatch {
+            attempt: 1,
             channel_id: scope.channel_id(),
             scope,
             events: vec![crate::queue::BatchEvent {
@@ -8227,7 +8494,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         s.sessions.insert(conv(ch), "c".into());
         s.sessions
             .insert(thread_scope(other, &"d".repeat(64)), "d".into());
-        let cleared = s.invalidate_channel(&ch);
+        let cleared = s.invalidate_channel(&ch, SessionCreationCause::MembershipChange);
         assert_eq!(cleared, 3, "all three ch scopes had sessions");
         assert!(s.sessions.keys().all(|k| k.channel_id() == other));
     }
@@ -8333,9 +8600,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[test]
     fn test_invalidate_channel_clears_session_and_turn_count() {
         let (mut s, ch_a, ch_b) = make_state();
-        s.invalidate(&PromptSource::Channel(SessionScope::Conversation {
-            channel_id: ch_a,
-        }));
+        s.invalidate(
+            &PromptSource::Channel(SessionScope::Conversation { channel_id: ch_a }),
+            SessionCreationCause::OwnerRotate,
+        );
 
         assert!(!s.sessions.contains_key(&conv(ch_a)));
         assert!(!s.turn_counts.contains_key(&conv(ch_a)));
@@ -8353,7 +8621,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[test]
     fn test_invalidate_heartbeat_clears_session_and_turn_count() {
         let (mut s, ch_a, ch_b) = make_state();
-        s.invalidate(&PromptSource::Heartbeat);
+        s.invalidate(&PromptSource::Heartbeat, SessionCreationCause::OwnerRotate);
 
         assert!(s.heartbeat_session.is_none());
         assert_eq!(s.heartbeat_turn_count, 0);
@@ -8369,7 +8637,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[test]
     fn test_invalidate_all_clears_everything() {
         let (mut s, _ch_a, _ch_b) = make_state();
-        s.invalidate_all();
+        s.invalidate_all(SessionCreationCause::AgentExited);
 
         assert!(s.sessions.is_empty());
         assert!(s.turn_counts.is_empty());
@@ -8383,9 +8651,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     fn test_invalidate_nonexistent_channel_is_noop() {
         let (mut s, ch_a, ch_b) = make_state();
         let ghost = Uuid::new_v4();
-        s.invalidate(&PromptSource::Channel(SessionScope::Conversation {
-            channel_id: ghost,
-        }));
+        s.invalidate(
+            &PromptSource::Channel(SessionScope::Conversation { channel_id: ghost }),
+            SessionCreationCause::OwnerRotate,
+        );
 
         // Everything still intact.
         assert_eq!(s.sessions.len(), 2);
@@ -8399,7 +8668,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[test]
     fn test_invalidate_all_on_empty_state_is_noop() {
         let mut s = SessionState::default();
-        s.invalidate_all(); // should not panic
+        s.invalidate_all(SessionCreationCause::AgentExited); // should not panic
         assert!(s.sessions.is_empty());
         assert!(s.turn_counts.is_empty());
         assert!(s.core_sections.is_empty());
@@ -8408,7 +8677,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[test]
     fn test_invalidate_channel_returns_true_when_session_existed() {
         let (mut s, ch_a, ch_b) = make_state();
-        assert!(s.invalidate_channel(&ch_a) > 0);
+        assert!(s.invalidate_channel(&ch_a, SessionCreationCause::MembershipChange) > 0);
         assert!(!s.sessions.contains_key(&conv(ch_a)));
         assert!(!s.turn_counts.contains_key(&conv(ch_a)));
         assert!(!s.core_sections.contains_key(&conv(ch_a)));
@@ -8426,7 +8695,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     fn test_invalidate_channel_returns_false_when_no_session() {
         let (mut s, _ch_a, _ch_b) = make_state();
         let ghost = Uuid::new_v4();
-        assert_eq!(s.invalidate_channel(&ghost), 0);
+        assert_eq!(
+            s.invalidate_channel(&ghost, SessionCreationCause::MembershipChange),
+            0
+        );
         // Nothing changed.
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
@@ -8439,7 +8711,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let (mut s, ch_a, ch_b) = make_state();
         let removed = vec![ch_a];
         for ch in &removed {
-            s.invalidate_channel(ch);
+            s.invalidate_channel(ch, SessionCreationCause::MembershipChange);
         }
         assert!(!s.sessions.contains_key(&conv(ch_a)));
         assert!(!s.turn_counts.contains_key(&conv(ch_a)));
@@ -8487,6 +8759,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             .sign_with_keys(&keys)
             .unwrap();
         FlushBatch {
+            attempt: 1,
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
@@ -9147,6 +9420,360 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         // Reaching here without a panic is the test.
     }
 
+    // ── NIP-AM provenance (attempt / isReplay / sessionCreationCause) ──────
+
+    fn provenance_batch(created_at_secs: &[u64], attempt: u32) -> FlushBatch {
+        let channel_id = Uuid::new_v4();
+        let events = created_at_secs
+            .iter()
+            .map(|secs| crate::queue::BatchEvent {
+                event: nostr::EventBuilder::text_note("hi")
+                    .custom_created_at(nostr::Timestamp::from_secs(*secs))
+                    .sign_with_keys(&nostr::Keys::generate())
+                    .expect("sign"),
+                prompt_tag: "mention".to_string(),
+                received_at: std::time::Instant::now(),
+            })
+            .collect();
+        FlushBatch {
+            attempt,
+            channel_id,
+            scope: SessionScope::Conversation { channel_id },
+            events,
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn provenance_reports_attempt_and_replay_for_a_wholly_historical_batch() {
+        let batch = provenance_batch(&[1000, 1001], 3);
+        let p = TurnProvenance::from_batch(Some(&batch), 2000);
+        assert_eq!(p.attempt, Some(3), "attempt must come from the batch");
+        assert_eq!(
+            p.is_replay,
+            Some(true),
+            "every trigger predates startup — the turn exists only because we restarted"
+        );
+    }
+
+    #[test]
+    fn provenance_does_not_call_a_mixed_batch_a_replay() {
+        // One live event means the turn would have happened anyway, so its
+        // tokens are not attributable to the restart.
+        let batch = provenance_batch(&[1000, 2500], 1);
+        let p = TurnProvenance::from_batch(Some(&batch), 2000);
+        assert_eq!(p.is_replay, Some(false));
+        assert_eq!(p.attempt, Some(1));
+    }
+
+    #[test]
+    fn provenance_treats_a_boundary_event_as_live() {
+        // created_at == startup is not older than startup: strict `<` keeps an
+        // event published in the same second we started on the live side.
+        let batch = provenance_batch(&[2000], 1);
+        assert_eq!(
+            TurnProvenance::from_batch(Some(&batch), 2000).is_replay,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn provenance_counts_merged_cancelled_events_as_triggers() {
+        // A cancelled-turn merge re-presents its events. A live cancelled event
+        // must keep the merged turn off the replay ledger.
+        let mut batch = provenance_batch(&[1000], 1);
+        batch.cancelled_events = provenance_batch(&[2500], 1).events;
+        assert_eq!(
+            TurnProvenance::from_batch(Some(&batch), 2000).is_replay,
+            Some(false),
+            "a live cancelled event must be counted as a trigger"
+        );
+    }
+
+    #[test]
+    fn provenance_is_unknown_without_a_batch_or_triggers() {
+        // Heartbeat: no batch at all — attempt and replay have no meaning and
+        // must be omitted rather than defaulted to 1/false.
+        let p = TurnProvenance::from_batch(None, 2000);
+        assert_eq!(p.attempt, None);
+        assert_eq!(p.is_replay, None);
+
+        // An empty batch must not become a vacuous `all() == true` replay.
+        let mut empty = provenance_batch(&[], 1);
+        empty.events.clear();
+        assert_eq!(
+            TurnProvenance::from_batch(Some(&empty), 2000).is_replay,
+            None
+        );
+    }
+
+    #[test]
+    fn first_session_of_a_fresh_worker_is_worker_spawn() {
+        let mut s = SessionState::default();
+        let source = PromptSource::Channel(SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        });
+        s.record_session_created(&source);
+        assert_eq!(
+            s.creation_cause(&source),
+            Some(SessionCreationCause::WorkerSpawn)
+        );
+    }
+
+    #[test]
+    fn a_second_scope_on_a_warm_worker_is_scope_first_turn() {
+        let mut s = SessionState::default();
+        let a = PromptSource::Channel(SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        });
+        let b = PromptSource::Channel(SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        });
+        s.record_session_created(&a);
+        s.record_session_created(&b);
+        assert_eq!(
+            s.creation_cause(&b),
+            Some(SessionCreationCause::ScopeFirstTurn),
+            "the worker was warm; this scope simply had no session yet"
+        );
+        assert_eq!(
+            s.creation_cause(&a),
+            Some(SessionCreationCause::WorkerSpawn),
+            "recording b must not rewrite a's cause"
+        );
+    }
+
+    #[test]
+    fn teardown_cause_carries_to_the_replacement_session() {
+        let channel_id = Uuid::new_v4();
+        let scope = SessionScope::Conversation { channel_id };
+        let source = PromptSource::Channel(scope.clone());
+        let mut s = SessionState::default();
+        s.sessions.insert(scope.clone(), "sess-1".to_string());
+        s.record_session_created(&source);
+
+        s.invalidate(&source, SessionCreationCause::RotationTurnLimit);
+        assert_eq!(
+            s.creation_cause(&source),
+            None,
+            "no live session means no cause to report"
+        );
+
+        s.sessions.insert(scope, "sess-2".to_string());
+        s.record_session_created(&source);
+        assert_eq!(
+            s.creation_cause(&source),
+            Some(SessionCreationCause::RotationTurnLimit),
+            "the replacement session must name why its predecessor died"
+        );
+    }
+
+    #[test]
+    fn invalidating_a_scope_with_no_session_records_no_cause() {
+        // Guard against fabricating a teardown: several error paths invalidate
+        // defensively when there may be nothing to tear down.
+        let channel_id = Uuid::new_v4();
+        let source = PromptSource::Channel(SessionScope::Conversation { channel_id });
+        let mut s = SessionState::default();
+        s.invalidate(&source, SessionCreationCause::AgentExited);
+        s.sessions.insert(
+            SessionScope::Conversation { channel_id },
+            "sess-1".to_string(),
+        );
+        s.record_session_created(&source);
+        assert_eq!(
+            s.creation_cause(&source),
+            Some(SessionCreationCause::WorkerSpawn),
+            "a no-op invalidation must not leave a phantom teardown cause"
+        );
+    }
+
+    #[test]
+    fn invalidate_all_records_the_cause_for_every_live_scope() {
+        let ch_a = Uuid::new_v4();
+        let ch_b = Uuid::new_v4();
+        let a = PromptSource::Channel(SessionScope::Conversation { channel_id: ch_a });
+        let b = PromptSource::Channel(SessionScope::Conversation { channel_id: ch_b });
+        let mut s = SessionState::default();
+        s.sessions
+            .insert(SessionScope::Conversation { channel_id: ch_a }, "s1".into());
+        s.record_session_created(&a);
+        s.sessions
+            .insert(SessionScope::Conversation { channel_id: ch_b }, "s2".into());
+        s.record_session_created(&b);
+
+        s.invalidate_all(SessionCreationCause::AgentExited);
+
+        for source in [&a, &b] {
+            s.sessions.insert(
+                SessionScope::Conversation {
+                    channel_id: source.channel_id().expect("channel scope"),
+                },
+                "s3".into(),
+            );
+            s.record_session_created(source);
+            assert_eq!(
+                s.creation_cause(source),
+                Some(SessionCreationCause::AgentExited),
+                "invalidate_all must reach every live scope, not just one"
+            );
+        }
+    }
+
+    #[test]
+    fn heartbeat_sessions_track_their_own_cause() {
+        let mut s = SessionState::default();
+        let hb = PromptSource::Heartbeat;
+        s.heartbeat_session = Some("hb-1".into());
+        s.record_session_created(&hb);
+        assert_eq!(
+            s.creation_cause(&hb),
+            Some(SessionCreationCause::WorkerSpawn)
+        );
+        s.invalidate(&hb, SessionCreationCause::TurnTimeout);
+        s.heartbeat_session = Some("hb-2".into());
+        s.record_session_created(&hb);
+        assert_eq!(
+            s.creation_cause(&hb),
+            Some(SessionCreationCause::TurnTimeout)
+        );
+    }
+
+    #[test]
+    fn control_signals_map_to_distinct_creation_causes() {
+        assert_eq!(
+            control_signal_creation_cause(&ControlSignal::Rotate),
+            SessionCreationCause::OwnerRotate
+        );
+        assert_eq!(
+            control_signal_creation_cause(&ControlSignal::SwitchModel {
+                model_id: "m".into(),
+                request_id: None,
+            }),
+            SessionCreationCause::ModelSwitch
+        );
+        for signal in [
+            ControlSignal::Cancel,
+            ControlSignal::Interrupt,
+            ControlSignal::Steer,
+        ] {
+            assert_eq!(
+                control_signal_creation_cause(&signal),
+                SessionCreationCause::OwnerInterrupt,
+                "{signal:?} is an owner interrupt, not a rotation"
+            );
+        }
+    }
+
+    fn provenance_test_usage() -> crate::usage::TurnUsage {
+        crate::usage::TurnUsage {
+            session_id: "sess-1".to_string(),
+            turn_seq: 4,
+            delta_reliable: true,
+            turn_input_tokens: Some(120),
+            turn_output_tokens: Some(30),
+            turn_total_tokens: None,
+            turn_cost_usd: None,
+            turn_cache_read_tokens: Some(100),
+            turn_cache_write_tokens: Some(10),
+            cumulative_input_tokens: None,
+            cumulative_output_tokens: None,
+            cumulative_total_tokens: None,
+            cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
+            context_tokens: Some(145_213),
+            context_window: Some(200_000),
+            model: Some("claude-opus-5".to_string()),
+            pricing_identity: None,
+        }
+    }
+
+    #[test]
+    fn payload_carries_context_model_and_provenance() {
+        let provenance = TurnProvenance {
+            attempt: Some(2),
+            is_replay: Some(true),
+            session_creation_cause: Some(SessionCreationCause::ProviderLimit),
+        };
+        let payload = build_turn_metric_payload(
+            "claude-agent-acp",
+            &provenance_test_usage(),
+            None,
+            "turn-1",
+            None,
+            &provenance,
+            "2026-09-03T00:00:00.000Z".to_string(),
+        );
+        assert_eq!(payload.context_tokens, Some(145_213));
+        assert_eq!(payload.context_window, Some(200_000));
+        assert_eq!(payload.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(payload.attempt, Some(2));
+        assert_eq!(payload.is_replay, Some(true));
+        assert_eq!(
+            payload.session_creation_cause,
+            Some(SessionCreationCause::ProviderLimit)
+        );
+    }
+
+    #[test]
+    fn payload_omits_context_and_provenance_the_harness_did_not_observe() {
+        let mut usage = provenance_test_usage();
+        usage.context_tokens = None;
+        usage.context_window = None;
+        usage.model = None;
+        let payload = build_turn_metric_payload(
+            "goose",
+            &usage,
+            None,
+            "turn-1",
+            None,
+            &TurnProvenance::default(),
+            "2026-09-03T00:00:00.000Z".to_string(),
+        );
+        // Unknown must never be published as a zero: a `contextTokens: 0` or
+        // `attempt: 0` would read as a measurement.
+        assert_eq!(payload.context_tokens, None);
+        assert_eq!(payload.context_window, None);
+        assert_eq!(payload.attempt, None);
+        assert_eq!(payload.is_replay, None);
+        assert_eq!(payload.session_creation_cause, None);
+        // The counters must still be intact — absent provenance is not a taint.
+        assert_eq!(payload.turn.and_then(|t| t.input_tokens), Some(120));
+    }
+
+    /// Every production `publish_agent_turn_metric` call must forward the
+    /// turn's real provenance, never a default.
+    ///
+    /// This is a source-shape guard because the harness has no seam that can
+    /// observe a publish end-to-end without a live relay. It exists because a
+    /// mechanical edit did exactly this: every call site compiled, every test
+    /// passed, and the three new fields would have shipped permanently null.
+    #[test]
+    fn every_production_publish_forwards_real_provenance() {
+        let src = include_str!("pool.rs");
+        let test_mod_start = src
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("test module marker must exist");
+        let production = &src[..test_mod_start];
+
+        let call_sites = production.matches("publish_agent_turn_metric(").count()
+            - production
+                .matches("async fn publish_agent_turn_metric(")
+                .count();
+        assert!(
+            call_sites >= 15,
+            "expected the production publish call sites to still be here, found {call_sites} — \
+             if this fell to zero the assertion below would pass while measuring nothing"
+        );
+        assert!(
+            !production.contains("&TurnProvenance::default()"),
+            "a production publish is passing a default provenance; attempt / isReplay / \
+             sessionCreationCause would be published as absent for every turn"
+        );
+    }
+
     // ── NIP-AM emit-hook unit tests ────────────────────────────────────────
 
     /// `acp_stop_to_core` maps all ACP stop reasons to the correct NIP-AM
@@ -9182,6 +9809,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &TurnProvenance::default(),
         )
         .await;
     }
@@ -9208,6 +9836,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            context_tokens: None,
+            context_window: None,
         };
         // owner_pubkey = None → early return, no panic.
         publish_agent_turn_metric(
@@ -9217,6 +9847,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &TurnProvenance::default(),
         )
         .await;
     }
@@ -9247,6 +9878,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            context_tokens: None,
+            context_window: None,
         };
         // Will try to publish and fail (no real relay) but must not panic.
         publish_agent_turn_metric(
@@ -9256,6 +9889,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &TurnProvenance::default(),
         )
         .await;
     }
@@ -9287,6 +9921,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            context_tokens: None,
+            context_window: None,
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
         publish_agent_turn_metric(
@@ -9296,6 +9932,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-cancel",
             "turn-cancel",
             Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+            &TurnProvenance::default(),
         )
         .await;
     }
@@ -9327,6 +9964,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            context_tokens: None,
+            context_window: None,
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
         publish_agent_turn_metric(
@@ -9336,6 +9975,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-ba",
             "turn-ba",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &TurnProvenance::default(),
         )
         .await;
     }
@@ -9364,6 +10004,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            context_tokens: None,
+            context_window: None,
         };
 
         let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
@@ -9416,6 +10058,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            context_tokens: None,
+            context_window: None,
         };
 
         let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
@@ -9563,6 +10207,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     ) -> PromptContext {
         use crate::relay::RestClient;
         PromptContext {
+            startup_epoch_secs: 0,
             mcp_servers: vec![],
             initial_message: None,
             idle_timeout: Duration::from_secs(60),
@@ -9718,7 +10363,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         s.canvas_sections
             .insert(conv(ch), "[Channel Canvas]\nrev abc".into());
 
-        s.invalidate_channel(&ch);
+        s.invalidate_channel(&ch, SessionCreationCause::MembershipChange);
 
         assert!(!s.canvas_sections.contains_key(&conv(ch)));
         assert!(!s.sessions.contains_key(&conv(ch)));
@@ -9733,7 +10378,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         s.canvas_sections.insert(conv(ch_b), "canvas-b".into());
         s.sessions.insert(conv(ch_a), "sess-a".into());
 
-        s.invalidate_all();
+        s.invalidate_all(SessionCreationCause::AgentExited);
 
         assert!(s.canvas_sections.is_empty());
         assert!(s.sessions.is_empty());
@@ -9749,7 +10394,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         s.canvas_sections.insert(conv(ch_a), "canvas-a".into());
         s.canvas_sections.insert(conv(ch_b), "canvas-b".into());
 
-        s.invalidate_channel(&ch_a);
+        s.invalidate_channel(&ch_a, SessionCreationCause::MembershipChange);
 
         assert!(!s.canvas_sections.contains_key(&conv(ch_a)));
         assert_eq!(s.canvas_sections.get(&conv(ch_b)).unwrap(), "canvas-b");
@@ -10239,6 +10884,7 @@ done"#
             .unwrap();
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id,
             scope: conv(channel_id),
             events: vec![crate::queue::BatchEvent {

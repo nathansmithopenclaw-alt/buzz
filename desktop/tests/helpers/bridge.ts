@@ -487,6 +487,13 @@ type MockBridgeOptions = {
     kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
   }>;
   /**
+   * Verbatim `get_agent_usage_series` response for the Agent usage panel.
+   * `unknown` on purpose — specs paste the exact JSON the real Rust command
+   * emitted rather than a hand-written fixture, so a shape drift between the
+   * backend and the panel shows up in the render.
+   */
+  agentUsageSeries?: unknown;
+  /**
    * Event IDs that `get_event` should report as definitively not found.
    * Causes `useDraftRootStatus` to map the draft to `deleted` state so specs
    * can exercise the "Thread deleted" label / disabled-send path.

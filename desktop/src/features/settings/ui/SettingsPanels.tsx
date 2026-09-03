@@ -8,6 +8,7 @@ import {
   Cpu,
   Download,
   FlaskConical,
+  Gauge,
   Keyboard,
   LayoutTemplate,
   MessagesSquare,
@@ -30,6 +31,7 @@ import type {
 import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
+import { AgentUsageCard } from "@/features/agent-usage/ui/AgentUsageCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
 import { cn } from "@/shared/lib/cn";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -97,6 +99,7 @@ export type SettingsSection =
   | "moderation"
   | "custom-emoji"
   | "local-archive"
+  | "agent-usage"
   | "mobile"
   | "updates";
 
@@ -123,6 +126,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "moderation",
   "custom-emoji",
   "local-archive",
+  "agent-usage",
   "mobile",
   "updates",
 ];
@@ -230,6 +234,12 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "local-archive",
     label: "Local archive",
     icon: Archive,
+  },
+  {
+    value: "agent-usage",
+    label: "Agent usage",
+    icon: Gauge,
+    featureGate: "agentUsage",
   },
   {
     value: "mobile",
@@ -862,6 +872,8 @@ export function renderSettingsSection(
       return <CustomEmojiSettingsCard />;
     case "local-archive":
       return <LocalArchiveSettingsCard />;
+    case "agent-usage":
+      return <AgentUsageCard />;
     case "mobile":
       return <MobilePairingCard currentPubkey={props.currentPubkey} />;
     case "updates":

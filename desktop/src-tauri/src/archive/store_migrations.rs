@@ -15,15 +15,163 @@ use rusqlite::{params, Connection};
 /// name = '...'` check so it is safe to call on every open — a migration
 /// that already ran is a no-op.
 ///
-/// Ordering: M2 (column additions) runs before M1 (index rebuild) so that
-/// the M1 rebuild, which calls `insert_metric_index_row`, always operates
-/// against a schema that includes the cache-read columns. M4 (`archive_meta`
-/// + scope-age index) runs last; it is independent of M1–M3.
+/// Ordering: every column addition runs before M1 (index rebuild) so that the
+/// M1 rebuild, which calls `insert_metric_index_row`, always operates against a
+/// schema containing every column that insert writes. M5 sits in that group for
+/// the same reason, even though it also rebuilds. M4 (`archive_meta` +
+/// scope-age index) runs last; it is independent of the rest.
 pub(super) fn apply_schema_migrations(conn: &Connection) -> Result<(), String> {
     migrate_add_cache_read_tokens(conn)?;
     migrate_add_cache_write_and_pricing(conn)?;
+    migrate_add_turn_provenance(conn)?;
     migrate_add_harness_to_metric_index(conn)?;
     migrate_add_archive_meta(conn)
+}
+
+/// M5: add the channel and turn-provenance columns to `agent_metric_index`,
+/// then rebuild the index from `archived_events.raw_json`.
+///
+/// Columns: `channel_id`, `context_tokens`, `context_window`, `attempt`,
+/// `is_replay`, `session_creation_cause`.
+///
+/// Unlike M2/M3 this migration also rebuilds, because `channelId` is NOT a new
+/// payload field — every NIP-AM payload has carried it since the kind shipped;
+/// it was simply never indexed. An ALTER alone would leave it NULL forever:
+/// `metric_store::backfill_agent_metric_index` anti-joins on
+/// `id NOT IN (SELECT id FROM agent_metric_index)`, so it never revisits a row
+/// that already has an index entry. The rebuild recovers per-channel history
+/// for the entire archive.
+///
+/// The provenance columns are genuinely new, so they stay NULL for every
+/// pre-existing row. That is correct and permanent: `archived_events` is
+/// insert-or-ignore, and the plaintext it stores for a row archived by an older
+/// build was re-serialized through a struct that had no such fields.
+fn migrate_add_turn_provenance(conn: &Connection) -> Result<(), String> {
+    // Cheap pre-lock guard so steady-state opens never take the write lock.
+    if turn_provenance_migration_applied(conn)? {
+        return Ok(());
+    }
+
+    // `BEGIN IMMEDIATE` + in-lock recheck, for exactly M4's reason: on a fresh
+    // database this migration is unmarked on every first open (the columns are
+    // already in the CREATE TABLE, but the marker is not), and two connections
+    // can open concurrently — the observer- and metric-archive seed hooks each
+    // call `open_archive_db`. Under `BEGIN DEFERRED` both would read no marker,
+    // both would take SHARED, and the first write would fail `database is
+    // locked` with no retry, because busy_timeout cannot resolve a deferred
+    // upgrade deadlock. IMMEDIATE makes the loser block, then observe the
+    // winner's committed marker and no-op.
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("migration M5: begin immediate: {e}"))?;
+
+    let result = migrate_add_turn_provenance_locked(conn);
+
+    if result.is_ok() {
+        conn.execute_batch("COMMIT")
+            .map_err(|e| format!("migration M5: commit: {e}"))?;
+    } else {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    result
+}
+
+fn turn_provenance_migration_applied(conn: &Connection) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_turn_provenance'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("migration M5: guard check: {e}"))?;
+    Ok(count > 0)
+}
+
+/// M5 body, run under the `BEGIN IMMEDIATE` write lock held by
+/// [`migrate_add_turn_provenance`].
+fn migrate_add_turn_provenance_locked(conn: &Connection) -> Result<(), String> {
+    // In-lock recheck: a concurrent first-opener may have committed the marker
+    // while this connection was blocked on the write lock.
+    if turn_provenance_migration_applied(conn)? {
+        return Ok(());
+    }
+
+    let names: Vec<String> = {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(agent_metric_index)")
+            .map_err(|e| format!("migration M5: PRAGMA table_info prepare: {e}"))?;
+        let ns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("migration M5: PRAGMA table_info query: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("migration M5: PRAGMA table_info read: {e}"))?;
+        ns
+    };
+
+    // Token-shaped values use the same fixed-width sortable TEXT encoding as
+    // every other u64 counter here; `attempt` and `is_replay` fit i64 natively.
+    //
+    // INVARIANT for any migration that rebuilds: it must first ensure EVERY
+    // column `insert_metric_index_row` writes exists, not just its own.
+    // `harness` belongs to M1, which runs after this one — on a pre-M1 database
+    // the rebuild below would otherwise fail with "no column named harness".
+    // M1's own ALTER is guarded on absence, so adding it here is a no-op there.
+    let cols = [
+        ("harness", "TEXT"),
+        ("channel_id", "TEXT"),
+        ("context_tokens", "TEXT"),
+        ("context_window", "TEXT"),
+        ("attempt", "INTEGER"),
+        ("is_replay", "INTEGER"),
+        ("session_creation_cause", "TEXT"),
+    ];
+    for (col, ty) in &cols {
+        if !names.iter().any(|n| n == col) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE agent_metric_index ADD COLUMN {col} {ty}"
+            ))
+            .map_err(|e| format!("migration M5: ALTER TABLE ({col}) failed: {e}"))?;
+        }
+    }
+
+    // Worklist from `archived_events` (canonical) rather than the index, so a
+    // partially rebuilt or empty index cannot lose a scope.
+    let scopes: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT identity_pubkey, relay_url
+                 FROM archived_events
+                 WHERE kind = 44200",
+            )
+            .map_err(|e| format!("migration M5: prepare scope query: {e}"))?;
+        let result = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("migration M5: query scopes: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("migration M5: read scopes: {e}"))?;
+        result
+    };
+
+    if !scopes.is_empty() {
+        conn.execute_batch("DELETE FROM agent_metric_index")
+            .map_err(|e| format!("migration M5: delete index rows: {e}"))?;
+        for (identity, relay) in &scopes {
+            rebuild_metric_index_in_tx(conn, identity, relay)?;
+        }
+    }
+
+    // Marker last, inside the same transaction: a crash before COMMIT rolls back
+    // every column and the rebuild, and the next open re-runs from scratch.
+    conn.execute(
+        "INSERT OR IGNORE INTO archive_migrations (name, applied_at) \
+         VALUES ('add_turn_provenance', ?1)",
+        params![std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64],
+    )
+    .map_err(|e| format!("migration M5: record marker: {e}"))?;
+
+    Ok(())
 }
 
 /// M1: add `harness TEXT` column to `agent_metric_index` and rebuild index

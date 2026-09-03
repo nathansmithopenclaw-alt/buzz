@@ -1,0 +1,1451 @@
+{
+  "_provenance": {
+    "source": "Verbatim `get_agent_usage_series` response, captured by the ignored `archive::agent_usage_live_evidence` harness running the production `open_archive_db` + `agent_usage_series` path over a copy of a real archive.db.",
+    "anonymization": "Every identifier in the source archive was deterministically rewritten BEFORE the harness ran, so the accounting ladder produced this response from synthetic ids and even the agent ordering is the ladder's own rather than a hand edit. Agent N = sha256(\"fixture-agent-N\"); channel N = uuid(sha256(\"fixture-channel-N\")[:32]); owner = sha256(\"fixture-owner\"); relay = wss://relay.example/. N counts distinct ids in the source archive in ascending order. `agentNames` uses that same N, so a display name and its pubkey always share one index.",
+    "preserved": "Token counts, session counts, per-channel and per-day distribution, and every completeness flag are unmodified. That fidelity is the point: a hand-written fixture would only ever assert what the panel already does. Only the identity columns were touched, and only in the archive copy.",
+    "regenerate": "Anonymize a copy of an archive.db as above, then run: BUZZ_LIVE_ARCHIVE=<copy> BUZZ_LIVE_IDENTITY=<synthetic owner> BUZZ_LIVE_RELAY=wss://relay.example/ BUZZ_LIVE_DAYS=2 cargo test --manifest-path desktop/src-tauri/Cargo.toml archive::agent_usage_live_evidence -- --ignored --nocapture"
+  },
+  "series": {
+    "collectionEnabled": true,
+    "buckets": [
+      {
+        "start": 1788321600,
+        "end": 1788408000,
+        "usage": {
+          "inputTokens": {
+            "value": "89142049",
+            "incomplete": true
+          },
+          "outputTokens": {
+            "value": "638570",
+            "incomplete": true
+          },
+          "totalTokens": {
+            "value": "2533349",
+            "incomplete": true
+          },
+          "estimatedCostUsd": {
+            "value": 92.10706610000004,
+            "incomplete": true
+          },
+          "cacheReadTokens": {
+            "value": "87103936",
+            "incomplete": true
+          },
+          "cacheWriteTokens": {
+            "value": "1898286",
+            "incomplete": true
+          },
+          "freshInputTokens": {
+            "value": null,
+            "incomplete": true
+          }
+        },
+        "reportCount": 220,
+        "hasUnknownUsage": true
+      },
+      {
+        "start": 1788408000,
+        "end": 1788494400,
+        "usage": {
+          "inputTokens": {
+            "value": "119573627",
+            "incomplete": true
+          },
+          "outputTokens": {
+            "value": "260775",
+            "incomplete": true
+          },
+          "totalTokens": {
+            "value": "1216309",
+            "incomplete": true
+          },
+          "estimatedCostUsd": {
+            "value": 82.44704375,
+            "incomplete": true
+          },
+          "cacheReadTokens": {
+            "value": "118760333",
+            "incomplete": true
+          },
+          "cacheWriteTokens": {
+            "value": "794108",
+            "incomplete": true
+          },
+          "freshInputTokens": {
+            "value": null,
+            "incomplete": true
+          }
+        },
+        "reportCount": 19,
+        "hasUnknownUsage": true
+      }
+    ],
+    "agents": [
+      {
+        "agentPubkey": "592c5ef70f3ae04cda8de8849d14efe10a9cc6336cfb64f21a183899a83bc735",
+        "usage": {
+          "inputTokens": {
+            "value": "124496975",
+            "incomplete": false
+          },
+          "outputTokens": {
+            "value": "329545",
+            "incomplete": false
+          },
+          "totalTokens": {
+            "value": null,
+            "incomplete": true
+          },
+          "estimatedCostUsd": {
+            "value": 78.356708,
+            "incomplete": false
+          },
+          "cacheReadTokens": {
+            "value": "123668400",
+            "incomplete": false
+          },
+          "cacheWriteTokens": {
+            "value": "827711",
+            "incomplete": false
+          },
+          "freshInputTokens": {
+            "value": "864",
+            "incomplete": false
+          }
+        },
+        "buckets": [
+          {
+            "start": 1788321600,
+            "end": 1788408000,
+            "usage": {
+              "inputTokens": {
+                "value": "9196539",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "106691",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 9.791372500000001,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "8930695",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": "265658",
+                "incomplete": false
+              },
+              "freshInputTokens": {
+                "value": "186",
+                "incomplete": false
+              }
+            },
+            "reportCount": 6,
+            "hasUnknownUsage": true
+          },
+          {
+            "start": 1788408000,
+            "end": 1788494400,
+            "usage": {
+              "inputTokens": {
+                "value": "115300436",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "222854",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 68.5653355,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "114737705",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": "562053",
+                "incomplete": false
+              },
+              "freshInputTokens": {
+                "value": "678",
+                "incomplete": false
+              }
+            },
+            "reportCount": 4,
+            "hasUnknownUsage": true
+          }
+        ],
+        "models": [
+          {
+            "harness": "claude-agent-acp",
+            "model": null,
+            "usage": {
+              "inputTokens": {
+                "value": "124496975",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "329545",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 78.356708,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "123668400",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": "827711",
+                "incomplete": false
+              },
+              "freshInputTokens": {
+                "value": "864",
+                "incomplete": false
+              }
+            },
+            "reportCount": 10,
+            "hasUnknownUsage": true
+          }
+        ],
+        "channels": [
+          {
+            "channelId": "bfec5b1f-5ba2-90f8-33fd-87059b8cf939",
+            "usage": {
+              "inputTokens": {
+                "value": "124496975",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "329545",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 78.356708,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "123668400",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": "827711",
+                "incomplete": false
+              },
+              "freshInputTokens": {
+                "value": "864",
+                "incomplete": false
+              }
+            },
+            "reportCount": 10,
+            "hasUnknownUsage": true
+          }
+        ],
+        "sessionStarts": [
+          {
+            "cause": null,
+            "sessions": 3
+          }
+        ],
+        "provenance": {
+          "turnsWithAttempt": 0,
+          "retriedTurns": 0,
+          "turnsWithReplayFlag": 0,
+          "replayTurns": 0,
+          "peakContextTokens": null,
+          "contextWindow": null
+        },
+        "reportCount": 10,
+        "hasUnknownUsage": true
+      },
+      {
+        "agentPubkey": "5516e87f19902405aff9145a305e3a234d70e2fc5dfcc276015e44f6deb07c52",
+        "usage": {
+          "inputTokens": {
+            "value": "1983339",
+            "incomplete": false
+          },
+          "outputTokens": {
+            "value": "4310",
+            "incomplete": false
+          },
+          "totalTokens": {
+            "value": "1987649",
+            "incomplete": false
+          },
+          "estimatedCostUsd": {
+            "value": null,
+            "incomplete": true
+          },
+          "cacheReadTokens": {
+            "value": "1879424",
+            "incomplete": false
+          },
+          "cacheWriteTokens": {
+            "value": null,
+            "incomplete": true
+          },
+          "freshInputTokens": {
+            "value": null,
+            "incomplete": true
+          }
+        },
+        "buckets": [
+          {
+            "start": 1788321600,
+            "end": 1788408000,
+            "usage": {
+              "inputTokens": {
+                "value": "1584348",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "3462",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "1587810",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "1487872",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 13,
+            "hasUnknownUsage": true
+          },
+          {
+            "start": 1788408000,
+            "end": 1788494400,
+            "usage": {
+              "inputTokens": {
+                "value": "398991",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "848",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "399839",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "391552",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 2,
+            "hasUnknownUsage": true
+          }
+        ],
+        "models": [
+          {
+            "harness": "codex-acp",
+            "model": null,
+            "usage": {
+              "inputTokens": {
+                "value": "1983339",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "4310",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "1987649",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "1879424",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 15,
+            "hasUnknownUsage": true
+          }
+        ],
+        "channels": [
+          {
+            "channelId": "bfec5b1f-5ba2-90f8-33fd-87059b8cf939",
+            "usage": {
+              "inputTokens": {
+                "value": "1250156",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "2776",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "1252932",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "1227008",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 9,
+            "hasUnknownUsage": true
+          },
+          {
+            "channelId": "d8146db0-fac2-26ba-65f0-0e054d97bbda",
+            "usage": {
+              "inputTokens": {
+                "value": "733183",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "1534",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "734717",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "652416",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 6,
+            "hasUnknownUsage": true
+          }
+        ],
+        "sessionStarts": [
+          {
+            "cause": null,
+            "sessions": 7
+          }
+        ],
+        "provenance": {
+          "turnsWithAttempt": 0,
+          "retriedTurns": 0,
+          "turnsWithReplayFlag": 0,
+          "replayTurns": 0,
+          "peakContextTokens": null,
+          "contextWindow": null
+        },
+        "reportCount": 15,
+        "hasUnknownUsage": true
+      },
+      {
+        "agentPubkey": "057f1b7c28e5567e728e371bac07521e3e7ad490fe8662eb150c8aa2c38d5017",
+        "usage": {
+          "inputTokens": {
+            "value": "1462893",
+            "incomplete": false
+          },
+          "outputTokens": {
+            "value": "2386",
+            "incomplete": false
+          },
+          "totalTokens": {
+            "value": "1465279",
+            "incomplete": false
+          },
+          "estimatedCostUsd": {
+            "value": null,
+            "incomplete": true
+          },
+          "cacheReadTokens": {
+            "value": "1435008",
+            "incomplete": false
+          },
+          "cacheWriteTokens": {
+            "value": null,
+            "incomplete": true
+          },
+          "freshInputTokens": {
+            "value": null,
+            "incomplete": true
+          }
+        },
+        "buckets": [
+          {
+            "start": 1788321600,
+            "end": 1788408000,
+            "usage": {
+              "inputTokens": {
+                "value": "647223",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "1586",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "648809",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "628480",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 6,
+            "hasUnknownUsage": true
+          },
+          {
+            "start": 1788408000,
+            "end": 1788494400,
+            "usage": {
+              "inputTokens": {
+                "value": "815670",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "800",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "816470",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "806528",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 5,
+            "hasUnknownUsage": true
+          }
+        ],
+        "models": [
+          {
+            "harness": "codex-acp",
+            "model": null,
+            "usage": {
+              "inputTokens": {
+                "value": "1462893",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "2386",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "1465279",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "1435008",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 11,
+            "hasUnknownUsage": true
+          }
+        ],
+        "channels": [
+          {
+            "channelId": "bfec5b1f-5ba2-90f8-33fd-87059b8cf939",
+            "usage": {
+              "inputTokens": {
+                "value": "1462893",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "2386",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "1465279",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "1435008",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 11,
+            "hasUnknownUsage": true
+          }
+        ],
+        "sessionStarts": [
+          {
+            "cause": null,
+            "sessions": 3
+          }
+        ],
+        "provenance": {
+          "turnsWithAttempt": 0,
+          "retriedTurns": 0,
+          "turnsWithReplayFlag": 0,
+          "replayTurns": 0,
+          "peakContextTokens": null,
+          "contextWindow": null
+        },
+        "reportCount": 11,
+        "hasUnknownUsage": true
+      },
+      {
+        "agentPubkey": "064e5b643521cb9c61cbadb77a98fd0791c12f29189b6aff0cb23650d4b71410",
+        "usage": {
+          "inputTokens": {
+            "value": "295902",
+            "incomplete": false
+          },
+          "outputTokens": {
+            "value": "828",
+            "incomplete": false
+          },
+          "totalTokens": {
+            "value": "296730",
+            "incomplete": false
+          },
+          "estimatedCostUsd": {
+            "value": null,
+            "incomplete": true
+          },
+          "cacheReadTokens": {
+            "value": "293632",
+            "incomplete": false
+          },
+          "cacheWriteTokens": {
+            "value": null,
+            "incomplete": true
+          },
+          "freshInputTokens": {
+            "value": null,
+            "incomplete": true
+          }
+        },
+        "buckets": [
+          {
+            "start": 1788321600,
+            "end": 1788408000,
+            "usage": {
+              "inputTokens": {
+                "value": "295902",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "828",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "296730",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "293632",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 3,
+            "hasUnknownUsage": true
+          },
+          {
+            "start": 1788408000,
+            "end": 1788494400,
+            "usage": {
+              "inputTokens": {
+                "value": null,
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": null,
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": null,
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": false
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": false
+              }
+            },
+            "reportCount": 0,
+            "hasUnknownUsage": false
+          }
+        ],
+        "models": [
+          {
+            "harness": "codex-acp",
+            "model": null,
+            "usage": {
+              "inputTokens": {
+                "value": "295902",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "828",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "296730",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "293632",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 3,
+            "hasUnknownUsage": true
+          }
+        ],
+        "channels": [
+          {
+            "channelId": "d8146db0-fac2-26ba-65f0-0e054d97bbda",
+            "usage": {
+              "inputTokens": {
+                "value": "295902",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "828",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": "296730",
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": true
+              },
+              "cacheReadTokens": {
+                "value": "293632",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 3,
+            "hasUnknownUsage": true
+          }
+        ],
+        "sessionStarts": [
+          {
+            "cause": null,
+            "sessions": 1
+          }
+        ],
+        "provenance": {
+          "turnsWithAttempt": 0,
+          "retriedTurns": 0,
+          "turnsWithReplayFlag": 0,
+          "replayTurns": 0,
+          "peakContextTokens": null,
+          "contextWindow": null
+        },
+        "reportCount": 3,
+        "hasUnknownUsage": true
+      },
+      {
+        "agentPubkey": "2bad28eb782d9cc17724b78c7c30f79e564afb264d6554c331fae297c493b1f0",
+        "usage": {
+          "inputTokens": {
+            "value": "79663645",
+            "incomplete": true
+          },
+          "outputTokens": {
+            "value": "558051",
+            "incomplete": true
+          },
+          "totalTokens": {
+            "value": null,
+            "incomplete": true
+          },
+          "estimatedCostUsd": {
+            "value": 95.98906525000001,
+            "incomplete": false
+          },
+          "cacheReadTokens": {
+            "value": "77830709",
+            "incomplete": true
+          },
+          "cacheWriteTokens": {
+            "value": "1809007",
+            "incomplete": true
+          },
+          "freshInputTokens": {
+            "value": null,
+            "incomplete": true
+          }
+        },
+        "buckets": [
+          {
+            "start": 1788321600,
+            "end": 1788408000,
+            "usage": {
+              "inputTokens": {
+                "value": "76605115",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "521778",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 82.10735700000002,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "75006161",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": "1576952",
+                "incomplete": false
+              },
+              "freshInputTokens": {
+                "value": "22002",
+                "incomplete": false
+              }
+            },
+            "reportCount": 28,
+            "hasUnknownUsage": true
+          },
+          {
+            "start": 1788408000,
+            "end": 1788494400,
+            "usage": {
+              "inputTokens": {
+                "value": "3058530",
+                "incomplete": true
+              },
+              "outputTokens": {
+                "value": "36273",
+                "incomplete": true
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 13.881708249999999,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "2824548",
+                "incomplete": true
+              },
+              "cacheWriteTokens": {
+                "value": "232055",
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 8,
+            "hasUnknownUsage": true
+          }
+        ],
+        "models": [
+          {
+            "harness": "claude-agent-acp",
+            "model": null,
+            "usage": {
+              "inputTokens": {
+                "value": "79663645",
+                "incomplete": true
+              },
+              "outputTokens": {
+                "value": "558051",
+                "incomplete": true
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 95.98906525000001,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "77830709",
+                "incomplete": true
+              },
+              "cacheWriteTokens": {
+                "value": "1809007",
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 36,
+            "hasUnknownUsage": true
+          }
+        ],
+        "channels": [
+          {
+            "channelId": "bfec5b1f-5ba2-90f8-33fd-87059b8cf939",
+            "usage": {
+              "inputTokens": {
+                "value": "35403780",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "183899",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 39.844342749999996,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "34669568",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": "724687",
+                "incomplete": false
+              },
+              "freshInputTokens": {
+                "value": "9525",
+                "incomplete": false
+              }
+            },
+            "reportCount": 23,
+            "hasUnknownUsage": true
+          },
+          {
+            "channelId": "d8146db0-fac2-26ba-65f0-0e054d97bbda",
+            "usage": {
+              "inputTokens": {
+                "value": "6608262",
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": "55530",
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 9.75577675,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "6337447",
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": "268555",
+                "incomplete": false
+              },
+              "freshInputTokens": {
+                "value": "2260",
+                "incomplete": false
+              }
+            },
+            "reportCount": 5,
+            "hasUnknownUsage": true
+          },
+          {
+            "channelId": "02df610a-ce61-ccf5-39cc-3685e00011da",
+            "usage": {
+              "inputTokens": {
+                "value": "37651603",
+                "incomplete": true
+              },
+              "outputTokens": {
+                "value": "318622",
+                "incomplete": true
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 46.38894575000001,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "36823694",
+                "incomplete": true
+              },
+              "cacheWriteTokens": {
+                "value": "815765",
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 8,
+            "hasUnknownUsage": true
+          }
+        ],
+        "sessionStarts": [
+          {
+            "cause": null,
+            "sessions": 11
+          }
+        ],
+        "provenance": {
+          "turnsWithAttempt": 0,
+          "retriedTurns": 0,
+          "turnsWithReplayFlag": 0,
+          "replayTurns": 0,
+          "peakContextTokens": null,
+          "contextWindow": null
+        },
+        "reportCount": 36,
+        "hasUnknownUsage": true
+      },
+      {
+        "agentPubkey": "753d57bfc6f51d75f70bdcba79beeff8ee9ec05fb9006b680b0e7ddee6553dea",
+        "usage": {
+          "inputTokens": {
+            "value": "812922",
+            "incomplete": true
+          },
+          "outputTokens": {
+            "value": "4225",
+            "incomplete": true
+          },
+          "totalTokens": {
+            "value": null,
+            "incomplete": true
+          },
+          "estimatedCostUsd": {
+            "value": 0.20833660000000004,
+            "incomplete": false
+          },
+          "cacheReadTokens": {
+            "value": "757096",
+            "incomplete": true
+          },
+          "cacheWriteTokens": {
+            "value": "55676",
+            "incomplete": true
+          },
+          "freshInputTokens": {
+            "value": null,
+            "incomplete": true
+          }
+        },
+        "buckets": [
+          {
+            "start": 1788321600,
+            "end": 1788408000,
+            "usage": {
+              "inputTokens": {
+                "value": "812922",
+                "incomplete": true
+              },
+              "outputTokens": {
+                "value": "4225",
+                "incomplete": true
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 0.20833660000000004,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "757096",
+                "incomplete": true
+              },
+              "cacheWriteTokens": {
+                "value": "55676",
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 164,
+            "hasUnknownUsage": true
+          },
+          {
+            "start": 1788408000,
+            "end": 1788494400,
+            "usage": {
+              "inputTokens": {
+                "value": null,
+                "incomplete": false
+              },
+              "outputTokens": {
+                "value": null,
+                "incomplete": false
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": false
+              },
+              "estimatedCostUsd": {
+                "value": null,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": null,
+                "incomplete": false
+              },
+              "cacheWriteTokens": {
+                "value": null,
+                "incomplete": false
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": false
+              }
+            },
+            "reportCount": 0,
+            "hasUnknownUsage": false
+          }
+        ],
+        "models": [
+          {
+            "harness": "claude-agent-acp",
+            "model": null,
+            "usage": {
+              "inputTokens": {
+                "value": "812922",
+                "incomplete": true
+              },
+              "outputTokens": {
+                "value": "4225",
+                "incomplete": true
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 0.20833660000000004,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "757096",
+                "incomplete": true
+              },
+              "cacheWriteTokens": {
+                "value": "55676",
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 164,
+            "hasUnknownUsage": true
+          }
+        ],
+        "channels": [
+          {
+            "channelId": "29d5bfc4-19a5-380b-2b15-591b3db1b2c8",
+            "usage": {
+              "inputTokens": {
+                "value": "37860",
+                "incomplete": true
+              },
+              "outputTokens": {
+                "value": "505",
+                "incomplete": true
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 0.052357,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "13620",
+                "incomplete": true
+              },
+              "cacheWriteTokens": {
+                "value": "24230",
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 2,
+            "hasUnknownUsage": true
+          },
+          {
+            "channelId": "6a459d0f-26ca-1ae1-70b9-6118e3ea18de",
+            "usage": {
+              "inputTokens": {
+                "value": "775062",
+                "incomplete": true
+              },
+              "outputTokens": {
+                "value": "3720",
+                "incomplete": true
+              },
+              "totalTokens": {
+                "value": null,
+                "incomplete": true
+              },
+              "estimatedCostUsd": {
+                "value": 0.15597960000000002,
+                "incomplete": false
+              },
+              "cacheReadTokens": {
+                "value": "743476",
+                "incomplete": true
+              },
+              "cacheWriteTokens": {
+                "value": "31446",
+                "incomplete": true
+              },
+              "freshInputTokens": {
+                "value": null,
+                "incomplete": true
+              }
+            },
+            "reportCount": 162,
+            "hasUnknownUsage": true
+          }
+        ],
+        "sessionStarts": [
+          {
+            "cause": null,
+            "sessions": 4
+          }
+        ],
+        "provenance": {
+          "turnsWithAttempt": 0,
+          "retriedTurns": 0,
+          "turnsWithReplayFlag": 0,
+          "replayTurns": 0,
+          "peakContextTokens": null,
+          "contextWindow": null
+        },
+        "reportCount": 164,
+        "hasUnknownUsage": true
+      }
+    ],
+    "coverage": {
+      "firstArchivedAt": 1788324605,
+      "lastArchivedAt": 1788411913,
+      "firstReportedAt": 1788324603,
+      "lastReportedAt": 1788411911,
+      "reportCount": 239,
+      "invalidReportCount": 0,
+      "hasUnknownUsage": true
+    },
+    "hasArchivedEvidence": null
+  },
+  "agentNames": [
+    {
+      "pubkey": "592c5ef70f3ae04cda8de8849d14efe10a9cc6336cfb64f21a183899a83bc735",
+      "name": "Agent 8"
+    },
+    {
+      "pubkey": "5516e87f19902405aff9145a305e3a234d70e2fc5dfcc276015e44f6deb07c52",
+      "name": "Agent 1"
+    },
+    {
+      "pubkey": "057f1b7c28e5567e728e371bac07521e3e7ad490fe8662eb150c8aa2c38d5017",
+      "name": "Agent 3"
+    },
+    {
+      "pubkey": "064e5b643521cb9c61cbadb77a98fd0791c12f29189b6aff0cb23650d4b71410",
+      "name": "Agent 12"
+    },
+    {
+      "pubkey": "2bad28eb782d9cc17724b78c7c30f79e564afb264d6554c331fae297c493b1f0",
+      "name": "Agent 16"
+    },
+    {
+      "pubkey": "753d57bfc6f51d75f70bdcba79beeff8ee9ec05fb9006b680b0e7ddee6553dea",
+      "name": "Agent 10"
+    }
+  ]
+}

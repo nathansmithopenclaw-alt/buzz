@@ -149,6 +149,14 @@ pub struct FlushBatch {
     /// [`Steer`](CancelReason::Steer) framing if a merge somehow lacks a reason
     /// (see [`MergeFraming::for_reason`]).
     pub cancel_reason: Option<CancelReason>,
+    /// 1-based delivery attempt for this scope: `1` on first dispatch, `2` on
+    /// the first retry after [`requeue`](EventQueue::requeue), and so on.
+    /// Derived from the scope's live retry counter at flush time.
+    ///
+    /// Published as NIP-AM `attempt` so token spend can be attributed to
+    /// retries. A value above `1` does NOT prove the earlier attempt reached
+    /// the provider — many requeues follow pre-prompt failures.
+    pub attempt: u32,
 }
 
 /// A queue loss that must be surfaced outside the queue state machine.
@@ -480,6 +488,7 @@ impl EventQueue {
                         self.in_flight_batch_sizes
                             .insert(scope.clone(), cancelled.len());
                         let batch = FlushBatch {
+                            attempt: self.attempt_for(&scope),
                             channel_id: scope.channel_id(),
                             scope: scope.clone(),
                             events: cancelled,
@@ -533,6 +542,7 @@ impl EventQueue {
         };
 
         let batch = FlushBatch {
+            attempt: self.attempt_for(&scope),
             channel_id,
             scope,
             events,
@@ -542,6 +552,21 @@ impl EventQueue {
         self.in_flight_batches
             .insert(batch.scope.clone(), batch.clone());
         Some(batch)
+    }
+
+    /// 1-based delivery attempt for `scope` at flush time.
+    ///
+    /// `retry_counts` holds the number of times this scope's batch has already
+    /// been requeued by [`requeue`](Self::requeue) — absent for a healthy scope
+    /// and cleared by `mark_complete` when a turn finishes without a requeue —
+    /// so the attempt about to be dispatched is one above it. Saturates rather
+    /// than wrapping; `requeue` dead-letters long before `u32::MAX` anyway.
+    fn attempt_for(&self, scope: &SessionScope) -> u32 {
+        self.retry_counts
+            .get(scope)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1)
     }
 
     /// Mark the prompt for `channel_id` as complete.
@@ -2717,6 +2742,7 @@ mod tests {
             .unwrap_or_else(|_| event.pubkey.to_hex());
 
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -2748,6 +2774,7 @@ mod tests {
     fn make_merged_batch(reason: Option<CancelReason>) -> FlushBatch {
         let ch = Uuid::new_v4();
         FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -2880,6 +2907,7 @@ mod tests {
         // Multi-event header path must also branch on reason.
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![
@@ -2937,6 +2965,7 @@ mod tests {
         let steering_id = steering.id.to_hex();
 
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -3130,6 +3159,7 @@ mod tests {
         let e3 = make_event("third message");
 
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![
@@ -3171,6 +3201,7 @@ mod tests {
         let event = make_event("hello");
 
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -3195,6 +3226,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hi");
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -3228,6 +3260,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hi");
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -3259,6 +3292,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hi");
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -3287,6 +3321,7 @@ mod tests {
         let event = make_event("hello");
 
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -3312,6 +3347,7 @@ mod tests {
         let event = make_event("hello");
 
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -3371,6 +3407,7 @@ mod tests {
         // evicting real channel history sooner.
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -3425,6 +3462,7 @@ mod tests {
         let event = make_event("hello");
 
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -3464,6 +3502,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -3747,6 +3786,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let scope = conv(ch);
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: scope.clone(),
             events: vec![BatchEvent {
@@ -4076,6 +4116,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4110,6 +4151,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hey");
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4158,6 +4200,7 @@ mod tests {
             for is_dm in [false, true] {
                 for (event, is_reply) in [(&top, false), (&reply, true)] {
                     let batch = FlushBatch {
+                        attempt: 1,
                         channel_id,
                         scope: SessionScope::derive(policy, channel_id, is_dm, event),
                         events: vec![BatchEvent {
@@ -4238,6 +4281,7 @@ mod tests {
             ]],
         );
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4266,6 +4310,7 @@ mod tests {
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4399,6 +4444,7 @@ mod tests {
         };
 
         let mixed_batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![
@@ -4424,6 +4470,7 @@ mod tests {
         assert!(mixed_prompt.contains("buzz messages thread"));
 
         let same_thread_batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![
@@ -4452,6 +4499,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("ok do that");
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4509,6 +4557,7 @@ mod tests {
         );
         let author_hex = event.pubkey.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4720,6 +4769,7 @@ mod tests {
             ]],
         );
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4791,6 +4841,7 @@ mod tests {
             ]],
         );
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4825,6 +4876,7 @@ mod tests {
     fn test_format_prompt_empty_dm_delta_distinguishes_trigger_only_from_delivered() {
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4876,6 +4928,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4919,6 +4972,7 @@ mod tests {
         let event = make_event("test");
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4944,6 +4998,7 @@ mod tests {
         let hex = event.pubkey.to_hex();
         let npub = event.pubkey.to_bech32().unwrap();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -4968,6 +5023,7 @@ mod tests {
         // Kind 9 (stream message) — tags were previously stripped.
         let event = make_event_with_tags("hello", vec![vec!["h".into(), ch.to_string()]]);
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -5459,6 +5515,7 @@ mod tests {
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -5501,6 +5558,7 @@ mod tests {
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -5538,6 +5596,7 @@ mod tests {
         let event = make_event("hello world");
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -5568,6 +5627,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -5613,6 +5673,7 @@ mod tests {
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -5651,6 +5712,7 @@ mod tests {
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -5688,6 +5750,7 @@ mod tests {
         );
         let threaded_id = threaded.id.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![
@@ -5726,6 +5789,7 @@ mod tests {
         let plain = make_event("latest top-level");
         let plain_id = plain.id.to_hex();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![
@@ -5761,6 +5825,7 @@ mod tests {
     fn make_single_batch(content: &str) -> FlushBatch {
         let channel_id = Uuid::new_v4();
         FlushBatch {
+            attempt: 1,
             channel_id,
             scope: conv(channel_id),
             events: vec![BatchEvent {
@@ -6062,6 +6127,7 @@ mod tests {
         let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00+00:00\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -6092,6 +6158,7 @@ mod tests {
         let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00+00:00\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -6121,6 +6188,7 @@ mod tests {
     fn test_format_prompt_no_canvas_produces_no_canvas_section() {
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {
@@ -6592,6 +6660,7 @@ mod tests {
 
     fn description_batch(ch: Uuid, event: Event) -> FlushBatch {
         FlushBatch {
+            attempt: 1,
             channel_id: ch,
             scope: conv(ch),
             events: vec![BatchEvent {

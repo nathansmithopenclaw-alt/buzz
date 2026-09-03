@@ -126,6 +126,201 @@ fn migration_m1_reopen_old_schema_db_populates_harness_and_records_marker() {
     assert_eq!(marker_count, 1, "M1: migration marker must be recorded");
 }
 
+/// M5 must recover `channel_id` for rows archived long before the column
+/// existed, and must survive a database that predates M1's `harness` column.
+///
+/// The second half is the regression: M5 runs BEFORE M1, and its rebuild calls
+/// `insert_metric_index_row`, which writes every column including `harness`. A
+/// version of M5 that added only its own columns failed on a legacy file with
+/// "table agent_metric_index has no column named harness" — the whole DB then
+/// refused to open. Any future rebuilding migration must ensure the full column
+/// set, not just its own.
+#[test]
+fn migration_m5_backfills_channel_id_on_a_pre_m1_database() {
+    use tempfile::NamedTempFile;
+    let db_file = NamedTempFile::new().unwrap();
+    let db_path = db_file.path().to_path_buf();
+
+    // Fixture sanity: the legacy schema really is pre-M1 and pre-M5, so this
+    // test cannot pass by starting from an already-migrated file.
+    build_old_schema_db(&db_path);
+    {
+        let raw = Connection::open(&db_path).unwrap();
+        let mut stmt = raw
+            .prepare("PRAGMA table_info(agent_metric_index)")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            !cols.iter().any(|c| c == "harness"),
+            "fixture must predate M1"
+        );
+        assert!(
+            !cols.iter().any(|c| c == "channel_id"),
+            "fixture must predate M5"
+        );
+    }
+
+    let conn = open_archive_db(&db_path).expect("open_archive_db must succeed on pre-M1 DB");
+
+    // The seeded payload carries `"channelId":null`, so assert on a row whose
+    // payload has a real channel: insert one and let the backfill index it.
+    let raw_json = r#"{"harness":"claude-agent-acp","model":null,"channelId":"11111111-2222-4333-8444-555555555555","sessionId":"s2","turnId":null,"turnSeq":1,"timestamp":"2026-09-01T00:00:00Z","turn":{"inputTokens":10,"outputTokens":20,"totalTokens":30,"costUsd":null},"cumulative":null,"deltaReliable":true,"stopReason":"end_turn"}"#;
+    conn.execute(
+        "INSERT INTO archived_events
+             (identity_pubkey, relay_url, id, kind, pubkey, created_at, raw_json, archived_at)
+         VALUES ('id', 'relay', 'eid2', 44200, 'agent1', 101, ?1, 201)",
+        rusqlite::params![raw_json],
+    )
+    .unwrap();
+    crate::archive::metric_store::backfill_agent_metric_index(&conn, "id", "relay").unwrap();
+
+    let channel: Option<String> = conn
+        .query_row(
+            "SELECT channel_id FROM agent_metric_index WHERE id = 'eid2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        channel,
+        Some("11111111-2222-4333-8444-555555555555".to_string()),
+        "channelId must be indexed from the payload"
+    );
+
+    // Provenance columns exist and are NULL for a payload that never had them —
+    // unknown, never a fabricated 1/false.
+    let (attempt, is_replay, cause): (Option<i64>, Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT attempt, is_replay, session_creation_cause \
+             FROM agent_metric_index WHERE id = 'eid2'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(attempt, None);
+    assert_eq!(is_replay, None);
+    assert_eq!(cause, None);
+
+    for marker in ["add_turn_provenance", "add_harness_to_metric_index"] {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archive_migrations WHERE name = ?1",
+                rusqlite::params![marker],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "{marker} marker must be recorded");
+    }
+}
+
+/// Two connections opening a DB where M5 is unmarked must both complete, and
+/// M5 must apply exactly once.
+///
+/// Mirrors `test_m4_two_conn_first_open_race_neither_times_out_and_marks_once`
+/// for the identical pattern, because M5 has the identical exposure: it is
+/// unmarked on the FIRST open of every database, including a brand-new one
+/// whose schema already contains its columns, and two connections open
+/// concurrently there (the observer- and metric-archive seed hooks each call
+/// `open_archive_db`).
+///
+/// This is the test that would have caught shipping M5 under M1–M3's
+/// `check marker -> BEGIN DEFERRED` shape: both connections read no marker,
+/// both take SHARED, and the first write fails `database is locked` with no
+/// retry, because `busy_timeout` cannot resolve a deferred upgrade deadlock.
+#[test]
+fn migration_m5_two_conn_first_open_race_neither_fails_and_marks_once() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use tempfile::NamedTempFile;
+
+    let db_file = NamedTempFile::new().unwrap();
+    let db_path = db_file.path().to_path_buf();
+
+    // Pre-M5 but post-M1..M3, with real kind-44200 rows so the rebuild inside
+    // M5's transaction does actual work while the loser is blocked on the lock.
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.pragma_update(None, "busy_timeout", 5000).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.execute_batch(super::SCHEMA).unwrap();
+        for name in [
+            "add_harness_to_metric_index",
+            "add_cache_read_tokens",
+            "add_cache_write_and_pricing",
+        ] {
+            conn.execute(
+                "INSERT OR IGNORE INTO archive_migrations (name, applied_at) VALUES (?1, 0)",
+                rusqlite::params![name],
+            )
+            .unwrap();
+        }
+        for i in 0..8 {
+            let raw_json = format!(
+                r#"{{"harness":"goose","model":null,"channelId":null,"sessionId":"s{i}","turnId":null,"turnSeq":1,"timestamp":"2026-07-01T00:00:00Z","turn":{{"inputTokens":10,"outputTokens":20,"totalTokens":30,"costUsd":null}},"cumulative":null,"deltaReliable":true,"stopReason":"end_turn"}}"#
+            );
+            conn.execute(
+                "INSERT INTO archived_events
+                     (identity_pubkey, relay_url, id, kind, pubkey, created_at, raw_json, archived_at)
+                 VALUES ('id', 'relay', ?1, 44200, 'agent1', ?2, ?3, 200)",
+                rusqlite::params![format!("eid{i}"), 100 + i, raw_json],
+            )
+            .unwrap();
+        }
+        // Fixture sanity: M5 really is unmarked, or the race below never runs.
+        let marked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_turn_provenance'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(marked, 0, "fixture must leave M5 unmarked");
+    }
+
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let p = db_path.clone();
+            let b = Arc::clone(&barrier);
+            thread::spawn(move || {
+                b.wait(); // maximise the first-open race window
+                open_archive_db(&p).map(|_| ())
+            })
+        })
+        .collect();
+    for h in handles {
+        let result = h.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "both racing opens must complete: {:?}",
+            result.err()
+        );
+    }
+
+    let verify = open_archive_db(&db_path).expect("verify open");
+    let marker_count: i64 = verify
+        .query_row(
+            "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_turn_provenance'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(marker_count, 1, "M5 must apply exactly once");
+
+    // The rebuild ran to completion once, not twice and not partially.
+    let indexed: i64 = verify
+        .query_row("SELECT COUNT(*) FROM agent_metric_index", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        indexed, 8,
+        "every kind-44200 row must be indexed exactly once"
+    );
+}
+
 /// Re-opening the same DB a second time must be a no-op: marker already present,
 /// harness already populated, no error.
 #[test]

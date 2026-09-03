@@ -574,6 +574,11 @@ type E2eConfig = {
       scope_value: string;
       kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
     }>;
+    // Verbatim `get_agent_usage_series` response for the Agent usage panel.
+    // Typed as `unknown` on purpose: specs paste the exact JSON the real Rust
+    // command emitted, so a shape drift between backend and panel surfaces in
+    // the render rather than being smoothed over by a hand-written fixture.
+    agentUsageSeries?: unknown;
     // Event IDs that `get_event` should report as definitively not found.
     // Causes `useDraftRootStatus` to classify as `deleted`.
     deletedEventIds?: string[];
@@ -15450,6 +15455,27 @@ export function maybeInstallE2eTauriMocks() {
         }
         // Return the no-canvas success shape — content null means no canvas set.
         return { content: null, updated_at: null, author: null };
+      }
+      case "get_agent_usage_series": {
+        const seeded = activeConfig?.mock?.agentUsageSeries;
+        if (seeded !== undefined) return seeded;
+        // Unseeded: the empty-but-enabled shape, so a spec that forgets to
+        // seed renders the panel's empty state instead of an error.
+        return {
+          collectionEnabled: true,
+          buckets: [],
+          agents: [],
+          coverage: {
+            firstArchivedAt: null,
+            lastArchivedAt: null,
+            firstReportedAt: null,
+            lastReportedAt: null,
+            reportCount: 0,
+            invalidReportCount: 0,
+            hasUnknownUsage: false,
+          },
+          hasArchivedEvidence: null,
+        };
       }
       // ── Local-save archive ──────────────────────────────────────────────
       // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests
