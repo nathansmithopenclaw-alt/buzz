@@ -119,6 +119,36 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
+### Experimental restart replay hygiene
+
+`BUZZ_ACP_ANSWERED_WATERMARK=true` enables a default-off experiment that
+persists exact reply targets already verified from the relay. The file is
+scoped by agent public key and relay, partitions receipts by channel, and is
+written atomically. At startup the harness merges those durable receipts with
+fresh relay-derived answered state before subscribing. Suppression remains
+exact-event based; the per-channel `answeredThrough` value is metadata, never
+a timestamp-only reason to drop a mention. Corrupt or mismatched state fails
+closed to the existing relay query. While enabled, startup replay is bounded
+to at most 900 seconds (`BUZZ_ACP_STARTUP_REPLAY_LOOKBACK` may choose a smaller
+window).
+
+Channel turns now expose `isReplay` provenance on the `turn_started` observer
+record and encrypted kind-44200 turn metric. It is `true` only when every
+triggering event predates this harness process; heartbeat metrics omit it.
+
+#### D1 descoped: background-completion coalescing
+
+Completion coalescing cannot be implemented at the Buzz harness layer without
+adding a second model turn. In Claude Code CLI 2.1.257, the transcript records
+completion as an internal queue operation followed by a synthetic user turn
+whose `origin.kind` is `task-notification`. The installed adapter only receives
+that notification after the SDK output iterator
+(`REPOS/claude-agent-acp-fork/src/acp-agent.ts:3511`) and only supplies the SDK
+input stream at `:6593`; `buzz-acp` observes the resulting background-task
+snapshot later still. No SDK setting or environment variable exposes a
+pre-model-call debounce seam. Coalescing therefore requires an upstream Claude
+Code/Agent SDK capability and is intentionally not attempted here.
+
 ### Parallel Agents & Heartbeat
 
 | Flag | Env Var | Default | Description |
