@@ -33,20 +33,6 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// Bounded history replay on harness startup. This closes the delivery gap for
 /// mentions published while the managed agent was stopped or respawning.
 pub(crate) const DEFAULT_STARTUP_REPLAY_LOOKBACK_SECS: u64 = 86_400;
-/// Replay bound used by the answered-watermark experiment. A durable exact-id
-/// cache makes a long duplicate-prone startup window unnecessary.
-pub(crate) const ANSWERED_WATERMARK_FALLBACK_LOOKBACK_SECS: u64 = 900;
-
-pub(crate) fn effective_startup_replay_lookback_secs(
-    configured_secs: u64,
-    answered_watermark: bool,
-) -> u64 {
-    if answered_watermark {
-        configured_secs.min(ANSWERED_WATERMARK_FALLBACK_LOOKBACK_SECS)
-    } else {
-        configured_secs
-    }
-}
 
 /// Upper bound for `max_turn_duration` (7 days). Any higher is operationally
 /// meaningless and risks arithmetic overflow when deriving the in-flight
@@ -309,10 +295,9 @@ pub struct CliArgs {
 
     /// Seconds of channel history to replay when the harness starts.
     ///
-    /// Without answered-watermark protection replay is intentionally
-    /// at-least-once. When that experiment is enabled, the effective window is
-    /// bounded to 900 seconds and exact relay-verified answer receipts suppress
-    /// already-handled mentions.
+    /// Replay is intentionally at-least-once. When answered-watermark
+    /// protection is enabled, exact relay-verified receipts suppress already
+    /// handled mentions without shortening this configured recovery window.
     #[arg(
         long,
         env = "BUZZ_ACP_STARTUP_REPLAY_LOOKBACK",
@@ -1762,19 +1747,13 @@ mod tests {
     use clap::{Parser, ValueEnum};
 
     #[test]
-    fn answered_watermark_is_default_off_and_bounds_fallback_to_900_seconds() {
+    fn answered_watermark_is_default_off() {
         let key = "0".repeat(64);
         let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
         assert!(!default.answered_watermark);
         let enabled =
             CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--answered-watermark"]);
         assert!(enabled.answered_watermark);
-        assert_eq!(
-            effective_startup_replay_lookback_secs(86_400, false),
-            86_400
-        );
-        assert_eq!(effective_startup_replay_lookback_secs(86_400, true), 900);
-        assert_eq!(effective_startup_replay_lookback_secs(300, true), 300);
     }
 
     /// Build a minimal Config for testing without CLI parsing.

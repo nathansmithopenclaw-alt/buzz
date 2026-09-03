@@ -129,8 +129,9 @@ fresh relay-derived answered state before subscribing. Suppression remains
 exact-event based; the per-channel `answeredThrough` value is metadata, never
 a timestamp-only reason to drop a mention. Corrupt or mismatched state fails
 closed to the existing relay query. While enabled, startup replay is bounded
-to at most 900 seconds (`BUZZ_ACP_STARTUP_REPLAY_LOOKBACK` may choose a smaller
-window).
+by the configured `BUZZ_ACP_STARTUP_REPLAY_LOOKBACK` horizon exactly as it is
+when the experiment is disabled; durable receipts suppress only verified
+answers and never shorten the recoverable downtime window.
 
 Channel turns now expose `isReplay` provenance on the `turn_started` observer
 record and encrypted kind-44200 turn metric. It is `true` only when every

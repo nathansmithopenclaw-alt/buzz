@@ -53,8 +53,7 @@ fn build_launch_block_for_policy(
     effective_prompt: Option<&str>,
     effective_model: Option<&str>,
     owner_pubkey: &str,
-    session_policy: crate::managed_agents::AcpSessionPolicy,
-    answered_event_watermark: bool,
+    policy: LaunchPolicy,
 ) -> serde_json::Value {
     use crate::managed_agents::{
         known_acp_runtime, resolve_session_title, DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
@@ -80,10 +79,10 @@ fn build_launch_block_for_policy(
         "BUZZ_ACP_AGENTS".into(),
         crate::managed_agents::acp_agents_value(&descriptor.command, record.parallelism),
     );
-    crate::managed_agents::insert_acp_session_policy_env(&mut policy_env, session_policy);
+    crate::managed_agents::insert_acp_session_policy_env(&mut policy_env, policy.session);
     policy_env.insert(
         crate::managed_agents::ANSWERED_EVENT_WATERMARK_ENV_VAR.into(),
-        answered_event_watermark.to_string(),
+        policy.answered_event_watermark.to_string(),
     );
 
     if let Some(value) = effective_prompt {
@@ -168,6 +167,12 @@ fn build_launch_block_for_policy(
     })
 }
 
+#[derive(Clone, Copy)]
+struct LaunchPolicy {
+    session: crate::managed_agents::AcpSessionPolicy,
+    answered_event_watermark: bool,
+}
+
 #[cfg(test)]
 pub(super) fn build_launch_block(
     record: &ManagedAgentRecord,
@@ -184,8 +189,10 @@ pub(super) fn build_launch_block(
         effective_prompt,
         effective_model,
         owner_pubkey,
-        crate::managed_agents::AcpSessionPolicy::Channel,
-        false,
+        LaunchPolicy {
+            session: crate::managed_agents::AcpSessionPolicy::Channel,
+            answered_event_watermark: false,
+        },
     )
 }
 
@@ -235,10 +242,12 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
         effective.system_prompt.value.as_deref(),
         effective.model.value.as_deref(),
         &owner_pubkey,
-        crate::managed_agents::acp_session_policy(state),
-        state
-            .answered_event_watermark_enabled()
-            .load(std::sync::atomic::Ordering::Acquire),
+        LaunchPolicy {
+            session: crate::managed_agents::acp_session_policy(state),
+            answered_event_watermark: state
+                .answered_event_watermark_enabled()
+                .load(std::sync::atomic::Ordering::Acquire),
+        },
     );
 
     let effective_parallelism =
@@ -399,15 +408,14 @@ mod tests {
             None,
             None,
             "owner-hex",
-            crate::managed_agents::AcpSessionPolicy::Thread,
-            true,
+            LaunchPolicy {
+                session: crate::managed_agents::AcpSessionPolicy::Thread,
+                answered_event_watermark: true,
+            },
         );
 
         assert_eq!(launch["policy_env"]["BUZZ_ACP_SESSION_POLICY"], "thread");
-        assert_eq!(
-            launch["policy_env"]["BUZZ_ACP_ANSWERED_WATERMARK"],
-            "true"
-        );
+        assert_eq!(launch["policy_env"]["BUZZ_ACP_ANSWERED_WATERMARK"], "true");
         assert!(
             launch["env"]["BUZZ_ACP_SESSION_POLICY"].is_null(),
             "desktop policy must not be shadowed by descriptor env"
