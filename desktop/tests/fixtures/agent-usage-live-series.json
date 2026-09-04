@@ -1420,7 +1420,9 @@
       "invalidReportCount": 0,
       "hasUnknownUsage": true
     },
-    "hasArchivedEvidence": null
+    "hasArchivedEvidence": null,
+    "bases": ["unknown"],
+    "basesMixed": false
   },
   "agentNames": [
     {
