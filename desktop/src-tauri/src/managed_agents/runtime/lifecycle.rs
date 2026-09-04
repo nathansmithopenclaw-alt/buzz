@@ -108,6 +108,17 @@ pub fn sync_managed_agent_processes(
     }
 
     let exited_pubkeys: Vec<String> = exited.iter().map(|key| key.pubkey.clone()).collect();
+    for key in &exited {
+        if super::super::outer_harness_guard::note_exit(key) {
+            if let Some(record) = records
+                .iter_mut()
+                .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
+            {
+                record.last_error = Some(super::super::outer_harness_guard::blocked_error(key));
+                record.last_error_code = None;
+            }
+        }
+    }
     for key in exited {
         runtimes.remove(&key);
     }

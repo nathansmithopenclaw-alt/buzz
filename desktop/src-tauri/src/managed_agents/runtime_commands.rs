@@ -15,6 +15,12 @@ use crate::app_state::AppState;
 
 const STATUS_EVENT: &str = "managed-agent-runtime-status";
 
+#[derive(Clone, Copy)]
+enum StartMode {
+    Manual,
+    Automatic,
+}
+
 fn status_for(
     app: &AppHandle,
     record: &super::ManagedAgentRecord,
@@ -172,6 +178,7 @@ pub async fn list_managed_agent_runtimes(
         let records_changed = !exited_keys.is_empty();
         let mut statuses = Vec::new();
         for key in exited_keys {
+            let crash_loop_blocked = super::outer_harness_guard::note_exit(&key);
             runtimes.remove(&key);
             super::remove_agent_runtime_receipt(&app, &key);
             state.clear_agent_session_cache(&key);
@@ -181,7 +188,7 @@ pub async fn list_managed_agent_runtimes(
             {
                 record.updated_at = crate::util::now_iso();
                 record.last_stopped_at = Some(record.updated_at.clone());
-                let status = status_for_with(
+                let mut status = status_for_with(
                     &app,
                     record,
                     &key,
@@ -192,6 +199,12 @@ pub async fn list_managed_agent_runtimes(
                         global: &global,
                     },
                 );
+                if crash_loop_blocked {
+                    let error = super::outer_harness_guard::blocked_error(&key);
+                    record.last_error = Some(error.clone());
+                    status.lifecycle = ManagedAgentRuntimeLifecycle::Failed;
+                    status.error = Some(error);
+                }
                 emit_status(&app, &status);
                 statuses.push(status);
             }
@@ -229,7 +242,7 @@ pub(crate) fn start_managed_agent_runtime_pair_lazy(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_pair(pubkey, relay_url, true, None, app)
+    start_pair(pubkey, relay_url, true, None, StartMode::Manual, app)
 }
 
 #[tauri::command]
@@ -246,6 +259,7 @@ fn start_pair(
     relay_url: String,
     lazy: bool,
     expected_updated_at: Option<&str>,
+    mode: StartMode,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
@@ -269,6 +283,9 @@ fn start_pair(
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
     let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    if matches!(mode, StartMode::Manual) {
+        super::outer_harness_guard::clear(&key);
+    }
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -281,15 +298,19 @@ fn start_pair(
         return Ok(status);
     }
     runtimes.remove(&key);
-    terminate_untracked_pair_runtime(&app, &key)?;
-
-    let owner = state
-        .keys
-        .lock()
-        .ok()
-        .map(|keys| keys.public_key().to_hex());
-    let mut process =
-        spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref(), None)?;
+    let spawn = || {
+        terminate_untracked_pair_runtime(&app, &key)?;
+        let owner = state
+            .keys
+            .lock()
+            .ok()
+            .map(|keys| keys.public_key().to_hex());
+        spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref(), None)
+    };
+    let mut process = match mode {
+        StartMode::Manual => spawn(),
+        StartMode::Automatic => super::outer_harness_guard::automatic_start(&key, spawn),
+    }?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -389,7 +410,7 @@ pub fn restart_managed_agent_runtime(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     stop_managed_agent_runtime(pubkey.clone(), relay_url.clone(), app.clone())?;
-    start_pair(pubkey, relay_url, true, None, app)
+    start_pair(pubkey, relay_url, true, None, StartMode::Manual, app)
 }
 
 /// Probe whether this agent can operate on `requested_relay_url`.
@@ -513,6 +534,7 @@ pub async fn reconcile_managed_agent_runtimes(
                         key.relay_url.clone(),
                         true,
                         Some(&record.updated_at),
+                        StartMode::Automatic,
                         app.clone(),
                     ) {
                         Ok(mut status) => {
