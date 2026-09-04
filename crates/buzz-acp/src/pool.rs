@@ -519,7 +519,7 @@ pub struct AgentPool {
     /// next dispatch and are pruned on channel-wide session invalidation.
     session_owners: HashMap<SessionScope, usize>,
     exclusive_session: bool,
-    exclusive_park_notices: HashSet<Uuid>,
+    exclusive_park_notices: HashSet<SessionScope>,
 }
 
 /// Result returned by a completed prompt task.
@@ -1073,15 +1073,15 @@ impl AgentPool {
         self.exclusive_session
     }
 
-    pub fn note_exclusive_park(&mut self, channel_id: Uuid) -> bool {
-        self.exclusive_park_notices.insert(channel_id)
+    pub fn note_exclusive_park(&mut self, scope: SessionScope) -> bool {
+        self.exclusive_park_notices.insert(scope)
     }
 
-    pub fn clear_exclusive_park(&mut self, channel_id: Uuid) {
-        self.exclusive_park_notices.remove(&channel_id);
+    pub fn clear_exclusive_park(&mut self, scope: &SessionScope) {
+        self.exclusive_park_notices.remove(scope);
     }
 
-    pub fn exclusive_parked_channels(&self) -> &HashSet<Uuid> {
+    pub fn exclusive_parked_scopes(&self) -> &HashSet<SessionScope> {
         &self.exclusive_park_notices
     }
 
@@ -6822,14 +6822,15 @@ mod tests {
     fn exclusive_park_notice_is_once_per_episode() {
         let mut pool = AgentPool::from_slots_with_exclusive(vec![None], true);
         let channel = Uuid::new_v4();
-        assert!(pool.note_exclusive_park(channel));
+        let scope = conv(channel);
+        assert!(pool.note_exclusive_park(scope.clone()));
         assert!(
-            !pool.note_exclusive_park(channel),
+            !pool.note_exclusive_park(scope.clone()),
             "same park episode must not re-notice"
         );
-        pool.clear_exclusive_park(channel);
+        pool.clear_exclusive_park(&scope);
         assert!(
-            pool.note_exclusive_park(channel),
+            pool.note_exclusive_park(scope),
             "a new park episode after claim must notice again"
         );
     }
