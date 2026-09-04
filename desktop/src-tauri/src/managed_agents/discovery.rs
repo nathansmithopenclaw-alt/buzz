@@ -1253,5 +1253,13 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
     Some(runtime.avatar_url.to_string())
 }
 
+/// Whether `url` is one of the built-in runtime avatars rather than a
+/// picture explicitly chosen for an agent.
+pub fn is_managed_agent_default_avatar(url: &str) -> bool {
+    KNOWN_ACP_RUNTIMES
+        .iter()
+        .any(|runtime| runtime.avatar_url == url)
+}
+
 #[cfg(test)]
 mod tests;

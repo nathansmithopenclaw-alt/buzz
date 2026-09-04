@@ -538,6 +538,125 @@ fn legacy_avatar_empty_when_nothing_resolves() {
     assert!(resolved.is_empty());
 }
 
+const CUSTOM_RELAY_PICTURE: &str = "https://relay.example/media/portrait.png";
+
+fn runtime_default(command: &str) -> String {
+    crate::managed_agents::managed_agent_avatar_url(command)
+        .unwrap_or_else(|| panic!("{command} should have a runtime default avatar"))
+}
+
+#[test]
+fn avatar_precedence_is_record_then_custom_relay_then_runtime_default() {
+    let record_default = runtime_default("codex");
+    let other_default = runtime_default("goose");
+
+    assert_eq!(
+        resolve_avatar_precedence(Some(&record_default), Some(CUSTOM_RELAY_PICTURE)),
+        AvatarPrecedence::AdoptRelay(CUSTOM_RELAY_PICTURE.to_string())
+    );
+    assert_eq!(
+        resolve_avatar_precedence(
+            Some("https://owner.example/chosen.png"),
+            Some(CUSTOM_RELAY_PICTURE)
+        ),
+        AvatarPrecedence::KeepRecord
+    );
+    assert_eq!(
+        resolve_avatar_precedence(Some(&record_default), Some(&other_default)),
+        AvatarPrecedence::KeepRecord
+    );
+    assert_eq!(
+        resolve_avatar_precedence(Some(&record_default), Some("  ")),
+        AvatarPrecedence::KeepRecord
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn relaunch_adopts_custom_relay_picture_without_republishing_kind_zero() {
+    use crate::app_state::build_app_state;
+    use crate::managed_agents::{load_managed_agents, save_managed_agents};
+    use tauri::Manager as _;
+
+    let _env_guard = crate::managed_agents::lock_path_mutex();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("create temp home");
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prior: Option<std::ffi::OsString>,
+    }
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let prior = std::env::var_os(key);
+            #[allow(deprecated)]
+            // SAFETY: this test holds the crate-wide process-env lock.
+            unsafe {
+                std::env::set_var(key, value)
+            };
+            Self { key, prior }
+        }
+    }
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            #[allow(deprecated)]
+            // SAFETY: this test holds the crate-wide process-env lock.
+            unsafe {
+                match &self.prior {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _xdg_guard = EnvVarGuard::set("XDG_DATA_HOME", &home);
+    let app = tauri::test::mock_builder()
+        .manage(build_app_state())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app builds headless");
+    let state = app.state::<AppState>();
+
+    let mut record = bare_agent_record(None, None, None);
+    record.pubkey = "avatar-adoption-agent".to_string();
+    record.name = "Avatar Agent".to_string();
+    record.avatar_url = Some(runtime_default("codex"));
+    save_managed_agents(app.handle(), &[record]).expect("seed managed-agent record");
+
+    let relay_profile = profile(Some("Avatar Agent"), Some(CUSTOM_RELAY_PICTURE));
+    let expected_avatar = reconcile_avatar_precedence(
+        &state,
+        app.handle(),
+        "avatar-adoption-agent",
+        Some(runtime_default("codex")),
+        relay_profile.picture.as_deref(),
+    )
+    .expect("adopt relay picture");
+
+    let saved = load_managed_agents(app.handle()).expect("reload managed-agent record");
+    assert_eq!(
+        saved[0].avatar_url.as_deref(),
+        Some(CUSTOM_RELAY_PICTURE),
+        "the next launch must read the adopted picture from disk"
+    );
+    assert_eq!(
+        relay_profile.picture.as_deref(),
+        Some(CUSTOM_RELAY_PICTURE),
+        "adoption must not mutate the observed kind:0"
+    );
+    assert!(
+        !profile_needs_sync(
+            Some(&relay_profile),
+            "Avatar Agent",
+            expected_avatar.as_deref(),
+            None,
+        ),
+        "an unchanged kind:0 must not be republished after adoption"
+    );
+}
+
 // ── Provider deploy payload completeness ─────────────────────────────────────
 
 fn deploy_payload_for_policy(

@@ -1,11 +1,11 @@
 //! Agent kind:0 profile reconciliation — split from `agents.rs` (file-size
-//! guard). Owns the reconcile data carrier, the legacy-avatar backfill, and
-//! the needs-sync predicate.
+//! guard). Owns the reconcile data carrier, avatar precedence, the
+//! legacy-avatar backfill, and the needs-sync predicate.
 
 use tauri::{AppHandle, Manager};
 
 use crate::app_state::AppState;
-use crate::managed_agents::managed_agent_avatar_url;
+use crate::managed_agents::{is_managed_agent_default_avatar, managed_agent_avatar_url};
 
 use super::*;
 
@@ -64,6 +64,76 @@ pub(super) fn resolve_legacy_avatar(
         .or(relay_picture)
         .or_else(|| managed_agent_avatar_url(agent_command))
         .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AvatarPrecedence {
+    KeepRecord,
+    AdoptRelay(String),
+}
+
+/// Resolve picture ownership for launch-time profile reconciliation.
+///
+/// An explicit record picture wins. A record containing a built-in runtime
+/// avatar carries only the fallback selected at creation time, so a nonblank,
+/// nondefault relay picture is more specific and can be adopted. Otherwise the
+/// record value remains authoritative.
+pub(super) fn resolve_avatar_precedence(
+    record_avatar: Option<&str>,
+    relay_picture: Option<&str>,
+) -> AvatarPrecedence {
+    let Some(record_avatar) = record_avatar else {
+        return AvatarPrecedence::KeepRecord;
+    };
+    if !is_managed_agent_default_avatar(record_avatar) {
+        return AvatarPrecedence::KeepRecord;
+    }
+
+    match relay_picture {
+        Some(picture)
+            if !picture.trim().is_empty() && !is_managed_agent_default_avatar(picture) =>
+        {
+            AvatarPrecedence::AdoptRelay(picture.to_string())
+        }
+        _ => AvatarPrecedence::KeepRecord,
+    }
+}
+
+fn persist_record_avatar<R: tauri::Runtime>(
+    state: &AppState,
+    app: &AppHandle<R>,
+    pubkey: &str,
+    avatar_url: &str,
+) -> Result<(), String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
+        record.avatar_url = Some(avatar_url.to_string());
+        save_managed_agents(app, &records)?;
+    }
+    Ok(())
+}
+
+/// Apply avatar precedence and persist a relay picture when it outranks a
+/// runtime default. Returning the resolved value keeps the persistence step on
+/// the production path before the stale-profile decision.
+pub(super) fn reconcile_avatar_precedence<R: tauri::Runtime>(
+    state: &AppState,
+    app: &AppHandle<R>,
+    pubkey: &str,
+    record_avatar: Option<String>,
+    relay_picture: Option<&str>,
+) -> Result<Option<String>, String> {
+    match resolve_avatar_precedence(record_avatar.as_deref(), relay_picture) {
+        AvatarPrecedence::KeepRecord => Ok(record_avatar),
+        AvatarPrecedence::AdoptRelay(picture) => {
+            persist_record_avatar(state, app, pubkey, &picture)?;
+            Ok(Some(picture))
+        }
+    }
 }
 
 /// Resolve the relay a reconciliation task will query and publish on. The
@@ -217,7 +287,7 @@ pub(crate) async fn reconcile_agent_profile(
 
     // Resolve the expected avatar — backfilling for legacy records that have no
     // stored avatar_url yet.
-    let expected_avatar = match data.avatar_url.as_deref() {
+    let record_avatar = match data.avatar_url.as_deref() {
         Some(url) => url.to_string(),
         None => {
             // Legacy record: the relay profile may have been corrupted by the
@@ -239,26 +309,31 @@ pub(crate) async fn reconcile_agent_profile(
 
             // Persist the backfilled avatar so this migration only runs once.
             if !backfilled.is_empty() {
-                let _store_guard = state
-                    .managed_agents_store_lock
-                    .lock()
-                    .map_err(|e| e.to_string())?;
-                let mut records = load_managed_agents(app)?;
-                if let Some(record) = records.iter_mut().find(|r| r.pubkey == data.pubkey) {
-                    record.avatar_url = Some(backfilled.clone());
-                    save_managed_agents(app, &records)?;
-                }
+                persist_record_avatar(state, app, &data.pubkey, &backfilled)?;
             }
 
             backfilled
         }
     };
 
-    let expected_avatar = if expected_avatar.is_empty() {
+    let record_avatar = if record_avatar.is_empty() {
         None
     } else {
-        Some(expected_avatar)
+        Some(record_avatar)
     };
+
+    // This call is the launch-time adoption seam: removing it leaves
+    // `expected_avatar` undefined below, so production cannot compile while
+    // silently bypassing the tested disk-persistence path.
+    let expected_avatar = reconcile_avatar_precedence(
+        state,
+        app,
+        &data.pubkey,
+        record_avatar,
+        existing
+            .as_ref()
+            .and_then(|profile| profile.picture.as_deref()),
+    )?;
 
     if !profile_needs_sync(
         existing.as_ref(),
