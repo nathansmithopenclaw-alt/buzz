@@ -69,6 +69,21 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
         let outcome = async {
             reject_legacy_nip_rs_cardinality_ambiguity(&mut conn).await?;
             MIGRATOR.run_to(target, &mut conn).await?;
+            let community_hosts_version = MIGRATOR
+                .iter()
+                .find(|migration| migration.description == "community hosts")
+                .map(|migration| migration.version)
+                .ok_or_else(|| {
+                    crate::DbError::InvalidData(
+                        "bounded migration requires the community-host migration".into(),
+                    )
+                })?;
+            if target >= community_hosts_version {
+                // The immutable upstream NIP-FI migrations do not know about
+                // canonical community_hosts. Keep bounded migration tests on
+                // the same post-SQLx catalog-reconciliation seam as startup.
+                ensure_community_hosts_deletion_taxonomy(&mut conn).await?;
+            }
             Ok(())
         }
         .await;
@@ -2442,6 +2457,20 @@ mod postgres_tests {
         .expect("read applied migrations")
     }
 
+    fn embedded_migration_versions() -> Vec<i64> {
+        let mut versions: Vec<i64> = MIGRATOR.iter().map(|migration| migration.version).collect();
+        versions.sort_unstable();
+        versions
+    }
+
+    fn migration_version(description: &str) -> i64 {
+        MIGRATOR
+            .iter()
+            .find(|migration| migration.description == description)
+            .unwrap_or_else(|| panic!("embedded migration `{description}` must exist"))
+            .version
+    }
+
     async fn assert_t6_fold_objects(pool: &PgPool) {
         let channel_index: Option<String> =
             sqlx::query_scalar("SELECT to_regclass('idx_channels_id_live')::text")
@@ -2826,11 +2855,7 @@ mod postgres_tests {
         // Every embedded migration must apply, in order. Derive the expected
         // list from the MIGRATOR itself so this doesn't go stale as additive
         // migrations land (it previously hardcoded [1, 2, 3] and rotted).
-        let expected: Vec<i64> = {
-            let mut versions: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
-            versions.sort_unstable();
-            versions
-        };
+        let expected = embedded_migration_versions();
         assert_eq!(applied_versions(&pool).await, expected);
         let fold_versions: Vec<(i64, String)> = sqlx::query_as(
             "SELECT version, description FROM _sqlx_migrations WHERE version IN (31, 32) ORDER BY version",
@@ -3150,7 +3175,10 @@ mod postgres_tests {
         run_migrations(&pool)
             .await
             .expect("apply renumbered community-host migration");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(33));
+        assert_eq!(
+            applied_versions(&pool).await.last().copied(),
+            embedded_migration_versions().last().copied()
+        );
         assert_t6_fold_objects(&pool).await;
         let mapped: uuid::Uuid = sqlx::query_scalar(
             "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
@@ -3202,10 +3230,7 @@ mod postgres_tests {
         run_migrations(&pool)
             .await
             .expect("move community hosts to 32 and apply upstream error-code version 31");
-        assert_eq!(
-            applied_versions(&pool).await,
-            (1_i64..=33).collect::<Vec<_>>()
-        );
+        assert_eq!(applied_versions(&pool).await, embedded_migration_versions());
         let descriptions: Vec<(i64, String)> = sqlx::query_as(
             "SELECT version, description FROM _sqlx_migrations WHERE version IN (31, 32) ORDER BY version",
         )
@@ -3263,10 +3288,7 @@ mod postgres_tests {
         run_migrations(&pool)
             .await
             .expect("move community hosts to 32 and apply upstream 29-31");
-        assert_eq!(
-            applied_versions(&pool).await,
-            (1_i64..=33).collect::<Vec<_>>()
-        );
+        assert_eq!(applied_versions(&pool).await, embedded_migration_versions());
         assert_t6_fold_objects(&pool).await;
         let mapped: uuid::Uuid = sqlx::query_scalar(
             "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
@@ -3477,10 +3499,7 @@ mod postgres_tests {
         run_migrations(&pool)
             .await
             .expect("move community hosts to 32 and apply upstream 27-31");
-        assert_eq!(
-            applied_versions(&pool).await,
-            (1_i64..=33).collect::<Vec<_>>()
-        );
+        assert_eq!(applied_versions(&pool).await, embedded_migration_versions());
         assert_t6_fold_objects(&pool).await;
     }
 
@@ -3494,10 +3513,9 @@ mod postgres_tests {
     async fn migration_0045_identity_foundation_is_durable_ledger_after_migration_a() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(45, &pool)
+        run_migrations_through(&pool, migration_version("nip fi identity foundation"))
             .await
-            .expect("apply migrations 1-45");
+            .expect("apply migrations through the identity foundation");
 
         // The five identity relations exist.
         let identity_tables = [
@@ -3584,10 +3602,9 @@ mod postgres_tests {
     async fn nip_fi_foundation_is_a_closed_durable_ledger_after_migrations_a_and_b() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(46, &pool)
+        run_migrations_through(&pool, migration_version("nip fi authorization foundation"))
             .await
-            .expect("apply migrations 1-46");
+            .expect("apply migrations through the authorization foundation");
 
         let nip_fi_tables = [
             "authorization_admission_results",
@@ -3686,10 +3703,9 @@ mod postgres_tests {
     async fn authorization_invalidation_floor_advances_through_guard() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
+        run_migrations_through(&pool, migration_version("nip fi authorization foundation"))
             .await
-            .expect("apply migrations 1-42");
+            .expect("apply migrations through the authorization foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -3818,10 +3834,9 @@ mod postgres_tests {
     async fn identity_binding_provenance_is_independent_of_enrollment_mode() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(41, &pool)
+        run_migrations_through(&pool, migration_version("nip fi identity foundation"))
             .await
-            .expect("apply migrations 1-41");
+            .expect("apply migrations through the identity foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -4070,10 +4085,9 @@ mod postgres_tests {
     async fn identity_enrollment_policy_revision_is_monotonic() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(41, &pool)
+        run_migrations_through(&pool, migration_version("nip fi identity foundation"))
             .await
-            .expect("apply migrations 1-41");
+            .expect("apply migrations through the identity foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -4321,10 +4335,9 @@ mod postgres_tests {
     async fn authorization_admission_result_requires_kind_11_receipt_bidirectional() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
+        run_migrations_through(&pool, migration_version("nip fi authorization foundation"))
             .await
-            .expect("apply migrations 1-42");
+            .expect("apply migrations through the authorization foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -4568,10 +4581,9 @@ mod postgres_tests {
     async fn authorization_denial_attempt_requires_kind_9_event_bidirectional() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
+        run_migrations_through(&pool, migration_version("nip fi authorization foundation"))
             .await
-            .expect("apply migrations 1-42");
+            .expect("apply migrations through the authorization foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -5082,10 +5094,9 @@ mod postgres_tests {
     async fn authenticated_kind_9_denial_commits_without_denial_attempt() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
+        run_migrations_through(&pool, migration_version("nip fi authorization foundation"))
             .await
-            .expect("apply migrations 1-42");
+            .expect("apply migrations through the authorization foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -5280,10 +5291,9 @@ mod postgres_tests {
     async fn denied_lifecycle_receipt_commits_without_audit_event() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
+        run_migrations_through(&pool, migration_version("nip fi authorization foundation"))
             .await
-            .expect("apply migrations 1-42");
+            .expect("apply migrations through the authorization foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -5450,10 +5460,9 @@ mod postgres_tests {
     async fn denied_lifecycle_receipt_event_side_trigger_isolated() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
+        run_migrations_through(&pool, migration_version("nip fi authorization foundation"))
             .await
-            .expect("apply migrations 1-42");
+            .expect("apply migrations through the authorization foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -5564,10 +5573,9 @@ mod postgres_tests {
     async fn applied_lifecycle_receipt_requires_exactly_one_event() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
+        run_migrations_through(&pool, migration_version("nip fi authorization foundation"))
             .await
-            .expect("apply migrations 1-42");
+            .expect("apply migrations through the authorization foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -5851,10 +5859,9 @@ mod postgres_tests {
     async fn denied_lifecycle_receipt_wrong_kind_receipt_side() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
+        run_migrations_through(&pool, migration_version("nip fi authorization foundation"))
             .await
-            .expect("apply migrations 1-42");
+            .expect("apply migrations through the authorization foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -5963,10 +5970,9 @@ mod postgres_tests {
     async fn denied_lifecycle_receipt_wrong_kind_event_side() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
+        run_migrations_through(&pool, migration_version("nip fi authorization foundation"))
             .await
-            .expect("apply migrations 1-42");
+            .expect("apply migrations through the authorization foundation");
 
         let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
