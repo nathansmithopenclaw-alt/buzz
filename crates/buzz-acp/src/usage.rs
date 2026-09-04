@@ -267,6 +267,14 @@ pub struct TurnUsage {
     /// `None` when the publisher omitted it (unrecognised endpoint, mixed
     /// identities, old harness). Per-turn only — not session-cumulative.
     pub pricing_identity: Option<buzz_core::agent_turn_metric::PricingIdentity>,
+
+    /// What the `turn_*` figures measure (NIP-AM `basis`). Derived from the
+    /// reporting adapter, not from our ingestion path: both standard adapters
+    /// arrive through `record_prompt_usage`, but claude-agent-acp reports
+    /// counts summed over every model call in the turn while codex-acp reports
+    /// a single response. `None` for a cost-only record, which has no token
+    /// evidence to characterise.
+    pub basis: Option<buzz_core::agent_turn_metric::MetricBasis>,
 }
 
 /// Per-turn usage carried by a standard ACP `session/prompt` response.
@@ -385,6 +393,15 @@ impl StandardUsageTracker {
             .map(|(session_id, _, _)| session_id.clone())
             .or_else(|| cost.as_ref().map(|(session_id, _)| session_id.clone()))?;
 
+        // Read the basis off the adapter before `prompt` is moved. Codex-acp
+        // reports one response per turn; claude-agent-acp reports the turn's
+        // summed calls. The two differ by orders of magnitude and must never be
+        // aggregated together — see `MetricBasis`.
+        let basis = prompt.as_ref().map(|(_, _, adapter)| match adapter {
+            StandardAdapterKind::Claude => buzz_core::agent_turn_metric::MetricBasis::PerTurnSum,
+            StandardAdapterKind::Codex => buzz_core::agent_turn_metric::MetricBasis::PerResponse,
+        });
+
         let (inclusive_input, output_tokens, total_tokens, cache_read, cache_write) = match prompt {
             Some((_, usage, adapter)) => {
                 let inclusive_input = usage
@@ -424,6 +441,17 @@ impl StandardUsageTracker {
                 state.last_cost = Some(current);
             }
         }
+
+        // A zero cost delta with no token evidence is "not reported", not
+        // "free". When the adapter sent no usage for this turn, an unchanged
+        // cumulative cost means nothing was reported — publishing Some(0.0)
+        // asserts the turn cost nothing, which is a claim we cannot make and
+        // which readers render as a confident $0.00. A zero delta alongside
+        // real token counts is kept: that is a genuine no-charge turn.
+        let turn_cost = match (inclusive_input, turn_cost) {
+            (None, Some(0.0)) => None,
+            (_, other) => other,
+        };
 
         // Input overflow invalidates the standard prompt counters. Emit only if
         // another valid signal (normally Claude cost) remains; NIP-AM forbids an
@@ -466,6 +494,7 @@ impl StandardUsageTracker {
             context_window: context.window,
             model,
             pricing_identity: None,
+            basis,
         })
     }
 }
@@ -825,6 +854,9 @@ impl UsageTracker {
                 // The folded identity is written in take() — use a placeholder
                 // here and replace it before returning the record.
                 pricing_identity: None,
+                // Cumulative-counter deltas span every model call the turn
+                // made, so this path is always a per-turn sum.
+                basis: Some(buzz_core::agent_turn_metric::MetricBasis::PerTurnSum),
             });
         } else if self.in_flight_session.is_none() {
             // Not in-flight at all: advance the committed baseline so the next
@@ -2070,6 +2102,7 @@ mod tests {
             context_window: None,
             model: None,
             pricing_identity: None,
+            basis: None,
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
@@ -2113,6 +2146,7 @@ mod tests {
             context_window: None,
             model: None,
             pricing_identity: None,
+            basis: None,
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
@@ -3567,6 +3601,99 @@ mod tests {
         assert!(
             !a2.delta_reliable,
             "A second turn must be poisoned: output absence from cross-session notification must hold even with no prior entry"
+        );
+    }
+
+    // ── NIP-AM `basis` + unknown-vs-zero cost (D-5c7c42dc) ────────────────────
+
+    use buzz_core::agent_turn_metric::MetricBasis;
+
+    fn prompt_usage(input: u64, output: u64) -> PromptResponseUsage {
+        PromptResponseUsage {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+            cached_read_tokens: Some(0),
+            cached_write_tokens: Some(0),
+        }
+    }
+
+    fn take_one(adapter: StandardAdapterKind) -> TurnUsage {
+        let mut t = StandardUsageTracker::default();
+        t.begin_turn("s1");
+        t.record_prompt_usage("s1", prompt_usage(100, 10), adapter);
+        t.take().expect("usage record")
+    }
+
+    /// codex-acp reports a single model response per turn; claude-agent-acp
+    /// reports the turn's summed calls. Publishing the basis is what stops a
+    /// consumer from ranking the two against each other.
+    #[test]
+    fn basis_is_derived_from_the_reporting_adapter() {
+        assert_eq!(
+            take_one(StandardAdapterKind::Codex).basis,
+            Some(MetricBasis::PerResponse),
+        );
+        assert_eq!(
+            take_one(StandardAdapterKind::Claude).basis,
+            Some(MetricBasis::PerTurnSum),
+        );
+    }
+
+    /// A cost-only turn (adapter reported no usage) whose cumulative cost did
+    /// not move must publish cost as unknown. Emitting `Some(0.0)` asserts the
+    /// turn was free, which readers render as a confident `$0.00`.
+    #[test]
+    fn zero_cost_delta_without_token_evidence_is_unknown_not_zero() {
+        let mut t = StandardUsageTracker::default();
+        t.begin_turn("s1");
+        t.record_cost("s1", 5.0);
+        let first = t.take().expect("baseline turn");
+        assert!(first.turn_cost_usd.is_none(), "no baseline yet on turn 1");
+
+        t.begin_turn("s1");
+        t.record_cost("s1", 5.0); // unchanged: nothing was reported
+        let second = t.take().expect("second turn");
+        assert!(
+            second.turn_input_tokens.is_none(),
+            "fixture must have no token evidence, or it tests nothing"
+        );
+        assert!(
+            second.turn_cost_usd.is_none(),
+            "zero cost delta with no token evidence must be unknown, got {:?}",
+            second.turn_cost_usd,
+        );
+        assert!(second.basis.is_none(), "cost-only record has no basis");
+    }
+
+    /// The guard must not swallow a real charge, nor a genuine no-charge turn
+    /// that does have token evidence.
+    #[test]
+    fn cost_guard_preserves_real_and_genuinely_zero_charges() {
+        // (a) real charge with no token evidence survives.
+        let mut t = StandardUsageTracker::default();
+        t.begin_turn("s1");
+        t.record_cost("s1", 1.0);
+        let _ = t.take().expect("baseline");
+        t.begin_turn("s1");
+        t.record_cost("s1", 3.5);
+        let charged = t.take().expect("charged turn");
+        assert_eq!(charged.turn_cost_usd, Some(2.5));
+
+        // (b) zero delta WITH token evidence is a genuine no-charge turn.
+        let mut t2 = StandardUsageTracker::default();
+        t2.begin_turn("s2");
+        t2.record_cost("s2", 7.0);
+        let _ = t2.take().expect("baseline");
+        t2.begin_turn("s2");
+        t2.record_prompt_usage("s2", prompt_usage(50, 5), StandardAdapterKind::Claude);
+        t2.record_cost("s2", 7.0);
+        let free = t2.take().expect("free turn");
+        assert!(free.turn_input_tokens.is_some(), "token evidence present");
+        assert_eq!(
+            free.turn_cost_usd,
+            Some(0.0),
+            "a zero charge backed by token evidence is a real measurement",
         );
     }
 }

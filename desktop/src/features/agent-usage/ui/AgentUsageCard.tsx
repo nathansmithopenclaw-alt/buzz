@@ -368,6 +368,17 @@ export function AgentUsageCard() {
           </SettingsOptionRow>
         ) : (
           <div className="px-4 py-2">
+            {series.basesMixed ? (
+              <p
+                className="mb-2 text-xs text-muted-foreground/70"
+                data-testid="agent-usage-mixed-bases"
+              >
+                These agents report on different measurement bases (
+                {series.bases.join(", ")}), so their turns are not comparable
+                and no combined total is shown. Per-agent figures below are each
+                internally consistent.
+              </p>
+            ) : null}
             {series.agents.map((agent) => (
               <AgentSection
                 agent={agent}

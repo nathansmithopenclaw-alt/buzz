@@ -124,6 +124,13 @@ The `content` field decrypts to a UTF-8 JSON object:
     "cacheClass": "ephemeral"                    // cache-write class; omit when not applicable
   },
 
+  // What the "turn" counts measure. OPTIONAL but SHOULD be set.
+  // "per_turn_sum"  - summed over every model call the turn made
+  // "per_response"  - a single model response; understates a multi-call turn
+  // Omitted when the publisher cannot determine it. Consumers MUST NOT
+  // aggregate or rank across differing (or unknown) bases.
+  "basis": "per_turn_sum",               // OPTIONAL
+
   "stopReason": "end_turn",              // optional
 
   // Context state at the end of this turn, as reported by the harness. These
@@ -143,7 +150,7 @@ The `content` field decrypts to a UTF-8 JSON object:
 `harness` and `timestamp` are REQUIRED. All other fields are OPTIONAL or
 nullable, except as constrained below: `pricingIdentity` is optional but not
 nullable (omit it entirely rather than set it to null), and so are
-`contextTokens`, `contextWindow`, `attempt`, `isReplay`, and
+`basis`, `contextTokens`, `contextWindow`, `attempt`, `isReplay`, and
 `sessionCreationCause` — each is omitted rather than set to null, `0`, or
 `false` when the publisher did not observe it. Consumers MUST ignore unknown
 fields (forward compatibility).
@@ -228,6 +235,60 @@ unlabeled total.
 `stopReason`, when present, MUST be one of `end_turn`, `max_tokens`,
 `cancelled`, `error`, `unknown`. Consumers MUST treat unrecognized
 `stopReason` values as `unknown`; the token counts remain valid.
+
+### Measurement basis
+
+An agent turn normally issues many model calls. Harnesses differ in what a
+single `turn` record covers, and the two conventions differ by orders of
+magnitude, so a consumer that mixes them silently produces nonsense.
+
+The optional `basis` field declares what the `turn` counts measure:
+
+| value | meaning |
+|---|---|
+| `per_turn_sum` | Counts accumulate over every model call the turn made. `turn.inputTokens` MAY exceed the context window many times over. |
+| `per_response` | Counts describe a single model response. A turn that made many calls is reported at the magnitude of one, and therefore UNDERSTATES the turn. |
+
+Publishers SHOULD set `basis` on every event. Publishers MUST NOT guess: omit
+the field when the reporting convention is not known.
+
+Consumers MUST NOT sum, average, rank, or otherwise aggregate `turn` counts
+across differing bases, and MUST treat an absent or unrecognized `basis` as
+unknown — which is itself not comparable with either known value. A consumer
+presenting a multi-publisher view MUST group or label by basis rather than
+producing a single combined figure. Unrecognized values MUST deserialize as
+absent rather than failing the payload, matching the `stopReason` rule.
+
+An observed instance, given as motivation rather than normative text: on one
+24-hour fleet day two publishers with comparable turn counts (81 and 36)
+reported 124.7M and 3.4M `turn.inputTokens` respectively. Across 66 turns the
+`per_response` publisher never exceeded 234,769 input tokens in any single
+turn, while the `per_turn_sum` publisher exceeded 300,000 on 82 of 106 turns
+and peaked above 100M. Ranking those publishers against each other would have
+reported the busier one as ~50x cheaper.
+
+### Unknown is not zero
+
+This is a restatement of the cache-field rule above, made general because it
+has been violated in both directions.
+
+Publishers MUST NOT emit a fabricated zero for a quantity they did not
+observe. In particular:
+
+- When a turn produced no token evidence at all, `turn.costUsd` MUST be null,
+  even where a cumulative cost counter happened not to change across the turn.
+  An unchanged counter with nothing reported is "not reported", not "free";
+  publishing `0.0` asserts a measurement the publisher does not have. A zero
+  cost delta accompanied by real token counts is a genuine no-charge turn and
+  MUST be preserved.
+- A turn that ends in an error and yields no counts MUST publish those counts
+  as null, not zero.
+
+Consumers MUST render an absent or null quantity distinguishably from a
+measured zero — "not reported" rather than `0`, `0.00`, or a blank that reads
+as zero — and MUST NOT coalesce null to zero when aggregating. A `$0.00` shown
+for a publisher that never reported cost is the most misleading value this
+spec can produce.
 
 ### Context state
 

@@ -6448,6 +6448,10 @@ pub(crate) fn build_turn_metric_payload(
         delta_reliable: usage.delta_reliable,
         stop_reason,
         pricing_identity: usage.pricing_identity.clone(),
+        // Same provenance contract as the context readings: absent stays
+        // absent. A consumer that cannot tell per-turn-sum from per-response
+        // must not be handed a default that looks like either.
+        basis: usage.basis,
         // Context readings pass through untouched: absent stays absent, so a
         // harness that reports no context never publishes a fabricated zero.
         context_tokens: usage.context_tokens,
@@ -10361,6 +10365,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             context_window: Some(200_000),
             model: Some("claude-opus-5".to_string()),
             pricing_identity: None,
+            basis: None,
         }
     }
 
@@ -10512,6 +10517,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             pricing_identity: None,
             context_tokens: None,
             context_window: None,
+            basis: None,
         };
         // owner_pubkey = None → early return, no panic.
         publish_agent_turn_metric(
@@ -10554,6 +10560,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             pricing_identity: None,
             context_tokens: None,
             context_window: None,
+            basis: None,
         };
         // Will try to publish and fail (no real relay) but must not panic.
         let provenance = TurnProvenance {
@@ -10601,6 +10608,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             pricing_identity: None,
             context_tokens: None,
             context_window: None,
+            basis: None,
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
         publish_agent_turn_metric(
@@ -10644,6 +10652,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             pricing_identity: None,
             context_tokens: None,
             context_window: None,
+            basis: None,
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
         publish_agent_turn_metric(
@@ -10684,6 +10693,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             pricing_identity: None,
             context_tokens: None,
             context_window: None,
+            basis: None,
         };
 
         let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
@@ -10738,6 +10748,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             pricing_identity: None,
             context_tokens: None,
             context_window: None,
+            basis: None,
         };
 
         let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);

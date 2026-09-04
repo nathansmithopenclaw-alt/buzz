@@ -243,6 +243,18 @@ pub struct AgentUsageSeries {
     /// `parse_status`) exists for that author, with no bucket-boundary
     /// restriction. Callers compute this (DB access) and pass it through.
     pub has_archived_evidence: Option<bool>,
+    /// Distinct NIP-AM `basis` values present in this window, sorted, with
+    /// `"unknown"` standing for events that declared none. Rendered so a
+    /// consumer can label what it is looking at.
+    pub bases: Vec<String>,
+    /// `true` when `bases` holds more than one value. Per NIP-AM, counts on
+    /// differing bases MUST NOT be summed, averaged or ranked: a per-response
+    /// publisher reports one model call where a per-turn-sum publisher reports
+    /// the whole turn, a difference of orders of magnitude. When this is set,
+    /// the cross-agent `buckets` totals are reported as unknown rather than as
+    /// a combined figure, and `agents` is ordered by identity rather than
+    /// ranked by volume.
+    pub bases_mixed: bool,
 }
 
 // ── Per-event field ladder (A1, A4, A11, A12) ───────────────────────────────
@@ -682,6 +694,28 @@ fn assign_bucket_index(boundaries: &[i64], t: i64) -> Option<usize> {
 /// within unknowns (callers chain further tiebreaks). Value is derived by
 /// [`UsageAccumulator::sort_value`]: provider total when available, else
 /// `input+output`, else `None`.
+/// An all-unknown [`ReportedUsage`], used where a total cannot be stated —
+/// currently a cross-agent aggregate spanning differing NIP-AM bases.
+/// `incomplete: true` is what drives the panel's "unknown, not zero" rendering.
+fn unknown_usage() -> ReportedUsage {
+    let unknown_token = || UsageField {
+        value: None,
+        incomplete: true,
+    };
+    ReportedUsage {
+        input_tokens: unknown_token(),
+        output_tokens: unknown_token(),
+        total_tokens: unknown_token(),
+        estimated_cost_usd: CostField {
+            value: None,
+            incomplete: true,
+        },
+        cache_read_tokens: unknown_token(),
+        cache_write_tokens: unknown_token(),
+        fresh_input_tokens: unknown_token(),
+    }
+}
+
 fn cmp_sort_value(a: Option<u64>, b: Option<u64>) -> std::cmp::Ordering {
     match (a, b) {
         (Some(av), Some(bv)) => bv.cmp(&av), // descending
@@ -1030,9 +1064,44 @@ pub(super) fn compute_series(
             )
         })
         .collect();
-    agent_rows.sort_by(|a, b| cmp_sort_value(a.0, b.0).then_with(|| a.1.cmp(&b.1)));
+    // NIP-AM measurement basis. An absent basis is its own bucket: an event
+    // that never declared one is not assumable into either known value.
+    let mut bases: Vec<String> = window_rows
+        .iter()
+        .map(|r| r.basis.clone().unwrap_or_else(|| "unknown".to_string()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    bases.sort();
+    let bases_mixed = bases.len() > 1;
+
+    if bases_mixed {
+        // Ranking by volume across incomparable bases would present the
+        // publisher that reports least per turn as the cheapest. Order by
+        // identity instead — deterministic, and it asserts nothing.
+        agent_rows.sort_by(|a, b| a.1.cmp(&b.1));
+    } else {
+        agent_rows.sort_by(|a, b| cmp_sort_value(a.0, b.0).then_with(|| a.1.cmp(&b.1)));
+    }
     let any_agent_unknown = agent_rows.iter().any(|(_, _, a)| a.has_unknown_usage);
     let agents: Vec<AgentUsage> = agent_rows.into_iter().map(|(_, _, a)| a).collect();
+
+    // A combined cross-agent total over differing bases is not a quantity that
+    // exists. Report it as unknown rather than publishing a number whose only
+    // possible reading is wrong. Per-agent rows survive: each is internally
+    // consistent and is labelled by its own basis.
+    let buckets = if bases_mixed {
+        buckets
+            .into_iter()
+            .map(|b| SeriesBucket {
+                usage: unknown_usage(),
+                has_unknown_usage: true,
+                ..b
+            })
+            .collect()
+    } else {
+        buckets
+    };
 
     AgentUsageSeries {
         collection_enabled,
@@ -1050,6 +1119,8 @@ pub(super) fn compute_series(
                 || invalid_report_count > 0,
         },
         has_archived_evidence,
+        bases,
+        bases_mixed,
     }
 }
 

@@ -48,6 +48,44 @@ pub struct TokenCounts {
 
 /// Why a turn ended.
 ///
+/// What one `turn` measurement actually covers.
+///
+/// An agent turn normally issues many model calls. Harnesses differ in what
+/// they report per turn, and the two bases differ by orders of magnitude, so a
+/// consumer that mixes them produces nonsense: on 2026-09-03 the same fleet-day
+/// showed 252M input tokens for a `PerTurnSum` publisher and 3.4M for a
+/// `PerResponse` one, with comparable turn counts.
+///
+/// Publishers SHOULD set `basis`. Consumers MUST NOT sum, average, or rank
+/// across differing bases, and MUST treat an absent or unrecognized `basis` as
+/// unknown — which is itself not comparable with either known value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricBasis {
+    /// Counts accumulate across every model call the turn made. A turn's
+    /// `inputTokens` may exceed the context window many times over.
+    PerTurnSum,
+    /// Counts describe a single model response. A turn that made many calls is
+    /// reported at the magnitude of one, so these figures UNDERSTATE the turn.
+    PerResponse,
+}
+
+/// Unrecognized values deserialize to `None` at the field, mirroring the
+/// forward-compatibility rule for `stopReason`: a future basis must not fail
+/// the whole payload, and must not be silently mistaken for a known one.
+impl<'de> Deserialize<'de> for MetricBasis {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "per_turn_sum" => Ok(MetricBasis::PerTurnSum),
+            "per_response" => Ok(MetricBasis::PerResponse),
+            other => Err(serde::de::Error::custom(format!(
+                "unrecognized basis: {other}"
+            ))),
+        }
+    }
+}
+
 /// NIP-AM: consumers MUST treat unrecognized `stopReason` values as `Unknown`
 /// and keep the token counts valid. Custom deserialization maps any unrecognized
 /// string to `Unknown` instead of failing the whole payload.
@@ -261,12 +299,37 @@ pub struct AgentTurnMetricPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_replay: Option<bool>,
 
+    /// What the `turn` counts measure — see [`MetricBasis`]. Omitted when the
+    /// publisher cannot determine it; an unrecognized wire value also
+    /// deserializes to `None`. Absent means unknown, NOT comparable-by-default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_basis"
+    )]
+    pub basis: Option<MetricBasis>,
+
     /// Why the session this turn ran in had to be created. Constant for every
     /// turn of one `sessionId`, so consumers can attribute a session's
     /// cache-write cost to its cause and see how far it amortized. Omitted
     /// when the publisher cannot determine it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_creation_cause: Option<SessionCreationCause>,
+}
+
+/// Accept an unrecognized `basis` as `None` rather than failing the payload.
+/// A metric event whose only unknown is a future basis label is still worth
+/// keeping — the counts are intact and the basis is honestly unknown.
+fn deserialize_optional_basis<'de, D>(deserializer: D) -> Result<Option<MetricBasis>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(match raw.as_deref() {
+        Some("per_turn_sum") => Some(MetricBasis::PerTurnSum),
+        Some("per_response") => Some(MetricBasis::PerResponse),
+        _ => None,
+    })
 }
 
 fn default_delta_reliable() -> bool {
@@ -394,6 +457,7 @@ mod tests {
             attempt: None,
             is_replay: None,
             session_creation_cause: None,
+            basis: None,
         }
     }
 
@@ -681,6 +745,7 @@ mod tests {
             attempt: None,
             is_replay: None,
             session_creation_cause: None,
+            basis: None,
         }
     }
 
@@ -710,6 +775,7 @@ mod tests {
             attempt: None,
             is_replay: None,
             session_creation_cause: None,
+            basis: None,
         }
     }
 

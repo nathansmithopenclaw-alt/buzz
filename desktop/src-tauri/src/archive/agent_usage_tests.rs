@@ -42,6 +42,7 @@ fn row(id: &str, agent: &str, session: &str, seq: u64, reported_at: i64) -> Agen
         attempt: None,
         is_replay: None,
         session_creation_cause: None,
+        basis: None,
         parse_status: ParseStatus::Valid,
     }
 }
@@ -839,5 +840,93 @@ fn reported_usage_serializes_with_all_seven_camel_case_keys() {
     assert_eq!(
         keys, expected,
         "ReportedUsage camelCase key contract changed — update tauriArchive.ts to match"
+    );
+}
+
+// ── NIP-AM measurement basis (D-5c7c42dc) ───────────────────────────────────
+
+/// Two publishers on different bases must not be combined into one total.
+/// A `per_response` publisher reports a single model call where a
+/// `per_turn_sum` publisher reports the whole turn; summing them produces a
+/// figure whose only possible reading is wrong.
+#[test]
+fn mixed_bases_suppress_the_cross_agent_total() {
+    // agentA is deliberately the SMALLER of the two so that ordering by
+    // identity (A first) is distinguishable from ranking by volume (B first);
+    // if A were larger, both orderings would agree and the assertion below
+    // would prove nothing.
+    let mut a = row("e1", "agentA", "s1", 1, 100);
+    a.turn_input_tokens = Some(50);
+    a.turn_output_tokens = Some(5);
+    a.basis = Some("per_response".to_string());
+    let mut b = row("e2", "agentB", "s2", 1, 150);
+    b.turn_input_tokens = Some(1_000_000);
+    b.turn_output_tokens = Some(1_000);
+    b.basis = Some("per_turn_sum".to_string());
+
+    let series = compute_series(&[a, b], &[], 0, &[0, 200], None, true);
+
+    assert!(series.bases_mixed, "two declared bases must read as mixed");
+    assert_eq!(series.bases, vec!["per_response", "per_turn_sum"]);
+    assert_eq!(
+        series.buckets[0].usage.input_tokens.value, None,
+        "a cross-agent total spanning bases must be unknown, not a sum",
+    );
+    assert!(series.buckets[0].usage.input_tokens.incomplete);
+    assert!(series.buckets[0].has_unknown_usage);
+    assert_eq!(
+        series.agents.len(),
+        2,
+        "per-agent rows survive: each is internally consistent",
+    );
+    assert_eq!(
+        series.agents[0].agent_pubkey, "agentA",
+        "mixed bases order by identity, never ranked by volume",
+    );
+}
+
+/// An event that declared no basis is its own bucket — it must not be pooled
+/// with a declared one, because its convention is genuinely unknown.
+#[test]
+fn absent_basis_is_not_pooled_with_a_declared_one() {
+    let mut a = row("e1", "agentA", "s1", 1, 100);
+    a.turn_input_tokens = Some(10);
+    a.basis = Some("per_turn_sum".to_string());
+    let mut b = row("e2", "agentB", "s2", 1, 150);
+    b.turn_input_tokens = Some(20);
+    b.basis = None;
+
+    let series = compute_series(&[a, b], &[], 0, &[0, 200], None, true);
+    assert!(series.bases_mixed);
+    assert_eq!(series.bases, vec!["per_turn_sum", "unknown"]);
+    assert_eq!(series.buckets[0].usage.input_tokens.value, None);
+}
+
+/// The guard must not fire on a single consistent basis, or it would blank
+/// every ordinary single-runtime view.
+#[test]
+fn single_basis_still_totals_and_ranks() {
+    // The agent ranking sorts on provider total, else input+output, so both
+    // components must be present for the ordering assertion to mean anything.
+    let mut a = row("e1", "agentA", "s1", 1, 100);
+    a.turn_input_tokens = Some(10);
+    a.turn_output_tokens = Some(1);
+    a.basis = Some("per_turn_sum".to_string());
+    let mut b = row("e2", "agentB", "s2", 1, 150);
+    b.turn_input_tokens = Some(90);
+    b.turn_output_tokens = Some(9);
+    b.basis = Some("per_turn_sum".to_string());
+
+    let series = compute_series(&[a, b], &[], 0, &[0, 200], None, true);
+    assert!(!series.bases_mixed);
+    assert_eq!(series.bases, vec!["per_turn_sum"]);
+    assert_eq!(
+        series.buckets[0].usage.input_tokens.value,
+        Some("100".to_string()),
+        "one basis: the total is real and must still be reported",
+    );
+    assert_eq!(
+        series.agents[0].agent_pubkey, "agentB",
+        "one basis: ranking by volume is still meaningful",
     );
 }

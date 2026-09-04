@@ -41,6 +41,7 @@ fn row(id: &str, agent: &str, session: &str, seq: u64, reported_at: i64) -> Agen
         attempt: None,
         is_replay: None,
         session_creation_cause: None,
+        basis: None,
         parse_status: ParseStatus::Valid,
     }
 }
