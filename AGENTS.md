@@ -481,9 +481,18 @@ like a product bug rather than a build mistake, so it burns real time.
 `pnpm test:e2e:smoke` and `pnpm test:e2e:integration` run the right build for
 you; prefer them over a manual build plus `playwright test`.
 
-**Stale server:** `reuseExistingServer: true` means a previous build's server
-serves old code. Kill port 4173 and re-run `pnpm build:e2e` before re-running
+**Stale server:** `reuseExistingServer` means a previous build's server serves
+old code. Kill the preview port and re-run `pnpm build:e2e` before re-running
 tests after code changes.
+
+**Parallel checkouts need separate preview ports.** The preview server serves
+`dist/` from the checkout that started it. If another checkout reuses that
+server, Playwright silently exercises the wrong build. Set `BUZZ_E2E_PORT` to a
+different port for each concurrent checkout; the default remains 4173:
+
+```sh
+BUZZ_E2E_PORT=4319 pnpm exec playwright test --project=integration
+```
 
 **`addInitScript` before bridge:** `page.addInitScript` (localStorage seeding)
 must run BEFORE `installMockBridge(page)` — React reads state on mount, the

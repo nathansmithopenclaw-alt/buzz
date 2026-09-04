@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+import { PREVIEW_ORIGIN, PREVIEW_PORT } from "./tests/e2e/previewOrigin";
+
 export default defineConfig({
   testDir: "./tests/e2e",
   timeout: 30_000,
@@ -10,7 +12,7 @@ export default defineConfig({
     ["html", { open: "never", outputFolder: "playwright-report" }],
   ],
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: PREVIEW_ORIGIN,
     screenshot: "only-on-failure",
     trace: "on-first-retry",
     video: "retain-on-failure",
@@ -207,9 +209,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "python3 -m http.server 4173 -d dist",
+    command: `python3 -m http.server ${PREVIEW_PORT} -d dist`,
     cwd: ".",
     reuseExistingServer: !process.env.CI,
-    url: "http://127.0.0.1:4173",
+    url: PREVIEW_ORIGIN,
   },
 });

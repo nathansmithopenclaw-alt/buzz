@@ -2,9 +2,10 @@ import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { PREVIEW_ORIGIN } from "./previewOrigin";
 
 const IMAGE_SHA = "c".repeat(64);
-const IMAGE_URL = "http://127.0.0.1:4173/buzz.svg";
+const IMAGE_URL = `${PREVIEW_ORIGIN}/buzz.svg`;
 const IMAGE_DESCRIPTOR = {
   url: IMAGE_URL,
   sha256: IMAGE_SHA,
@@ -49,7 +50,7 @@ test("no-selection spoiler applies to every composer paragraph", async ({
 }) => {
   await installSpoilerBridge(page);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
-    origin: "http://127.0.0.1:4173",
+    origin: PREVIEW_ORIGIN,
   });
 
   await page.goto("/");

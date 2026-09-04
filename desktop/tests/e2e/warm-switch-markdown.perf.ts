@@ -40,9 +40,9 @@ import { installMockBridge } from "../helpers/bridge";
  *   pnpm build
  *   npx playwright test --config=playwright.perf.config.ts warm-switch-markdown.perf.ts
  *
- * NOTE: the perf web server reuses an existing server on :4173 — if one is
- * already running, kill it or make sure `dist/` is freshly built, otherwise
- * you measure stale code.
+ * NOTE: the perf web server reuses an existing server on BUZZ_E2E_PORT (4173
+ * by default). Use a checkout-specific port or make sure the served `dist/` is
+ * freshly built; otherwise you measure stale code.
  */
 
 const MEASURED_SWITCHES = 8;
