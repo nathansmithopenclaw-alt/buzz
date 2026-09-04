@@ -111,10 +111,14 @@ const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
 
 /// Metadata stored per in-flight task for panic recovery.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct SuccessfulSteerDelivery {
     pub event_id: String,
     pub session_id: String,
+    /// Exact signed event retained until the owning turn's terminal fate is
+    /// known. Older delivery-ledger tests may omit it because they exercise
+    /// only session bookkeeping, not retry recovery.
+    pub event: Option<crate::queue::BatchEvent>,
 }
 
 pub struct TaskMeta {
@@ -140,8 +144,9 @@ pub struct TaskMeta {
     pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
     /// Successful non-cancelling steers acknowledged while this task owned the
     /// live session. The session ID prevents a late ack from contaminating a
-    /// replacement session after task return.
-    pub successful_steer_deliveries: HashSet<SuccessfulSteerDelivery>,
+    /// replacement session after task return. Keyed by exact event ID so the
+    /// retained signed event is a value, never a hash key with interior state.
+    pub successful_steer_deliveries: HashMap<String, SuccessfulSteerDelivery>,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -1229,22 +1234,49 @@ impl AgentPool {
     /// accepted it. Acks may arrive before or after the prompt result: while
     /// the task is in flight we stage the delivery in `TaskMeta`; after return
     /// we write directly to the idle agent's matching live-session ledger.
+    #[cfg(test)]
     pub fn record_successful_steer(
         &mut self,
         scope: &SessionScope,
         event_id: String,
         session_id: String,
     ) -> bool {
+        self.record_successful_steer_inner(scope, event_id, session_id, None)
+    }
+
+    /// Variant used by the live ack seam while the owning turn is still in
+    /// flight. It retains the full signed event so cancellation can rebuild an
+    /// N+1 retry batch instead of silently losing acknowledged steers.
+    pub fn record_successful_steer_event(
+        &mut self,
+        scope: &SessionScope,
+        event: crate::queue::BatchEvent,
+        session_id: String,
+    ) -> bool {
+        let event_id = event.event.id.to_hex();
+        self.record_successful_steer_inner(scope, event_id, session_id, Some(event))
+    }
+
+    fn record_successful_steer_inner(
+        &mut self,
+        scope: &SessionScope,
+        event_id: String,
+        session_id: String,
+        event: Option<crate::queue::BatchEvent>,
+    ) -> bool {
         if let Some(meta) = self
             .task_map
             .values_mut()
             .find(|meta| meta.scope.as_ref() == Some(scope))
         {
-            meta.successful_steer_deliveries
-                .insert(SuccessfulSteerDelivery {
+            meta.successful_steer_deliveries.insert(
+                event_id.clone(),
+                SuccessfulSteerDelivery {
                     event_id,
                     session_id,
-                });
+                    event,
+                },
+            );
             return true;
         }
 
