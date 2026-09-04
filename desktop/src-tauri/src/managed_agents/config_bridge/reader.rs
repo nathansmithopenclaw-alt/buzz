@@ -22,13 +22,28 @@ pub(crate) fn read_config_surface(
 ) -> RuntimeConfigSurface {
     let is_pre_spawn = session_cache.is_none();
 
+    // The account changes credentials, not configuration. Read the same
+    // layered source home that runtime composition uses, including custom env.
+    let codex_home = record
+        .env_vars
+        .get("CODEX_HOME")
+        .or_else(|| tiers.persona_env.get("CODEX_HOME"))
+        .or_else(|| tiers.global_env.get("CODEX_HOME"))
+        .or_else(|| tiers.definition_env.get("CODEX_HOME"))
+        .map(std::path::PathBuf::from);
+
     // Tier 2b: config file values.
     let (file_config, file_was_read) = runtime_meta
         .map(|m| m.id)
         .and_then(|id| match id {
             "goose" => super::goose::read_config_file().map(|c| (c, true)),
             "claude" => super::claude::read_config_file(claude_config_dir).map(|c| (c, true)),
-            "codex" => super::codex::read_config_file().map(|c| (c, true)),
+            "codex" => if codex_home.is_some() {
+                super::codex::read_config_file_at(codex_home.as_deref())
+            } else {
+                super::codex::read_config_file()
+            }
+            .map(|c| (c, true)),
             "buzz-agent" => super::buzz_agent::read_config_file().map(|c| (c, true)),
             _ => None,
         })

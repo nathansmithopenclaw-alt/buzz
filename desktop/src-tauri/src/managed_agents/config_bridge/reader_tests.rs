@@ -126,6 +126,8 @@ fn test_record() -> ManagedAgentRecord {
         persona_source_version: None,
         provider: None,
         claude_account_id: None,
+        subscription_account_id: None,
+        subscription_account_generation: 0,
     }
 }
 

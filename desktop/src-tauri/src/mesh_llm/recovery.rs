@@ -448,6 +448,8 @@ mod tests {
             model: None,
             provider: None,
             claude_account_id: None,
+            subscription_account_id: None,
+            subscription_account_generation: 0,
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,

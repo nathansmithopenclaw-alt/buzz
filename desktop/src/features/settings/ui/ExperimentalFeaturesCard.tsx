@@ -1,3 +1,4 @@
+import { SubscriptionAccountsExperimentRow } from "./SubscriptionAccountsExperimentRow";
 import { setAgentManagedProfiles } from "@/shared/api/tauri";
 import { updateFleetVisibilityEnabled } from "@/features/agents/lib/useFleetVisibilitySettings";
 import {
@@ -96,6 +97,7 @@ export function ExperimentalFeaturesCard() {
       />
 
       <SettingsOptionGroup title="Features">
+        <SubscriptionAccountsExperimentRow />
         {previewFeatures.map((f) => (
           <FeatureRow feature={f} key={f.id} />
         ))}

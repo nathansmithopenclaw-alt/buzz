@@ -506,6 +506,7 @@ impl OwnedAgent {
 /// (running inside a spawned task). The `task_map` tracks in-flight
 /// tasks for panic recovery.
 pub struct AgentPool {
+    account_quiesced: bool,
     agents: Vec<Option<OwnedAgent>>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
@@ -1059,6 +1060,7 @@ impl AgentPool {
         let (result_tx, result_rx) = mpsc::unbounded_channel();
         Self {
             agents: slots,
+            account_quiesced: false,
             result_tx,
             result_rx,
             join_set: JoinSet::new(),
@@ -1067,6 +1069,11 @@ impl AgentPool {
             exclusive_session,
             exclusive_park_notices: HashSet::new(),
         }
+    }
+
+    /// Freeze every claim path after Desktop has obtained the idle barrier.
+    pub fn set_account_quiesced(&mut self, value: bool) {
+        self.account_quiesced = value;
     }
 
     pub fn exclusive_session(&self) -> bool {
@@ -1120,6 +1127,9 @@ impl AgentPool {
     ///
     /// Returns `None` if all agents are checked out.
     pub fn try_claim(&mut self, scope: Option<&SessionScope>) -> Option<OwnedAgent> {
+        if self.account_quiesced {
+            return None;
+        }
         // Pass 1: prefer agent with existing session for this scope.
         if let Some(scope) = scope {
             let idx = self.agents.iter().position(|slot| {
@@ -1160,7 +1170,7 @@ impl AgentPool {
 
     /// Whether any agent is currently idle (sitting in its slot).
     pub fn any_idle(&self) -> bool {
-        self.agents.iter().any(|slot| slot.is_some())
+        !self.account_quiesced && self.agents.iter().any(|slot| slot.is_some())
     }
 
     /// Whether any idle agent already has a session for `scope`.
@@ -12865,6 +12875,26 @@ mod model_switch_tests {
             goose_system_prompt_supported: None,
             protocol_version: 2,
         }
+    }
+
+    #[tokio::test]
+    async fn account_switch_barrier_blocks_real_idle_worker_claims_until_release() {
+        let acp = AcpClient::spawn("/bin/sh", &["-c".into(), "sleep 30".into()], &[], false)
+            .await
+            .unwrap();
+        let mut pool = AgentPool::from_slots(vec![Some(switching_agent(acp, "fixture-model"))]);
+        assert!(pool.any_idle());
+        pool.set_account_quiesced(true);
+        assert!(!pool.any_idle());
+        assert!(
+            pool.try_claim(None).is_none(),
+            "quiesced account must not admit heartbeat or channel work"
+        );
+        pool.set_account_quiesced(false);
+        let mut agent = pool
+            .try_claim(None)
+            .expect("release restores the actual idle worker");
+        agent.acp.shutdown().await;
     }
 
     /// Scripted ACP: `session/new` (request #1) returns `session_new_options`,

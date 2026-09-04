@@ -85,7 +85,7 @@ import {
 } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
-import { EditAgentClaudeAccountField } from "./EditAgentClaudeAccountField";
+import { SubscriptionAccountSelector } from "./SubscriptionAccountSelector";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
@@ -974,7 +974,7 @@ export function AgentInstanceEditDialog({
             />
             <RunOnSummarySection backend={agent.backend} />
 
-            <EditAgentClaudeAccountField agent={agent} />
+            <SubscriptionAccountSelector agent={agent} />
 
             {/* Provider (runtime) */}
             <div className="space-y-1.5">

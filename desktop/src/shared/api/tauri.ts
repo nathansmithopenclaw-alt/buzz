@@ -1,3 +1,4 @@
+import { subscriptionAccountBindingFromRaw } from "./subscriptionAccountBinding";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
   activateRateLimit,
@@ -112,7 +113,8 @@ type RawRelayAgent = {
 };
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent =
-  import("@/shared/api/claudeAccountBinding").RawClaudeAccountBinding & {
+  import("@/shared/api/claudeAccountBinding").RawClaudeAccountBinding &
+  import("./subscriptionAccountBinding").RawSubscriptionAccountBinding & {
     pubkey: string;
     name: string;
     persona_id: string | null;
@@ -656,6 +658,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     modelSource: agent.model_source ?? null,
     provider: agent.provider ?? null,
     ...claudeAccountBindingFromRaw(agent),
+    ...subscriptionAccountBindingFromRaw(agent),
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
     needsRestart: agent.needs_restart ?? false,

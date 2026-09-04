@@ -62,6 +62,8 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         model: None,
         provider: None,
         claude_account_id: None,
+        subscription_account_id: None,
+        subscription_account_generation: 0,
         persona_source_version: None,
         start_on_app_launch: false,
         auto_restart_on_config_change: true,

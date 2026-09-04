@@ -2,7 +2,14 @@ use super::types::{ExtensionEntry, RuntimeFileConfig};
 
 /// Read Codex config from `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`).
 pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
-    let path = codex_config_path()?;
+    read_config_file_at(None)
+}
+
+/// Read the same source config context used by subscription runtime composition.
+pub(super) fn read_config_file_at(home: Option<&std::path::Path>) -> Option<RuntimeFileConfig> {
+    let path = home
+        .map(|p| p.join("config.toml"))
+        .or_else(codex_config_path)?;
     let raw = std::fs::read_to_string(path).ok()?;
     parse_codex_config(&raw)
 }

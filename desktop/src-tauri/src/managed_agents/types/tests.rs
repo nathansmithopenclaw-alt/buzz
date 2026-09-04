@@ -745,6 +745,12 @@ fn summary_fixture(
         claude_account_source: "none".into(),
         claude_account_shadowed: false,
         supports_claude_accounts: false,
+        subscription_account_id: None,
+        subscription_account_generation: 0,
+        subscription_account_harness: None,
+        running_subscription_account_id: None,
+        running_subscription_account_generation: None,
+        subscription_account_error: None,
         persona_out_of_date: false,
         persona_orphaned: false,
         // Both fields derive from one vector in `build_managed_agent_summary`;

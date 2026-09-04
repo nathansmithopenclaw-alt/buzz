@@ -389,6 +389,14 @@ pub async fn restore_managed_agents_on_launch(
                 };
                 let now = util::now_iso();
                 let receipt = super::ManagedAgentRuntimeReceipt {
+                    subscription_account_id: process
+                        .subscription_binding
+                        .as_ref()
+                        .map(|b| b.account_id.clone()),
+                    subscription_account_generation: process
+                        .subscription_binding
+                        .as_ref()
+                        .map_or(0, |b| b.generation),
                     key: key.clone(),
                     pid: process.child.id(),
                     desktop_instance_id: super::current_instance_id(app),

@@ -36,6 +36,8 @@ fn minimal_record() -> ManagedAgentRecord {
         model: Some("claude-opus-4".to_string()),
         provider: Some("anthropic".to_string()),
         claude_account_id: None,
+        subscription_account_id: None,
+        subscription_account_generation: 0,
         persona_source_version: Some("v1.0".to_string()), // MUST NOT appear
         env_vars: {
             let mut m = BTreeMap::new();

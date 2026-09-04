@@ -680,6 +680,196 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
+/// Enforce Desktop's explicit local binding at the final provider child boundary.
+/// No caller-supplied extra env or credential override may outrank that binding.
+fn enforce_subscription_child_env(
+    child: &mut tokio::process::Command,
+    command: &str,
+    args: &[String],
+) -> Result<(), AcpError> {
+    let Some(account_id) = std::env::var_os("BUZZ_ACP_SUBSCRIPTION_ACCOUNT_ID") else {
+        return Ok(());
+    };
+    if account_id.is_empty() {
+        return Err(AcpError::Protocol(
+            "Empty subscription account binding".into(),
+        ));
+    }
+    let harness = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS")
+        .map_err(|_| AcpError::Protocol("Missing subscription harness binding".into()))?;
+    let home = std::env::var_os("BUZZ_ACP_SUBSCRIPTION_HOME")
+        .ok_or_else(|| AcpError::Protocol("Missing subscription credential home".into()))?;
+    let identity = crate::config::normalize_agent_command_identity(command);
+    let matches = match harness.as_str() {
+        "claude" => matches!(
+            identity.as_str(),
+            "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode"
+        ),
+        "codex" => matches!(identity.as_str(), "codex" | "codex-acp"),
+        _ => false,
+    };
+    if !matches {
+        return Err(AcpError::Protocol(
+            "Subscription binding does not match the launched adapter".into(),
+        ));
+    }
+    if args.iter().any(|arg| {
+        [
+            "--resume",
+            "--continue",
+            "--fork-session",
+            "resume",
+            "fork",
+            "--settings",
+            "--config",
+            "-c",
+            "--api-key",
+        ]
+        .iter()
+        .any(|blocked| arg == blocked || arg.starts_with(&format!("{blocked}=")))
+    }) {
+        return Err(AcpError::Protocol("Subscription account cannot use authentication/config overrides or resume another provider session".into()));
+    }
+    for name in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_ORG_ID",
+        "OPENAI_ORGANIZATION",
+        "OPENAI_PROJECT_ID",
+        "CODEX_API_KEY",
+        "CODEX_API_KEY_FILE_DESCRIPTOR",
+    ] {
+        child.env_remove(name);
+    }
+    match harness.as_str() {
+        "claude" => {
+            let config_home =
+                std::env::var_os("BUZZ_ACP_SUBSCRIPTION_CONFIG_HOME").ok_or_else(|| {
+                    AcpError::Protocol("Missing validated Claude configuration home".into())
+                })?;
+            child
+                .env("CLAUDE_CONFIG_DIR", config_home)
+                .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home);
+        }
+        "codex" => {
+            child.env("CODEX_HOME", home);
+            let existing = child
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "CODEX_CONFIG")
+                .and_then(|(_, v)| v.map(|s| s.to_string_lossy().into_owned()))
+                .or_else(|| std::env::var("CODEX_CONFIG").ok());
+            let mut config: serde_json::Value = existing
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|_| AcpError::Protocol("Invalid subscription Codex configuration".into()))?
+                .unwrap_or_else(|| serde_json::json!({}));
+            validate_subscription_codex_config(&config)?;
+            let map = config.as_object_mut().ok_or_else(|| {
+                AcpError::Protocol("Subscription Codex config must be an object".into())
+            })?;
+            map.insert("cli_auth_credentials_store".into(), "file".into());
+            map.insert("forced_login_method".into(), "chatgpt".into());
+            child.env("CODEX_CONFIG", config.to_string());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+fn validate_subscription_codex_config(config: &serde_json::Value) -> Result<(), AcpError> {
+    match config {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if [
+                    "model_providers",
+                    "api_key",
+                    "apikeyhelper",
+                    "env_key",
+                    "base_url",
+                    "bearer_token",
+                    "experimental_bearer_token",
+                    "anthropic_api_key",
+                    "anthropic_auth_token",
+                    "anthropic_base_url",
+                    "claude_code_oauth_token",
+                    "claude_code_oauth_token_file_descriptor",
+                    "claude_code_use_bedrock",
+                    "claude_code_use_vertex",
+                    "claude_code_use_foundry",
+                    "openai_api_key",
+                    "openai_base_url",
+                ]
+                .contains(&key.to_ascii_lowercase().as_str())
+                    || (key == "model_provider" && value.as_str() != Some("openai"))
+                {
+                    return Err(AcpError::Protocol(
+                        "Codex configuration conflicts with subscription authentication".into(),
+                    ));
+                }
+                validate_subscription_codex_config(value)?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for value in items {
+                validate_subscription_codex_config(value)?
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_subscription_project_context(
+    harness: &str,
+    cwd: &std::path::Path,
+) -> Result<(), AcpError> {
+    for parent in cwd.ancestors() {
+        let names: &[&str] = if harness == "claude" {
+            &[".claude/settings.json", ".claude/settings.local.json"]
+        } else {
+            &[".codex/config.toml"]
+        };
+        for name in names {
+            let path = parent.join(name);
+            let meta = match std::fs::metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(AcpError::Protocol(format!(
+                        "Project configuration unavailable: {e}"
+                    )))
+                }
+            };
+            if !meta.is_file() || meta.len() > 1024 * 1024 {
+                return Err(AcpError::Protocol(
+                    "Project configuration is not a bounded regular file".into(),
+                ));
+            }
+            let raw = std::fs::read_to_string(path)?;
+            let value: serde_json::Value = if harness == "claude" {
+                serde_json::from_str(&raw)
+                    .map_err(|_| AcpError::Protocol("Invalid Claude project settings".into()))?
+            } else {
+                let value: toml::Value = raw
+                    .parse()
+                    .map_err(|_| AcpError::Protocol("Invalid Codex project settings".into()))?;
+                serde_json::to_value(value).map_err(|e| AcpError::Protocol(e.to_string()))?
+            };
+            validate_subscription_codex_config(&value)?;
+        }
+    }
+    Ok(())
+}
+
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
@@ -831,6 +1021,8 @@ impl AcpClient {
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
         }
+
+        enforce_subscription_child_env(&mut cmd, command, args)?;
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
@@ -998,6 +1190,9 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        if let Ok(harness) = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS") {
+            validate_subscription_project_context(&harness, std::path::Path::new(cwd))?;
+        }
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -6639,5 +6834,100 @@ printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod subscription_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// The parent invokes this exact test in a child test process so trusted
+    /// Desktop env can be exercised without mutating the parallel test runner.
+    #[tokio::test]
+    async fn subscription_child_environment_is_authoritative() {
+        const MARKER: &str = "BUZZ_TEST_SUBSCRIPTION_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let adapter = root.path().join("codex-acp");
+            std::fs::write(&adapter,r#"#!/usr/bin/python3
+import json, os, sys
+for line in sys.stdin:
+    req=json.loads(line)
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':{
+      'home':os.environ.get('CODEX_HOME'), 'key':os.environ.get('OPENAI_API_KEY'),
+      'buzz':os.environ.get('BUZZ_AUTH_TAG'), 'config':json.loads(os.environ['CODEX_CONFIG'])}}),flush=True)
+"#).unwrap();
+            std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "acp::subscription_tests::subscription_child_environment_is_authoritative",
+                    "--nocapture",
+                ])
+                .env(MARKER, &adapter)
+                .env("BUZZ_ACP_SUBSCRIPTION_ACCOUNT_ID", "fixture-id")
+                .env("BUZZ_ACP_SUBSCRIPTION_HARNESS", "codex")
+                .env("BUZZ_ACP_SUBSCRIPTION_HOME", root.path())
+                .env("OPENAI_API_KEY", "parent-fixture-competing")
+                .env("BUZZ_AUTH_TAG", "fixture-communication")
+                .env_remove("CODEX_CONFIG")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let adapter = std::env::var(MARKER).unwrap();
+        let mut client=AcpClient::spawn(&adapter,&[],&[("OPENAI_API_KEY".into(),"late-fixture-competing".into()),("CODEX_HOME".into(),"wrong-home".into()),("CODEX_CONFIG".into(),r#"{"model":"fixture-model","cli_auth_credentials_store":"keyring","forced_login_method":"api"}"#.into())],false).await.unwrap();
+        let result = client
+            .send_request("fixture", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result["home"].as_str(),
+            std::env::var("BUZZ_ACP_SUBSCRIPTION_HOME").ok().as_deref()
+        );
+        assert!(result["key"].is_null());
+        assert_eq!(result["buzz"], "fixture-communication");
+        assert_eq!(result["config"]["model"], "fixture-model");
+        assert_eq!(result["config"]["cli_auth_credentials_store"], "file");
+        assert_eq!(result["config"]["forced_login_method"], "chatgpt");
+        client.shutdown().await;
+        assert!(AcpClient::spawn(
+            &adapter,
+            &["--resume".into(), "other-account-session".into()],
+            &[],
+            false
+        )
+        .await
+        .is_err());
+        assert!(AcpClient::spawn(
+            &adapter,
+            &[],
+            &[(
+                "CODEX_CONFIG".into(),
+                r#"{"model_provider":"other"}"#.into()
+            )],
+            false
+        )
+        .await
+        .is_err());
+    }
+
+    #[test]
+    fn subscription_session_rejects_new_project_auth_override() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".claude");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("settings.json"),
+            r#"{"apiKeyHelper":"competing-helper"}"#,
+        )
+        .unwrap();
+        assert!(validate_subscription_project_context("claude", root.path()).is_err());
     }
 }

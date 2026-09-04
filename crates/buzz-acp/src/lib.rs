@@ -1,7 +1,9 @@
 #![deny(unsafe_code)]
 
+mod account_control;
 mod acp;
 mod answered_watermark;
+mod auth_recovery;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -3373,6 +3375,22 @@ async fn tokio_main() -> Result<()> {
     let dedup_mode = config.dedup_mode;
     let mut queue =
         EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    if let Some(root) = std::env::var_os("BUZZ_ACP_AUTH_RECOVERY_DIR") {
+        let mut recovery = auth_recovery::AuthRecovery::open(
+            std::path::Path::new(&root),
+            &pubkey_hex,
+            &config.relay_url,
+        )?;
+        let completed = recovery
+            .batches()
+            .iter()
+            .flat_map(|batch| &batch.events)
+            .filter(|event| answered_event_ids.contains(&event.event))
+            .map(|event| event.event.id)
+            .collect();
+        recovery.complete(&completed)?;
+        queue = queue.with_auth_recovery(recovery);
+    }
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -3640,15 +3658,72 @@ async fn tokio_main() -> Result<()> {
     // a new `break` out of this loop without naming why it fired — which is the
     // defect this exists to close, restated as a type-checker rule.
     let exit_cause: Option<ShutdownCause>;
+    let mut account_control = account_control::AccountControl::from_env();
+    let mut reported_auth_blocked = false;
+    let mut account_control_tick = tokio::time::interval(Duration::from_millis(250));
+    account_control_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        let account_request_pending = account_control.has_pending_request();
+        if account_request_pending {
+            drain_idle_agent_notifications(&mut pool).await;
+        }
+        let account_switch_busy = !pool.task_map().is_empty()
+            || pool_lifecycle.waking_attempt().is_some()
+            || queue.has_in_flight()
+            || heartbeat_in_flight
+            || any_respawn_in_flight(&crash_history)
+            || (account_request_pending && !channel_pending_background_tasks(&mut pool).is_empty());
+        if let Err(error) = account_control.poll(account_switch_busy) {
+            tracing::warn!(%error, "subscription account control request rejected");
+        }
+        if account_control.take_resume_auth() {
+            let resumed = queue
+                .validate_auth_channels(&subscribed_channel_ids)
+                .and_then(|()| queue.resume_after_auth())
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            if let Err(error) = &resumed {
+                tracing::error!(%error, "explicit authentication resume failed; work remains held");
+            }
+            if let Err(error) = account_control.finish_resume_auth(resumed) {
+                tracing::error!(%error, "could not acknowledge authentication resume");
+            }
+        }
+        pool.set_account_quiesced(account_control.is_quiesced() || queue.auth_blocked());
+        if queue.auth_blocked() != reported_auth_blocked {
+            reported_auth_blocked = queue.auth_blocked();
+            emit_runtime_lifecycle(
+                observer.as_ref(),
+                &runtime_start_nonce,
+                &pubkey_hex,
+                &config.relay_url,
+                if reported_auth_blocked {
+                    "failed"
+                } else if pool_ready {
+                    "ready"
+                } else {
+                    "listening"
+                },
+                if reported_auth_blocked {
+                    Some("subscription_auth_required")
+                } else {
+                    None
+                },
+            );
+        }
+
         // Whether buffered work is waiting on a lazy pool. Also gates the
         // retry-deadline sleep arm below: a `Failed` lifecycle keeps its
         // (possibly past) `retry_at` until the next wake, so sleeping on it
         // unconditionally would complete instantly on every iteration — a
         // busy spin — whenever the queued work drained after a failed wake.
         let mut lazy_wake_work_pending = false;
-        if config.lazy_pool && !pool_ready {
+        if config.lazy_pool
+            && !pool_ready
+            && !account_control.is_quiesced()
+            && !queue.auth_blocked()
+        {
             lazy_wake_work_pending = queue.has_flushable_work();
             if let Some(attempt) = pool_lifecycle
                 .start_wake_if_due(lazy_wake_work_pending, tokio::time::Instant::now())
@@ -3776,6 +3851,9 @@ async fn tokio_main() -> Result<()> {
             let (result_rx, join_set) = pool.rx_and_join_set();
             tokio::select! {
                 biased;
+                // Quiet brokers must still acknowledge Desktop's bounded IPC.
+                _ = account_control_tick.tick(), if account_control.enabled() => None,
+
                 // recv() returning None means all senders dropped (pool was torn down).
                 // Break cleanly instead of panicking.
                 r = result_rx.recv(), if pool_ready => match r {
@@ -4383,7 +4461,7 @@ async fn tokio_main() -> Result<()> {
                     }
                 } => {
                     let _ = result_rx;
-                    if !pool_ready {
+                    if !pool_ready || account_control.is_quiesced() || queue.auth_blocked() {
                         tracing::debug!("heartbeat_skipped_pool_not_ready");
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
@@ -4919,6 +4997,7 @@ fn is_delivery_failure_report(event: &nostr::Event) -> bool {
             .starts_with("⚠️ I can't take this conversation right now")
         || event.content.starts_with("⚠️ I couldn't process")
         || event.content.starts_with("⚠️ I couldn't finish")
+        || event.content.starts_with("⚠️ Authentication failed.")
 }
 
 #[derive(Debug, Default)]
@@ -5825,8 +5904,8 @@ async fn post_shutdown_interruption_notices(rest: &relay::RestClient, batches: V
 ///
 /// Retrying auth errors is harmful: the token won't self-repair between
 /// attempts, so each retry wastes an attempt slot, delays the visible failure,
-/// and burns the user's context window. Dead-letter immediately and surface a
-/// re-authentication hint instead.
+/// and burns the user's context window. Hold the original request and surface a
+/// re-authentication hint with an explicit resume action instead.
 ///
 /// # Classification rationale
 ///
@@ -5847,7 +5926,11 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     let acp::AcpError::AgentError { message, .. } = error else {
         return false;
     };
-    message.contains("Re-authenticate") || message.contains("API Error: 401")
+    message.contains("Re-authenticate")
+        || message.contains("API Error: 401")
+        || message.contains("refresh token was already used")
+        || message.contains("refresh token has expired")
+        || message.contains("refresh token has been revoked")
 }
 
 /// Spawn a task that posts a user-visible failure notice to the relay.
@@ -5956,6 +6039,27 @@ fn handle_prompt_result(
         .values()
         .filter_map(|delivery| delivery.event.clone())
         .collect();
+    let recovery_batch = pool
+        .task_map()
+        .values()
+        .find(|meta| meta.agent_index == agent_index)
+        .and_then(|meta| meta.recoverable_batch.clone())
+        .or_else(|| match &result.source {
+            PromptSource::Channel(scope) => queue.auth_recoverable_batch(scope),
+            PromptSource::Heartbeat => None,
+        });
+    if matches!(&result.outcome, PromptOutcome::Ok(_)) {
+        if let Some(batch) = &recovery_batch {
+            if let Err(error) = queue.complete_auth_recovery(batch) {
+                tracing::error!(%error, "failed to retire completed authentication recovery receipt");
+            }
+        }
+    } else if matches!(&result.outcome, PromptOutcome::Error(error) if is_auth_error(error))
+        && result.batch.is_none()
+    {
+        // Drop mode still owes the triggering request a recoverable auth hold.
+        result.batch = recovery_batch;
+    }
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
@@ -6007,7 +6111,8 @@ fn handle_prompt_result(
             PromptOutcome::Cancelled
                 | PromptOutcome::CancelDrainTimeout(_)
                 | PromptOutcome::Timeout(TimeoutKind::Idle)
-        ) {
+        ) || matches!(&result.outcome, PromptOutcome::Error(error) if is_auth_error(error))
+        {
             let mut seen: HashSet<String> = batch
                 .events
                 .iter()
@@ -6086,22 +6191,28 @@ fn handle_prompt_result(
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                     delivery_fate = "requeue";
                 }
-            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
-                // Auth errors are non-retryable: the token won't self-repair
-                // between retries, so requeueing only wastes attempt slots and
-                // delays the visible failure. Dead-letter immediately and tell
-                // the user to re-authenticate the CLI.
-                tracing::warn!(
-                    channel_id = %batch.channel_id,
-                    events = batch.events.len(),
-                    "dead-lettering batch immediately — non-retryable auth error"
-                );
-                let content = "⚠️ I couldn't process the last request: authentication failed. \
-                    Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
-                    and then re-send."
-                    .to_string();
-                spawn_failure_notice(rest_client, &batch, content);
+            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e))
+                && !queue.auth_recovery_enabled()
+            {
+                // Standalone CLI retains its existing explicit re-send recovery;
+                // only managed brokers have the local Desktop resume endpoint.
+                spawn_failure_notice(rest_client, &batch,
+                    "⚠️ I couldn't process the last request: authentication failed. Re-authenticate the CLI and then re-send.".into());
                 delivery_fate = "dead_letter";
+            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
+                let notice_batch = batch.clone();
+                pool.set_account_quiesced(true);
+                match queue.hold_for_auth(batch) {
+                    Ok(()) => tracing::warn!(
+                        "authentication failed: original request held for explicit resume"
+                    ),
+                    Err(error) => {
+                        tracing::error!(%error, "authentication recovery persistence failed; request remains held in memory")
+                    }
+                }
+                let content = "⚠️ Authentication failed. The original request is retained and automatic retries are paused. Reconnect the account in Settings, then choose Resume retained work in the agent’s Account controls. Earlier partial work may already have run.".to_string();
+                spawn_failure_notice(rest_client, &notice_batch, content);
+                delivery_fate = "auth_held";
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -12389,7 +12500,7 @@ mod error_outcome_emission_tests {
     /// (the batch is never requeued) so the user sees a re-auth hint at once
     /// rather than after 10 futile retries.
     #[tokio::test]
-    async fn auth_error_dead_letters_immediately_without_requeueing() {
+    async fn auth_error_retains_request_without_automatic_retry() {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
             .sign_with_keys(&keys)
@@ -12430,7 +12541,15 @@ mod error_outcome_emission_tests {
                 successful_steer_deliveries: HashMap::new(),
             },
         );
-        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let recovery_dir = tempfile::tempdir().unwrap();
+        let mut queue = EventQueue::new(config::DedupMode::Queue).with_auth_recovery(
+            auth_recovery::AuthRecovery::open(
+                &recovery_dir.path().canonicalize().unwrap(),
+                "agent",
+                "relay",
+            )
+            .unwrap(),
+        );
         let config = test_config();
         let mut heartbeat_in_flight = false;
         let removed_channels = std::collections::HashSet::new();
@@ -12462,17 +12581,11 @@ mod error_outcome_emission_tests {
             None,
         );
 
-        // The batch must not be requeued: pending_channels returns 0.
-        assert_eq!(
-            queue.pending_channels(),
-            0,
-            "auth error must dead-letter immediately — batch must not be requeued"
-        );
-        assert_eq!(
-            queue.queued_event_count(channel_id),
-            0,
-            "auth error must dead-letter immediately — no events should be pending"
-        );
+        assert!(queue.auth_blocked());
+        assert!(!queue.has_flushable_work());
+        assert_eq!(queue.resume_after_auth().unwrap(), 1);
+        assert!(!queue.auth_blocked());
+        assert_eq!(queue.flush_next().unwrap().events.len(), 1);
     }
 
     /// A non-auth application error (e.g. usage credits) must still follow the

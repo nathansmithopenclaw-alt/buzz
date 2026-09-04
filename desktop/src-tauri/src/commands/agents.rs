@@ -693,6 +693,8 @@ pub async fn create_managed_agent(
             model: effective_model.clone(),
             provider: effective_provider.clone(),
             claude_account_id: None,
+            subscription_account_id: None,
+            subscription_account_generation: 0,
             persona_source_version: snapshot_source_version,
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false

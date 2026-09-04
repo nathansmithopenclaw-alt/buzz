@@ -43,6 +43,7 @@ mod reset;
 mod runtime_identity;
 mod secret_store;
 mod shutdown;
+mod subscription_accounts;
 mod team_catalog;
 mod templates;
 mod terminal_runtime;
@@ -739,6 +740,16 @@ pub fn run() {
             set_agent_management_delegation,
             apply_delegated_global_agent_config,
             managed_agents::list_claude_accounts,
+            subscription_accounts::subscription_account_capabilities,
+            subscription_accounts::list_subscription_accounts,
+            subscription_accounts::get_subscription_accounts_enabled,
+            subscription_accounts::set_subscription_accounts_enabled,
+            subscription_accounts::begin_subscription_account_login,
+            subscription_accounts::cancel_subscription_account_login,
+            subscription_accounts::rename_subscription_account,
+            subscription_accounts::remove_subscription_account,
+            managed_agents::subscription_binding::switch_agent_subscription_account,
+            managed_agents::subscription_binding::resume_agent_subscription_work,
             managed_agents::add_claude_account,
             managed_agents::delete_claude_account,
             managed_agents::note_claude_account_switch_queued,

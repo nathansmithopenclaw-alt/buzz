@@ -1,3 +1,7 @@
+import {
+  mockSubscriptionAccountCommand,
+  resetMockSubscriptionAccounts,
+} from "./e2eSubscriptionAccounts";
 import * as React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -983,6 +987,12 @@ type RawRelayAgent = {
 };
 
 type RawManagedAgent = {
+  subscription_account_id?: string | null;
+  subscription_account_harness?: string | null;
+  subscription_account_generation?: number;
+  running_subscription_account_id?: string | null;
+  running_subscription_account_generation?: number | null;
+  subscription_account_error?: string | null;
   pubkey: string;
   name: string;
   persona_id: string | null;
@@ -1931,6 +1941,13 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     claude_account_source: agent.claude_account_source ?? "credentials_file",
     claude_account_shadowed: agent.claude_account_shadowed ?? false,
     supports_claude_accounts: agent.supports_claude_accounts ?? false,
+    subscription_account_harness: agent.subscription_account_harness ?? null,
+    subscription_account_id: agent.subscription_account_id ?? null,
+    subscription_account_generation: agent.subscription_account_generation ?? 0,
+    running_subscription_account_id: agent.running_subscription_account_id ?? null,
+    running_subscription_account_generation:
+      agent.running_subscription_account_generation ?? null,
+    subscription_account_error: agent.subscription_account_error ?? null,
     env_vars: { ...(agent.env_vars ?? {}) },
     status: agent.status,
     pid: agent.pid,
@@ -2501,6 +2518,16 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
       (seed.runtime === "claude" ? "instance" : "credentials_file"),
     claude_account_shadowed: seed.claudeAccountShadowed ?? false,
     supports_claude_accounts: seed.runtime === "claude",
+    subscription_account_harness: ["claude", "codex", "grok"].includes(
+      seed.runtime ?? "",
+    )
+      ? seed.runtime
+      : null,
+    subscription_account_id: null,
+    subscription_account_generation: 0,
+    running_subscription_account_id: null,
+    running_subscription_account_generation: null,
+    subscription_account_error: null,
     env_vars: { ...(seed.envVars ?? {}) },
     status,
     pid: status === "running" ? 42000 + mockManagedAgents.length : null,
@@ -2560,6 +2587,7 @@ function resetMockRelayAgents(config?: E2eConfig) {
 }
 
 function resetMockManagedAgents(config?: E2eConfig) {
+  resetMockSubscriptionAccounts();
   mockManagedAgents = [];
   mockClaudeAccounts = [
     {
@@ -14617,6 +14645,21 @@ export function maybeInstallE2eTauriMocks() {
         return setAgentManagementDelegationCallCount;
       case "get_agent_management_delegation_last_payload":
         return lastAgentManagementDelegationPayload;
+      case "get_subscription_accounts_enabled":
+      case "set_subscription_accounts_enabled":
+      case "subscription_account_capabilities":
+      case "list_subscription_accounts":
+      case "begin_subscription_account_login":
+      case "cancel_subscription_account_login":
+      case "rename_subscription_account":
+      case "remove_subscription_account":
+      case "switch_agent_subscription_account":
+      case "resume_agent_subscription_work":
+        return mockSubscriptionAccountCommand(
+          command,
+          (payload ?? {}) as Record<string, unknown>,
+          mockManagedAgents,
+        );
       case "list_claude_accounts":
         return mockClaudeAccounts;
       case "add_claude_account": {
