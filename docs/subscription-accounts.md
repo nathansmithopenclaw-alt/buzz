@@ -1,6 +1,6 @@
 # Subscription Accounts
 
-Subscription Accounts is a local experiment under Settings → Agents. Enable it in
+Subscription Accounts is a local experiment under Settings → AI. Enable it in
 Settings → Experiments, choose a supported harness, finish that harness's browser
 login, then give the verified login a nickname. The Edit Agent selector and the
 DM header read the same account store. Selection applies to the agent in every

@@ -159,7 +159,7 @@ export function SubscriptionAccountSelector({
       </p>
       {unavailable ? (
         <p className="text-xs text-destructive">
-          Selected account unavailable. Reconnect it in Settings → Agents;
+          Selected account unavailable. Reconnect it in Settings → AI;
           another account will not be chosen automatically.
         </p>
       ) : null}
@@ -194,7 +194,7 @@ export function SubscriptionAccountSelector({
         <div className="space-y-2 text-xs">
           <p>
             Authentication paused this agent. Stop the agent, reconnect in
-            Settings → Agents, then start it and resume retained work.
+            Settings → AI, then start it and resume retained work.
           </p>
           <Button
             size="sm"

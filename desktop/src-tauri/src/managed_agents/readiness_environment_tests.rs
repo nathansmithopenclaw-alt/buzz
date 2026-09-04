@@ -1,4 +1,5 @@
 use super::*;
+use crate::managed_agents::discovery::known_acp_runtime_exact;
 
 #[test]
 fn resolve_effective_agent_env_user_env_wins_over_structured_fields() {
