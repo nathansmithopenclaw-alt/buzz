@@ -794,6 +794,48 @@ fn validate_request_rejects_malformed_pubkey() {
 
 // ── Tauri camelCase key-shape contract ────────────────────────────────────────
 
+/// Same contract one level up: `AgentUsageSeries` must serialize to exactly the
+/// camelCase keys `tauriArchive.ts` declares.
+///
+/// This exists because the contract already drifted once. `bases` / `basesMixed`
+/// were added to the Rust series and the TS type, but the captured e2e fixture
+/// that mirrors this payload was not updated — and it failed OPEN rather than
+/// red: a missing boolean reads as `undefined`, the guarded branch never
+/// renders, and the spec passes exactly as before. `tsconfig.json` includes
+/// only `src`, so neither `tsc` nor biome covers `tests/fixtures`. This test is
+/// the only gate that binds the Rust wire names to their consumers.
+#[test]
+fn agent_usage_series_serializes_with_its_exact_camel_case_keys() {
+    let series = compute_series(&[], &[], 0, &[0, 200], None, true);
+
+    let obj = serde_json::to_value(&series).expect("AgentUsageSeries must serialize");
+    let keys: std::collections::BTreeSet<&str> = obj
+        .as_object()
+        .expect("must be a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+
+    let expected: std::collections::BTreeSet<&str> = [
+        "collectionEnabled",
+        "buckets",
+        "agents",
+        "coverage",
+        "hasArchivedEvidence",
+        "bases",
+        "basesMixed",
+    ]
+    .iter()
+    .copied()
+    .collect();
+
+    assert_eq!(
+        keys, expected,
+        "AgentUsageSeries camelCase key contract changed — update tauriArchive.ts \
+         AND tests/fixtures/agent-usage-live-series.json to match",
+    );
+}
+
 /// Verify that a fully-populated `ReportedUsage` serializes to exactly the
 /// seven camelCase keys the TS `ReportedUsage` type declares.  Any Rust-side
 /// rename drift will fail this test before reaching the TypeScript consumer.
