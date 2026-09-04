@@ -400,19 +400,19 @@ impl EventQueue {
     /// Try to flush the next batch.
     ///
     /// Returns `None` if all non-in-flight, non-throttled queues are empty.
-    /// Otherwise picks the channel with the oldest pending event (FIFO fairness
-    /// across channels), drains ALL events for that channel into a single batch,
-    /// inserts into `in_flight_channels`, and returns the batch.
+    /// Otherwise picks the scope with the oldest pending event (FIFO fairness
+    /// across scopes), drains ALL events for that scope into a single batch,
+    /// inserts into `in_flight_scopes`, and returns the batch.
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
         self.flush_next_skipping(&HashSet::new())
     }
 
     /// Like [`flush_next`], excluding `skip` so one unclaimable head cannot
-    /// starve later claimable channels in the same scheduling pass.
+    /// starve later claimable scopes in the same scheduling pass.
     ///
-    /// `skip` is caller-owned and per-pass — a parked channel is retried on
+    /// `skip` is caller-owned and per-pass — a parked scope is retried on
     /// the next `dispatch_pending` cycle, when a worker may have freed.
-    pub fn flush_next_skipping(&mut self, skip: &HashSet<Uuid>) -> Option<FlushBatch> {
+    pub fn flush_next_skipping(&mut self, skip: &HashSet<SessionScope>) -> Option<FlushBatch> {
         let now = Instant::now();
 
         // Auto-expire any stuck in-flight entries that missed mark_complete.
@@ -455,7 +455,7 @@ impl EventQueue {
             .iter()
             .filter(|(scope, q)| {
                 !q.is_empty()
-                    && !skip.contains(&scope.channel_id())
+                    && !skip.contains(scope)
                     && !self.in_flight_scopes.contains(scope)
                     && self.retry_after.get(scope).is_none_or(|&t| t <= now)
             })
@@ -471,10 +471,7 @@ impl EventQueue {
                 let cancelled_scope = self
                     .cancelled_batches
                     .keys()
-                    .find(|scope| {
-                        !skip.contains(&scope.channel_id())
-                            && !self.in_flight_scopes.contains(scope)
-                    })
+                    .find(|scope| !skip.contains(*scope) && !self.in_flight_scopes.contains(scope))
                     .cloned();
                 match cancelled_scope {
                     Some(scope) => {
@@ -875,25 +872,22 @@ impl EventQueue {
     }
 
     /// Like [`has_undispatched_work`](Self::has_undispatched_work), but skip
-    /// channels in `exclude`.
+    /// scopes in `exclude`.
     ///
     /// Used by idle-pool-sleep accounting to ignore exclusive-parked
-    /// channels (park set lives on the pool; this is the intersection).
+    /// scopes (park set lives on the pool; this is the intersection).
     /// Claimable, retry-throttled, cancelled, and withheld work on any
-    /// non-excluded channel still returns true.
-    pub fn has_undispatched_work_except(&self, exclude: &HashSet<Uuid>) -> bool {
+    /// non-excluded scope still returns true.
+    pub fn has_undispatched_work_except(&self, exclude: &HashSet<SessionScope>) -> bool {
         let has_queued = self.queues.iter().any(|(scope, q)| {
-            !q.is_empty()
-                && !exclude.contains(&scope.channel_id())
-                && !self.in_flight_scopes.contains(scope)
+            !q.is_empty() && !exclude.contains(scope) && !self.in_flight_scopes.contains(scope)
         });
-        let has_cancelled = self.cancelled_batches.keys().any(|scope| {
-            !exclude.contains(&scope.channel_id()) && !self.in_flight_scopes.contains(scope)
-        });
+        let has_cancelled = self
+            .cancelled_batches
+            .keys()
+            .any(|scope| !exclude.contains(scope) && !self.in_flight_scopes.contains(scope));
         let has_withheld = self.withheld_native_steer.iter().any(|(scope, v)| {
-            !v.is_empty()
-                && !exclude.contains(&scope.channel_id())
-                && !self.in_flight_scopes.contains(scope)
+            !v.is_empty() && !exclude.contains(scope) && !self.in_flight_scopes.contains(scope)
         });
         has_queued || has_cancelled || has_withheld
     }
@@ -3127,11 +3121,12 @@ mod tests {
     }
 
     #[test]
-    fn test_has_undispatched_work_except_skips_excluded_channel() {
+    fn test_has_undispatched_work_except_skips_only_excluded_scope() {
         let mut queue = EventQueue::new(DedupMode::Queue);
-        let parked = Uuid::new_v4();
-        let claimable = Uuid::new_v4();
-        queue.push(make_queued(parked, "parked"));
+        let channel = Uuid::new_v4();
+        let parked = thread(channel, &"a".repeat(64));
+        let claimable = thread(channel, &"b".repeat(64));
+        queue.push(make_scoped(parked.clone(), "parked"));
         let mut exclude = HashSet::new();
         exclude.insert(parked);
         assert!(
@@ -3140,12 +3135,12 @@ mod tests {
         );
         assert!(
             !queue.has_undispatched_work_except(&exclude),
-            "excluded parked channel must not block sleep"
+            "excluded parked scope must not block sleep"
         );
-        queue.push(make_queued(claimable, "claimable"));
+        queue.push(make_scoped(claimable, "claimable"));
         assert!(
             queue.has_undispatched_work_except(&exclude),
-            "claimable sibling still blocks sleep"
+            "claimable sibling scope in the same channel still blocks sleep"
         );
     }
 
@@ -3690,26 +3685,31 @@ mod tests {
     }
 
     #[test]
-    fn flush_next_skipping_passes_over_oldest_unclaimable_head() {
+    fn flush_next_skipping_passes_over_only_the_unclaimable_scope() {
         let mut q = EventQueue::new(DedupMode::Queue);
-        let ch_b = Uuid::new_v4();
-        let ch_a = Uuid::new_v4();
-        q.push(make_queued_at(ch_b, "B-older", Duration::from_secs(2)));
-        q.push(make_queued_at(ch_a, "A-newer", Duration::from_secs(1)));
+        let channel = Uuid::new_v4();
+        let blocked = thread(channel, &"b".repeat(64));
+        let claimable = thread(channel, &"a".repeat(64));
+        let mut blocked_event = make_scoped(blocked.clone(), "B-older");
+        blocked_event.received_at -= Duration::from_secs(2);
+        let mut claimable_event = make_scoped(claimable.clone(), "A-newer");
+        claimable_event.received_at -= Duration::from_secs(1);
+        q.push(blocked_event);
+        q.push(claimable_event);
 
         let mut skip = HashSet::new();
-        skip.insert(ch_b);
+        skip.insert(blocked.clone());
         let batch = q.flush_next_skipping(&skip).expect("A should flush");
-        assert_eq!(batch.channel_id, ch_a);
+        assert_eq!(batch.scope, claimable);
         assert_eq!(batch.events[0].event.content, "A-newer");
-        q.mark_complete(ch_a);
+        q.mark_complete(batch.scope);
 
         let leftover = q.flush_next_skipping(&skip);
         assert!(
             leftover.is_none(),
             "skipped B must not flush this pass even though it is oldest"
         );
-        assert_eq!(q.queued_event_count(ch_b), 1);
+        assert_eq!(q.queued_event_count(blocked), 1);
     }
 
     #[test]

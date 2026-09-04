@@ -2294,13 +2294,13 @@ fn idle_pool_sleep_due(
 
 /// Sleep-blocking queued work: undispatched events an idle worker could take.
 ///
-/// Exclusive-parked channels are excluded so a parked foreign mention cannot
+/// Exclusive-parked scopes are excluded so a parked foreign mention cannot
 /// pin the pool awake forever. Park bookkeeping stays on the pool; this only
 /// intersects it with the queue. Claimable / retry-throttled / cancelled /
 /// withheld work still blocks. Multiplex never parks, so it matches
 /// [`EventQueue::has_undispatched_work`].
 fn has_sleep_blocking_work(queue: &EventQueue, pool: &AgentPool) -> bool {
-    let parked = pool.exclusive_parked_channels();
+    let parked = pool.exclusive_parked_scopes();
     if parked.is_empty() {
         queue.has_undispatched_work()
     } else {
@@ -5555,8 +5555,8 @@ enum ScheduleOutcome {
         batch: FlushBatch,
         affinity_hit: bool,
     },
-    /// Idle workers exist but none can take this channel (exclusive-session).
-    /// Batch is requeued; skip-set holds the channel for the rest of this pass.
+    /// Idle workers exist but none can take this scope (exclusive-session).
+    /// Batch is requeued; skip-set holds the scope for the rest of this pass.
     Park {
         batch: FlushBatch,
         first_notice: bool,
@@ -5569,7 +5569,7 @@ enum ScheduleOutcome {
 fn schedule_next(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
-    skip: &mut HashSet<Uuid>,
+    skip: &mut HashSet<scope::SessionScope>,
 ) -> ScheduleOutcome {
     let batch = match if skip.is_empty() {
         queue.flush_next()
@@ -5584,7 +5584,7 @@ fn schedule_next(
     let affinity_hit = pool.has_session_for(&scope);
     match pool.try_claim(Some(&scope)) {
         Some(agent) => {
-            pool.clear_exclusive_park(channel_id);
+            pool.clear_exclusive_park(&scope);
             ScheduleOutcome::Dispatch {
                 agent: Box::new(agent),
                 batch,
@@ -5592,7 +5592,7 @@ fn schedule_next(
             }
         }
         None if pool.any_idle() => {
-            let first_notice = pool.note_exclusive_park(channel_id);
+            let first_notice = pool.note_exclusive_park(scope.clone());
             tracing::warn!(
                 channel = %channel_id,
                 pending_channels = queue.pending_channels(),
@@ -5601,8 +5601,8 @@ fn schedule_next(
                 "exclusive_unclaimable — skipping head, scanning remaining queue"
             );
             queue.requeue_preserve_timestamps(batch.clone());
-            queue.mark_complete(channel_id);
-            skip.insert(channel_id);
+            queue.mark_complete(scope.clone());
+            skip.insert(scope);
             ScheduleOutcome::Park {
                 batch,
                 first_notice,
@@ -5614,7 +5614,7 @@ fn schedule_next(
                 "pool_exhausted"
             );
             queue.requeue_preserve_timestamps(batch);
-            queue.mark_complete(channel_id);
+            queue.mark_complete(scope);
             ScheduleOutcome::Exhausted
         }
     }
@@ -12882,20 +12882,30 @@ mod exclusive_schedule_tests {
 
     struct Pass {
         dispatched: Vec<Uuid>,
+        dispatched_scopes: Vec<scope::SessionScope>,
         parks: Vec<(Uuid, bool)>,
+        parked_scopes: Vec<scope::SessionScope>,
         claimed: Vec<OwnedAgent>,
         exhausted: bool,
     }
 
     fn make_queued(channel_id: Uuid, content: &str, age: Duration) -> QueuedEvent {
+        make_queued_scope(
+            scope::SessionScope::Conversation { channel_id },
+            content,
+            age,
+        )
+    }
+
+    fn make_queued_scope(scope: scope::SessionScope, content: &str, age: Duration) -> QueuedEvent {
         let keys = Keys::generate();
         let event = EventBuilder::new(Kind::Custom(9), content)
             .tags([])
             .sign_with_keys(&keys)
             .unwrap();
         QueuedEvent {
-            channel_id,
-            scope: scope::SessionScope::Conversation { channel_id },
+            channel_id: scope.channel_id(),
+            scope,
             event,
             received_at: Instant::now() - age,
             prompt_tag: "test".into(),
@@ -12925,7 +12935,9 @@ mod exclusive_schedule_tests {
         let mut skip = HashSet::new();
         let mut pass = Pass {
             dispatched: Vec::new(),
+            dispatched_scopes: Vec::new(),
             parks: Vec::new(),
+            parked_scopes: Vec::new(),
             claimed: Vec::new(),
             exhausted: false,
         };
@@ -12939,14 +12951,132 @@ mod exclusive_schedule_tests {
                 ScheduleOutcome::Park {
                     batch,
                     first_notice,
-                } => pass.parks.push((batch.channel_id, first_notice)),
+                } => {
+                    pass.parks.push((batch.channel_id, first_notice));
+                    pass.parked_scopes.push(batch.scope);
+                }
                 ScheduleOutcome::Dispatch { agent, batch, .. } => {
                     pass.dispatched.push(batch.channel_id);
+                    pass.dispatched_scopes.push(batch.scope);
                     pass.claimed.push(*agent);
                 }
             }
         }
         pass
+    }
+
+    #[tokio::test]
+    async fn exclusive_hol_serves_claimable_sibling_thread_in_same_pass() {
+        let channel = Uuid::new_v4();
+        let claimable = scope::SessionScope::Thread {
+            channel_id: channel,
+            root_event_id: "a".repeat(64),
+        };
+        let blocked = scope::SessionScope::Thread {
+            channel_id: channel,
+            root_event_id: "b".repeat(64),
+        };
+        let mut bound = dummy_agent(0).await;
+        bound
+            .state
+            .sessions
+            .insert(claimable.clone(), "sess-a".into());
+        let mut pool = AgentPool::from_slots_with_exclusive(vec![Some(bound)], true);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(make_queued_scope(
+            blocked.clone(),
+            "blocked-older",
+            Duration::from_secs(2),
+        ));
+        queue.push(make_queued_scope(
+            claimable.clone(),
+            "claimable-newer",
+            Duration::from_secs(1),
+        ));
+
+        let pass = run_pass(&mut pool, &mut queue);
+        assert_eq!(pass.parked_scopes, vec![blocked]);
+        assert_eq!(
+            pass.dispatched_scopes,
+            vec![claimable],
+            "a blocked thread must not suppress its claimable sibling"
+        );
+        assert!(!pass.exhausted);
+        drop(pass.claimed);
+    }
+
+    #[tokio::test]
+    async fn exclusive_hol_preserves_fifo_among_claimable_scopes() {
+        let blocked = scope::SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let first = scope::SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let second = scope::SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let mut first_agent = dummy_agent(0).await;
+        first_agent
+            .state
+            .sessions
+            .insert(first.clone(), "sess-first".into());
+        let mut second_agent = dummy_agent(1).await;
+        second_agent
+            .state
+            .sessions
+            .insert(second.clone(), "sess-second".into());
+        let mut pool =
+            AgentPool::from_slots_with_exclusive(vec![Some(first_agent), Some(second_agent)], true);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(make_queued_scope(
+            blocked.clone(),
+            "blocked",
+            Duration::from_secs(3),
+        ));
+        queue.push(make_queued_scope(
+            first.clone(),
+            "first",
+            Duration::from_secs(2),
+        ));
+        queue.push(make_queued_scope(
+            second.clone(),
+            "second",
+            Duration::from_secs(1),
+        ));
+
+        let pass = run_pass(&mut pool, &mut queue);
+        assert_eq!(pass.parked_scopes, vec![blocked]);
+        assert_eq!(pass.dispatched_scopes, vec![first, second]);
+        assert!(!pass.exhausted);
+        drop(pass.claimed);
+    }
+
+    #[tokio::test]
+    async fn exclusive_hol_keeps_blocked_scope_skipped_for_the_pass() {
+        let blocked = scope::SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let mut bound = dummy_agent(0).await;
+        bound.state.sessions.insert(
+            scope::SessionScope::Conversation {
+                channel_id: Uuid::new_v4(),
+            },
+            "sess-other".into(),
+        );
+        let mut pool = AgentPool::from_slots_with_exclusive(vec![Some(bound)], true);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(make_queued_scope(
+            blocked.clone(),
+            "blocked",
+            Duration::from_secs(1),
+        ));
+
+        let pass = run_pass(&mut pool, &mut queue);
+        assert_eq!(pass.parked_scopes, vec![blocked.clone()]);
+        assert!(pass.dispatched_scopes.is_empty());
+        assert!(!pass.exhausted);
+        assert_eq!(queue.queued_event_count(blocked.channel_id()), 1);
     }
 
     /// Helm HOL repro: exclusive worker holds A; B mention parks; later A
@@ -13159,7 +13289,7 @@ mod exclusive_schedule_tests {
         let mut queue = EventQueue::new(config::DedupMode::Queue);
         queue.push(make_queued(channel_a, "A", Duration::from_secs(1)));
         assert!(
-            pool.exclusive_parked_channels().is_empty(),
+            pool.exclusive_parked_scopes().is_empty(),
             "multiplex must not populate the park set"
         );
         assert!(has_sleep_blocking_work(&queue, &pool));
