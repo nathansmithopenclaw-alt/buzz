@@ -277,6 +277,120 @@ test.describe("composer overlays mask scrolled content", () => {
       .toBe(true);
   });
 
+  test("Jump to latest clears a multiline thread composer", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+    await page.getByTestId(`channel-${CHANNEL}`).click();
+    await waitForMockLiveSubscription(page, CHANNEL);
+
+    const root = await emit(page, "Thread root for composer clearance.");
+    for (let i = 0; i < 20; i++) {
+      await emit(
+        page,
+        `Thread clearance reply ${i} occupies enough vertical space to keep the reply panel scrollable.`,
+        root.id,
+      );
+    }
+    const summary = page.locator(
+      `[data-testid="message-thread-summary"][data-thread-head-id="${root.id}"]`,
+    );
+    await expect(summary).toBeVisible();
+    await summary.click();
+
+    const threadPanel = page.getByTestId("message-thread-panel");
+    const threadBody = page.getByTestId("message-thread-body");
+    await expect(threadBody).toContainText("Thread clearance reply 19");
+    await threadPanel
+      .getByTestId("message-input")
+      .fill(
+        [
+          "Draft line one keeps the composer open while reading history.",
+          "Draft line two must remain visible.",
+          "Draft line three must remain visible.",
+          "Draft line four must remain visible.",
+          "Draft line five must remain visible.",
+        ].join("\n"),
+      );
+    await expect
+      .poll(() =>
+        threadBody.evaluate((body) => {
+          const measurementTarget = body.parentElement;
+          const overlay = measurementTarget?.querySelector<HTMLElement>(
+            '[data-testid="thread-composer-overlay"]',
+          );
+          if (!measurementTarget || !overlay) {
+            return Number.POSITIVE_INFINITY;
+          }
+          const measuredHeight = Number.parseFloat(
+            getComputedStyle(measurementTarget).getPropertyValue(
+              "--composer-overlay-height",
+            ),
+          );
+          return Math.abs(
+            measuredHeight - overlay.getBoundingClientRect().height,
+          );
+        }),
+      )
+      .toBeLessThanOrEqual(1);
+    await threadBody.evaluate((element) => {
+      element.scrollTop = Math.max(
+        0,
+        element.scrollHeight - element.clientHeight - 300,
+      );
+      element.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await expect
+      .poll(() =>
+        threadBody.evaluate(
+          (element) =>
+            element.scrollHeight - element.clientHeight - element.scrollTop,
+        ),
+      )
+      .toBeGreaterThan(200);
+
+    const jumpToLatest = threadPanel.getByTestId("thread-scroll-to-latest");
+    const composer = threadPanel.getByTestId("message-composer");
+    await expect(jumpToLatest).toBeVisible();
+    await waitForAnimations(page);
+
+    await page.screenshot({
+      path: "test-results/channel-overflow/thread-jump-to-latest-multiline.png",
+      clip: { x: 720, y: 300, width: 560, height: 420 },
+    });
+
+    const [pillBox, composerBox] = await Promise.all([
+      jumpToLatest.boundingBox(),
+      composer.boundingBox(),
+    ]);
+    expect(pillBox).not.toBeNull();
+    expect(composerBox).not.toBeNull();
+    expect((pillBox?.y ?? 0) + (pillBox?.height ?? 0)).toBeLessThanOrEqual(
+      composerBox?.y ?? 0,
+    );
+
+    await page.setViewportSize({ width: 960, height: 600 });
+    await threadBody.evaluate((element) => {
+      element.scrollTop = Math.max(
+        0,
+        element.scrollHeight - element.clientHeight - 220,
+      );
+      element.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await expect(jumpToLatest).toBeVisible();
+    await waitForAnimations(page);
+    const [narrowPillBox, narrowComposerBox] = await Promise.all([
+      jumpToLatest.boundingBox(),
+      composer.boundingBox(),
+    ]);
+    expect(narrowPillBox).not.toBeNull();
+    expect(narrowComposerBox).not.toBeNull();
+    expect(
+      (narrowPillBox?.y ?? 0) + (narrowPillBox?.height ?? 0),
+    ).toBeLessThanOrEqual(narrowComposerBox?.y ?? 0);
+  });
+
   test("thread panel replies fade out behind the reply composer", async ({
     page,
   }) => {
