@@ -221,6 +221,8 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         model: None,
         provider: None,
         claude_account_id: None,
+        subscription_account_id: None,
+        subscription_account_generation: 0,
         persona_source_version: None,
         env_vars: Default::default(),
         start_on_app_launch: false,

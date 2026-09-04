@@ -1,0 +1,72 @@
+import { invokeTauri } from "./tauri";
+
+/** Local metadata only; credentials and authorization URLs never cross IPC. */
+export type SubscriptionAccount = {
+  id: string;
+  provider: "anthropic" | "openai" | "xai";
+  harness: "claude" | "codex" | "grok";
+  nickname: string | null;
+  state:
+    | "connecting"
+    | "ready"
+    | "needs_login"
+    | "removal_pending"
+    | "unavailable";
+  last_checked_at: string | null;
+  last_error: string | null;
+  attempt_id: string | null;
+};
+
+export type SubscriptionAccountCapability = {
+  provider: SubscriptionAccount["provider"];
+  harness: SubscriptionAccount["harness"];
+  supported: boolean;
+  reason: string | null;
+};
+
+export const listSubscriptionAccounts = () =>
+  invokeTauri<SubscriptionAccount[]>("list_subscription_accounts");
+export const subscriptionAccountCapabilities = () =>
+  invokeTauri<SubscriptionAccountCapability[]>(
+    "subscription_account_capabilities",
+  );
+export const beginSubscriptionAccountLogin = (
+  harness: string,
+  accountId: string | null = null,
+) =>
+  invokeTauri<SubscriptionAccount>("begin_subscription_account_login", {
+    harness,
+    accountId,
+  });
+export const cancelSubscriptionAccountLogin = (id: string) =>
+  invokeTauri<SubscriptionAccount>("cancel_subscription_account_login", { id });
+export const renameSubscriptionAccount = (id: string, nickname: string) =>
+  invokeTauri<SubscriptionAccount>("rename_subscription_account", {
+    id,
+    nickname,
+  });
+export const removeSubscriptionAccount = (id: string) =>
+  invokeTauri<void>("remove_subscription_account", { id });
+export const getSubscriptionAccountsEnabled = () =>
+  invokeTauri<boolean>("get_subscription_accounts_enabled");
+export const setSubscriptionAccountsEnabled = (enabled: boolean) =>
+  invokeTauri<void>("set_subscription_accounts_enabled", { enabled });
+
+export type SubscriptionAccountSwitchResult = {
+  account_id: string | null;
+  generation: number;
+  restarted_count: number;
+  failed_restart_count: number;
+  errors: string[];
+};
+export const switchAgentSubscriptionAccount = (
+  pubkey: string,
+  accountId: string | null,
+) =>
+  invokeTauri<SubscriptionAccountSwitchResult>(
+    "switch_agent_subscription_account",
+    { pubkey, accountId },
+  );
+
+export const resumeAgentSubscriptionWork = (pubkey: string) =>
+  invokeTauri<void>("resume_agent_subscription_work", { pubkey });

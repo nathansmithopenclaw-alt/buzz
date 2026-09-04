@@ -187,6 +187,8 @@ mod tests {
             model: Some("claude-opus-4".to_string()),
             provider: Some("anthropic".to_string()),
             claude_account_id: None,
+            subscription_account_id: None,
+            subscription_account_generation: 0,
             persona_source_version: Some("abc123".to_string()),
             env_vars: BTreeMap::from([("OPENAI_API_KEY".to_string(), "sk-secret".to_string())]),
             start_on_app_launch: true,

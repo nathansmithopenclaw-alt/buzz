@@ -1,3 +1,4 @@
+import { SubscriptionAccountsSettingsCard } from "./SubscriptionAccountsSettingsCard";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import { ClaudeAccountsSettingsCard } from "./ClaudeAccountsSettingsCard";
 import { DeviceRoleSettingsCard } from "./DeviceRoleSettingsCard";
@@ -27,6 +28,7 @@ export function AgentsSettingsPanel() {
 
       <SettingsOptionGroupList>
         <DeviceRoleSettingsCard />
+        <SubscriptionAccountsSettingsCard />
         <ClaudeAccountsSettingsCard />
         <SettingsOptionGroup title="Conversations">
           <SettingsOptionRow data-testid="settings-automatic-agent-mentions">

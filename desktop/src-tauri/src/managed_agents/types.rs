@@ -134,6 +134,8 @@ impl AgentDefinition {
             model: self.model,
             provider: self.provider,
             claude_account_id: self.claude_account_id,
+            subscription_account_id: None,
+            subscription_account_generation: 0,
             persona_source_version: None,
             env_vars: self.env_vars,
             start_on_app_launch: false,
@@ -327,6 +329,12 @@ pub struct ManagedAgentRecord {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_account_id: Option<String>,
+    /// Local-only subscription binding; excluded from portable definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_account_id: Option<String>,
+    /// Monotonic local binding revision, never a provider session identifier.
+    #[serde(default)]
+    pub subscription_account_generation: u64,
     /// Content hash of the persona at the time this agent was created — the
     /// `persona_content_hash` of the snapshot in `system_prompt` / `model` /
     /// `provider` / `env_vars`. The Agents menu compares it against the linked
@@ -533,6 +541,12 @@ pub struct ManagedAgentSummary {
     pub claude_account_source: String,
     pub claude_account_shadowed: bool,
     pub supports_claude_accounts: bool,
+    pub subscription_account_id: Option<String>,
+    pub subscription_account_generation: u64,
+    pub subscription_account_harness: Option<String>,
+    pub running_subscription_account_id: Option<String>,
+    pub running_subscription_account_generation: Option<u64>,
+    pub subscription_account_error: Option<String>,
     /// `true` when the linked persona has been edited since this agent was
     /// created — the running agent uses the older pinned snapshot. The UI
     /// flags it and tells the user to delete + respawn to pick up the edit.

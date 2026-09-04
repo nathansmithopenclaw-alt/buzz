@@ -2,7 +2,7 @@ import { LogIn, SquareTerminal } from "lucide-react";
 import type * as React from "react";
 
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
-import { ClaudeAccountPill } from "@/features/agents/ui/ClaudeAccountPill";
+import { SubscriptionAccountSelector } from "@/features/agents/ui/SubscriptionAccountSelector";
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import type { EphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import type { ActiveDmHeaderParticipant } from "@/features/channels/useActiveChannelHeader";
@@ -210,8 +210,8 @@ export function ChannelScreenHeader({
           <ChannelHeaderStatusBadge
             ephemeralDisplay={activeChannelEphemeralDisplay}
           />
-          {!isGroupDm && activeDmManagedAgent?.supportsClaudeAccounts ? (
-            <ClaudeAccountPill agent={activeDmManagedAgent} compact />
+          {!isGroupDm && activeDmManagedAgent ? (
+            <SubscriptionAccountSelector agent={activeDmManagedAgent} compact />
           ) : null}
         </div>
       }

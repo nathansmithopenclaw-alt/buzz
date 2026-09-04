@@ -130,6 +130,14 @@ pub fn put_managed_agent_runtime_lifecycle(
     {
         return Err("lifecycle frame arrived after process exit".into());
     }
+    if payload.error.as_deref() == Some("subscription_auth_required") {
+        if let Some(binding) = runtime.subscription_binding.as_ref() {
+            let _account = crate::subscription_accounts::lifecycle_lock()
+                .lock()
+                .map_err(|e| e.to_string())?;
+            crate::subscription_accounts::mark_needs_login(&app, &binding.account_id)?;
+        }
+    }
     runtime.lifecycle = payload.lifecycle;
     runtime.error = payload.error;
     let status = status_for(&app, record, &key, Some(runtime), None);
@@ -295,6 +303,14 @@ fn start_pair(
     let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
+        subscription_account_id: process
+            .subscription_binding
+            .as_ref()
+            .map(|b| b.account_id.clone()),
+        subscription_account_generation: process
+            .subscription_binding
+            .as_ref()
+            .map_or(0, |b| b.generation),
         key: key.clone(),
         pid: process.child.id(),
         desktop_instance_id: current_instance_id(&app),

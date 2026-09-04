@@ -286,6 +286,10 @@ pub fn build_managed_agent_summary(
     let supports_claude_accounts =
         super::record_supports_claude_accounts(record, &descriptor.command);
 
+    let subscription_account_harness = super::subscription_binding::account_harness(
+        known_acp_runtime(&descriptor.command).map(|r| r.id),
+    )
+    .map(str::to_owned);
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
@@ -313,6 +317,18 @@ pub fn build_managed_agent_summary(
         claude_account_source: claude.source,
         claude_account_shadowed: claude.shadowed,
         supports_claude_accounts,
+        subscription_account_id: record.subscription_account_id.clone(),
+        subscription_account_generation: record.subscription_account_generation,
+        subscription_account_harness,
+        running_subscription_account_id: super::subscription_binding::ready_binding(pair_runtime)
+            .map(|b| b.account_id.clone()),
+        running_subscription_account_generation: super::subscription_binding::ready_binding(
+            pair_runtime,
+        )
+        .map(|b| b.generation),
+        subscription_account_error: pair_runtime
+            .and_then(|r| r.error.clone())
+            .or_else(|| record.last_error.clone()),
         persona_out_of_date,
         persona_orphaned,
         needs_restart,
@@ -890,13 +906,17 @@ pub fn spawn_agent_child(
         spawned_claude_account_id,
         spawned_claude_token_fingerprint,
         spawned_claude_account_source,
-    ) = super::configure_spawned_claude_account(
-        &mut command,
-        runtime_meta.is_some_and(|runtime| runtime.id == "claude"),
-        record,
-        &personas,
-        &global,
-    )?;
+    ) = if record.subscription_account_id.is_some() {
+        (None, None, "subscription_account".into())
+    } else {
+        super::configure_spawned_claude_account(
+            &mut command,
+            runtime_meta.is_some_and(|runtime| runtime.id == "claude"),
+            record,
+            &personas,
+            &global,
+        )?
+    };
 
     if let Some((desktop_path, desktop_hash)) = crate::runtime_identity::desktop_identity() {
         command.env("BUZZ_ACP_DESKTOP_PATH", desktop_path);
@@ -935,11 +955,25 @@ pub fn spawn_agent_child(
         }
     }
 
+    let mut subscription_binding = super::subscription_binding::configure(
+        app,
+        record,
+        super::subscription_binding::account_harness(runtime_meta.map(|r| r.id)),
+        effective_provider.as_deref(),
+        &mut command,
+    )?;
+
     // Stamp desktop ownership and an unpredictable harness-generation identity.
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
     command
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
         .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
+    let account_control_dir = Some(super::subscription_binding::configure_control(
+        app,
+        &runtime_key,
+        &start_nonce,
+        &mut command,
+    )?);
 
     // Stamp the effective spawn config from the values that populated the
     // `Command` above, BEFORE spawning. Re-resolving after `spawn()` would let
@@ -977,13 +1011,41 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let child = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
             resolved_acp_command.display(),
             record.name
         )
     })?;
+
+    if let Some(binding) = subscription_binding.as_mut() {
+        if let Err(error) = binding._lease.attach_pid(child.id()) {
+            // The reservation was durable before spawn. If stamping its PID
+            // fails, terminate this exact child; unresolved cleanup keeps the
+            // reservation busy rather than admitting another account consumer.
+            if let Err(cleanup) = terminate_process(child.id()) {
+                return Err(format!(
+                    "{error}; spawned runtime cleanup failed: {cleanup}"
+                ));
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return Err(error),
+                    Err(cleanup) => {
+                        return Err(format!(
+                            "{error}; spawned runtime cleanup failed: {cleanup}"
+                        ))
+                    }
+                    Ok(None) if std::time::Instant::now() >= deadline => {
+                        return Err(format!("{error}; spawned runtime exit remains unconfirmed"));
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                }
+            }
+        }
+    }
 
     // Stamp the adapter availability for runtimes with a version gate (codex
     // only). The summary builder compares this against the current cached value
@@ -1014,6 +1076,8 @@ pub fn spawn_agent_child(
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
+        subscription_binding,
+        account_control_dir,
         &record.name,
     ));
     #[cfg(not(windows))]
@@ -1027,6 +1091,8 @@ pub fn spawn_agent_child(
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,
+        subscription_binding,
+        account_control_dir,
     })
 }
 
@@ -1126,6 +1192,14 @@ pub fn start_managed_agent_process(
     let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
+        subscription_account_id: process
+            .subscription_binding
+            .as_ref()
+            .map(|b| b.account_id.clone()),
+        subscription_account_generation: process
+            .subscription_binding
+            .as_ref()
+            .map_or(0, |b| b.generation),
         key: key.clone(),
         pid: process.child.id(),
         desktop_instance_id: current_instance_id(app),

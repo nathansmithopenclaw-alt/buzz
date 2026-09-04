@@ -7,12 +7,12 @@ const read = (name) => readFile(new URL(name, import.meta.url), "utf8");
 test("Claude account selector stays in the instance edit surface", async () => {
   const [editDialog, editField, fleetSection] = await Promise.all([
     read("./AgentInstanceEditDialog.tsx"),
-    read("./EditAgentClaudeAccountField.tsx"),
+    read("./SubscriptionAccountSelector.tsx"),
     read("./FleetSection.tsx"),
   ]);
 
-  assert.match(editDialog, /<EditAgentClaudeAccountField agent=\{agent\} \/>/);
-  assert.match(editField, /<ClaudeAccountPill agent=\{agent\} \/>/);
+  assert.match(editDialog, /<SubscriptionAccountSelector agent=\{agent\} \/>/);
+  assert.match(editField, /switchAgentSubscriptionAccount/);
   assert.doesNotMatch(fleetSection, /ClaudeAccountPill/);
 });
 

@@ -220,6 +220,10 @@ pub enum QueueLoss {
 ///     else: push_front with original received_at, set exponential backoff retry_after with jitter
 /// ```
 pub struct EventQueue {
+    auth_recovery: Option<crate::auth_recovery::AuthRecovery>,
+    auth_held: Vec<FlushBatch>,
+    auth_blocked: bool,
+    auth_retained_ids: HashSet<nostr::EventId>,
     queues: HashMap<SessionScope, VecDeque<QueuedEvent>>,
     in_flight_scopes: HashSet<SessionScope>,
     /// Per-scope deadline for auto-expiring stuck in-flight entries.
@@ -268,6 +272,10 @@ impl EventQueue {
     /// derive the deadline from the configured `max_turn_duration`.
     pub fn new(dedup_mode: DedupMode) -> Self {
         Self {
+            auth_recovery: None,
+            auth_held: Vec::new(),
+            auth_blocked: false,
+            auth_retained_ids: HashSet::new(),
             queues: HashMap::new(),
             in_flight_scopes: HashSet::new(),
             in_flight_deadlines: HashMap::new(),
@@ -282,6 +290,93 @@ impl EventQueue {
             withheld_native_steer: HashMap::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
         }
+    }
+
+    /// Attach the managed runtime's private journal. Recovery never auto-resumes.
+    pub(crate) fn with_auth_recovery(
+        mut self,
+        recovery: crate::auth_recovery::AuthRecovery,
+    ) -> Self {
+        self.auth_held = recovery.batches();
+        self.auth_blocked = !self.auth_held.is_empty();
+        self.auth_retained_ids = self
+            .auth_held
+            .iter()
+            .flat_map(|b| b.events.iter().chain(&b.cancelled_events))
+            .map(|e| e.event.id)
+            .collect();
+        self.auth_recovery = Some(recovery);
+        self
+    }
+
+    pub(crate) fn auth_recovery_enabled(&self) -> bool {
+        self.auth_recovery.is_some()
+    }
+
+    pub(crate) fn auth_blocked(&self) -> bool {
+        self.auth_blocked
+    }
+
+    /// Hold before surfacing the auth failure. Persistence errors leave the
+    /// in-memory batch held and propagate; they must never become a discard.
+    pub(crate) fn hold_for_auth(&mut self, batch: FlushBatch) -> anyhow::Result<()> {
+        self.auth_blocked = true;
+        self.auth_retained_ids.extend(
+            batch
+                .events
+                .iter()
+                .chain(&batch.cancelled_events)
+                .map(|e| e.event.id),
+        );
+        let persisted = self
+            .auth_recovery
+            .as_mut()
+            .map_or(Ok(()), |store| store.hold(&batch));
+        self.auth_held.push(batch);
+        persisted
+    }
+
+    /// Explicit owner intent. Replays retain the original event IDs and scope.
+    pub(crate) fn validate_auth_channels(&self, subscribed: &HashSet<Uuid>) -> anyhow::Result<()> {
+        anyhow::ensure!(self.auth_held.iter().all(|batch| subscribed.contains(&batch.channel_id)),
+            "Retained work includes a channel this agent cannot currently access; restore channel membership before resuming");
+        Ok(())
+    }
+
+    pub(crate) fn resume_after_auth(&mut self) -> anyhow::Result<usize> {
+        // Retry a previous failed durable write before admitting anything.
+        if let Some(store) = &mut self.auth_recovery {
+            for batch in &self.auth_held {
+                store.hold(batch)?;
+            }
+        }
+        let held = std::mem::take(&mut self.auth_held);
+        let count = held.iter().map(|batch| batch.events.len()).sum();
+        for batch in held {
+            self.requeue_preserve_timestamps(batch);
+        }
+        self.auth_blocked = false;
+        Ok(count)
+    }
+
+    pub(crate) fn auth_recoverable_batch(&self, scope: &SessionScope) -> Option<FlushBatch> {
+        self.in_flight_batches.get(scope).cloned()
+    }
+
+    pub(crate) fn complete_auth_recovery(&mut self, batch: &FlushBatch) -> anyhow::Result<()> {
+        if let Some(store) = &mut self.auth_recovery {
+            let ids = batch
+                .events
+                .iter()
+                .chain(&batch.cancelled_events)
+                .map(|event| event.event.id)
+                .collect();
+            store.complete(&ids)?;
+        }
+        for event in batch.events.iter().chain(&batch.cancelled_events) {
+            self.auth_retained_ids.remove(&event.event.id);
+        }
+        Ok(())
     }
 
     /// Set the in-flight backstop deadline from the configured max turn
@@ -322,6 +417,11 @@ impl EventQueue {
     ///
     /// Returns `true` if the event was accepted, `false` if dropped.
     pub fn push(&mut self, event: QueuedEvent) -> bool {
+        // Relay replay of a retained request must not produce a second turn,
+        // including after resume while the original is queued or in flight.
+        if self.auth_retained_ids.contains(&event.event.id) {
+            return false;
+        }
         debug_assert_eq!(
             event.scope.channel_id(),
             event.channel_id,
@@ -413,6 +513,9 @@ impl EventQueue {
     /// `skip` is caller-owned and per-pass — a parked scope is retried on
     /// the next `dispatch_pending` cycle, when a worker may have freed.
     pub fn flush_next_skipping(&mut self, skip: &HashSet<SessionScope>) -> Option<FlushBatch> {
+        if self.auth_blocked {
+            return None;
+        }
         let now = Instant::now();
 
         // Auto-expire any stuck in-flight entries that missed mark_complete.
@@ -813,6 +916,9 @@ impl EventQueue {
     /// This is a `&mut self` method so expiry can happen without requiring a
     /// full `flush_next` call.
     pub fn has_flushable_work(&mut self) -> bool {
+        if self.auth_blocked {
+            return false;
+        }
         let now = Instant::now();
 
         // Auto-expire stuck in-flight entries (same logic as flush_next).

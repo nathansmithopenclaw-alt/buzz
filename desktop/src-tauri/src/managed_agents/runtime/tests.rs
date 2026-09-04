@@ -931,6 +931,8 @@ fn receipt_fixture(
     key: crate::managed_agents::ManagedAgentRuntimeKey,
 ) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
     crate::managed_agents::ManagedAgentRuntimeReceipt {
+        subscription_account_id: None,
+        subscription_account_generation: 0,
         key,
         pid: std::process::id(),
         desktop_instance_id: "test-instance".into(),
@@ -1316,6 +1318,8 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         setup_mode: false,
         adapter_availability: None,
         start_nonce: "test-nonce".to_string(),
+        subscription_binding: None,
+        account_control_dir: None,
         #[cfg(windows)]
         job: None,
     };

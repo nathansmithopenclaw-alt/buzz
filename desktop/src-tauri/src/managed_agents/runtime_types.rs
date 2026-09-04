@@ -15,8 +15,22 @@ pub struct ManagedAgentProcess {
     pub setup_mode: bool,
     pub adapter_availability: Option<AcpAvailabilityStatus>,
     pub start_nonce: String,
+    pub subscription_binding: Option<super::subscription_binding::RuntimeBinding>,
+    pub account_control_dir: Option<PathBuf>,
     #[cfg(windows)]
     pub job: Option<crate::managed_agents::JobHandle>,
+}
+
+impl Drop for ManagedAgentProcess {
+    fn drop(&mut self) {
+        // Keep a live failed teardown's control surface intact. Its lease also
+        // remains busy; stopped generations can discard their bounded IPC files.
+        if self.child.try_wait().ok().flatten().is_some() {
+            if let Some(dir) = self.account_control_dir.as_ref() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
 }
 
 /// Canonical identity of one managed-agent harness on one relay.
@@ -129,6 +143,11 @@ pub struct ManagedAgentCommunityTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedAgentRuntimeReceipt {
+    /// Local credential lease proof survives Desktop crashes until the process exits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_account_id: Option<String>,
+    #[serde(default)]
+    pub subscription_account_generation: u64,
     pub key: ManagedAgentRuntimeKey,
     pub pid: u32,
     pub desktop_instance_id: String,

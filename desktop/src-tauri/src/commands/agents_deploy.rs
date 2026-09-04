@@ -212,6 +212,9 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
     state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
+    if record.subscription_account_id.is_some() {
+        return Err("Subscription accounts are local to this machine. Explicitly select ambient authentication before deploying this agent remotely.".into());
+    }
     if let Some(err) = crate::managed_agents::spawn_key_refusal(record) {
         return Err(err);
     }
@@ -335,6 +338,21 @@ mod tests {
             "updated_at": "2026-01-01T00:00:00Z"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn selected_local_account_refuses_real_remote_payload_boundary() {
+        let state = crate::app_state::build_app_state();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let mut record = record();
+        record.subscription_account_id = Some(uuid::Uuid::new_v4().to_string());
+        let error = build_deploy_payload(app.handle(), &state, &record).unwrap_err();
+        assert!(
+            error.contains("Subscription accounts are local to this machine"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -387,6 +387,8 @@ mod tests {
             system_prompt: None,
             model: None,
             claude_account_id: None,
+            subscription_account_id: None,
+            subscription_account_generation: 0,
             env_vars: std::collections::BTreeMap::new(),
             start_on_app_launch: false,
             auto_restart_on_config_change: true,

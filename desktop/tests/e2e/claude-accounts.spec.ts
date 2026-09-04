@@ -70,60 +70,71 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("Accounts settings shows live and scope-insufficient states", async ({
+test("Subscription Accounts explains migration without token entry or fabricated readiness", async ({
   page,
 }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await openSettings(page, "agents");
-
-  const card = page.getByTestId("settings-claude-accounts");
-  await expect(card).toContainText("Account A");
-  await expect(card).toContainText("5-hour 82%");
-  await expect(card).toContainText("Account B");
-  await expect(card).toContainText(
-    "Usage meter needs a login-minted token; re-mint with interactive login.",
-  );
+  const card = page.getByTestId("settings-subscription-accounts");
+  await expect(card).toContainText("No subscription accounts saved");
+  await expect(
+    card.getByRole("button", { name: /Sign in with openai/ }),
+  ).toBeDisabled();
+  await expect(
+    card.getByRole("button", { name: /Sign in with xai/ }),
+  ).toBeDisabled();
+  const legacy = page.getByTestId("settings-claude-accounts");
+  await expect(legacy).toContainText("Account A");
+  await expect(legacy).toContainText("Each saved account requires a new login");
+  await expect(page.getByLabel("Claude OAuth token")).toHaveCount(0);
 });
 
-test("wrapped paste normalizes before save", async ({ page }) => {
+test("browser login remains pending until provider verification and cancellation retains recovery", async ({
+  page,
+}) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  await openSettings(page, "agents");
-
-  const card = page.getByTestId("settings-claude-accounts");
-  await card.getByLabel("Account label").fill("Wrapped token");
-  await card
-    .getByLabel("Claude OAuth token")
-    .fill(`${"a".repeat(79)}\n  ${"b".repeat(29)}`);
-  await card.getByRole("button", { name: "Verify and save" }).click();
-
-  await expect(card).toContainText("Wrapped token");
-  await expect(card).toContainText("108 chars");
+  await openSettings(page, "experimental");
+  await page.getByRole("switch", { name: "Subscription Accounts" }).click();
+  // Navigate between Settings sections through their normal UI.
+  await page.getByTestId("settings-nav-agents").click();
+  const card = page.getByTestId("settings-subscription-accounts");
+  await card.getByRole("button", { name: /Sign in with openai/ }).click();
+  await expect(card).toContainText(
+    "Waiting for browser login and verification",
+  );
+  await expect(card.getByRole("textbox")).toHaveCount(0);
+  await card.getByRole("button", { name: "Cancel login" }).click();
+  await expect(card).toContainText("Login cancelled");
+  await expect(card.getByRole("button", { name: "Reconnect" })).toBeEnabled();
+  expect(await commandCount(page, "begin_subscription_account_login")).toBe(1);
+  expect(await commandCount(page, "cancel_subscription_account_login")).toBe(1);
 });
 
-test("switch requested mid-turn waits for completion before restart", async ({
+test("legacy account selection is preserved and active turns block switching without queuing", async ({
   page,
 }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await waitForBridge(page);
   await openAgentEditDialog(page, "Helm");
+  const selector = page.getByTestId(
+    `subscription-account-selector-${CLAUDE_AGENT}`,
+  );
+  const picker = selector.getByRole("combobox");
+  await expect(picker).toHaveValue("__legacy__");
   await seedTurn(page, "turn_started");
-
-  const pill = page.getByTestId(`claude-account-pill-${CLAUDE_AGENT}`);
-  await pill.click();
-  await page.getByRole("menuitem", { name: /Account B/ }).click();
-
-  await expect(pill).toContainText("Switch queued");
-  expect(await commandCount(page, "note_claude_account_switch_queued")).toBe(1);
-  expect(await commandCount(page, "switch_agent_claude_account")).toBe(0);
-
+  await expect(picker).toBeDisabled();
+  await expect(selector).toContainText("Finish the active turn");
+  expect(await commandCount(page, "switch_agent_subscription_account")).toBe(0);
+  expect(await commandCount(page, "note_claude_account_switch_queued")).toBe(0);
   await seedTurn(page, "turn_completed");
-  await expect
-    .poll(() => commandCount(page, "switch_agent_claude_account"))
-    .toBe(1);
-  await expect(pill).toContainText("Account B");
+  await expect(picker).toBeEnabled();
+  await expect(picker).toHaveValue("__legacy__");
+  await picker.selectOption("");
+  await expect(picker).toHaveValue("");
+  expect(await commandCount(page, "switch_agent_subscription_account")).toBe(1);
 });
 
-test("unassigned Claude agent exposes credentials-file fallback", async ({
+test("unassigned agent exposes explicit ambient choice and honest running state", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -140,11 +151,12 @@ test("unassigned Claude agent exposes credentials-file fallback", async ({
   });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await openAgentEditDialog(page, "Anvil");
-
-  const pill = page.getByTestId(`claude-account-pill-${CLAUDE_AGENT}`);
-  await expect(pill).toContainText("Credentials file");
-  await expect(pill).toHaveAttribute(
-    "title",
-    "Using the credentials file (no saved account selected)",
+  const selector = page.getByTestId(
+    `subscription-account-selector-${CLAUDE_AGENT}`,
   );
+  await expect(selector.getByRole("combobox")).toHaveValue("");
+  await expect(selector).toContainText(
+    "Applies to this agent in every conversation",
+  );
+  await expect(selector).toContainText("Running account not confirmed");
 });

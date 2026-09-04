@@ -301,7 +301,8 @@ export type ManagedAgentBackend =
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent =
-  import("./claudeAccountBinding").ClaudeAccountBinding & {
+  import("./claudeAccountBinding").ClaudeAccountBinding &
+  import("./subscriptionAccountBinding").SubscriptionAccountBinding & {
     pubkey: string;
     name: string;
     personaId: string | null;
