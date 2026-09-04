@@ -26,7 +26,10 @@ adapter deliberately selects file storage for its owned profile and does not
 claim keyring/auto isolation. Configuration containing competing authentication
 or unsupported path semantics is rejected with an actionable error. Known
 non-secret configuration paths are preserved or resolved against their original
-home. A different account never implicitly selects different agent settings.
+home. A different account never implicitly selects different agent settings. Claude cloud
+provider selectors, named authentication profiles, host-supplied credentials, and
+custom authentication headers are removed from the child environment and rejected
+in settings so they cannot override the selected subscription.
 
 ## Runtime guarantees
 

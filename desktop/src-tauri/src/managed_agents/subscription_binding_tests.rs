@@ -105,6 +105,55 @@ fn competing_configuration_authentication_fails_closed_without_target_write() {
     assert!(validate_claude_config(&source, None).is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn selected_claude_account_blocks_cloud_profile_and_host_authentication() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("config");
+    let target = root.path().join("account");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+    for key in [
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+        "CLAUDE_CODE_USE_MANTLE",
+        "ANTHROPIC_PROFILE",
+        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+        "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR",
+        "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
+        "CLAUDE_CODE_HOST_CREDS_FILE",
+        "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+        "ANTHROPIC_UNIX_SOCKET",
+        "ANTHROPIC_CUSTOM_HEADERS",
+    ] {
+        let mut command = Command::new("/bin/sh");
+        command
+            .env_clear()
+            .current_dir(root.path())
+            .env("CLAUDE_CONFIG_DIR", &source)
+            .env(key, "fixture");
+        apply_subscription_env(&mut command, "claude", &target).unwrap();
+        command.args(["-c", &format!("test -z \"${{{key}+present}}\"")]);
+        assert!(command.status().unwrap().success(), "{key} reached runtime");
+
+        std::fs::write(
+            source.join("settings.json"),
+            serde_json::json!({"env": {key: "fixture"}}).to_string(),
+        )
+        .unwrap();
+        let mut command = Command::new("/bin/true");
+        command
+            .env_clear()
+            .current_dir(root.path())
+            .env("CLAUDE_CONFIG_DIR", &source);
+        assert!(
+            apply_subscription_env(&mut command, "claude", &target).is_err(),
+            "{key} was accepted from settings"
+        );
+        std::fs::remove_file(source.join("settings.json")).unwrap();
+    }
+}
+
 #[test]
 fn project_auth_overrides_are_validated_from_the_child_working_directory() {
     let root = tempfile::tempdir().unwrap();

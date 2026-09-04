@@ -739,6 +739,17 @@ fn enforce_subscription_child_env(
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CODE_USE_VERTEX",
         "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+        "CLAUDE_CODE_USE_MANTLE",
+        "ANTHROPIC_PROFILE",
+        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+        "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR",
+        "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
+        "CLAUDE_CODE_HOST_CREDS_FILE",
+        "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+        "ANTHROPIC_UNIX_SOCKET",
+        "ANTHROPIC_CUSTOM_HEADERS",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_ORG_ID",
@@ -805,6 +816,17 @@ fn validate_subscription_codex_config(config: &serde_json::Value) -> Result<(), 
                     "claude_code_use_bedrock",
                     "claude_code_use_vertex",
                     "claude_code_use_foundry",
+                    "claude_code_use_anthropic_aws",
+                    "claude_code_use_anthropic_google_cloud",
+                    "claude_code_use_mantle",
+                    "anthropic_profile",
+                    "claude_code_api_key_file_descriptor",
+                    "claude_code_gateway_token_file_descriptor",
+                    "claude_code_host_auth_env_var",
+                    "claude_code_host_creds_file",
+                    "claude_code_provider_managed_by_host",
+                    "anthropic_unix_socket",
+                    "anthropic_custom_headers",
                     "openai_api_key",
                     "openai_base_url",
                 ]
@@ -6841,6 +6863,119 @@ printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
 mod subscription_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn claude_subscription_rejects_cloud_profile_and_host_authentication() {
+        const MARKER: &str = "BUZZ_TEST_CLAUDE_SUBSCRIPTION_CHILD";
+        const KEYS: &[&str] = &[
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+            "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+            "CLAUDE_CODE_USE_MANTLE",
+            "ANTHROPIC_PROFILE",
+            "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+            "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR",
+            "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
+            "CLAUDE_CODE_HOST_CREDS_FILE",
+            "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+            "ANTHROPIC_UNIX_SOCKET",
+            "ANTHROPIC_CUSTOM_HEADERS",
+        ];
+        if std::env::var_os(MARKER).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let adapter = root.path().join("claude-agent-acp");
+            std::fs::write(
+                &adapter,
+                format!(
+                    r#"#!/usr/bin/python3
+import json, os, sys
+keys = {}
+for line in sys.stdin:
+    req = json.loads(line)
+    print(json.dumps({{'jsonrpc':'2.0','id':req['id'],'result':{{
+      'sessionId':'fixture', 'auth_keys':[key for key in keys if key in os.environ],
+      'home':os.environ.get('CLAUDE_SECURESTORAGE_CONFIG_DIR'),
+      'buzz':os.environ.get('BUZZ_AUTH_TAG')}}}}), flush=True)
+"#,
+                    serde_json::to_string(KEYS).unwrap()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut test = std::process::Command::new(std::env::current_exe().unwrap());
+            test.args(["--exact", "acp::subscription_tests::claude_subscription_rejects_cloud_profile_and_host_authentication", "--nocapture"])
+                .env(MARKER, &adapter)
+                .env("BUZZ_ACP_SUBSCRIPTION_ACCOUNT_ID", "fixture-id")
+                .env("BUZZ_ACP_SUBSCRIPTION_HARNESS", "claude")
+                .env("BUZZ_ACP_SUBSCRIPTION_HOME", root.path())
+                .env("BUZZ_ACP_SUBSCRIPTION_CONFIG_HOME", root.path())
+                .env("BUZZ_AUTH_TAG", "fixture-communication");
+            for late_override in [false, true] {
+                test.env(
+                    "BUZZ_TEST_CLAUDE_LATE_OVERRIDE",
+                    if late_override { "1" } else { "0" },
+                );
+                for key in KEYS {
+                    if late_override {
+                        test.env_remove(key);
+                    } else {
+                        test.env(key, "fixture-inherited");
+                    }
+                }
+                let output = test.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "late_override={late_override}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+        let adapter = std::env::var(MARKER).unwrap();
+        {
+            let late_override = std::env::var("BUZZ_TEST_CLAUDE_LATE_OVERRIDE").unwrap() == "1";
+            let env = if late_override {
+                KEYS.iter()
+                    .map(|key| ((*key).into(), "fixture-late".into()))
+                    .collect()
+            } else {
+                vec![]
+            };
+            let mut client = AcpClient::spawn(&adapter, &[], &env, false).await.unwrap();
+            let result = client
+                .send_request("fixture", serde_json::json!({}))
+                .await
+                .unwrap();
+            assert_eq!(result["auth_keys"], serde_json::json!([]));
+            assert_eq!(
+                result["home"].as_str(),
+                std::env::var("BUZZ_ACP_SUBSCRIPTION_HOME").ok().as_deref()
+            );
+            assert_eq!(result["buzz"], "fixture-communication");
+            let project = tempfile::tempdir().unwrap();
+            std::fs::create_dir(project.path().join(".claude")).unwrap();
+            // Exercise the actual session admission call after adapter spawn.
+            for key in KEYS {
+                std::fs::write(
+                    project.path().join(".claude/settings.json"),
+                    serde_json::json!({"env": {*key: "fixture"}}).to_string(),
+                )
+                .unwrap();
+                let error = client
+                    .session_new_full(project.path().to_str().unwrap(), vec![], None, None)
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("{key} reached a session from settings"));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("conflicts with subscription authentication"),
+                    "{error}"
+                );
+            }
+            client.shutdown().await;
+        }
+    }
 
     /// The parent invokes this exact test in a child test process so trusted
     /// Desktop env can be exercised without mutating the parallel test runner.
