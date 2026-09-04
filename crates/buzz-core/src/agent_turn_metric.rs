@@ -52,9 +52,11 @@ pub struct TokenCounts {
 ///
 /// An agent turn normally issues many model calls. Harnesses differ in what
 /// they report per turn, and the two bases differ by orders of magnitude, so a
-/// consumer that mixes them produces nonsense: on 2026-09-03 the same fleet-day
-/// showed 252M input tokens for a `PerTurnSum` publisher and 3.4M for a
-/// `PerResponse` one, with comparable turn counts.
+/// consumer that mixes them produces nonsense: on 2026-09-03 two publishers
+/// with turn counts of the same order (81 and 36) reported 124.7M and 3.4M
+/// `turn.inputTokens` respectively. That is the one observed instance this
+/// codebase cites; `docs/nips/NIP-AM.md` carries it and the supporting
+/// distribution, and the two must not drift apart.
 ///
 /// Publishers SHOULD set `basis`. Consumers MUST NOT sum, average, or rank
 /// across differing bases, and MUST treat an absent or unrecognized `basis` as
@@ -686,6 +688,99 @@ mod tests {
         assert!(json.contains("\"outputTokens\":null"));
         let back: TokenCounts = serde_json::from_str(&json).unwrap();
         assert_eq!(back, counts);
+    }
+
+    // ── NIP-AM `basis` wire contract ────────────────────────────────────────
+
+    /// The wire strings are the contract. `agent_metric_index` stores this
+    /// value verbatim and the desktop projection groups on it, so a rename here
+    /// silently splits one basis into two and re-enables the mixed-basis
+    /// blanking for a single-runtime fleet.
+    #[test]
+    fn metric_basis_serializes_to_its_documented_wire_strings() {
+        assert_eq!(
+            serde_json::to_string(&MetricBasis::PerTurnSum).unwrap(),
+            r#""per_turn_sum""#,
+        );
+        assert_eq!(
+            serde_json::to_string(&MetricBasis::PerResponse).unwrap(),
+            r#""per_response""#,
+        );
+    }
+
+    /// Both documented values must round-trip through the payload, which is the
+    /// real path: `basis` is read via `deserialize_optional_basis`, not the
+    /// enum's own `Deserialize`.
+    #[test]
+    fn basis_round_trips_through_the_payload() {
+        for (wire, expected) in [
+            ("per_turn_sum", MetricBasis::PerTurnSum),
+            ("per_response", MetricBasis::PerResponse),
+        ] {
+            let json = format!(
+                r#"{{
+                    "harness": "claude-agent-acp",
+                    "timestamp": "2026-09-03T20:11:03Z",
+                    "basis": "{wire}",
+                    "turn": {{ "inputTokens": 10, "outputTokens": 2, "totalTokens": 12, "costUsd": null }}
+                }}"#
+            );
+            let payload: AgentTurnMetricPayload =
+                serde_json::from_str(&json).expect("payload with a known basis must parse");
+            assert_eq!(
+                payload.basis,
+                Some(expected),
+                "basis {wire} must round-trip"
+            );
+        }
+    }
+
+    /// A future basis must read as absent rather than failing the payload or
+    /// being mistaken for a known value — the same forward-compatibility rule
+    /// as `stopReason`. Absent means "not comparable", which is the safe
+    /// reading; silently adopting a known value would be the unsafe one.
+    #[test]
+    fn unrecognized_basis_reads_as_absent_and_keeps_the_counts() {
+        let json = r#"{
+            "harness": "some-future-adapter",
+            "timestamp": "2026-09-03T20:11:03Z",
+            "basis": "per_epoch_sum",
+            "turn": {
+                "inputTokens": 1234,
+                "outputTokens": 567,
+                "totalTokens": 1801,
+                "costUsd": null
+            }
+        }"#;
+        let payload: AgentTurnMetricPayload =
+            serde_json::from_str(json).expect("payload with a future basis must parse");
+        assert_eq!(
+            payload.basis, None,
+            "an unrecognized basis must read as absent, never as a known value",
+        );
+        let turn = payload.turn.expect("turn must survive an unknown basis");
+        assert_eq!(turn.input_tokens, Some(1234));
+        assert_eq!(turn.output_tokens, Some(567));
+    }
+
+    /// An omitted `basis` is absent, and an absent basis is not serialized back
+    /// out — a publisher that declared nothing must not appear to have declared
+    /// something on re-emission.
+    #[test]
+    fn absent_basis_stays_absent_in_both_directions() {
+        let json = r#"{
+            "harness": "goose",
+            "timestamp": "2026-09-03T20:11:03Z",
+            "turn": { "inputTokens": 1, "outputTokens": 1, "totalTokens": 2, "costUsd": null }
+        }"#;
+        let payload: AgentTurnMetricPayload =
+            serde_json::from_str(json).expect("payload without basis must parse");
+        assert_eq!(payload.basis, None);
+        let back = serde_json::to_value(&payload).expect("must re-serialize");
+        assert!(
+            back.get("basis").is_none(),
+            "an absent basis must be omitted, not emitted as null",
+        );
     }
 
     #[test]
