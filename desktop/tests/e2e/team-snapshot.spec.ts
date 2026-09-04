@@ -30,7 +30,9 @@ async function gotoAgentsPage(page: import("@playwright/test").Page) {
 
 // Minimal .team.json bytes — the bridge returns a canned preview/result
 // regardless of content; these just need to be non-empty so the file-input
-// handler invokes handleImportTeamSnapshotFile.
+// handler invokes handleImportTeamSnapshotFile. Agents renders one shared
+// `snapshot-import-input` for agent and team snapshots and routes on the file
+// name, so the `.team.json` suffix is what selects the team path.
 const TEAM_SNAPSHOT_BYTES = new Uint8Array([
   0x7b, 0x22, 0x74, 0x22, 0x3a, 0x31, 0x7d,
 ]); // {"t":1}
@@ -74,8 +76,8 @@ test("team_snapshot_import_confirm_fail_renders_error_and_retry_succeeds", async
   });
   await gotoAgentsPage(page);
 
-  // Trigger import via the hidden file input.
-  const fileInput = page.getByTestId("team-snapshot-import-input");
+  // Trigger import via the hidden shared snapshot file input.
+  const fileInput = page.getByTestId("snapshot-import-input");
   await fileInput.setInputFiles({
     name: "test.team.json",
     mimeType: "application/json",
@@ -134,7 +136,7 @@ test("team_snapshot_import_clear_allowlist_sends_keepAllowlist_false", async ({
   });
   await gotoAgentsPage(page);
 
-  const fileInput = page.getByTestId("team-snapshot-import-input");
+  const fileInput = page.getByTestId("snapshot-import-input");
   await fileInput.setInputFiles({
     name: "test.team.json",
     mimeType: "application/json",
@@ -192,7 +194,7 @@ test("team_snapshot_import_keep_allowlist_sends_keepAllowlist_true", async ({
   });
   await gotoAgentsPage(page);
 
-  const fileInput = page.getByTestId("team-snapshot-import-input");
+  const fileInput = page.getByTestId("snapshot-import-input");
   await fileInput.setInputFiles({
     name: "test.team.json",
     mimeType: "application/json",
