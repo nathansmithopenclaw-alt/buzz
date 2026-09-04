@@ -3996,6 +3996,8 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
+    preserve_in_flight_for_shutdown(&mut pool, &ctx.rest_client).await;
+
     tracing::info!("shutdown: waiting for in-flight prompts");
     // 30 s is generous for in-flight prompts to be cancelled; using
     // max_turn_duration here would cause Ctrl+C to hang for up to an hour.
@@ -4107,6 +4109,284 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
         t.as_slice().first().map(|s| s.as_str()) == Some("p")
             && t.as_slice().get(1).map(|s| s.as_str()) == Some(agent_pubkey_hex)
     })
+}
+
+/// Cancel checked-out channel turns before the shutdown drain and retain each
+/// exact triggering batch long enough to anchor its interruption notice. The
+/// in-process batch does not survive shutdown; restart recovery still relies
+/// on the original relay events.
+fn interrupt_in_flight_for_shutdown(pool: &mut AgentPool) -> Vec<FlushBatch> {
+    let mut interrupted = Vec::new();
+    for meta in pool.task_map_mut().values_mut() {
+        let Some(batch) = meta.recoverable_batch.clone() else {
+            continue;
+        };
+        let Some(control_tx) = meta.control_tx.take() else {
+            continue;
+        };
+        if control_tx.send(ControlSignal::Cancel).is_ok() {
+            interrupted.push(batch);
+        }
+    }
+    interrupted
+}
+
+fn shutdown_interruption_thread_tags(batch: &FlushBatch) -> ThreadTags {
+    let mut thread_tags = batch
+        .events
+        .last()
+        .map(|event| queue::parse_thread_tags(&event.event))
+        .unwrap_or_default();
+    if thread_tags.root_event_id.is_none() {
+        if let Some(trigger) = batch.events.last() {
+            let trigger_id = trigger.event.id.to_hex();
+            thread_tags.root_event_id = Some(trigger_id.clone());
+            thread_tags.parent_event_id = Some(trigger_id);
+        }
+    }
+    thread_tags
+}
+
+async fn preserve_in_flight_for_shutdown(pool: &mut AgentPool, rest: &relay::RestClient) {
+    let interrupted_batches = interrupt_in_flight_for_shutdown(pool);
+    post_shutdown_interruption_notices(rest, interrupted_batches).await;
+}
+
+async fn post_shutdown_interruption_notices(rest: &relay::RestClient, batches: Vec<FlushBatch>) {
+    let mut notices = tokio::task::JoinSet::new();
+    for batch in batches {
+        let rest = rest.clone();
+        notices.spawn(async move {
+            let thread_tags = shutdown_interruption_thread_tags(&batch);
+            pool::post_failure_notice(
+                &rest,
+                batch.channel_id,
+                &thread_tags,
+                "⚠️ This turn was interrupted because the agent harness is shutting down. It was not completed.",
+            )
+            .await;
+        });
+    }
+    if tokio::time::timeout(Duration::from_secs(6), async {
+        while notices.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        tracing::warn!("shutdown interruption notices did not drain before relay teardown");
+        notices.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod shutdown_interruption_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn batch_for(event: nostr::Event, channel_id: Uuid) -> FlushBatch {
+        FlushBatch {
+            channel_id,
+            scope: scope::SessionScope::Conversation { channel_id },
+            events: vec![queue::BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_channel_turn_and_preserves_replay_anchor() {
+        let channel_id = Uuid::new_v4();
+        let trigger = EventBuilder::new(Kind::Custom(9), "unfinished work")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let trigger_id = trigger.id;
+        let batch = batch_for(trigger, channel_id);
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_task = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            channel_task.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(scope::SessionScope::Conversation { channel_id }),
+                turn_id: "shutdown-test".into(),
+                recoverable_batch: Some(batch),
+                control_tx: Some(control_tx),
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        let heartbeat_task = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            heartbeat_task.id(),
+            pool::TaskMeta {
+                agent_index: 1,
+                channel_id: None,
+                scope: None,
+                turn_id: "heartbeat".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        let interrupted = interrupt_in_flight_for_shutdown(&mut pool);
+
+        assert_eq!(control_rx.await.unwrap(), ControlSignal::Cancel);
+        assert_eq!(interrupted.len(), 1, "one notice anchor per channel turn");
+        assert_eq!(interrupted[0].events[0].event.id, trigger_id);
+        assert!(pool
+            .task_map()
+            .values()
+            .filter(|meta| meta.recoverable_batch.is_some())
+            .all(|meta| meta.control_tx.is_none()));
+    }
+
+    #[tokio::test]
+    async fn shutdown_step_cancels_checked_out_turn_and_posts_one_thread_notice() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind shutdown notice test server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            loop {
+                let accept_timeout = if bodies.is_empty() {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::from_millis(100)
+                };
+                let accepted = tokio::time::timeout(accept_timeout, listener.accept()).await;
+                let Ok(Ok((mut socket, _))) = accepted else {
+                    break;
+                };
+                server_count.fetch_add(1, Ordering::SeqCst);
+
+                let mut request = Vec::new();
+                let (body_start, content_length) = loop {
+                    let mut chunk = [0; 4096];
+                    let read = socket.read(&mut chunk).await.expect("read notice request");
+                    assert_ne!(read, 0, "notice request ended before its body");
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let body_start = header_end + 4;
+                    let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length: ")
+                                .or_else(|| line.strip_prefix("Content-Length: "))
+                        })
+                        .expect("notice request content length")
+                        .parse::<usize>()
+                        .expect("numeric notice content length");
+                    if request.len() >= body_start + content_length {
+                        break (body_start, content_length);
+                    }
+                };
+                bodies.push(request[body_start..body_start + content_length].to_vec());
+
+                let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+                socket
+                    .write_all(response)
+                    .await
+                    .expect("write notice response");
+            }
+            bodies
+        });
+
+        let channel_id = Uuid::new_v4();
+        let trigger = EventBuilder::new(Kind::Custom(9), "unfinished work")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let trigger_id = trigger.id.to_hex();
+        let channel_id_text = channel_id.to_string();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_task = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            channel_task.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(scope::SessionScope::Conversation { channel_id }),
+                turn_id: "shutdown-sequence-test".into(),
+                recoverable_batch: Some(batch_for(trigger, channel_id)),
+                control_tx: Some(control_tx),
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            preserve_in_flight_for_shutdown(&mut pool, &rest),
+        )
+        .await
+        .expect("shutdown preservation step completes");
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(200), control_rx)
+                .await
+                .expect("shutdown step sends a control signal")
+                .unwrap(),
+            ControlSignal::Cancel
+        );
+        let bodies = server.await.expect("join shutdown notice test server");
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert_eq!(bodies.len(), 1);
+        let notice: nostr::Event = serde_json::from_slice(&bodies[0]).unwrap();
+        assert_eq!(notice.kind, Kind::Custom(9));
+        assert!(notice.content.contains("interrupted"));
+        assert!(notice.content.contains("not completed"));
+        assert!(notice.tags.iter().any(|tag| {
+            let fields = tag.as_slice();
+            fields.first().map(String::as_str) == Some("h")
+                && fields.get(1).map(String::as_str) == Some(channel_id_text.as_str())
+        }));
+        assert!(notice.tags.iter().any(|tag| {
+            let fields = tag.as_slice();
+            fields.first().map(String::as_str) == Some("e")
+                && fields.get(1).map(String::as_str) == Some(trigger_id.as_str())
+                && fields.get(3).map(String::as_str) == Some("reply")
+        }));
+    }
+
+    #[test]
+    fn shutdown_notice_anchors_an_unthreaded_trigger_to_itself() {
+        let channel_id = Uuid::new_v4();
+        let trigger = EventBuilder::new(Kind::Custom(9), "unfinished work")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let trigger_id = trigger.id.to_hex();
+
+        let tags = shutdown_interruption_thread_tags(&batch_for(trigger, channel_id));
+
+        assert_eq!(tags.root_event_id.as_deref(), Some(trigger_id.as_str()));
+        assert_eq!(tags.parent_event_id.as_deref(), Some(trigger_id.as_str()));
+    }
 }
 
 fn is_owner_control_command(
@@ -4391,10 +4671,10 @@ fn dispatch_pending(
         };
         tracing::debug!(agent = agent.index, channel = %channel_id, scope = %scope.telemetry_label(), affinity_hit, "agent_claimed");
 
-        let recoverable_batch = match ctx.dedup_mode {
-            DedupMode::Queue => Some(batch.clone()),
-            DedupMode::Drop => None,
-        };
+        // Keep the exact checked-out batch available for shutdown cancellation
+        // and notice anchoring in every dedup mode. Panic recovery below still
+        // requeues it only in Queue mode.
+        let recoverable_batch = Some(batch.clone());
 
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
@@ -4941,18 +5221,20 @@ fn recover_panicked_agent(
     let i = meta.agent_index;
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
-    if let Some(batch) = meta.recoverable_batch {
-        if let Some(ch) = meta.channel_id {
-            if !removed_channels.contains(&ch) {
-                // Dead-letter on exhaustion is logged inside requeue(); a
-                // panic path has no outcome to report, so no notice here.
-                let _ = queue.requeue(batch);
-                tracing::warn!("requeued batch for panicked agent {i}");
-            } else {
-                tracing::debug!(
-                    channel_id = %ch,
-                    "dropping panicked batch for removed channel"
-                );
+    if matches!(config.dedup_mode, DedupMode::Queue) {
+        if let Some(batch) = meta.recoverable_batch {
+            if let Some(ch) = meta.channel_id {
+                if !removed_channels.contains(&ch) {
+                    // Dead-letter on exhaustion is logged inside requeue(); a
+                    // panic path has no outcome to report, so no notice here.
+                    let _ = queue.requeue(batch);
+                    tracing::warn!("requeued batch for panicked agent {i}");
+                } else {
+                    tracing::debug!(
+                        channel_id = %ch,
+                        "dropping panicked batch for removed channel"
+                    );
+                }
             }
         }
     }

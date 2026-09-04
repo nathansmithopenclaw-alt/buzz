@@ -48,8 +48,8 @@ use crate::scope::SessionScope;
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 
-// FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
-// a recoverable copy in TaskMeta for panic recovery in Queue mode.
+// FlushBatch and BatchEvent derive Clone so TaskMeta can retain the exact
+// checked-out batch for shutdown notices and Queue-mode panic recovery.
 
 /// Metadata stored per in-flight task for panic recovery.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -67,7 +67,8 @@ pub struct TaskMeta {
     pub scope: Option<SessionScope>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
-    /// Clone of batch for Queue mode panic recovery.
+    /// Clone of a channel batch for shutdown notice anchoring and Queue-mode
+    /// panic recovery. `None` for heartbeat tasks.
     pub recoverable_batch: Option<FlushBatch>,
     /// Control signal for the in-flight prompt task.
     /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
