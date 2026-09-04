@@ -569,7 +569,7 @@ fn make_valid_auth_tag(agent_keys: &nostr::Keys) -> String {
 fn profile_event_with_valid_auth_tag() {
     let agent_keys = nostr::Keys::generate();
     let tag_json = make_valid_auth_tag(&agent_keys);
-    let event = build_profile_event(&agent_keys, "TestBot", None, None, Some(&tag_json))
+    let event = build_profile_event(&agent_keys, "TestBot", None, None, &[], Some(&tag_json))
         .expect("should succeed with a valid auth tag");
 
     // Exactly one "auth" tag must be present.
@@ -587,7 +587,7 @@ fn profile_event_with_valid_auth_tag() {
 #[test]
 fn profile_event_without_auth_tag() {
     let agent_keys = nostr::Keys::generate();
-    let event = build_profile_event(&agent_keys, "TestBot", None, None, None)
+    let event = build_profile_event(&agent_keys, "TestBot", None, None, &[], None)
         .expect("should succeed without an auth tag");
 
     // No "auth" tags should be present.
@@ -609,6 +609,7 @@ fn profile_event_includes_about_when_description_present() {
         "TestBot",
         None,
         Some("A meticulous code reviewer."),
+        &[],
         None,
     )
     .expect("should succeed with an about");
@@ -623,7 +624,7 @@ fn profile_event_includes_about_when_description_present() {
 #[test]
 fn profile_event_omits_about_when_absent() {
     let agent_keys = nostr::Keys::generate();
-    let event = build_profile_event(&agent_keys, "TestBot", None, None, None)
+    let event = build_profile_event(&agent_keys, "TestBot", None, None, &[], None)
         .expect("should succeed without an about");
     let content: serde_json::Value =
         serde_json::from_str(&event.content).expect("kind:0 content is JSON");
@@ -635,10 +636,79 @@ fn profile_event_rejects_invalid_auth_tag() {
     let agent_keys = nostr::Keys::generate();
     // Structurally valid JSON array but with a bogus signature — verification must fail.
     let bad_json = format!(r#"["auth","{}","","{}"]"#, "a".repeat(64), "b".repeat(128));
-    let result = build_profile_event(&agent_keys, "TestBot", None, None, Some(&bad_json));
+    let result = build_profile_event(&agent_keys, "TestBot", None, None, &[], Some(&bad_json));
     assert!(result.is_err(), "should reject an invalid auth tag");
     assert!(
         result.unwrap_err().contains("verification failed"),
         "error message should mention verification failure"
     );
+}
+
+#[test]
+fn managed_profile_republish_preserves_prior_tags() {
+    let agent_keys = nostr::Keys::generate();
+    let auth_tag: nostr::Tag = serde_json::from_str(&make_valid_auth_tag(&agent_keys)).unwrap();
+    let client_tag = nostr::Tag::parse(["client", "buzz"]).unwrap();
+    let prior_tags = vec![auth_tag.clone(), client_tag.clone()];
+
+    let event = build_profile_event(&agent_keys, "TestBot", None, None, &prior_tags, None).unwrap();
+
+    assert_eq!(
+        event.tags.iter().cloned().collect::<Vec<_>>(),
+        vec![auth_tag, client_tag]
+    );
+}
+
+#[test]
+fn supplied_auth_replaces_every_prior_auth_and_preserves_other_tags() {
+    let agent_keys = nostr::Keys::generate();
+    let canonical_json = make_valid_auth_tag(&agent_keys);
+    let canonical: nostr::Tag = serde_json::from_str(&canonical_json).unwrap();
+    let client_tag = nostr::Tag::parse(["client", "buzz"]).unwrap();
+    let prior_tags = vec![
+        serde_json::from_str(&make_valid_auth_tag(&agent_keys)).unwrap(),
+        client_tag.clone(),
+        serde_json::from_str(&make_valid_auth_tag(&agent_keys)).unwrap(),
+    ];
+
+    let event = build_profile_event(
+        &agent_keys,
+        "TestBot",
+        None,
+        None,
+        &prior_tags,
+        Some(&canonical_json),
+    )
+    .unwrap();
+
+    assert_eq!(
+        event.tags.iter().cloned().collect::<Vec<_>>(),
+        vec![client_tag, canonical]
+    );
+}
+
+#[test]
+fn managed_profile_without_fresh_auth_rejects_duplicate_auth() {
+    let agent_keys = nostr::Keys::generate();
+    let prior_tags: Vec<nostr::Tag> = vec![
+        serde_json::from_str(&make_valid_auth_tag(&agent_keys)).unwrap(),
+        serde_json::from_str(&make_valid_auth_tag(&agent_keys)).unwrap(),
+    ];
+
+    let error =
+        build_profile_event(&agent_keys, "TestBot", None, None, &prior_tags, None).unwrap_err();
+
+    assert!(error.contains("expected at most 1 preserved auth tag"));
+}
+
+#[test]
+fn managed_profile_without_fresh_auth_rejects_invalid_auth() {
+    let agent_keys = nostr::Keys::generate();
+    let invalid_auth: nostr::Tag =
+        serde_json::from_str(&make_valid_auth_tag(&nostr::Keys::generate())).unwrap();
+
+    let error =
+        build_profile_event(&agent_keys, "TestBot", None, None, &[invalid_auth], None).unwrap_err();
+
+    assert!(error.contains("preserved profile auth tag is invalid"));
 }

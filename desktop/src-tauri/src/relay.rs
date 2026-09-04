@@ -470,41 +470,63 @@ pub fn parse_command_response<T: DeserializeOwned>(message: &str) -> Result<T, S
 /// This is a pure function (no I/O) extracted from `sync_managed_agent_profile` so that
 /// the event-building and auth-tag-injection logic can be unit tested without HTTP calls.
 ///
-/// `buzz-sdk` uses `nostr 0.36` while the desktop crate uses `nostr 0.37`. Cross-version
-/// bridging is done via hex-encoded public keys and raw tag slices — both versions share the
-/// same wire format.
 fn build_profile_event(
     agent_keys: &nostr::Keys,
     display_name: &str,
     avatar_url: Option<&str>,
     about: Option<&str>,
+    prior_tags: &[nostr::Tag],
     auth_tag_json: Option<&str>,
 ) -> Result<nostr::Event, String> {
     let builder = crate::events::build_profile(Some(display_name), None, avatar_url, about, None)?;
 
-    let builder = if let Some(tag_json) = auth_tag_json {
-        // Bridge nostr 0.37 PublicKey → nostr 0.36 PublicKey via hex encoding.
-        let agent_pubkey_hex = agent_keys.public_key().to_hex();
-        let compat_pubkey = nostr::PublicKey::from_hex(&agent_pubkey_hex)
-            .map_err(|e| format!("failed to convert agent pubkey for auth verification: {e}"))?;
-
-        // Verify Schnorr signature before injecting into profile event.
-        buzz_sdk_pkg::nip_oa::verify_auth_tag(tag_json, &compat_pubkey)
-            .map_err(|e| format!("auth tag verification failed for profile event: {e}"))?;
-
-        // parse_auth_tag returns a nostr 0.36 Tag; bridge to nostr 0.37 via raw slice.
-        let compat_tag = buzz_sdk_pkg::nip_oa::parse_auth_tag(tag_json)
-            .map_err(|e| format!("failed to parse verified auth tag: {e}"))?;
-        let tag = nostr::Tag::parse(compat_tag.as_slice())
-            .map_err(|e| format!("failed to convert auth tag to nostr 0.37: {e}"))?;
-        builder.tags([tag])
-    } else {
-        builder
-    };
+    let tags = profile_tags_for_signer(prior_tags, &agent_keys.public_key(), auth_tag_json)?;
 
     builder
+        .tags(tags)
         .sign_with_keys(agent_keys)
         .map_err(|e| format!("failed to sign profile event: {e}"))
+}
+
+/// Preserve a kind:0 tag snapshot while keeping NIP-OA auth canonical and valid.
+pub(crate) fn profile_tags_for_signer(
+    prior_tags: &[nostr::Tag],
+    signer: &nostr::PublicKey,
+    auth_tag_json: Option<&str>,
+) -> Result<Vec<nostr::Tag>, String> {
+    let is_auth = |tag: &nostr::Tag| tag.as_slice().first().map(String::as_str) == Some("auth");
+
+    if let Some(tag_json) = auth_tag_json {
+        // Verify Schnorr signature before injecting into profile event.
+        buzz_sdk_pkg::nip_oa::verify_auth_tag(tag_json, signer)
+            .map_err(|e| format!("auth tag verification failed for profile event: {e}"))?;
+
+        let canonical_auth = buzz_sdk_pkg::nip_oa::parse_auth_tag(tag_json)
+            .map_err(|e| format!("failed to parse verified auth tag: {e}"))?;
+        let mut tags: Vec<_> = prior_tags
+            .iter()
+            .filter(|tag| !is_auth(tag))
+            .cloned()
+            .collect();
+        tags.push(canonical_auth);
+        return Ok(tags);
+    }
+
+    let prior_auth: Vec<_> = prior_tags.iter().filter(|tag| is_auth(tag)).collect();
+    if prior_auth.len() > 1 {
+        return Err(format!(
+            "profile has {} auth tags; expected at most 1 preserved auth tag",
+            prior_auth.len()
+        ));
+    }
+    if let Some(auth_tag) = prior_auth.first() {
+        let auth_json = serde_json::to_string(auth_tag)
+            .map_err(|e| format!("failed to serialize preserved profile auth tag: {e}"))?;
+        buzz_sdk_pkg::nip_oa::verify_auth_tag(&auth_json, signer)
+            .map_err(|e| format!("preserved profile auth tag is invalid: {e}"))?;
+    }
+
+    Ok(prior_tags.to_vec())
 }
 
 // ── Managed-agent profile sync ──────────────────────────────────────────────
@@ -525,9 +547,52 @@ pub async fn sync_managed_agent_profile(
     about: Option<&str>,
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
+    // Retain the existing fail-before-network secret-egress boundary. The
+    // final event is rebuilt after the read with the prior tag snapshot.
+    let preview = build_profile_event(agent_keys, display_name, avatar_url, about, &[], auth_tag)?;
+    crate::egress_guard::assert_no_key_backup_bytes(
+        preview.as_json().as_bytes(),
+        "agent profile sync",
+    )?;
+
+    let existing = query_agent_profile(state, relay_url, &agent_keys.public_key().to_hex()).await?;
+    sync_managed_agent_profile_from_snapshot(
+        state,
+        relay_url,
+        agent_keys,
+        display_name,
+        avatar_url,
+        about,
+        auth_tag,
+        existing.as_ref(),
+    )
+    .await
+}
+
+/// Publish from a profile snapshot already fetched by the caller.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn sync_managed_agent_profile_from_snapshot(
+    state: &AppState,
+    relay_url: &str,
+    agent_keys: &nostr::Keys,
+    display_name: &str,
+    avatar_url: Option<&str>,
+    about: Option<&str>,
+    auth_tag: Option<&str>,
+    existing: Option<&AgentProfileInfo>,
+) -> Result<(), String> {
     crate::relay_admission::wait_for_rate_limit().await;
-    // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
-    let event = build_profile_event(agent_keys, display_name, avatar_url, about, auth_tag)?;
+    let prior_tags = existing
+        .map(|profile| profile.tags.as_slice())
+        .unwrap_or_default();
+    let event = build_profile_event(
+        agent_keys,
+        display_name,
+        avatar_url,
+        about,
+        prior_tags,
+        auth_tag,
+    )?;
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
@@ -605,6 +670,7 @@ pub async fn query_agent_profile(
             .get("about")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        tags: event.tags.iter().cloned().collect(),
     }))
 }
 
@@ -615,6 +681,8 @@ pub struct AgentProfileInfo {
     pub picture: Option<String>,
     /// Published public description (kind:0 `about`).
     pub about: Option<String>,
+    /// Complete event tag snapshot, retained for read-merge-write republish.
+    pub tags: Vec<nostr::Tag>,
 }
 
 // ── Signed-event submission ─────────────────────────────────────────────────

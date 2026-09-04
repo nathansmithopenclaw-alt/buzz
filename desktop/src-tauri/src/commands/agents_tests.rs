@@ -367,6 +367,7 @@ fn profile_with_about(
         display_name: name.map(str::to_string),
         picture: picture.map(str::to_string),
         about: about.map(str::to_string),
+        tags: Vec::new(),
     }
 }
 

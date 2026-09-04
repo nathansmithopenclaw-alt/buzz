@@ -1,5 +1,5 @@
 use buzz_core::kind::KIND_MANAGED_AGENT;
-use nostr::PublicKey;
+use nostr::{PublicKey, Tag};
 
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
@@ -372,48 +372,14 @@ pub async fn cmd_set_profile(
     // Read-merge-write: fetch current profile, merge in the new fields, then sign.
     let current = fetch_current_profile(client).await?;
 
-    // Merge: caller-supplied fields win; fall back to current profile values.
-    let merged_name = display_name
-        .map(|s| s.to_string())
-        .or_else(|| {
-            current
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .or_else(|| {
-            current
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
-    let merged_picture = avatar_url.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("picture")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-    let merged_about = about.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("about")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-    let merged_nip05 = nip05_handle.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("nip05")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-
-    let builder = buzz_sdk::build_profile(
-        merged_name.as_deref(),
-        None, // `name` field (username) — not exposed by CLI
-        merged_picture.as_deref(),
-        merged_about.as_deref(),
-        merged_nip05.as_deref(),
-    )
-    .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?;
+    let builder = build_profile_update(
+        &current,
+        display_name,
+        avatar_url,
+        about,
+        nip05_handle,
+        !client.has_injected_auth_tag(),
+    )?;
 
     let event = client.sign_event(builder)?;
 
@@ -422,11 +388,78 @@ pub async fn cmd_set_profile(
     Ok(())
 }
 
+fn build_profile_update(
+    current: &CurrentProfile,
+    display_name: Option<&str>,
+    avatar_url: Option<&str>,
+    about: Option<&str>,
+    nip05_handle: Option<&str>,
+    preserve_existing_auth: bool,
+) -> Result<nostr::EventBuilder, CliError> {
+    // Merge: caller-supplied fields win; fall back to current profile values.
+    let merged_name = display_name
+        .map(|s| s.to_string())
+        .or_else(|| {
+            current
+                .metadata
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            current
+                .metadata
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+    let merged_picture = avatar_url.map(|s| s.to_string()).or_else(|| {
+        current
+            .metadata
+            .get("picture")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
+    let merged_about = about.map(|s| s.to_string()).or_else(|| {
+        current
+            .metadata
+            .get("about")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
+    let merged_nip05 = nip05_handle.map(|s| s.to_string()).or_else(|| {
+        current
+            .metadata
+            .get("nip05")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
+
+    let mut tags = current.tags.clone();
+    if !preserve_existing_auth {
+        tags.retain(|tag| tag.as_slice().first().map(String::as_str) != Some("auth"));
+    }
+
+    buzz_sdk::build_profile(
+        merged_name.as_deref(),
+        None, // `name` field (username) — not exposed by CLI
+        merged_picture.as_deref(),
+        merged_about.as_deref(),
+        merged_nip05.as_deref(),
+    )
+    .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))
+    .map(|builder| builder.tags(tags))
+}
+
 /// Fetch the current user's profile metadata via POST /query (kind:0).
-/// Returns the parsed content JSON object, or an empty object if no profile exists.
-async fn fetch_current_profile(
-    client: &BuzzClient,
-) -> Result<serde_json::Map<String, serde_json::Value>, CliError> {
+/// Returns parsed content and tags, or an empty snapshot if no profile exists.
+#[derive(Default)]
+struct CurrentProfile {
+    metadata: serde_json::Map<String, serde_json::Value>,
+    tags: Vec<Tag>,
+}
+
+async fn fetch_current_profile(client: &BuzzClient) -> Result<CurrentProfile, CliError> {
     let my_pk = client.keys().public_key().to_hex();
     let filter = serde_json::json!({
         "kinds": [0],
@@ -438,10 +471,10 @@ async fn fetch_current_profile(
         .map_err(|e| CliError::Other(format!("failed to parse profile query: {e}")))?;
 
     let Some(arr) = events.as_array() else {
-        return Ok(serde_json::Map::new());
+        return Ok(CurrentProfile::default());
     };
     let Some(event) = arr.first() else {
-        return Ok(serde_json::Map::new());
+        return Ok(CurrentProfile::default());
     };
     // kind:0 content is a JSON string containing the profile fields
     let content_str = event
@@ -449,7 +482,12 @@ async fn fetch_current_profile(
         .and_then(|c| c.as_str())
         .unwrap_or("{}");
     let content: serde_json::Value = serde_json::from_str(content_str).unwrap_or_default();
-    Ok(content.as_object().cloned().unwrap_or_default())
+    let tags = serde_json::from_value(event.get("tags").cloned().unwrap_or_default())
+        .map_err(|e| CliError::Other(format!("failed to parse profile tags: {e}")))?;
+    Ok(CurrentProfile {
+        metadata: content.as_object().cloned().unwrap_or_default(),
+        tags,
+    })
 }
 
 /// Get presence status for users — query kind:40902 presence snapshot events.
@@ -574,11 +612,99 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        owned_agent_pubkeys_from_events, owner_scoped_profiles, owner_verification,
-        presence_subject,
+        build_profile_update, owned_agent_pubkeys_from_events, owner_scoped_profiles,
+        owner_verification, presence_subject, BuzzClient, CurrentProfile,
     };
-    use nostr::Keys;
+    use nostr::{Keys, Tag};
     use serde_json::json;
+
+    #[test]
+    fn set_profile_without_injected_auth_preserves_prior_tags() {
+        let keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let auth_tag: Tag = serde_json::from_str(
+            &buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &keys.public_key(), "kind=0").unwrap(),
+        )
+        .unwrap();
+        let client_tag = Tag::parse(["client", "buzz"]).unwrap();
+        let current = CurrentProfile {
+            metadata: json!({"display_name": "Agent"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            tags: vec![auth_tag.clone(), client_tag.clone()],
+        };
+        let client = BuzzClient::new("https://test.relay".into(), keys, None, None).unwrap();
+
+        let event = client
+            .sign_event(
+                build_profile_update(
+                    &current,
+                    None,
+                    Some("https://example.com/new.png"),
+                    None,
+                    None,
+                    true,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            event.tags.iter().cloned().collect::<Vec<_>>(),
+            vec![auth_tag, client_tag]
+        );
+    }
+
+    #[test]
+    fn set_profile_with_injected_auth_replaces_prior_auth_and_keeps_other_tags() {
+        let keys = Keys::generate();
+        let prior_auth: Tag = serde_json::from_str(
+            &buzz_sdk::nip_oa::compute_auth_tag(&Keys::generate(), &keys.public_key(), "kind=0")
+                .unwrap(),
+        )
+        .unwrap();
+        let injected_auth: Tag = serde_json::from_str(
+            &buzz_sdk::nip_oa::compute_auth_tag(&Keys::generate(), &keys.public_key(), "kind=0")
+                .unwrap(),
+        )
+        .unwrap();
+        let client_tag = Tag::parse(["client", "buzz"]).unwrap();
+        let current = CurrentProfile {
+            metadata: json!({"display_name": "Agent"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            tags: vec![prior_auth, client_tag.clone()],
+        };
+        let injected_json = serde_json::to_string(&injected_auth).unwrap();
+        let client = BuzzClient::new(
+            "https://test.relay".into(),
+            keys,
+            Some(injected_auth.clone()),
+            Some(injected_json),
+        )
+        .unwrap();
+
+        let event = client
+            .sign_event(
+                build_profile_update(
+                    &current,
+                    None,
+                    Some("https://example.com/new.png"),
+                    None,
+                    None,
+                    !client.has_injected_auth_tag(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            event.tags.iter().cloned().collect::<Vec<_>>(),
+            vec![client_tag, injected_auth]
+        );
+    }
 
     #[test]
     fn owned_agent_lookup_matches_exact_name_case_insensitively() {

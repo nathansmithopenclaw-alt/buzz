@@ -195,7 +195,7 @@ pub(crate) async fn reconcile_agent_profile(
     agent_pubkey: &str,
     data: &ProfileReconcileData,
 ) -> Result<ProfileReconcileOutcome, String> {
-    use crate::relay::{query_agent_profile, sync_managed_agent_profile};
+    use crate::relay::{query_agent_profile, sync_managed_agent_profile_from_snapshot};
 
     // Resolved ONCE and used for both the read and the write-back. A pinned
     // `target_relay_url` wins unconditionally — see `resolve_reconcile_relay`.
@@ -279,7 +279,7 @@ pub(crate) async fn reconcile_agent_profile(
         return Ok(ProfileReconcileOutcome::SkippedDisabled);
     }
 
-    sync_managed_agent_profile(
+    sync_managed_agent_profile_from_snapshot(
         state,
         &relay_url,
         &agent_keys,
@@ -287,6 +287,7 @@ pub(crate) async fn reconcile_agent_profile(
         expected_avatar.as_deref(),
         data.about.as_deref(),
         data.auth_tag.as_deref(),
+        existing.as_ref(),
     )
     .await?;
     Ok(ProfileReconcileOutcome::Reconciled)

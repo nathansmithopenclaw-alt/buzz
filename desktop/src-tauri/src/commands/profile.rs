@@ -11,8 +11,8 @@ use crate::{
     models::{ProfileInfo, SearchUsersResponse, UserNotesResponse, UsersBatchResponse},
     nostr_convert,
     relay::{
-        query_relay, query_relay_at_with_keys, relay_http_base_url, submit_event,
-        submit_event_at_with_keys,
+        profile_tags_for_signer, query_relay, query_relay_at_with_keys, relay_http_base_url,
+        submit_event_at_with_keys, submit_event_with_keys,
     },
 };
 
@@ -45,7 +45,8 @@ pub async fn update_profile(
     state: State<'_, AppState>,
 ) -> Result<ProfileInfo, String> {
     // Read-merge-write: kind 0 is a full profile snapshot.
-    let my_pubkey = current_pubkey_hex(&state)?;
+    let signer = state.signing_keys()?;
+    let my_pubkey = signer.public_key().to_hex();
     let prior_events = query_relay(
         &state,
         &[serde_json::json!({
@@ -63,22 +64,16 @@ pub async fn update_profile(
         .and_then(|ev| serde_json::from_str::<Value>(&ev.content).ok())
         .unwrap_or(Value::Null);
 
-    let dn = display_name
-        .as_deref()
-        .or_else(|| current.get("display_name").and_then(Value::as_str));
-    let name = current.get("name").and_then(Value::as_str);
-    let picture = avatar_url
-        .as_deref()
-        .or_else(|| current.get("picture").and_then(Value::as_str));
-    let ab = about
-        .as_deref()
-        .or_else(|| current.get("about").and_then(Value::as_str));
-    let nip05 = nip05_handle
-        .as_deref()
-        .or_else(|| current.get("nip05").and_then(Value::as_str));
-
-    let builder = events::build_profile(dn, name, picture, ab, nip05)?;
-    submit_event(builder, &state).await?;
+    let builder = build_profile_update_event(
+        &current,
+        display_name.as_deref(),
+        avatar_url.as_deref(),
+        about.as_deref(),
+        nip05_handle.as_deref(),
+        prior_events.first(),
+        &signer,
+    )?;
+    submit_event_with_keys(builder, &state, &signer, None).await?;
 
     // Re-fetch to return canonical profile.
     let events = query_relay(
@@ -96,6 +91,28 @@ pub async fn update_profile(
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
         .unwrap_or_else(|| empty_profile_info(&current_pubkey_hex_unwrap(&state))))
+}
+
+fn build_profile_update_event(
+    current: &Value,
+    display_name: Option<&str>,
+    avatar_url: Option<&str>,
+    about: Option<&str>,
+    nip05_handle: Option<&str>,
+    prior_event: Option<&nostr::Event>,
+    signer: &nostr::Keys,
+) -> Result<nostr::EventBuilder, String> {
+    let dn = display_name.or_else(|| current.get("display_name").and_then(Value::as_str));
+    let name = current.get("name").and_then(Value::as_str);
+    let picture = avatar_url.or_else(|| current.get("picture").and_then(Value::as_str));
+    let ab = about.or_else(|| current.get("about").and_then(Value::as_str));
+    let nip05 = nip05_handle.or_else(|| current.get("nip05").and_then(Value::as_str));
+    let prior_tags = prior_event
+        .map(|event| event.tags.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let tags = profile_tags_for_signer(&prior_tags, &signer.public_key(), None)?;
+
+    Ok(events::build_profile(dn, name, picture, ab, nip05)?.tags(tags))
 }
 
 #[tauri::command]
@@ -136,7 +153,7 @@ pub async fn update_profile_at_relay(
         return Err("profile avatar changed before deferred save".to_string());
     }
 
-    let builder = build_deferred_profile_event(&current, &avatar_url, prior_event)?;
+    let builder = build_deferred_profile_event(&current, &avatar_url, prior_event, &signer)?;
     submit_event_at_with_keys(builder, &state, &api_base_url, &signer).await?;
 
     let events = query_relay_at_with_keys(&state, &api_base_url, &[filter], &signer, None).await?;
@@ -151,14 +168,21 @@ fn build_deferred_profile_event(
     current: &Value,
     avatar_url: &str,
     prior_event: Option<&nostr::Event>,
+    signer: &nostr::Keys,
 ) -> Result<nostr::EventBuilder, String> {
     let display_name = current.get("display_name").and_then(Value::as_str);
     let name = current.get("name").and_then(Value::as_str);
     let about = current.get("about").and_then(Value::as_str);
     let nip05 = current.get("nip05").and_then(Value::as_str);
 
+    let prior_tags = prior_event
+        .map(|event| event.tags.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let tags = profile_tags_for_signer(&prior_tags, &signer.public_key(), None)?;
+
     Ok(
         events::build_profile(display_name, name, Some(avatar_url), about, nip05)?
+            .tags(tags)
             .custom_created_at(monotonic_created_at(
                 prior_event.map(|event| event.created_at.as_secs() as i64),
             )),
@@ -417,6 +441,16 @@ fn empty_profile_info(pubkey: &str) -> ProfileInfo {
 mod tests {
     use super::*;
 
+    fn valid_auth_tag(agent_keys: &nostr::Keys) -> nostr::Tag {
+        let tag_json = buzz_sdk_pkg::nip_oa::compute_auth_tag(
+            &nostr::Keys::generate(),
+            &agent_keys.public_key(),
+            "kind=0",
+        )
+        .unwrap();
+        serde_json::from_str(&tag_json).unwrap()
+    }
+
     #[test]
     fn deferred_profile_signer_is_captured_and_rejects_wrong_identity() {
         let state = crate::app_state::build_app_state();
@@ -442,10 +476,13 @@ mod tests {
     fn deferred_profile_event_is_strictly_newer_than_prior_head() {
         let keys = nostr::Keys::generate();
         let prior_created_at = nostr::Timestamp::now().as_secs() + 60;
+        let auth_tag = valid_auth_tag(&keys);
+        let client_tag = nostr::Tag::parse(["client", "buzz"]).unwrap();
         let prior_event = nostr::EventBuilder::new(
             nostr::Kind::Metadata,
             serde_json::json!({"display_name": "Larry"}).to_string(),
         )
+        .tags([auth_tag.clone(), client_tag.clone()])
         .custom_created_at(nostr::Timestamp::from(prior_created_at))
         .sign_with_keys(&keys)
         .expect("sign prior profile");
@@ -454,6 +491,7 @@ mod tests {
             &serde_json::json!({"display_name": "Larry"}),
             "https://example.com/avatar.png",
             Some(&prior_event),
+            &keys,
         )
         .expect("build deferred profile");
         let event = builder
@@ -462,8 +500,44 @@ mod tests {
 
         assert_eq!(event.created_at.as_secs(), prior_created_at + 1);
         assert_eq!(
+            event.tags.iter().cloned().collect::<Vec<_>>(),
+            vec![auth_tag, client_tag]
+        );
+        assert_eq!(
             serde_json::from_str::<Value>(&event.content).unwrap()["picture"],
             "https://example.com/avatar.png"
+        );
+    }
+
+    #[test]
+    fn profile_update_republish_preserves_prior_tags() {
+        let keys = nostr::Keys::generate();
+        let auth_tag = valid_auth_tag(&keys);
+        let client_tag = nostr::Tag::parse(["client", "buzz"]).unwrap();
+        let prior_event = nostr::EventBuilder::new(
+            nostr::Kind::Metadata,
+            serde_json::json!({"display_name": "Larry"}).to_string(),
+        )
+        .tags([auth_tag.clone(), client_tag.clone()])
+        .sign_with_keys(&keys)
+        .unwrap();
+
+        let event = build_profile_update_event(
+            &serde_json::json!({"display_name": "Larry"}),
+            None,
+            Some("https://example.com/new.png"),
+            None,
+            None,
+            Some(&prior_event),
+            &keys,
+        )
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+
+        assert_eq!(
+            event.tags.iter().cloned().collect::<Vec<_>>(),
+            vec![auth_tag, client_tag]
         );
     }
 

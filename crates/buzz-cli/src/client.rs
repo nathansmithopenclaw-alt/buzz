@@ -580,11 +580,17 @@ impl BuzzClient {
             .and_then(|slice| slice.get(1).cloned())
     }
 
+    /// Whether this client will inject its configured NIP-OA auth tag while signing.
+    pub(crate) fn has_injected_auth_tag(&self) -> bool {
+        self.auth_tag.is_some()
+    }
+
     /// Sign an event builder, injecting the NIP-OA auth tag if configured.
     ///
     /// All event creation should go through this method to ensure consistent
-    /// auth tag injection. Callers MUST NOT add `auth` tags to the builder
-    /// before calling this method.
+    /// auth tag injection. Callers MUST NOT add `auth` tags to the builder,
+    /// except that a kind:0 read-merge-write may preserve one existing auth
+    /// tag when this client has no configured tag to inject.
     pub fn sign_event(&self, builder: EventBuilder) -> Result<nostr::Event, CliError> {
         let builder = if let Some(ref tag) = self.auth_tag {
             builder.tags([tag.clone()])
@@ -595,18 +601,43 @@ impl BuzzClient {
             .sign_with_keys(&self.keys)
             .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
 
-        // Enforce: auth tags may only come from self.auth_tag injection.
+        // Enforce: auth tags normally only come from self.auth_tag injection.
+        // A kind:0 replacement may instead reuse one signer-valid prior auth
+        // tag when there is no fresh configured credential.
         let auth_count = event
             .tags
             .iter()
             .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("auth"))
             .count();
-        let expected = if self.auth_tag.is_some() { 1 } else { 0 };
-        if auth_count != expected {
+        let is_metadata = event.kind == Kind::Metadata;
+        let valid_auth_count = match (self.auth_tag.is_some(), is_metadata) {
+            (true, _) => auth_count == 1,
+            (false, true) => auth_count <= 1,
+            (false, false) => auth_count == 0,
+        };
+        if !valid_auth_count {
+            let expected = match (self.auth_tag.is_some(), is_metadata) {
+                (true, _) => "exactly 1 injected auth tag",
+                (false, true) => "at most 1 preserved auth tag",
+                (false, false) => "no auth tags",
+            };
             return Err(CliError::Other(format!(
-                "event has {auth_count} auth tags — expected {expected}; \
-                 callers must not add auth tags manually"
+                "event has {auth_count} auth tags — expected {expected}"
             )));
+        }
+
+        if self.auth_tag.is_none() && is_metadata && auth_count == 1 {
+            let preserved = event
+                .tags
+                .iter()
+                .find(|tag| tag.as_slice().first().map(String::as_str) == Some("auth"))
+                .ok_or_else(|| CliError::Other("preserved profile auth tag missing".into()))?;
+            let preserved_json = serde_json::to_string(preserved).map_err(|e| {
+                CliError::Other(format!("failed to serialize preserved auth tag: {e}"))
+            })?;
+            buzz_sdk::nip_oa::verify_auth_tag(&preserved_json, &event.pubkey).map_err(|e| {
+                CliError::Other(format!("preserved profile auth tag is invalid: {e}"))
+            })?;
         }
 
         Ok(event)
@@ -2488,6 +2519,47 @@ mod tests {
         let json = serde_json::to_string(&tag_vec).unwrap();
         let tag = Tag::parse(tag_vec).unwrap();
         (tag, json)
+    }
+
+    #[test]
+    fn sign_event_without_injection_rejects_auth_on_non_metadata_event() {
+        let client =
+            BuzzClient::new("https://test.relay".into(), Keys::generate(), None, None).unwrap();
+        let (auth_tag, _) = make_auth_tag();
+        let builder = EventBuilder::new(Kind::TextNote, "note").tags([auth_tag]);
+
+        let error = client.sign_event(builder).unwrap_err();
+
+        assert!(error.to_string().contains("expected no auth tags"));
+    }
+
+    #[test]
+    fn sign_event_without_injection_rejects_multiple_metadata_auth_tags() {
+        let client =
+            BuzzClient::new("https://test.relay".into(), Keys::generate(), None, None).unwrap();
+        let first = Tag::parse(["auth", &"a".repeat(64), "", &"b".repeat(128)]).unwrap();
+        let second = Tag::parse(["auth", &"c".repeat(64), "", &"d".repeat(128)]).unwrap();
+        let builder = EventBuilder::new(Kind::Metadata, "{}").tags([first, second]);
+
+        let error = client.sign_event(builder).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("expected at most 1 preserved auth tag"));
+    }
+
+    #[test]
+    fn sign_event_without_injection_rejects_invalid_single_metadata_auth_tag() {
+        let client =
+            BuzzClient::new("https://test.relay".into(), Keys::generate(), None, None).unwrap();
+        let (invalid_auth, _) = make_auth_tag();
+        let builder = EventBuilder::new(Kind::Metadata, "{}").tags([invalid_auth]);
+
+        let error = client.sign_event(builder).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("preserved profile auth tag is invalid"));
     }
 
     #[test]
