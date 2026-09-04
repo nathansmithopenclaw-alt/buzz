@@ -636,6 +636,11 @@ impl EventQueue {
     pub fn requeue(&mut self, batch: FlushBatch) -> Option<FlushBatch> {
         let channel_id = batch.channel_id;
         let scope = batch.scope.clone();
+        let event_ids: Vec<String> = batch
+            .events
+            .iter()
+            .map(|event| event.event.id.to_hex())
+            .collect();
         let attempt = {
             let count = self.retry_counts.entry(scope.clone()).or_insert(0);
             *count += 1;
@@ -647,6 +652,7 @@ impl EventQueue {
                 channel_id = %channel_id,
                 attempt,
                 events = batch.events.len(),
+                event_ids = ?event_ids,
                 "dead-lettering batch after {} retries — discarding {} events",
                 MAX_RETRIES,
                 batch.events.len(),
@@ -677,6 +683,7 @@ impl EventQueue {
             max = MAX_RETRIES,
             delay_secs = delay.as_secs_f64(),
             events = batch.events.len(),
+            event_ids = ?event_ids,
             "requeueing failed batch with backoff"
         );
 
@@ -781,6 +788,20 @@ impl EventQueue {
     /// `flush_next()`. No retry throttle, no backoff.
     pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
         let scope = batch.scope.clone();
+        let event_ids: Vec<String> = batch
+            .cancelled_events
+            .iter()
+            .chain(batch.events.iter())
+            .map(|event| event.event.id.to_hex())
+            .collect();
+        tracing::info!(
+            channel_id = %batch.channel_id,
+            scope = %scope.telemetry_label(),
+            ?reason,
+            events = event_ids.len(),
+            event_ids = ?event_ids,
+            "requeueing cancelled batch"
+        );
         let entry = self.cancelled_batches.entry(scope.clone()).or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
         entry.extend(batch.cancelled_events);
