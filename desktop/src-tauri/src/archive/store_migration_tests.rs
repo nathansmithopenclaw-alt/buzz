@@ -1060,3 +1060,71 @@ fn migration_m3_reopen_twice_is_idempotent() {
         "M3: marker must still be present after idempotent second open"
     );
 }
+
+// ── Migration M6: basis column (D-5c7c42dc) ─────────────────────────────────
+
+/// M6 must add `basis` to a database that has already applied every earlier
+/// migration — which is the real production case, and the only one where M6
+/// is load-bearing.
+///
+/// An earlier version of this test used a pre-M5 fixture and passed with M6
+/// unregistered: M5's rebuild lists `basis` among the columns it ensures, so
+/// it added the column and masked M6 entirely. The fixture here is built by
+/// running the full migration chain and then dropping the column, so the only
+/// thing that can restore it is M6.
+///
+/// A broken archive migration bricks the DB on first open, so this exercises
+/// the production `open_archive_db` path rather than calling M6 directly.
+#[test]
+fn migration_m6_adds_basis_to_an_already_migrated_db() {
+    use tempfile::NamedTempFile;
+    let db_file = NamedTempFile::new().unwrap();
+    let db_path = db_file.path().to_path_buf();
+
+    build_old_schema_db(&db_path);
+    // Bring the DB fully up to date (every prior migration, markers recorded).
+    drop(open_archive_db(&db_path).expect("initial migration must succeed"));
+
+    // Now remove only `basis`, reproducing a database migrated before the
+    // field existed.
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("ALTER TABLE agent_metric_index DROP COLUMN basis")
+            .expect("drop basis to build the pre-M6 fixture");
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(agent_metric_index)")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            !cols.iter().any(|c| c == "basis"),
+            "fixture must genuinely lack the column, or this test proves nothing",
+        );
+    }
+
+    // Reopening must restore it via M6 alone — every earlier migration has
+    // already recorded its marker and will not re-run.
+    let conn = open_archive_db(&db_path).expect("open_archive_db must succeed on pre-M6 DB");
+    let basis: Option<String> = conn
+        .query_row(
+            "SELECT basis FROM agent_metric_index WHERE id = 'eid1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("basis column must exist after M6");
+    assert_eq!(
+        basis, None,
+        "a row archived before the field existed has no basis and must not be given one",
+    );
+
+    // Idempotent: a second open must not fail on a duplicate ALTER.
+    drop(conn);
+    let reopened = open_archive_db(&db_path).expect("second open must succeed");
+    let count: i64 = reopened
+        .query_row("SELECT COUNT(*) FROM agent_metric_index", [], |r| r.get(0))
+        .unwrap();
+    assert!(count > 0, "existing rows must survive the migration");
+}

@@ -20,11 +20,41 @@ use rusqlite::{params, Connection};
 /// schema containing every column that insert writes. M5 sits in that group for
 /// the same reason, even though it also rebuilds. M4 (`archive_meta` +
 /// scope-age index) runs last; it is independent of the rest.
+/// Add `basis` to `agent_metric_index` (NIP-AM measurement basis).
+///
+/// Additive and idempotent: guarded on column absence, no rebuild. Rows written
+/// before this migration keep `basis` NULL, which is the correct reading —
+/// those events predate the field and their basis is genuinely unknown, not
+/// assumable from the harness name.
+fn migrate_add_basis_to_metric_index(conn: &Connection) -> Result<(), String> {
+    let names: Vec<String> = {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(agent_metric_index)")
+            .map_err(|e| format!("migration M6: PRAGMA table_info prepare: {e}"))?;
+        let ns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("migration M6: PRAGMA table_info query: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("migration M6: PRAGMA table_info read: {e}"))?;
+        ns
+    };
+    if names.is_empty() {
+        // Table not created yet; the CREATE TABLE path already includes basis.
+        return Ok(());
+    }
+    if !names.iter().any(|n| n == "basis") {
+        conn.execute_batch("ALTER TABLE agent_metric_index ADD COLUMN basis TEXT")
+            .map_err(|e| format!("migration M6: ALTER TABLE (basis) failed: {e}"))?;
+    }
+    Ok(())
+}
+
 pub(super) fn apply_schema_migrations(conn: &Connection) -> Result<(), String> {
     migrate_add_cache_read_tokens(conn)?;
     migrate_add_cache_write_and_pricing(conn)?;
     migrate_add_turn_provenance(conn)?;
     migrate_add_harness_to_metric_index(conn)?;
+    migrate_add_basis_to_metric_index(conn)?;
     migrate_add_archive_meta(conn)
 }
 
@@ -123,6 +153,11 @@ fn migrate_add_turn_provenance_locked(conn: &Connection) -> Result<(), String> {
         ("attempt", "INTEGER"),
         ("is_replay", "INTEGER"),
         ("session_creation_cause", "TEXT"),
+        // Per the invariant above: `basis` is added by its own migration which
+        // runs after this one, but `insert_metric_index_row` writes it, so the
+        // rebuild below must not run without the column. That migration guards
+        // its own ALTER on absence, so listing it here is a no-op there.
+        ("basis", "TEXT"),
     ];
     for (col, ty) in &cols {
         if !names.iter().any(|n| n == col) {

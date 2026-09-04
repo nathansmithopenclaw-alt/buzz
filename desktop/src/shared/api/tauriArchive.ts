@@ -130,6 +130,19 @@ export type AgentUsageSeries = {
    * agents whose only evidence falls outside the current 7d/30d window.
    */
   hasArchivedEvidence: boolean | null;
+  /**
+   * Distinct NIP-AM `basis` values present in the window, sorted, with
+   * `"unknown"` for events that declared none.
+   */
+  bases: string[];
+  /**
+   * `true` when more than one basis is present. Counts on differing bases
+   * measure different things — a per-response publisher reports one model
+   * call where a per-turn-sum publisher reports the whole turn — so the
+   * cross-agent bucket totals come back unknown rather than combined, and
+   * `agents` is ordered by identity rather than ranked by volume.
+   */
+  basesMixed: boolean;
 };
 
 export type AgentUsageSeriesRequest = {

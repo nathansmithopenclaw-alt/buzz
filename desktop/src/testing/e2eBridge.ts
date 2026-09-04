@@ -15510,6 +15510,8 @@ export function maybeInstallE2eTauriMocks() {
             hasUnknownUsage: false,
           },
           hasArchivedEvidence: null,
+          bases: [],
+          basesMixed: false,
         };
       }
       // ── Local-save archive ──────────────────────────────────────────────

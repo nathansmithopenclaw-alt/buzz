@@ -67,6 +67,22 @@ fn session_creation_cause_wire_value(raw_json: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Read `basis` verbatim off the wire.
+///
+/// Same contract as [`session_creation_cause_wire_value`], and for the same
+/// reason: the typed deserializer maps an unrecognized basis to `None`, which
+/// would record a publisher that DID declare a future basis identically to one
+/// that declared nothing. Those are different facts, and the aggregation guard
+/// depends on telling them apart — an unrecognized basis is still a distinct
+/// basis and must not be pooled with either known value.
+fn basis_wire_value(raw_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw_json)
+        .ok()?
+        .get("basis")?
+        .as_str()
+        .map(str::to_string)
+}
+
 // ── Row type ──────────────────────────────────────────────────────────────
 
 /// Parse status of a stored `agent_metric_index` row.
@@ -136,6 +152,10 @@ pub(super) struct AgentMetricIndexRow {
     pub attempt: Option<u32>,
     pub is_replay: Option<bool>,
     pub session_creation_cause: Option<String>,
+    /// NIP-AM `basis`, verbatim. `None` only when the field was absent — every
+    /// event archived before the field existed reads as unknown, which is
+    /// correct: their basis was never declared and must not be inferred.
+    pub basis: Option<String>,
     pub parse_status: ParseStatus,
 }
 
@@ -220,6 +240,7 @@ impl AgentMetricIndexRow {
             // `session_creation_cause_wire_value` for why the parsed enum
             // cannot round-trip an unrecognized cause.
             session_creation_cause: session_creation_cause_wire_value(raw_json),
+            basis: basis_wire_value(raw_json),
             parse_status: ParseStatus::Valid,
         }
     }
@@ -257,6 +278,7 @@ impl AgentMetricIndexRow {
             attempt: None,
             is_replay: None,
             session_creation_cause: None,
+            basis: None,
             parse_status: ParseStatus::Invalid,
         }
     }
@@ -329,6 +351,7 @@ fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<AgentMetricIndexRow> {
         attempt: attempt_int.and_then(|v| u32::try_from(v).ok()),
         is_replay: is_replay_int.map(|v| v != 0),
         session_creation_cause: row.get("session_creation_cause")?,
+        basis: row.get("basis")?,
         parse_status: ParseStatus::from_str(&parse_status_str),
     })
 }
@@ -339,7 +362,8 @@ const ROW_COLUMNS: &str = "id, agent_pubkey, event_created_at, archived_at, repo
      cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens, \
      cumulative_cost_usd, cumulative_cache_read_tokens, cumulative_cache_write_tokens, \
      pricing_authority, pricing_model, pricing_cache_class, channel_id, \
-     context_tokens, context_window, attempt, is_replay, session_creation_cause, parse_status";
+     context_tokens, context_window, attempt, is_replay, session_creation_cause, basis, \
+     parse_status";
 
 // ── Write path ───────────────────────────────────────────────────────────────
 
@@ -385,11 +409,11 @@ pub(super) fn insert_metric_index_row(
                   cumulative_cache_read_tokens, cumulative_cache_write_tokens,
                   pricing_authority, pricing_model, pricing_cache_class, channel_id,
                   context_tokens, context_window, attempt, is_replay,
-                  session_creation_cause, parse_status)
+                  session_creation_cause, basis, parse_status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                      ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
                      ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                     ?31, ?32, ?33, ?34)
+                     ?31, ?32, ?33, ?34, ?35)
              ON CONFLICT (identity_pubkey, relay_url, id) DO NOTHING",
             params![
                 identity_pubkey,
@@ -425,6 +449,7 @@ pub(super) fn insert_metric_index_row(
                 row.attempt,
                 is_replay,
                 row.session_creation_cause,
+                row.basis,
                 row.parse_status.as_str(),
             ],
         )

@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS agent_metric_index (
     attempt                      INTEGER,
     is_replay                    INTEGER,
     session_creation_cause       TEXT,
+    basis                        TEXT,
     parse_status                 TEXT NOT NULL CHECK (parse_status IN ('valid','invalid')),
     PRIMARY KEY (identity_pubkey, relay_url, id)
 );
