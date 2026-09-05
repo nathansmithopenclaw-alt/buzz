@@ -7192,10 +7192,7 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
 /// Flow: spawn → initialize → session/new → print models → shutdown.
 /// No relay connection, no MCP servers, no subscriptions. ~2-5s total.
 async fn run_models(args: ModelsArgs) -> Result<()> {
-    use acp::{
-        extract_model_config_options, extract_model_state, resolve_model_switch_method,
-        ModelSwitchMethod,
-    };
+    use acp::{extract_model_config_options, extract_model_state, resolve_model_switch_method};
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
     let cwd = current_working_directory()?;
@@ -7243,21 +7240,9 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         let method = resolve_model_switch_method(&session_resp.raw, desired).ok_or_else(|| {
             anyhow::anyhow!("requested model {desired:?} is not advertised by the agent")
         })?;
-        let updated = match method {
-            ModelSwitchMethod::ConfigOption {
-                config_id,
-                option_value,
-            } => {
-                client
-                    .session_set_config_option(&session_resp.session_id, &config_id, &option_value)
-                    .await?
-            }
-            ModelSwitchMethod::SetModel { model_id } => {
-                client
-                    .session_set_model(&session_resp.session_id, &model_id)
-                    .await?
-            }
-        };
+        let updated = client
+            .apply_model_switch_method(&session_resp.session_id, &method)
+            .await?;
         if let Some(options) = updated.get("configOptions") {
             session_resp.raw["configOptions"] = options.clone();
         }

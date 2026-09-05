@@ -14,6 +14,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
+#[path = "codex_model_config.rs"]
+mod codex_model_config;
+pub use codex_model_config::resolve_model_switch_method;
 mod subscription_token;
 
 use crate::observer::{ObserverContext, ObserverHandle};
@@ -3113,6 +3116,12 @@ pub enum ModelSwitchMethod {
         config_id: String,
         option_value: String,
     },
+    /// Stable model selection followed by an explicitly advertised reasoning effort.
+    ConfigOptionWithEffort {
+        config_id: String,
+        option_value: String,
+        effort: String,
+    },
     /// Unstable: use `session/set_model` with this model_id.
     SetModel { model_id: String },
 }
@@ -3184,65 +3193,6 @@ pub fn extract_thought_level_config_id(result: &serde_json::Value) -> Option<Str
             return Some(config_id.to_string());
         }
     }
-    None
-}
-
-/// Match a desired model ID against a fresh `session/new` response.
-///
-/// Returns the correct ACP method to call, or `None` if no match.
-///
-/// **Precedence**: stable `configOptions` first (spec-blessed), then unstable
-/// `availableModels`. The fresh `session/new` response is always authoritative.
-pub fn resolve_model_switch_method(
-    session_new_result: &serde_json::Value,
-    desired_model: &str,
-) -> Option<ModelSwitchMethod> {
-    // 1. Search stable configOptions for a "model"-category entry whose
-    //    options contain a value matching desired_model.
-    for config_opt in extract_model_config_options(session_new_result) {
-        // Adapters disagree on the key: the ACP spec says `configId`, but
-        // claude-agent-acp emits `id`. Accept both; the set request always
-        // uses `configId` on the wire.
-        let config_id = match config_opt
-            .get("configId")
-            .or_else(|| config_opt.get("id"))
-            .and_then(|v| v.as_str())
-        {
-            Some(id) => id,
-            None => continue,
-        };
-        if let Some(options) = config_opt.get("options").and_then(|v| v.as_array()) {
-            for opt in options {
-                if let Some(advertised) = opt.get("value").and_then(|v| v.as_str()) {
-                    if !model_catalog_value_matches(desired_model, advertised) {
-                        continue;
-                    }
-                    return Some(ModelSwitchMethod::ConfigOption {
-                        config_id: config_id.to_string(),
-                        option_value: advertised.to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    // 2. Search unstable availableModels for a matching modelId.
-    if let Some(models) = extract_model_state(session_new_result) {
-        if let Some(available) = models.get("availableModels").and_then(|v| v.as_array()) {
-            for model in available {
-                if let Some(advertised) = model.get("modelId").and_then(|v| v.as_str()) {
-                    if !model_catalog_value_matches(desired_model, advertised) {
-                        continue;
-                    }
-                    return Some(ModelSwitchMethod::SetModel {
-                        model_id: advertised.to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    // 3. No match.
     None
 }
 

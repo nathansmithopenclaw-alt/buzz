@@ -19,6 +19,12 @@
 //!
 //! `AcpClient` is NOT Clone — ownership moves out on claim and back on return.
 
+#[path = "pool_fast_mode.rs"]
+mod fast_mode;
+use fast_mode::apply_fast_mode;
+#[cfg(test)]
+use fast_mode::resolve_fast_mode_config_option;
+
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -2343,30 +2349,24 @@ async fn apply_model_switch(
     method: &ModelSwitchMethod,
 ) -> Result<ModelSwitchOutcome, AcpError> {
     let selected_model = match method {
-        ModelSwitchMethod::ConfigOption { option_value, .. } => option_value.as_str(),
+        ModelSwitchMethod::ConfigOption { option_value, .. }
+        | ModelSwitchMethod::ConfigOptionWithEffort { option_value, .. } => option_value.as_str(),
         ModelSwitchMethod::SetModel { model_id } => model_id.as_str(),
     };
     let method_label = match method {
         ModelSwitchMethod::ConfigOption { config_id, .. } => {
             format!("configOption (configId={config_id})")
         }
+        ModelSwitchMethod::ConfigOptionWithEffort { .. } => {
+            "configOption (model + effort)".to_string()
+        }
         ModelSwitchMethod::SetModel { .. } => "set_model".to_string(),
     };
 
-    let result = tokio::time::timeout(MODEL_SWITCH_TIMEOUT, async {
-        match method {
-            ModelSwitchMethod::ConfigOption {
-                config_id,
-                option_value,
-            } => {
-                acp.session_set_config_option(session_id, config_id, option_value)
-                    .await
-            }
-            ModelSwitchMethod::SetModel { model_id } => {
-                acp.session_set_model(session_id, model_id).await
-            }
-        }
-    })
+    let result = tokio::time::timeout(
+        MODEL_SWITCH_TIMEOUT,
+        acp.apply_model_switch_method(session_id, method),
+    )
     .await;
 
     match result {
@@ -2578,79 +2578,6 @@ fn skip_unsupported_default_thinking_effort(
         }),
     );
     true
-}
-
-async fn apply_fast_mode(
-    acp: &mut AcpClient,
-    session_id: &str,
-    enabled: bool,
-    config_options: &serde_json::Value,
-) -> Result<serde_json::Value, AcpError> {
-    let (config_id, value) = resolve_fast_mode_config_option(config_options, enabled)?;
-    let response = tokio::time::timeout(
-        MODEL_SWITCH_TIMEOUT,
-        acp.session_set_config_option(session_id, config_id, value),
-    )
-    .await
-    .map_err(|_| AcpError::Timeout(MODEL_SWITCH_TIMEOUT))??;
-    tracing::info!(
-        target: "pool::fast_mode",
-        fast_mode = enabled,
-        "applied native Fast mode via configOption on session {session_id}"
-    );
-    acp.observe(
-        "fast_mode_selection_verified",
-        serde_json::json!({ "enabled": enabled, "configId": config_id }),
-    );
-    Ok(response
-        .get("configOptions")
-        .cloned()
-        .unwrap_or_else(|| config_options.clone()))
-}
-
-fn resolve_fast_mode_config_option(
-    config_options: &serde_json::Value,
-    enabled: bool,
-) -> Result<(&str, &'static str), AcpError> {
-    let option = config_options.as_array().and_then(|options| {
-        options.iter().find(|option| {
-            let id = option
-                .get("id")
-                .or_else(|| option.get("configId"))
-                .and_then(|value| value.as_str());
-            id == Some("fast")
-                || id == Some("fast-mode")
-                || (option.get("category").and_then(|value| value.as_str()) == Some("model_config")
-                    && option
-                        .get("name")
-                        .or_else(|| option.get("displayName"))
-                        .and_then(|value| value.as_str())
-                        .is_some_and(|name| name.eq_ignore_ascii_case("fast mode")))
-        })
-    });
-    let config_id = option
-        .and_then(|option| option.get("id").or_else(|| option.get("configId")))
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            AcpError::Protocol(
-                "configured Fast mode is not available for the selected model".to_string(),
-            )
-        })?;
-    let desired = if enabled { "on" } else { "off" };
-    let advertised = option
-        .and_then(|option| option.get("options"))
-        .and_then(|value| value.as_array())
-        .is_some_and(|options| {
-            options
-                .iter()
-                .any(|option| option.get("value").and_then(|value| value.as_str()) == Some(desired))
-        });
-    if !advertised {
-        return Err(AcpError::Protocol(format!(
-            "Fast mode value {desired:?} is not advertised for the selected model"
-        )));
-    }
-    Ok((config_id, desired))
 }
 
 /// Outcome of applying a worker's spawn-scoped startup effort at session creation.
@@ -12125,7 +12052,7 @@ done"#
         assert!(resolve_fast_mode_config_option(&json!([]), true)
             .unwrap_err()
             .to_string()
-            .contains("not available"));
+            .contains("did not advertise a Fast mode control"));
     }
 }
 
@@ -13094,6 +13021,72 @@ done"#
         assert_eq!(agent.desired_model.as_deref(), Some("model-b"));
         assert!(!agent.state.sessions.contains_key(&scopes[0]));
         assert!(!pool.session_owners.contains_key(&scopes[0]));
+    }
+
+    #[tokio::test]
+    async fn codex_qualified_model_preserves_fast_controls_at_session_start() {
+        let script = r#"import json,sys
+options = [
+ {"id":"model","category":"model","currentValue":"gpt-6-astra","options":[{"value":"gpt-5.6-sol"}]},
+ {"id":"reasoning-effort","category":"thought_level","currentValue":"low","options":[{"value":"medium"}]},
+ {"id":"fast-mode","category":"model_config","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}
+]
+for line in sys.stdin:
+ r=json.loads(line); method=r['method']; p=r.get('params',{})
+ if method=='session/new':
+  result={'sessionId':'sess-1','configOptions':options,'models':{'availableModels':[{'modelId':'gpt-5.6-sol[medium]'}]}}
+ elif method=='session/set_model': result={}
+ elif method=='session/set_config_option':
+  for o in options:
+   if o['id']==p['configId']: o['currentValue']=p['value']
+  result={'configOptions':options}
+ else: result={}
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
+"#;
+        let acp = AcpClient::spawn(
+            "python3",
+            &["-u".into(), "-c".into(), script.into()],
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+        let mut agent = switching_agent(acp, "gpt-5.6-sol[medium]");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.fast_mode = Some(true);
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("qualified model must retain current Fast mode controls");
+        let cap = capture(&obs);
+        for (id, value) in [
+            ("model", "gpt-5.6-sol"),
+            ("reasoning-effort", "medium"),
+            ("fast-mode", "on"),
+        ] {
+            assert!(cap["configOptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["id"] == id && o["currentValue"] == value));
+        }
+        assert!(obs
+            .snapshot()
+            .iter()
+            .any(|e| e.kind == "fast_mode_selection_verified"));
+        agent.acp.shutdown().await;
     }
 
     #[tokio::test]
