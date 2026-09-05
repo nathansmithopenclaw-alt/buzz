@@ -109,6 +109,28 @@ export function sessionCauseLabel(cause: string | null): string {
   return CAUSE_LABELS[cause] ?? cause;
 }
 
+/** Human label for a NIP-AM `basis` wire value. */
+const BASIS_LABELS: Record<string, string> = {
+  per_turn_sum: "Whole turn (all model calls)",
+  per_response: "Single model response",
+  // The wire value the backend substitutes for a turn that declared no basis.
+  // "Not declared" rather than "Unknown": what is missing is the publisher's
+  // statement of how it counted, not the counts themselves.
+  unknown: "Basis not declared",
+};
+
+/**
+ * Human label for a measurement basis.
+ *
+ * A basis this build has never heard of renders as itself. NIP-AM lets
+ * publishers add values, and collapsing one into "unknown" would claim it
+ * counts the same way as a publisher that declared nothing — the exact
+ * conflation the basis field exists to prevent.
+ */
+export function basisLabel(basis: string): string {
+  return BASIS_LABELS[basis] ?? basis;
+}
+
 /**
  * Whether a cause also names why the previous session in that scope ended.
  *

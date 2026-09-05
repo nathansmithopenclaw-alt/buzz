@@ -11,7 +11,7 @@
 //! Accounting contract (Rev 3, frozen plan + amendments A1/A2/A4/A9/A11–A13):
 //! see `docs/nips/NIP-AM.md:119-160` for the NIP itself.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +47,12 @@ const MAX_BOUNDARIES: usize = 367;
 /// Smallest boundary count that describes a real window: 2 boundaries =
 /// 1 bucket, the `1d` case.
 const MIN_BOUNDARIES: usize = 2;
+
+/// Stands in for a turn that declared no `basis`. Its own group, never pooled
+/// with a declared value: NIP-AM says an absent basis is not comparable with
+/// either known convention, so assuming it into one would be the exact error
+/// the field exists to prevent.
+const UNDECLARED_BASIS: &str = "unknown";
 
 /// Validate a request per the frozen contract + A9 (drops the 23–25h band
 /// for a `> 0 && <= 48h` sanity band) and A13 pubkey normalization.
@@ -219,6 +225,31 @@ pub struct AgentUsage {
     pub has_unknown_usage: bool,
 }
 
+/// One NIP-AM measurement basis present in the window, with the totals for
+/// exactly the turns that declared it.
+///
+/// NIP-AM forbids summing across bases, so a window that mixes them has no
+/// single combined figure — but it does have one real figure per basis, since
+/// every turn inside a group counted the same way. Emitting these is what the
+/// NIP means by "group or label by basis rather than producing a single
+/// combined figure": the consumer shows several honest totals instead of one
+/// dishonest one, and never has to show a blank.
+///
+/// Present whether or not the window is mixed. A single-basis window yields
+/// exactly one entry, equal to the combined total the same window reports.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BasisUsage {
+    /// The declared `basis` verbatim, or `"unknown"` for turns that declared
+    /// none. Unrecognized values survive as themselves: a publisher that
+    /// declared a future basis is not the same fact as one that declared
+    /// nothing, and must not be pooled with it.
+    pub basis: String,
+    pub usage: ReportedUsage,
+    pub report_count: i64,
+    pub has_unknown_usage: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Coverage {
@@ -255,6 +286,10 @@ pub struct AgentUsageSeries {
     /// a combined figure, and `agents` is ordered by identity rather than
     /// ranked by volume.
     pub bases_mixed: bool,
+    /// One entry per value in [`AgentUsageSeries::bases`], same order. Each is
+    /// a real total over a single basis, so a consumer that cannot show the
+    /// combined figure still has something true to show. See [`BasisUsage`].
+    pub basis_totals: Vec<BasisUsage>,
 }
 
 // ── Per-event field ladder (A1, A4, A11, A12) ───────────────────────────────
@@ -845,6 +880,13 @@ pub(super) fn compute_series(
         .collect();
     let mut overall_bucket_counts: Vec<i64> = vec![0; bucket_count];
 
+    // One accumulator per declared basis, fed by exactly the rows that reach
+    // every other total, so the per-basis figures and the combined ones can
+    // never describe different sets of turns. `BTreeMap` so iteration order is
+    // the basis name — deterministic, and it asserts no ranking between two
+    // quantities that are not comparable in the first place.
+    let mut by_basis: BTreeMap<String, (UsageAccumulator, i64)> = BTreeMap::new();
+
     let mut agents: HashMap<String, AgentScope> = HashMap::new();
 
     let mut first_reported_at: Option<i64> = None;
@@ -874,6 +916,16 @@ pub(super) fn compute_series(
 
         overall_buckets[bucket_idx].add(&outcome);
         overall_bucket_counts[bucket_idx] += 1;
+
+        let basis_entry = by_basis
+            .entry(
+                row.basis
+                    .clone()
+                    .unwrap_or_else(|| UNDECLARED_BASIS.to_string()),
+            )
+            .or_insert_with(|| (UsageAccumulator::default(), 0i64));
+        basis_entry.0.add(&outcome);
+        basis_entry.1 += 1;
 
         let scope = agents
             .entry(row.agent_pubkey.clone())
@@ -1064,15 +1116,25 @@ pub(super) fn compute_series(
             )
         })
         .collect();
-    // NIP-AM measurement basis. An absent basis is its own bucket: an event
-    // that never declared one is not assumable into either known value.
-    let mut bases: Vec<String> = window_rows
-        .iter()
-        .map(|r| r.basis.clone().unwrap_or_else(|| "unknown".to_string()))
-        .collect::<std::collections::BTreeSet<_>>()
+    // NIP-AM measurement basis, read off the same accumulators the totals come
+    // from. Deriving it from `window_rows` directly would let a row the loop
+    // skipped (no `reported_at`, or outside every bucket) declare a basis that
+    // blanks a combined total it never entered, and would leave `bases` naming
+    // a group `basis_totals` has no entry for.
+    let basis_totals: Vec<BasisUsage> = by_basis
         .into_iter()
+        .map(|(basis, (acc, report_count))| {
+            let has_unknown_usage = acc.has_unknown();
+            BasisUsage {
+                basis,
+                usage: acc.finish(),
+                report_count,
+                has_unknown_usage,
+            }
+        })
         .collect();
-    bases.sort();
+    // Already sorted: `BTreeMap` iterates in key order.
+    let bases: Vec<String> = basis_totals.iter().map(|b| b.basis.clone()).collect();
     let bases_mixed = bases.len() > 1;
 
     if bases_mixed {
@@ -1121,6 +1183,7 @@ pub(super) fn compute_series(
         has_archived_evidence,
         bases,
         bases_mixed,
+        basis_totals,
     }
 }
 

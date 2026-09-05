@@ -259,6 +259,29 @@ presenting a multi-publisher view MUST group or label by basis rather than
 producing a single combined figure. Unrecognized values MUST deserialize as
 absent rather than failing the payload, matching the `stopReason` rule.
 
+Withholding the combined figure is necessary but not sufficient. A consumer
+that only withholds leaves a blank where a number belongs, and a blank is read
+as zero — the same failure as "unknown is not zero" one level up. Group first,
+then withhold only what grouping cannot rescue.
+
+The reference consumer is Buzz Desktop's Agent usage panel. Its
+`get_agent_usage_series` response carries `basisTotals`: one entry per basis
+present in the window, ordered by basis name, each a real total over exactly
+the turns that declared it, with the turns that declared none as their own
+group. The panel renders one labelled total per entry. The cross-basis
+combined series is reported as unknown, never summed. Two notes on that
+implementation:
+
+- It groups on the basis string as published rather than on the typed
+  deserialization, so a value this build does not recognize forms its own
+  group instead of joining the undeclared one. That is stricter than the
+  paragraph above requires and only ever prevents an aggregate, never
+  produces one: a publisher that DID declare a future convention is not the
+  same fact as one that declared nothing.
+- Ordering is by basis name, not by volume. Ranking two groups against each
+  other would restate, as a comparison, the very claim the field exists to
+  forbid.
+
 An observed instance, given as motivation rather than normative text: on one
 24-hour fleet day two publishers with comparable turn counts (81 and 36)
 reported 124.7M and 3.4M `turn.inputTokens` respectively. Across 66 turns the

@@ -107,6 +107,26 @@ export type AgentUsage = {
   hasUnknownUsage: boolean;
 };
 
+/**
+ * Totals over exactly the turns that declared one NIP-AM measurement basis.
+ *
+ * The NIP forbids summing across bases — a `per_response` publisher reports
+ * one model call where a `per_turn_sum` publisher reports the whole turn — so
+ * a mixed window has no single combined figure. It does have one real figure
+ * per basis, which is what "group or label by basis" asks a consumer to show.
+ */
+export type AgentUsageBasisTotal = {
+  /**
+   * The declared `basis` verbatim, or `"unknown"` for turns that declared
+   * none. An unrecognized value arrives as itself: a publisher that declared
+   * a future basis is not the same fact as one that declared nothing.
+   */
+  basis: string;
+  usage: ReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
 export type AgentUsageCoverage = {
   firstArchivedAt: number | null;
   lastArchivedAt: number | null;
@@ -143,6 +163,13 @@ export type AgentUsageSeries = {
    * `agents` is ordered by identity rather than ranked by volume.
    */
   basesMixed: boolean;
+  /**
+   * One entry per value in `bases`, in the same order. What the panel renders
+   * in place of the combined figure `buckets` withholds when `basesMixed`:
+   * several honest totals rather than one meaningless one, so the operator
+   * never faces a blank where a number belongs.
+   */
+  basisTotals: AgentUsageBasisTotal[];
 };
 
 export type AgentUsageSeriesRequest = {

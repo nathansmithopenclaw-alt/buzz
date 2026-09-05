@@ -824,6 +824,7 @@ fn agent_usage_series_serializes_with_its_exact_camel_case_keys() {
         "hasArchivedEvidence",
         "bases",
         "basesMixed",
+        "basisTotals",
     ]
     .iter()
     .copied()
@@ -971,4 +972,325 @@ fn single_basis_still_totals_and_ranks() {
         series.agents[0].agent_pubkey, "agentB",
         "one basis: ranking by volume is still meaningful",
     );
+}
+
+// ── Per-basis subtotals (D-e35ea0bf) ────────────────────────────────────────
+
+/// Look up one basis group, failing with the whole set when it is missing so a
+/// regression that drops or renames a group reads as a mismatch rather than an
+/// index panic.
+fn basis_group<'a>(series: &'a AgentUsageSeries, basis: &str) -> &'a BasisUsage {
+    series
+        .basis_totals
+        .iter()
+        .find(|b| b.basis == basis)
+        .unwrap_or_else(|| {
+            panic!(
+                "no basis group {basis:?}; got {:?}",
+                series
+                    .basis_totals
+                    .iter()
+                    .map(|b| b.basis.as_str())
+                    .collect::<Vec<_>>()
+            )
+        })
+}
+
+/// `BasisUsage` must serialize to exactly the camelCase keys `tauriArchive.ts`
+/// declares. Same guard, and same reason, as the series-level contract above:
+/// a renamed key fails open in the consumer, which reads a missing field as
+/// `undefined` and renders nothing.
+#[test]
+fn basis_usage_serializes_with_its_exact_camel_case_keys() {
+    let mut r = row("e1", "agentA", "s1", 1, 100);
+    r.turn_input_tokens = Some(1);
+    r.basis = Some("per_turn_sum".to_string());
+    let series = compute_series(&[r], &[], 0, &[0, 200], None, true);
+
+    let entry = serde_json::to_value(&series.basis_totals[0]).expect("BasisUsage must serialize");
+    let keys: std::collections::BTreeSet<&str> = entry
+        .as_object()
+        .expect("must be a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+
+    let expected: std::collections::BTreeSet<&str> =
+        ["basis", "usage", "reportCount", "hasUnknownUsage"]
+            .iter()
+            .copied()
+            .collect();
+
+    assert_eq!(
+        keys, expected,
+        "BasisUsage camelCase key contract changed — update tauriArchive.ts \
+         AND tests/fixtures/agent-usage-live-series.json to match",
+    );
+}
+
+/// The lane's whole point: a window that mixes bases still reports a real
+/// total per basis, so the consumer never has to render a blank.
+///
+/// The two publishers here differ by four orders of magnitude — exactly the
+/// spread NIP-AM's motivating example describes — so a regression that pools
+/// them cannot produce either expected figure by accident.
+#[test]
+fn mixed_bases_report_a_real_subtotal_per_basis() {
+    let mut a = row("e1", "agentA", "s1", 1, 100);
+    a.turn_input_tokens = Some(50);
+    a.turn_output_tokens = Some(5);
+    a.turn_cache_read_tokens = Some(0);
+    a.turn_cache_write_tokens = Some(0);
+    a.basis = Some("per_response".to_string());
+    let mut b = row("e2", "agentB", "s2", 1, 150);
+    b.turn_input_tokens = Some(1_000_000);
+    b.turn_output_tokens = Some(1_000);
+    b.turn_cache_read_tokens = Some(0);
+    b.turn_cache_write_tokens = Some(0);
+    b.basis = Some("per_turn_sum".to_string());
+
+    let series = compute_series(&[a, b], &[], 0, &[0, 200], None, true);
+
+    assert!(series.bases_mixed);
+    // The combined figure stays unknown: ruling A, unchanged by this lane.
+    assert_eq!(series.buckets[0].usage.input_tokens.value, None);
+
+    assert_eq!(
+        series
+            .basis_totals
+            .iter()
+            .map(|b| b.basis.as_str())
+            .collect::<Vec<_>>(),
+        vec!["per_response", "per_turn_sum"],
+        "one group per basis, ordered by name — never ranked by volume",
+    );
+
+    let per_response = basis_group(&series, "per_response");
+    assert_eq!(
+        per_response.usage.input_tokens.value,
+        Some("50".to_string()),
+        "a single-basis group is a real quantity and must be reported",
+    );
+    assert_eq!(
+        per_response.usage.output_tokens.value,
+        Some("5".to_string())
+    );
+    assert_eq!(per_response.report_count, 1);
+    assert!(!per_response.usage.input_tokens.incomplete);
+
+    let per_turn_sum = basis_group(&series, "per_turn_sum");
+    assert_eq!(
+        per_turn_sum.usage.input_tokens.value,
+        Some("1000000".to_string()),
+    );
+    assert_eq!(
+        per_turn_sum.usage.output_tokens.value,
+        Some("1000".to_string()),
+    );
+    assert_eq!(per_turn_sum.report_count, 1);
+
+    // The sum of the two subtotals is deliberately NOT reported anywhere:
+    // 1000050 is the figure the mixed-basis rule exists to suppress.
+    assert!(
+        !series
+            .basis_totals
+            .iter()
+            .any(|g| g.usage.input_tokens.value.as_deref() == Some("1000050")),
+        "no group may carry the cross-basis sum",
+    );
+}
+
+/// A turn that declared no basis is its own group, with its own real total —
+/// not folded into a declared one, and not silently dropped from the split.
+#[test]
+fn undeclared_basis_is_its_own_subtotal() {
+    let mut a = row("e1", "agentA", "s1", 1, 100);
+    a.turn_input_tokens = Some(10);
+    a.basis = Some("per_turn_sum".to_string());
+    let mut b = row("e2", "agentB", "s2", 1, 150);
+    b.turn_input_tokens = Some(20);
+    b.basis = None;
+
+    let series = compute_series(&[a, b], &[], 0, &[0, 200], None, true);
+
+    assert_eq!(series.bases, vec!["per_turn_sum", "unknown"]);
+    assert_eq!(
+        basis_group(&series, "per_turn_sum")
+            .usage
+            .input_tokens
+            .value,
+        Some("10".to_string()),
+    );
+    assert_eq!(
+        basis_group(&series, "unknown").usage.input_tokens.value,
+        Some("20".to_string()),
+        "an undeclared basis has a real total of its own; it is the basis \
+         that is unknown, not the count",
+    );
+}
+
+/// A basis this build has never heard of stays its own group. NIP-AM lets
+/// publishers add values, and pooling one into `unknown` would assert the two
+/// publishers count the same way when nothing says they do.
+#[test]
+fn unrecognized_basis_is_not_pooled_with_undeclared() {
+    let mut a = row("e1", "agentA", "s1", 1, 100);
+    a.turn_input_tokens = Some(10);
+    a.basis = Some("per_subagent_future".to_string());
+    let mut b = row("e2", "agentB", "s2", 1, 150);
+    b.turn_input_tokens = Some(20);
+    b.basis = None;
+
+    let series = compute_series(&[a, b], &[], 0, &[0, 200], None, true);
+
+    assert_eq!(series.bases, vec!["per_subagent_future", "unknown"]);
+    assert_eq!(
+        basis_group(&series, "per_subagent_future")
+            .usage
+            .input_tokens
+            .value,
+        Some("10".to_string()),
+    );
+}
+
+/// With one basis the split degenerates to a single group that equals the
+/// combined total — so the panel renders the same figure either way and the
+/// section is exercised on the ordinary path, not only on the rare mixed one.
+#[test]
+fn single_basis_subtotal_equals_the_combined_total() {
+    let mut a = row("e1", "agentA", "s1", 1, 100);
+    a.turn_input_tokens = Some(10);
+    a.turn_output_tokens = Some(1);
+    a.basis = Some("per_turn_sum".to_string());
+    let mut b = row("e2", "agentB", "s2", 1, 150);
+    b.turn_input_tokens = Some(90);
+    b.turn_output_tokens = Some(9);
+    b.basis = Some("per_turn_sum".to_string());
+
+    let series = compute_series(&[a, b], &[], 0, &[0, 200], None, true);
+
+    assert!(!series.bases_mixed);
+    assert_eq!(series.basis_totals.len(), 1);
+    let group = &series.basis_totals[0];
+    assert_eq!(group.basis, "per_turn_sum");
+    assert_eq!(group.report_count, series.coverage.report_count);
+    assert_eq!(
+        group.usage, series.buckets[0].usage,
+        "one basis: the group total is the combined total",
+    );
+    assert_eq!(group.usage.input_tokens.value, Some("100".to_string()));
+}
+
+/// `bases` and `basis_totals` must describe one row set. They are derived from
+/// the same accumulators precisely so a row the loop skipped cannot name a
+/// basis that has no total behind it — and cannot flip `bases_mixed`, blanking
+/// a combined figure it never entered.
+#[test]
+fn a_row_outside_every_bucket_declares_no_basis() {
+    let mut inside = row("e1", "agentA", "s1", 1, 100);
+    inside.turn_input_tokens = Some(10);
+    inside.basis = Some("per_turn_sum".to_string());
+    // Reported well past the last boundary: counted nowhere.
+    let mut outside = row("e2", "agentB", "s2", 1, 5_000);
+    outside.turn_input_tokens = Some(999);
+    outside.basis = Some("per_response".to_string());
+
+    let series = compute_series(&[inside, outside], &[], 0, &[0, 200], None, true);
+
+    assert_eq!(series.coverage.report_count, 1, "only one row is in-window");
+    assert_eq!(
+        series.bases,
+        vec!["per_turn_sum"],
+        "a row counted nowhere must not declare a basis",
+    );
+    assert!(!series.bases_mixed);
+    assert_eq!(
+        series.buckets[0].usage.input_tokens.value,
+        Some("10".to_string()),
+        "and must not blank the combined total it never entered",
+    );
+    assert_eq!(
+        series
+            .basis_totals
+            .iter()
+            .map(|b| b.basis.clone())
+            .collect::<Vec<_>>(),
+        series.bases,
+        "basis_totals and bases name the same groups in the same order",
+    );
+}
+
+/// Every counted turn lands in exactly one group: the split partitions the
+/// window rather than sampling it.
+#[test]
+fn basis_report_counts_partition_the_window() {
+    let mut a = row("e1", "agentA", "s1", 1, 100);
+    a.basis = Some("per_response".to_string());
+    let mut b = row("e2", "agentA", "s2", 1, 110);
+    b.basis = Some("per_turn_sum".to_string());
+    let mut c = row("e3", "agentB", "s3", 1, 120);
+    c.basis = None;
+    let mut d = row("e4", "agentB", "s4", 1, 130);
+    d.basis = Some("per_turn_sum".to_string());
+
+    let series = compute_series(&[a, b, c, d], &[], 0, &[0, 200], None, true);
+
+    assert_eq!(series.coverage.report_count, 4);
+    assert_eq!(
+        series
+            .basis_totals
+            .iter()
+            .map(|g| g.report_count)
+            .sum::<i64>(),
+        series.coverage.report_count,
+        "the groups must account for every counted turn, once each",
+    );
+    assert_eq!(basis_group(&series, "per_turn_sum").report_count, 2);
+    assert_eq!(basis_group(&series, "per_response").report_count, 1);
+    assert_eq!(basis_group(&series, "unknown").report_count, 1);
+}
+
+/// Unknown is not zero inside a group either: a basis whose turns reported no
+/// cost must say so rather than publishing `0.0`.
+#[test]
+fn a_group_with_nothing_reported_is_unknown_not_zero() {
+    // Fully reported, so `has_unknown_usage` is false for a real reason and
+    // the contrast below is between a measured group and an unmeasured one
+    // rather than between two differently-incomplete ones.
+    let mut a = row("e1", "agentA", "s1", 1, 100);
+    a.turn_input_tokens = Some(10);
+    a.turn_output_tokens = Some(1);
+    a.turn_total_tokens = Some(11);
+    a.turn_cost_usd = Some(0.01);
+    a.turn_cache_read_tokens = Some(2);
+    a.turn_cache_write_tokens = Some(3);
+    a.basis = Some("per_turn_sum".to_string());
+    // No token or cost fields at all: nothing measured this turn.
+    let mut b = row("e2", "agentB", "s2", 1, 150);
+    b.basis = Some("per_response".to_string());
+
+    let series = compute_series(&[a, b], &[], 0, &[0, 200], None, true);
+
+    let empty = basis_group(&series, "per_response");
+    assert_eq!(
+        empty.usage.input_tokens.value, None,
+        "a group whose turns reported nothing must not read as zero",
+    );
+    assert!(empty.usage.input_tokens.incomplete);
+    assert!(empty.has_unknown_usage);
+    assert_eq!(empty.report_count, 1, "the turn still happened");
+
+    let known = basis_group(&series, "per_turn_sum");
+    assert_eq!(known.usage.input_tokens.value, Some("10".to_string()));
+    assert!(!known.has_unknown_usage);
+}
+
+/// An empty window has no groups — not one `"unknown"` group standing for
+/// nothing.
+#[test]
+fn an_empty_window_has_no_basis_groups() {
+    let series = compute_series(&[], &[], 0, &[0, 200], None, true);
+    assert!(series.basis_totals.is_empty());
+    assert!(series.bases.is_empty());
+    assert!(!series.bases_mixed);
 }

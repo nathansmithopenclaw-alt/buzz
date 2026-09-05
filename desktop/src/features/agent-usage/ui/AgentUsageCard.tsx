@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type {
   AgentUsage,
+  AgentUsageBasisTotal,
   AgentUsageChannel,
   ReportedUsage,
 } from "@/shared/api/tauriArchive";
@@ -17,6 +18,7 @@ import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHea
 
 import { useAgentUsageSeries } from "../hooks";
 import {
+  basisLabel,
   cacheHitRate,
   costDisplay,
   isTeardownCause,
@@ -145,6 +147,73 @@ function channelLabel(
 ): string {
   if (channel.channelId === null) return "No channel (heartbeat)";
   return nameById.get(channel.channelId) ?? channel.channelId.slice(0, 8);
+}
+
+/**
+ * Window totals, one per NIP-AM measurement basis.
+ *
+ * NIP-AM forbids summing across bases, so a window that mixes them has no
+ * single combined figure — the backend reports the combined series as unknown.
+ * It does have one real total per basis, and showing those is what the NIP
+ * means by "group or label by basis rather than producing a single combined
+ * figure". Rendering them is what keeps a blank off the screen: the operator
+ * gets several true numbers instead of one missing one.
+ *
+ * Rendered whether or not the window is mixed. With a single basis there is
+ * one group, equal to the combined total, so the ordinary path exercises the
+ * same code the mixed path does.
+ */
+function BasisTotals({
+  totals,
+  bases,
+  mixed,
+}: {
+  totals: AgentUsageBasisTotal[];
+  bases: string[];
+  mixed: boolean;
+}) {
+  if (totals.length === 0) return null;
+  return (
+    <div
+      className="mb-4 space-y-4 border-b border-border/50 pb-4"
+      data-testid="agent-usage-basis-totals"
+    >
+      <div className="space-y-1">
+        <p className="text-xs font-medium text-muted-foreground/70">
+          Totals by measurement basis
+        </p>
+        {mixed ? (
+          <p
+            className="text-xs text-muted-foreground/70"
+            data-testid="agent-usage-mixed-bases"
+          >
+            These agents count a turn in {bases.length} different ways, so there
+            is no single combined figure. Each total below covers only the turns
+            counted that way, and the per-agent figures further down are each
+            internally consistent.
+          </p>
+        ) : null}
+      </div>
+      {totals.map((group) => (
+        <div
+          className="space-y-2"
+          data-basis={group.basis}
+          data-testid="agent-usage-basis-total"
+          key={group.basis}
+        >
+          <div className="flex items-baseline justify-between gap-3">
+            <p className="truncate text-sm font-medium">
+              {basisLabel(group.basis)}
+            </p>
+            <p className="shrink-0 text-xs text-muted-foreground/70 tabular-nums">
+              {group.reportCount.toLocaleString("en-US")} turns
+            </p>
+          </div>
+          <UsageFigures usage={group.usage} />
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function AgentSection({
@@ -368,17 +437,11 @@ export function AgentUsageCard() {
           </SettingsOptionRow>
         ) : (
           <div className="px-4 py-2">
-            {series.basesMixed ? (
-              <p
-                className="mb-2 text-xs text-muted-foreground/70"
-                data-testid="agent-usage-mixed-bases"
-              >
-                These agents report on different measurement bases (
-                {series.bases.join(", ")}), so their turns are not comparable
-                and no combined total is shown. Per-agent figures below are each
-                internally consistent.
-              </p>
-            ) : null}
+            <BasisTotals
+              bases={series.bases}
+              mixed={series.basesMixed}
+              totals={series.basisTotals}
+            />
             {series.agents.map((agent) => (
               <AgentSection
                 agent={agent}

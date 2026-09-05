@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  basisLabel,
   cacheHitRate,
   costDisplay,
   formatTokenCount,
@@ -236,5 +237,26 @@ describe("peakContextSummary", () => {
       peakContextSummary({ peakContextTokens: null, contextWindow: "200000" }),
       null,
     );
+  });
+});
+
+describe("basisLabel", () => {
+  it("names each declared basis in the operator's terms", () => {
+    assert.equal(basisLabel("per_turn_sum"), "Whole turn (all model calls)");
+    assert.equal(basisLabel("per_response"), "Single model response");
+  });
+
+  it("says the basis was not declared rather than that a count is unknown", () => {
+    // The backend's sentinel for an absent `basis`. What is missing is the
+    // publisher's statement of how it counted; the counts themselves may be
+    // complete, so this must not read as "no data".
+    assert.equal(basisLabel("unknown"), "Basis not declared");
+  });
+
+  it("renders an unrecognized basis as itself", () => {
+    // NIP-AM lets publishers add values. Collapsing one into "not declared"
+    // would claim a publisher that DID state its convention counts the same
+    // way as one that stated nothing.
+    assert.equal(basisLabel("per_subagent_future"), "per_subagent_future");
   });
 });
