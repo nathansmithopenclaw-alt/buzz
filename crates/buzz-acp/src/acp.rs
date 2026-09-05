@@ -865,47 +865,9 @@ fn validate_subscription_codex_config(config: &serde_json::Value) -> Result<(), 
     Ok(())
 }
 
-fn validate_subscription_project_context(
-    harness: &str,
-    cwd: &std::path::Path,
-) -> Result<(), AcpError> {
-    for parent in cwd.ancestors() {
-        let names: &[&str] = if harness == "claude" {
-            &[".claude/settings.json", ".claude/settings.local.json"]
-        } else {
-            &[".codex/config.toml"]
-        };
-        for name in names {
-            let path = parent.join(name);
-            let meta = match std::fs::metadata(&path) {
-                Ok(meta) => meta,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => {
-                    return Err(AcpError::Protocol(format!(
-                        "Project configuration unavailable: {e}"
-                    )))
-                }
-            };
-            if !meta.is_file() || meta.len() > 1024 * 1024 {
-                return Err(AcpError::Protocol(
-                    "Project configuration is not a bounded regular file".into(),
-                ));
-            }
-            let raw = std::fs::read_to_string(path)?;
-            let value: serde_json::Value = if harness == "claude" {
-                serde_json::from_str(&raw)
-                    .map_err(|_| AcpError::Protocol("Invalid Claude project settings".into()))?
-            } else {
-                let value: toml::Value = raw
-                    .parse()
-                    .map_err(|_| AcpError::Protocol("Invalid Codex project settings".into()))?;
-                serde_json::to_value(value).map_err(|e| AcpError::Protocol(e.to_string()))?
-            };
-            validate_subscription_codex_config(&value)?;
-        }
-    }
-    Ok(())
-}
+#[path = "subscription_project.rs"]
+mod subscription_project;
+use subscription_project::validate_subscription_project_context;
 
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
