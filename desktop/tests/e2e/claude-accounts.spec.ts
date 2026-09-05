@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
@@ -188,7 +189,7 @@ test("Agents profile Runtime switches accounts without opening a DM", async ({
 
 test("token browser approval, nickname, Profile Runtime switch and feature-off renewal", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await openSettings(page, "experimental");
   await page.getByRole("switch", { name: "Subscription Accounts" }).click();
@@ -216,8 +217,9 @@ test("token browser approval, nickname, Profile Runtime switch and feature-off r
   ).toContainText("Choose Renew");
   await expect(card).toContainText("local OS notifications");
   await expect(card).not.toContainText("owner DM");
+  await waitForAnimations(page);
   await card.getByRole("article", { name: "Fleet token" }).screenshot({
-    path: "../WORK_LOGS/TOKEN_UI_2026_09_05/SETTINGS_TOKEN.png",
+    path: testInfo.outputPath("SETTINGS_TOKEN.png"),
   });
   await page.keyboard.press("Escape");
   await page.getByTestId("open-agents-view").click();
@@ -235,9 +237,9 @@ test("token browser approval, nickname, Profile Runtime switch and feature-off r
     "Expires in 29 days",
   );
   // Let the profile tab transition finish before capturing visual evidence.
-  await page.waitForTimeout(500);
+  await waitForAnimations(page);
   await page.screenshot({
-    path: "../WORK_LOGS/TOKEN_UI_2026_09_05/PROFILE_TOKEN.png",
+    path: testInfo.outputPath("PROFILE_TOKEN.png"),
   });
   expect(await commandCount(page, "open_dm")).toBe(0);
   await page.keyboard.press("Escape");
