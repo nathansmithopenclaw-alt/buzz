@@ -12,7 +12,7 @@ struct Reservation {
     pid: Option<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct ReservationHandle {
     path: PathBuf,
     token: String,
@@ -95,6 +95,14 @@ pub(super) fn create(root: &Path, id: &str, token: &str) -> Result<ReservationHa
 }
 
 impl ReservationHandle {
+    pub(super) fn owns_running_process(&self, pid: u32) -> Result<bool, String> {
+        Ok(read(&self.path)?.is_some_and(|current| {
+            current.token == self.token
+                && current.pid == Some(pid)
+                && crate::managed_agents::process_is_running(pid)
+        }))
+    }
+
     pub(super) fn attach_pid(&self, pid: u32) -> Result<(), String> {
         let current = read(&self.path)?.ok_or("Runtime reservation disappeared")?;
         if current.token != self.token {

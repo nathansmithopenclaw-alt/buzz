@@ -3,8 +3,18 @@
 Subscription Accounts is a local experiment under Settings → AI. Enable it in
 Settings → Experiments, choose a supported harness, finish that harness's browser
 login, then give the verified login a nickname. The Edit Agent selector and the
-DM header read the same account store. Selection applies to the agent in every
+profile Runtime tab and DM header read the same account store. Selection applies to the agent in every
 conversation and community on this machine.
+
+Claude login opens your default browser, which can already be signed into another
+account. Before adding a second Claude account, sign into the intended account on
+claude.ai, then start the login in Buzz and check the identity before authorizing.
+A fresh Buzz credential profile does not isolate the browser's website session.
+Claude's `--email` flag is only a login hint, not an account-selection guarantee.
+See the [provider CLI reference](https://code.claude.com/docs/en/cli-usage).
+
+While login is pending, Buzz polls for completion even when unfocused and refreshes
+when focus returns. No unrelated click is required to update the checked status.
 
 An explicit selection remains authoritative when the experiment is disabled.
 Unavailable accounts stay visible. Buzz refuses the launch instead of choosing a

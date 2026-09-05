@@ -565,108 +565,129 @@ pub fn switch_agent_subscription_account(
         subscription_accounts::account_home(&app, id)?;
     }
     let keys = super::managed_agent_runtime_keys(&runtimes, &pubkey);
-    let token = uuid::Uuid::new_v4().simple().to_string();
-    let mut held: Vec<(PathBuf, String)> = Vec::new();
-    for key in &keys {
-        if let Some(runtime) = runtimes.get(key) {
-            let outcome = runtime
-                .account_control_dir
+    let owned_lease = keys
+        .first()
+        .and_then(|key| runtimes.get(key))
+        .and_then(|runtime| {
+            runtime
+                .subscription_binding
                 .as_ref()
-                .ok_or_else(|| {
-                    "Running agent predates safe account switching; stop it first".to_string()
-                })
-                .and_then(|dir| {
-                    held.push((dir.clone(), runtime.start_nonce.clone()));
-                    control(dir, &runtime.start_nonce, &token, "quiesce")
-                });
-            if let Err(e) = outcome {
-                for (dir, nonce) in &held {
-                    let _ = control(dir, nonce, &token, "release");
+                .map(|binding| (&binding._lease, runtime.child.id()))
+        });
+    let admission = subscription_accounts::prepare_switch(
+        &app,
+        account_id.as_deref(),
+        keys.len(),
+        owned_lease,
+    )?;
+    // Admission and effects share one execution seam: a busy destination cannot
+    // quiesce a working runtime or persist a different account selection.
+    admission.execute(|| {
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let mut held: Vec<(PathBuf, String)> = Vec::new();
+        for key in &keys {
+            if let Some(runtime) = runtimes.get(key) {
+                let outcome = runtime
+                    .account_control_dir
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "Running agent predates safe account switching; stop it first".to_string()
+                    })
+                    .and_then(|dir| {
+                        held.push((dir.clone(), runtime.start_nonce.clone()));
+                        control(dir, &runtime.start_nonce, &token, "quiesce")
+                    });
+                if let Err(e) = outcome {
+                    for (dir, nonce) in &held {
+                        let _ = control(dir, nonce, &token, "release");
+                    }
+                    return Err(e);
                 }
-                return Err(e);
             }
         }
-    }
-    // Teardown precedes persist, so no old-account runtime survives a saved change.
-    for key in &keys {
-        if let Some(mut runtime) = runtimes.remove(key) {
-            if let Err(e) = super::terminate_process(runtime.child.id())
-                .and_then(|()| runtime.child.wait().map(|_| ()).map_err(|e| e.to_string()))
+        // Teardown precedes persist, so no old-account runtime survives a saved change.
+        for key in &keys {
+            if let Some(mut runtime) = runtimes.remove(key) {
+                if let Err(e) = super::terminate_process(runtime.child.id())
+                    .and_then(|()| runtime.child.wait().map(|_| ()).map_err(|e| e.to_string()))
+                {
+                    runtimes.insert(key.clone(), runtime);
+                    for (dir, nonce) in &held {
+                        let _ = control(dir, nonce, &token, "release");
+                    }
+                    return Err(e);
+                }
+                super::remove_agent_runtime_receipt(&app, key);
+                state.clear_agent_session_cache(key);
+            }
+        }
+        let record = super::find_managed_agent_mut(&mut records, &pubkey)?;
+        record.subscription_account_id = account_id.clone();
+        record.subscription_account_generation = record
+            .subscription_account_generation
+            .checked_add(1)
+            .ok_or("Subscription binding generation exhausted")?;
+        // Explicit ambient selection must override inherited legacy Claude accounts.
+        record.claude_account_id = Some(super::CREDENTIALS_FILE_ACCOUNT_ID.into());
+        record.updated_at = crate::util::now_iso();
+        record.last_error = None;
+        let generation = record.subscription_account_generation;
+        let snapshot = record.clone();
+        super::save_managed_agents(&app, &records)?;
+        drop(account_guard);
+        let owner = state
+            .keys
+            .lock()
+            .ok()
+            .map(|keys| keys.public_key().to_hex());
+        let mut result = SubscriptionSwitchResult {
+            account_id,
+            generation,
+            restarted_count: 0,
+            failed_restart_count: 0,
+            errors: Vec::new(),
+        };
+        for key in keys {
+            match super::spawn_agent_child(&app, &snapshot, &key.relay_url, true, owner.as_deref())
             {
-                runtimes.insert(key.clone(), runtime);
-                for (dir, nonce) in &held {
-                    let _ = control(dir, nonce, &token, "release");
+                Ok(mut process) => {
+                    let receipt = super::ManagedAgentRuntimeReceipt {
+                        subscription_account_id: process
+                            .subscription_binding
+                            .as_ref()
+                            .map(|b| b.account_id.clone()),
+                        subscription_account_generation: process
+                            .subscription_binding
+                            .as_ref()
+                            .map_or(0, |b| b.generation),
+                        key: key.clone(),
+                        pid: process.child.id(),
+                        desktop_instance_id: super::current_instance_id(&app),
+                        started_at: crate::util::now_iso(),
+                    };
+                    if let Err(e) = super::write_agent_runtime_receipt(&app, &receipt) {
+                        let _ = super::terminate_process(process.child.id());
+                        let _ = process.child.wait();
+                        result.failed_restart_count += 1;
+                        result.errors.push(e);
+                    } else {
+                        runtimes.insert(key, super::ManagedAgentPairRuntime::starting(process));
+                        result.restarted_count += 1;
+                    }
                 }
-                return Err(e);
-            }
-            super::remove_agent_runtime_receipt(&app, key);
-            state.clear_agent_session_cache(key);
-        }
-    }
-    record.subscription_account_id = account_id.clone();
-    record.subscription_account_generation = record
-        .subscription_account_generation
-        .checked_add(1)
-        .ok_or("Subscription binding generation exhausted")?;
-    // Explicit ambient selection must override inherited legacy Claude accounts.
-    record.claude_account_id = Some(super::CREDENTIALS_FILE_ACCOUNT_ID.into());
-    record.updated_at = crate::util::now_iso();
-    record.last_error = None;
-    let generation = record.subscription_account_generation;
-    let snapshot = record.clone();
-    super::save_managed_agents(&app, &records)?;
-    drop(account_guard);
-    let owner = state
-        .keys
-        .lock()
-        .ok()
-        .map(|keys| keys.public_key().to_hex());
-    let mut result = SubscriptionSwitchResult {
-        account_id,
-        generation,
-        restarted_count: 0,
-        failed_restart_count: 0,
-        errors: Vec::new(),
-    };
-    for key in keys {
-        match super::spawn_agent_child(&app, &snapshot, &key.relay_url, true, owner.as_deref()) {
-            Ok(mut process) => {
-                let receipt = super::ManagedAgentRuntimeReceipt {
-                    subscription_account_id: process
-                        .subscription_binding
-                        .as_ref()
-                        .map(|b| b.account_id.clone()),
-                    subscription_account_generation: process
-                        .subscription_binding
-                        .as_ref()
-                        .map_or(0, |b| b.generation),
-                    key: key.clone(),
-                    pid: process.child.id(),
-                    desktop_instance_id: super::current_instance_id(&app),
-                    started_at: crate::util::now_iso(),
-                };
-                if let Err(e) = super::write_agent_runtime_receipt(&app, &receipt) {
-                    let _ = super::terminate_process(process.child.id());
-                    let _ = process.child.wait();
+                Err(e) => {
                     result.failed_restart_count += 1;
                     result.errors.push(e);
-                } else {
-                    runtimes.insert(key, super::ManagedAgentPairRuntime::starting(process));
-                    result.restarted_count += 1;
                 }
             }
-            Err(e) => {
-                result.failed_restart_count += 1;
-                result.errors.push(e);
-            }
         }
-    }
-    if !result.errors.is_empty() {
-        let record = super::find_managed_agent_mut(&mut records, &pubkey)?;
-        record.last_error = Some(result.errors.join("; "));
-        super::save_managed_agents(&app, &records)?;
-    }
-    Ok(result)
+        if !result.errors.is_empty() {
+            let record = super::find_managed_agent_mut(&mut records, &pubkey)?;
+            record.last_error = Some(result.errors.join("; "));
+            super::save_managed_agents(&app, &records)?;
+        }
+        Ok(result)
+    })
 }
 
 pub(crate) fn ready_binding(

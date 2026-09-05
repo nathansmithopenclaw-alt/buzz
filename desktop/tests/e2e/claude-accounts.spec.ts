@@ -160,3 +160,28 @@ test("unassigned agent exposes explicit ambient choice and honest running state"
   );
   await expect(selector).toContainText("Running account not confirmed");
 });
+
+test("Agents profile Runtime switches accounts without opening a DM", async ({
+  page,
+}) => {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await waitForBridge(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByRole("button", { name: "Helm agent profile" }).click();
+  const panel = page.getByTestId("user-profile-panel");
+  await panel.getByRole("tab", { name: "Runtime" }).click();
+  const selector = panel.getByTestId(
+    `subscription-account-selector-${CLAUDE_AGENT}`,
+  );
+  const picker = selector.getByRole("combobox");
+  await expect(picker).toHaveValue("__legacy__");
+  await seedTurn(page, "turn_started");
+  await expect(picker).toBeDisabled();
+  await seedTurn(page, "turn_completed");
+  await expect(picker).toBeEnabled();
+  await picker.selectOption("");
+  await expect(picker).toHaveValue("");
+  expect(await commandCount(page, "switch_agent_subscription_account")).toBe(1);
+  expect(await commandCount(page, "open_dm")).toBe(0);
+  await expect(page.getByTestId("edit-agent-dialog")).toHaveCount(0);
+});

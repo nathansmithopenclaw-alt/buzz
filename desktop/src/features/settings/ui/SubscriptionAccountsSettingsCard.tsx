@@ -214,6 +214,11 @@ export function SubscriptionAccountsSettingsCard() {
       )}
       <div className="space-y-2">
         <p className="text-sm font-medium">Add account</p>
+        <p className="text-xs text-muted-foreground">
+          Your browser may already be signed into a provider account. To add a
+          different Claude account, sign into that account on claude.ai first,
+          then start the login here. Check the account shown before authorizing.
+        </p>
         {capabilities.isPending ? (
           <p role="status">Checking providers…</p>
         ) : capabilities.isError ? (

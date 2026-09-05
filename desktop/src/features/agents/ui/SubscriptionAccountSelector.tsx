@@ -18,7 +18,7 @@ import type { ManagedAgent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 
-/** Shared by Edit Agent and the DM header; every change applies agent-wide. */
+/** Shared by the agent profile, Edit Agent and DM header; changes apply agent-wide. */
 export function SubscriptionAccountSelector({
   agent,
   compact = false,
@@ -159,8 +159,8 @@ export function SubscriptionAccountSelector({
       </p>
       {unavailable ? (
         <p className="text-xs text-destructive">
-          Selected account unavailable. Reconnect it in Settings → AI;
-          another account will not be chosen automatically.
+          Selected account unavailable. Reconnect it in Settings → AI; another
+          account will not be chosen automatically.
         </p>
       ) : null}
       {legacy ? (
