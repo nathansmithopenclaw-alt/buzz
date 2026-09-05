@@ -306,3 +306,54 @@ fn renewal_never_overwrites_a_newer_selection_or_mint() {
     }
     assert!(!renewal_still_selected(Some("a"), "a", Some(11), 10));
 }
+
+#[test]
+fn selected_codex_account_preserves_mcp_working_directory() {
+    for cwd in [".", "../tools", "/absolute/tools"] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("account");
+        let launch_dir = root.path().join("work");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&launch_dir).unwrap();
+        std::fs::write(
+            source.join("config.toml"),
+            format!("[mcp_servers.computer-use]\ncommand = '/bin/true'\ncwd = '{cwd}'\n"),
+        )
+        .unwrap();
+        let mut command = Command::new("/bin/true");
+        command
+            .env_clear()
+            .env("CODEX_HOME", &source)
+            .current_dir(&launch_dir);
+        apply_subscription_env(&mut command, "codex", &target).unwrap();
+        assert_eq!(command.get_current_dir(), Some(launch_dir.as_path()));
+        let config: toml::Table = std::fs::read_to_string(target.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            config["mcp_servers"]["computer-use"]["cwd"].as_str(),
+            Some(cwd)
+        );
+        assert_eq!(config["forced_login_method"].as_str(), Some("chatgpt"));
+        assert_eq!(config["cli_auth_credentials_store"].as_str(), Some("file"));
+    }
+}
+
+#[test]
+fn mcp_cwd_exception_does_not_accept_other_ambiguous_paths() {
+    for raw in [
+        "cwd = '.'",
+        "[other.server]\ncwd = '.'",
+        "[mcp_servers.test]\npath = '.'",
+        "[mcp_servers.test.env]\ncwd = '.'",
+    ] {
+        let mut config: toml::Table = raw.parse().unwrap();
+        assert!(
+            normalize_config_paths(&mut config, Path::new("/source")).is_err(),
+            "{raw}"
+        );
+    }
+}

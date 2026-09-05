@@ -300,22 +300,57 @@ fn validate_codex_project_config(cwd: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 fn normalize_config_paths(table: &mut toml::Table, source: &Path) -> Result<(), String> {
+    normalize_config_table_paths(table, source, &[])
+}
+
+fn normalize_config_table_paths(
+    table: &mut toml::Table,
+    source: &Path,
+    scope: &[&str],
+) -> Result<(), String> {
     for (key, value) in table {
+        let mut child_scope = scope.to_vec();
+        child_scope.push(key.as_str());
         match value {
-   toml::Value::Table(child)=>normalize_config_paths(child,source)?,
-   toml::Value::String(path) if key.ends_with("_file")||key.ends_with("_dir")||key.ends_with("_path")||key=="model_catalog_json"=>{
-    if path.starts_with('~') {return Err("Codex configuration path uses shell expansion; use an absolute path before selecting an account".into())}
-    if !path.is_empty()&&!Path::new(path).is_absolute(){*path=source.join(&*path).to_string_lossy().into_owned();}
-   },
-   // An ambiguous relative path may control tools or permissions. Fail rather
-   // than silently reinterpret it from a different configuration directory.
-   toml::Value::String(path) if (key=="path"||key=="cwd") && !path.is_empty()&&!Path::new(path).is_absolute()=>return Err("Codex configuration contains an unsupported relative path; use an absolute path before selecting an account".into()),
-   toml::Value::Array(values)=>for value in values {if let toml::Value::Table(child)=value {normalize_config_paths(child,source)?;}},
-   _=>{},
-  }
+            toml::Value::Table(child) => normalize_config_table_paths(child, source, &child_scope)?,
+            // MCP cwd is passed to process launch, not resolved against CODEX_HOME.
+            // Account selection preserves the launch directory, so preserve this
+            // value too. Rebasing it onto either config home would change behavior.
+            toml::Value::String(_)
+                if key == "cwd" && scope.len() == 2 && scope[0] == "mcp_servers" => {}
+            toml::Value::String(path)
+                if key.ends_with("_file")
+                    || key.ends_with("_dir")
+                    || key.ends_with("_path")
+                    || key == "model_catalog_json" =>
+            {
+                if path.starts_with('~') {
+                    return Err("Codex configuration path uses shell expansion; use an absolute path before selecting an account".into());
+                }
+                if !path.is_empty() && !Path::new(path).is_absolute() {
+                    *path = source.join(&*path).to_string_lossy().into_owned();
+                }
+            }
+            toml::Value::String(path)
+                if (key == "path" || key == "cwd")
+                    && !path.is_empty()
+                    && !Path::new(path).is_absolute() =>
+            {
+                return Err("Codex configuration contains an unsupported relative path; use an absolute path before selecting an account".into());
+            }
+            toml::Value::Array(values) => {
+                for value in values {
+                    if let toml::Value::Table(child) = value {
+                        normalize_config_table_paths(child, source, &child_scope)?;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
+
 fn compose_codex_config(
     source: &Path,
     destination: &Path,
