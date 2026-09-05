@@ -1,6 +1,6 @@
 use super::*;
 
-fn registry() -> (tempfile::TempDir, PathBuf, String) {
+pub(super) fn registry() -> (tempfile::TempDir, PathBuf, String) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("accounts");
     store::private_dir(&root, true).unwrap();
@@ -8,6 +8,9 @@ fn registry() -> (tempfile::TempDir, PathBuf, String) {
     store::private_dir(&root.join(&id), true).unwrap();
     let account = SubscriptionAccount {
         id: id.clone(),
+        kind: login_kind(),
+        minted_at: None,
+        expires_at: None,
         provider: "anthropic".into(),
         harness: "claude".into(),
         nickname: Some("Work".into()),

@@ -1,9 +1,13 @@
 //! Local subscription accounts. The harness owns all provider credentials.
 mod adapters;
 mod process;
+pub(crate) mod reminders;
 mod reservation;
 mod store;
 mod switch_admission;
+mod token_process;
+pub(crate) mod tokens;
+pub(crate) use tokens::read_token;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,6 +27,12 @@ pub(crate) use switch_admission::prepare_switch;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SubscriptionAccount {
     pub id: String,
+    #[serde(default = "login_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub minted_at: Option<i64>,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
     pub provider: String,
     pub harness: String,
     pub nickname: Option<String>,
@@ -34,6 +44,10 @@ pub(crate) struct SubscriptionAccount {
     pub attempt_started_at: Option<i64>,
     #[serde(default)]
     pub logout_completed: bool,
+}
+
+fn login_kind() -> String {
+    "login".into()
 }
 
 /// Serializes account lifecycle with spawn and saved binding changes.
@@ -247,7 +261,7 @@ pub(crate) fn mark_needs_login(app: &AppHandle, id: &str) -> Result<(), String> 
     let account = store::account_mut(&mut registry, id)?;
     if account.state == "ready" {
         account.state = "needs_login".into();
-        account.last_error = Some("Provider authentication expired; stop the agent and reconnect, then resume its pending work".into());
+        account.last_error = Some(if account.kind == "token" { "Token authentication expired; renew the account in Settings, then resume pending work" } else { "Provider authentication expired; stop the agent and reconnect, then resume its pending work" }.into());
         store::save(&root, &registry)?;
     }
     Ok(())
@@ -361,6 +375,9 @@ fn begin_account_login(
     ensure_no_live_receipts(&app, &id)?;
     let home = if registry.accounts.iter().any(|account| account.id == id) {
         let account = store::account_mut(&mut registry, &id)?;
+        if account.kind != "login" {
+            return Err("Use Renew for a long-lived token account".into());
+        }
         if account.harness != harness {
             return Err("Reconnect must use the original harness".into());
         }
@@ -392,6 +409,9 @@ fn begin_account_login(
         store::private_dir(&home, true)?;
         registry.accounts.push(SubscriptionAccount {
             id: id.clone(),
+            kind: login_kind(),
+            minted_at: None,
+            expires_at: None,
             provider: provider.into(),
             harness: harness.clone(),
             nickname: None,
@@ -538,7 +558,7 @@ pub(crate) async fn remove_subscription_account(id: String, app: AppHandle) -> R
 }
 
 fn remove_account(id: &str, app: &AppHandle) -> Result<(), String> {
-    let (root, home, harness, logout_completed) = {
+    let (root, home, harness, logout_completed, token_kind) = {
         let state = app.state::<crate::app_state::AppState>();
         let _store = state
             .managed_agents_store_lock
@@ -576,6 +596,7 @@ fn remove_account(id: &str, app: &AppHandle) -> Result<(), String> {
             );
         }
         let harness = account.harness.clone();
+        let token_kind = account.kind == "token";
         let logout_completed = account.logout_completed;
         let home = if logout_completed && !root.join(id).exists() {
             root.join(id)
@@ -584,9 +605,9 @@ fn remove_account(id: &str, app: &AppHandle) -> Result<(), String> {
         };
         start_removal(account)?;
         store::save(&root, &registry)?;
-        (root, home, harness, logout_completed)
+        (root, home, harness, logout_completed, token_kind)
     };
-    let result = if logout_completed {
+    let result = if logout_completed || token_kind {
         Ok(())
     } else {
         crate::managed_agents::resolve_command(&harness)

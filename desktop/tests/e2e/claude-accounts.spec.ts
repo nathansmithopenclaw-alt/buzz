@@ -185,3 +185,83 @@ test("Agents profile Runtime switches accounts without opening a DM", async ({
   expect(await commandCount(page, "open_dm")).toBe(0);
   await expect(page.getByTestId("edit-agent-dialog")).toHaveCount(0);
 });
+
+test("token browser approval, nickname, Profile Runtime switch and feature-off renewal", async ({
+  page,
+}) => {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await openSettings(page, "experimental");
+  await page.getByRole("switch", { name: "Subscription Accounts" }).click();
+  await page.getByTestId("settings-nav-agents").click();
+  const card = page.getByTestId("settings-subscription-accounts");
+  await card
+    .getByRole("button", { name: "Add Claude long-lived token" })
+    .click();
+  await expect(card).toContainText("Waiting for browser approval");
+  await expect(card.getByRole("textbox")).toHaveCount(0);
+  const mintedAt = Math.floor(Date.now() / 1000) - 336 * 86400;
+  await page.evaluate((minted) => {
+    window.__BUZZ_E2E_COMPLETE_SUBSCRIPTION_TOKEN__?.(
+      "mock-subscription-1",
+      minted,
+    );
+  }, mintedAt);
+  await card.getByRole("textbox", { name: /Nickname/ }).fill("Fleet token");
+  await card.getByRole("button", { name: "Save nickname" }).click();
+  await expect(
+    card.getByRole("article", { name: "Fleet token" }),
+  ).toContainText("Expires in 29 days");
+  await expect(
+    card.getByTestId("token-renewal-notice-mock-subscription-1"),
+  ).toContainText("Choose Renew");
+  await expect(card).toContainText("local OS notifications");
+  await expect(card).not.toContainText("owner DM");
+  await card.getByRole("article", { name: "Fleet token" }).screenshot({
+    path: "../WORK_LOGS/TOKEN_UI_2026_09_05/SETTINGS_TOKEN.png",
+  });
+  await page.keyboard.press("Escape");
+  await page.getByTestId("open-agents-view").click();
+  await page.getByRole("button", { name: "Helm agent profile" }).click();
+  const panel = page.getByTestId("user-profile-panel");
+  await panel.getByRole("tab", { name: "Runtime" }).click();
+  const selector = panel.getByTestId(
+    `subscription-account-selector-${CLAUDE_AGENT}`,
+  );
+  await selector.getByRole("combobox").selectOption("mock-subscription-1");
+  await expect(selector.getByRole("combobox")).toHaveValue(
+    "mock-subscription-1",
+  );
+  await expect(selector.getByTestId("selected-token-expiry")).toHaveText(
+    "Expires in 29 days",
+  );
+  // Let the profile tab transition finish before capturing visual evidence.
+  await page.waitForTimeout(500);
+  await page.screenshot({
+    path: "../WORK_LOGS/TOKEN_UI_2026_09_05/PROFILE_TOKEN.png",
+  });
+  expect(await commandCount(page, "open_dm")).toBe(0);
+  await page.keyboard.press("Escape");
+  await openSettings(page, "experimental");
+  await page.getByRole("switch", { name: "Subscription Accounts" }).click();
+  await page.getByTestId("settings-nav-agents").click();
+  await expect(
+    card.getByRole("button", { name: "Add Claude long-lived token" }),
+  ).toBeDisabled();
+  await card.getByRole("button", { name: "Renew" }).click();
+  await expect(card).toContainText("Waiting for browser approval");
+  await page.evaluate((minted) => {
+    window.__BUZZ_E2E_COMPLETE_SUBSCRIPTION_TOKEN__?.(
+      "mock-subscription-1",
+      minted + 336 * 86400,
+    );
+  }, mintedAt);
+  await expect(
+    card.getByRole("article", { name: "Fleet token" }),
+  ).toContainText("Expires in 365 days");
+  await expect(
+    card.getByTestId("token-renewal-notice-mock-subscription-1"),
+  ).toHaveCount(0);
+  expect(await commandCount(page, "begin_subscription_account_token")).toBe(2);
+  expect(await commandCount(page, "begin_subscription_account_login")).toBe(0);
+  expect(await commandCount(page, "switch_agent_subscription_account")).toBe(1);
+});

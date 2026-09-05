@@ -261,3 +261,48 @@ fn control_response_never_follows_symlinks_or_reads_oversized_files() {
         Some("{}")
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn token_binding_replaces_caller_credentials_and_refuses_unreadable_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let account = root.path().join("account");
+    let config = root.path().join("config");
+    std::fs::create_dir(&account).unwrap();
+    std::fs::create_dir(&config).unwrap();
+    std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let token = format!("sk-ant-oat01-{}", "x".repeat(95));
+    let path = account.join("oauth-token");
+    std::fs::write(&path, &token).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut command = Command::new("/bin/sh");
+    command
+        .env_clear()
+        .current_dir(root.path())
+        .env("CLAUDE_CONFIG_DIR", &config)
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "caller")
+        .env("ANTHROPIC_API_KEY", "caller");
+    apply_token_env(&mut command, &account).unwrap();
+    assert!(command
+        .get_envs()
+        .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN"
+            && value == Some(std::ffi::OsStr::new(&token))));
+    assert!(!command
+        .get_envs()
+        .any(|(key, value)| key == "ANTHROPIC_API_KEY" && value.is_some()));
+    assert!(!command
+        .get_envs()
+        .any(|(key, value)| key == "CLAUDE_SECURESTORAGE_CONFIG_DIR" && value.is_some()));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(apply_token_env(&mut command, &account).is_err());
+}
+
+#[test]
+fn renewal_never_overwrites_a_newer_selection_or_mint() {
+    assert!(renewal_still_selected(Some("a"), "a", Some(10), 10));
+    for selected in [None, Some("b")] {
+        assert!(!renewal_still_selected(selected, "a", Some(10), 10));
+    }
+    assert!(!renewal_still_selected(Some("a"), "a", Some(11), 10));
+}

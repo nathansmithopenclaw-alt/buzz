@@ -1,4 +1,5 @@
 import {
+  completeMockSubscriptionToken,
   mockSubscriptionAccountCommand,
   resetMockSubscriptionAccounts,
 } from "./e2eSubscriptionAccounts";
@@ -1507,6 +1508,10 @@ declare global {
       agentPubkey: string;
       payload: unknown;
     }>;
+    __BUZZ_E2E_COMPLETE_SUBSCRIPTION_TOKEN__?: (
+      accountId: string,
+      mintedAt: number,
+    ) => void;
     __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
       agentPubkey: string;
       channelId: string;
@@ -12139,6 +12144,7 @@ export function maybeInstallE2eTauriMocks() {
         ...mesh.servingUsage,
       };
   };
+  window.__BUZZ_E2E_COMPLETE_SUBSCRIPTION_TOKEN__ = completeMockSubscriptionToken;
   let seedTurnSeq = Date.now();
   window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ = ({
     agentPubkey,
@@ -14649,6 +14655,7 @@ export function maybeInstallE2eTauriMocks() {
       case "set_subscription_accounts_enabled":
       case "subscription_account_capabilities":
       case "list_subscription_accounts":
+      case "begin_subscription_account_token":
       case "begin_subscription_account_login":
       case "cancel_subscription_account_login":
       case "rename_subscription_account":

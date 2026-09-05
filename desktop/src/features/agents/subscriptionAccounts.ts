@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   getSubscriptionAccountsEnabled,
@@ -44,4 +45,19 @@ export function useSubscriptionAccountsEnabledQuery() {
     queryFn: getSubscriptionAccountsEnabled,
     staleTime: 0,
   });
+}
+
+/** Keep visible expiry trackers current while a settings/profile panel stays open. */
+export function useSubscriptionAccountClock() {
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    const update = () => setNow(Date.now() / 1000);
+    const interval = setInterval(update, 1000);
+    window.addEventListener("focus", update);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", update);
+    };
+  }, []);
+  return now;
 }

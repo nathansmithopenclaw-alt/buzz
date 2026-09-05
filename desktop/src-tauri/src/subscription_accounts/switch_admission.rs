@@ -48,6 +48,10 @@ pub(crate) fn prepare_switch(
     runtime_count: usize,
     owned_lease: Option<(&SubscriptionLease, u32)>,
 ) -> Result<SwitchAdmission, String> {
+    let id = match id {
+        Some(id) if super::load_account(app, id)?.kind == "token" => None,
+        other => other,
+    };
     Ok(SwitchAdmission {
         // Ambient is the recovery path even if account storage is unavailable.
         root: id

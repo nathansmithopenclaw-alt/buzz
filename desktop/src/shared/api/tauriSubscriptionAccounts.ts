@@ -3,6 +3,9 @@ import { invokeTauri } from "./tauri";
 /** Local metadata only; credentials and authorization URLs never cross IPC. */
 export type SubscriptionAccount = {
   id: string;
+  kind?: "login" | "token";
+  minted_at?: number | null;
+  expires_at?: number | null;
   provider: "anthropic" | "openai" | "xai";
   harness: "claude" | "codex" | "grok";
   nickname: string | null;
@@ -21,6 +24,7 @@ export type SubscriptionAccountCapability = {
   provider: SubscriptionAccount["provider"];
   harness: SubscriptionAccount["harness"];
   supported: boolean;
+  token_supported?: boolean;
   reason: string | null;
 };
 
@@ -36,6 +40,13 @@ export const beginSubscriptionAccountLogin = (
 ) =>
   invokeTauri<SubscriptionAccount>("begin_subscription_account_login", {
     harness,
+    accountId,
+  });
+/** Mint or renew locally; only lifecycle metadata is returned to the UI. */
+export const beginSubscriptionAccountToken = (
+  accountId: string | null = null,
+) =>
+  invokeTauri<SubscriptionAccount>("begin_subscription_account_token", {
     accountId,
   });
 export const cancelSubscriptionAccountLogin = (id: string) =>

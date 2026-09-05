@@ -1019,8 +1019,11 @@ pub fn spawn_agent_child(
         )
     })?;
 
-    if let Some(binding) = subscription_binding.as_mut() {
-        if let Err(error) = binding._lease.attach_pid(child.id()) {
+    if let Some(lease) = subscription_binding
+        .as_mut()
+        .and_then(|binding| binding._lease.as_mut())
+    {
+        if let Err(error) = lease.attach_pid(child.id()) {
             // The reservation was durable before spawn. If stamping its PID
             // fails, terminate this exact child; unresolved cleanup keeps the
             // reservation busy rather than admitting another account consumer.

@@ -355,6 +355,8 @@ pub fn run() {
                 tauri::async_runtime::spawn(crate::mesh_llm::start_coordinator(app_handle.clone()));
             }
 
+            subscription_accounts::reminders::start(app_handle.clone());
+
             // Start the localhost media streaming proxy. Uses the shared HTTP
             // client so VPN tunnelling applies. The port is stored in AppState
             // and exposed to the frontend via the `get_media_proxy_port` command.
@@ -745,6 +747,7 @@ pub fn run() {
             subscription_accounts::get_subscription_accounts_enabled,
             subscription_accounts::set_subscription_accounts_enabled,
             subscription_accounts::begin_subscription_account_login,
+            subscription_accounts::tokens::begin_subscription_account_token,
             subscription_accounts::cancel_subscription_account_login,
             subscription_accounts::rename_subscription_account,
             subscription_accounts::remove_subscription_account,

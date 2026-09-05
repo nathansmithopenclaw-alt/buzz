@@ -62,6 +62,7 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 dirs = "6"
+zeroize = { workspace = true }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

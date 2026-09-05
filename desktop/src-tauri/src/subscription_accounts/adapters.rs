@@ -15,14 +15,15 @@ pub(crate) struct SubscriptionAccountCapability {
     pub provider: &'static str,
     pub harness: &'static str,
     pub supported: bool,
+    pub token_supported: bool,
     pub reason: Option<&'static str>,
 }
 
 pub(super) fn capabilities() -> Vec<SubscriptionAccountCapability> {
     vec![
-        SubscriptionAccountCapability { provider: "anthropic", harness: "claude", supported: cfg!(target_os = "macos"), reason: if cfg!(target_os = "macos") { None } else { Some("Credential-only isolation currently requires macOS Keychain") } },
-        SubscriptionAccountCapability { provider: "openai", harness: "codex", supported: cfg!(unix), reason: if cfg!(unix) { None } else { Some("Login process containment is not implemented on this platform") } },
-        SubscriptionAccountCapability { provider: "xai", harness: "grok", supported: false, reason: Some("Grok 1.0.13 exposes login/logout but no documented subscription status check; configuration preservation also needs validation") },
+        SubscriptionAccountCapability { provider: "anthropic", harness: "claude", supported: cfg!(target_os = "macos"), token_supported: cfg!(unix), reason: if cfg!(target_os = "macos") { None } else { Some("Credential-only isolation currently requires macOS Keychain") } },
+        SubscriptionAccountCapability { provider: "openai", harness: "codex", supported: cfg!(unix), token_supported: false, reason: if cfg!(unix) { None } else { Some("Login process containment is not implemented on this platform") } },
+        SubscriptionAccountCapability { provider: "xai", harness: "grok", supported: false, token_supported: false, reason: Some("Grok 1.0.13 exposes login/logout but no documented subscription status check; configuration preservation also needs validation") },
     ]
 }
 
@@ -42,7 +43,7 @@ pub(super) fn provider(harness: &str) -> Result<&'static str, String> {
 
 /// Authentication commands run with a small environment, so login cannot
 /// silently select an inherited API key, cloud provider, or ambient OAuth token.
-fn isolated_command(
+pub(super) fn isolated_command(
     executable: &Path,
     harness: &str,
     home: &Path,

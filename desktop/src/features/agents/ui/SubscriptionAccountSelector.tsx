@@ -1,3 +1,4 @@
+import { subscriptionAccountExpiry } from "@/features/agents/subscriptionAccountExpiry";
 import * as React from "react";
 import {
   useIsMutating,
@@ -9,6 +10,7 @@ import {
   subscriptionAccountsQueryKey,
   useSubscriptionAccountsEnabledQuery,
   useSubscriptionAccountsQuery,
+  useSubscriptionAccountClock,
 } from "@/features/agents/subscriptionAccounts";
 import {
   resumeAgentSubscriptionWork,
@@ -27,6 +29,7 @@ export function SubscriptionAccountSelector({
   compact?: boolean;
 }) {
   const accounts = useSubscriptionAccountsQuery();
+  const now = useSubscriptionAccountClock();
   const enabled = useSubscriptionAccountsEnabledQuery();
   const client = useQueryClient();
   const switching =
@@ -48,6 +51,7 @@ export function SubscriptionAccountSelector({
   const selectedAccount = accounts.data?.find(
     (account) => account.id === selected,
   );
+  const expiry = subscriptionAccountExpiry(selectedAccount, now);
   const selectedValue = selected ?? (legacy ? "__legacy__" : "");
   const runningKnown = agent.runningSubscriptionAccountGeneration != null;
   const running = accounts.data?.find(
@@ -77,7 +81,8 @@ export function SubscriptionAccountSelector({
     return null;
   const unavailable =
     selected !== null &&
-    (selectedAccount?.state !== "ready" ||
+    (expiry?.expired ||
+      selectedAccount?.state !== "ready" ||
       !selectedAccount.nickname ||
       selectedAccount.harness !== agent.subscriptionAccountHarness);
   const busy = working || switching || resume.isPending;
@@ -128,6 +133,7 @@ export function SubscriptionAccountSelector({
               key={account.id}
               value={account.id}
               disabled={
+                subscriptionAccountExpiry(account, now)?.expired ||
                 !enabled.data ||
                 account.state !== "ready" ||
                 !account.nickname ||
@@ -135,6 +141,9 @@ export function SubscriptionAccountSelector({
               }
             >
               {account.nickname ?? "Unnamed account"}
+              {subscriptionAccountExpiry(account, now)
+                ? ` — ${subscriptionAccountExpiry(account, now)?.label}`
+                : ""}
               {account.state !== "ready"
                 ? ` — ${account.state.replaceAll("_", " ")}`
                 : ""}
@@ -157,10 +166,16 @@ export function SubscriptionAccountSelector({
             ? `Running: ${agent.runningSubscriptionAccountId ? (running?.nickname ?? "Unavailable account") : "Ambient — harness’s current login"}`
             : "Running account not confirmed."}
       </p>
+      {expiry ? (
+        <p className="text-xs" data-testid="selected-token-expiry">
+          {expiry.label}
+        </p>
+      ) : null}
       {unavailable ? (
         <p className="text-xs text-destructive">
-          Selected account unavailable. Reconnect it in Settings → AI; another
-          account will not be chosen automatically.
+          Selected account unavailable.{" "}
+          {selectedAccount?.kind === "token" ? "Renew" : "Reconnect"} it in
+          Settings → AI; another account will not be chosen automatically.
         </p>
       ) : null}
       {legacy ? (
@@ -193,8 +208,9 @@ export function SubscriptionAccountSelector({
       {authHeld ? (
         <div className="space-y-2 text-xs">
           <p>
-            Authentication paused this agent. Stop the agent, reconnect in
-            Settings → AI, then start it and resume retained work.
+            {selectedAccount?.kind === "token"
+              ? "Authentication paused this agent. Renew in Settings → AI, then resume retained work."
+              : "Authentication paused this agent. Stop the agent, reconnect in Settings → AI, then start it and resume retained work."}
           </p>
           <Button
             size="sm"

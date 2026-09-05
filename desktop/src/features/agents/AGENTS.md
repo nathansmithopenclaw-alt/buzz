@@ -415,3 +415,7 @@ matches the code is worse than no rule; a new pattern that isn't written down
 here will be broken by the next agent that never learns it existed. Reviewers:
 treat a config-behavior diff without a matching AGENTS.md diff (or an explicit
 "no rules changed" note) as incomplete.
+
+## Fork-local Subscription Account tokens
+
+Token creation availability comes from Rust `token_supported`; components never infer it from a harness id. Token material does not cross IPC. `kind`, `minted_at`, and `expires_at` are non-secret account metadata; timestamps are UNIX seconds. The shared expiry projection rounds positive partial days up and shows Expired at zero without erasing the selected account. Settings AI owns mint, nickname and renewal; the shared selector remains in Agents Profile Runtime, Edit Agent and the DM header. Renewal is available when the creation experiment is disabled. Login accounts retain exclusive runtime admission; token accounts do not acquire a lease or reservation. See `docs/subscription-token-accounts.md` for the local storage and acceptance boundary.

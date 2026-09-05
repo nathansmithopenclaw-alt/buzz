@@ -14,7 +14,7 @@ use tauri::{AppHandle, Manager};
 pub struct RuntimeBinding {
     pub account_id: String,
     pub generation: u64,
-    pub(crate) _lease: subscription_accounts::SubscriptionLease,
+    pub(crate) _lease: Option<subscription_accounts::SubscriptionLease>,
 }
 
 pub(crate) fn account_harness(runtime_id: Option<&str>) -> Option<&'static str> {
@@ -36,6 +36,7 @@ pub(crate) fn configure(
 ) -> Result<Option<RuntimeBinding>, String> {
     // Do not inherit a binding from Desktop's own launch environment.
     for name in [
+        "BUZZ_ACP_SUBSCRIPTION_KIND",
         "BUZZ_ACP_SUBSCRIPTION_ACCOUNT_ID",
         "BUZZ_ACP_SUBSCRIPTION_ACCOUNT_GENERATION",
         "BUZZ_ACP_SUBSCRIPTION_HARNESS",
@@ -64,19 +65,39 @@ pub(crate) fn configure(
     let _guard = subscription_accounts::lifecycle_lock()
         .lock()
         .map_err(|e| e.to_string())?;
-    let lease = subscription_accounts::acquire_runtime_lease(app, id, harness)?;
+    let account = subscription_accounts::load_account(app, id)?;
     let home = subscription_accounts::account_home(app, id)?;
-    apply_subscription_env(command, harness, &home)?;
+    let lease = if account.kind == "token" {
+        if harness != "claude"
+            || account.harness != harness
+            || account.state != "ready"
+            || account.nickname.is_none()
+        {
+            return Err("Token account is not ready; renew it in Settings".into());
+        }
+        if account
+            .expires_at
+            .is_none_or(|at| at <= chrono::Utc::now().timestamp())
+        {
+            return Err("Token account has expired; renew it in Settings".into());
+        }
+        apply_token_env(command, &home)?;
+        None
+    } else {
+        let lease = subscription_accounts::acquire_runtime_lease(app, id, harness)?;
+        apply_subscription_env(command, harness, &home)?;
+        command.env("BUZZ_ACP_AGENTS", "1");
+        Some(lease)
+    };
     command
         .env("BUZZ_ACP_SUBSCRIPTION_ACCOUNT_ID", id)
         .env(
             "BUZZ_ACP_SUBSCRIPTION_ACCOUNT_GENERATION",
             record.subscription_account_generation.to_string(),
         )
+        .env("BUZZ_ACP_SUBSCRIPTION_KIND", &account.kind)
         .env("BUZZ_ACP_SUBSCRIPTION_HARNESS", harness)
-        .env("BUZZ_ACP_SUBSCRIPTION_HOME", &home)
-        // One live adapter process, including the broker's internal pool.
-        .env("BUZZ_ACP_AGENTS", "1");
+        .env("BUZZ_ACP_SUBSCRIPTION_HOME", &home);
     Ok(Some(RuntimeBinding {
         account_id: id.into(),
         generation: record.subscription_account_generation,
@@ -159,6 +180,13 @@ fn apply_subscription_env(command: &mut Command, harness: &str, home: &Path) -> 
     for name in AUTH_ENV {
         command.env_remove(name);
     }
+    Ok(())
+}
+fn apply_token_env(command: &mut Command, home: &Path) -> Result<(), String> {
+    apply_subscription_env(command, "claude", home)?;
+    command.env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR");
+    let token = subscription_accounts::read_token(home)?;
+    command.env("CLAUDE_CODE_OAUTH_TOKEN", token.as_str());
     Ok(())
 }
 fn validate_claude_config(home: &Path, cwd: Option<&Path>) -> Result<(), String> {
@@ -519,6 +547,34 @@ pub fn switch_agent_subscription_account(
     account_id: Option<String>,
     app: AppHandle,
 ) -> Result<SubscriptionSwitchResult, String> {
+    switch_account(pubkey, account_id, app, None)
+}
+
+/// Renewal may only restart bindings that still select this mint's account.
+pub(crate) fn restart_agent_token_account(
+    pubkey: String,
+    id: String,
+    minted: i64,
+    app: AppHandle,
+) -> Result<SubscriptionSwitchResult, String> {
+    switch_account(pubkey, Some(id.clone()), app, Some((id, minted)))
+}
+
+fn renewal_still_selected(
+    selected: Option<&str>,
+    expected: &str,
+    current_mint: Option<i64>,
+    expected_mint: i64,
+) -> bool {
+    selected == Some(expected) && current_mint == Some(expected_mint)
+}
+
+fn switch_account(
+    pubkey: String,
+    account_id: Option<String>,
+    app: AppHandle,
+    expected: Option<(String, i64)>,
+) -> Result<SubscriptionSwitchResult, String> {
     let state = app.state::<AppState>();
     super::require_fleet_host(&state)?;
     let _transition = state
@@ -544,6 +600,22 @@ pub fn switch_agent_subscription_account(
     let account_guard = subscription_accounts::lifecycle_lock()
         .lock()
         .map_err(|e| e.to_string())?;
+    if let Some((id, minted)) = expected.as_ref() {
+        if !renewal_still_selected(
+            record.subscription_account_id.as_deref(),
+            id,
+            subscription_accounts::load_account(&app, id)?.minted_at,
+            *minted,
+        ) {
+            return Ok(SubscriptionSwitchResult {
+                account_id: record.subscription_account_id.clone(),
+                generation: record.subscription_account_generation,
+                restarted_count: 0,
+                failed_restart_count: 0,
+                errors: Vec::new(),
+            });
+        }
+    }
     if let Some(id) = account_id.as_deref() {
         if !subscription_accounts::accounts_enabled(&app)?
             && record.subscription_account_id.as_deref() != Some(id)
@@ -569,10 +641,12 @@ pub fn switch_agent_subscription_account(
         .first()
         .and_then(|key| runtimes.get(key))
         .and_then(|runtime| {
-            runtime
-                .subscription_binding
-                .as_ref()
-                .map(|binding| (&binding._lease, runtime.child.id()))
+            runtime.subscription_binding.as_ref().and_then(|binding| {
+                binding
+                    ._lease
+                    .as_ref()
+                    .map(|lease| (lease, runtime.child.id()))
+            })
         });
     let admission = subscription_accounts::prepare_switch(
         &app,
