@@ -38,6 +38,7 @@ export function mockSubscriptionAccountCommand(
         {
           provider: "anthropic",
           harness: "claude",
+          token_supported: true,
           supported: true,
           reason: null,
         },
@@ -52,13 +53,15 @@ export function mockSubscriptionAccountCommand(
       ];
     case "list_subscription_accounts":
       return structuredClone(accounts);
+    case "begin_subscription_account_token":
     case "begin_subscription_account_login": {
+      const token = command === "begin_subscription_account_token";
       if (accounts.some((row) => row.state === "connecting"))
         throw new Error("A login is already in progress");
       const existing = accounts.find((row) => row.id === payload.accountId);
       if (!existing && !enabled)
         throw new Error("Enable Subscription Accounts first");
-      if (payload.harness !== "claude" && payload.harness !== "codex")
+      if (!token && payload.harness !== "claude" && payload.harness !== "codex")
         throw new Error("Unsupported subscription account harness");
       if (existing) {
         existing.state = "connecting";
@@ -67,8 +70,12 @@ export function mockSubscriptionAccountCommand(
       }
       const row: SubscriptionAccount = {
         id: `mock-subscription-${++sequence}`,
-        provider: payload.harness === "claude" ? "anthropic" : "openai",
-        harness: payload.harness,
+        provider:
+          token || payload.harness === "claude" ? "anthropic" : "openai",
+        harness: token ? "claude" : (payload.harness as "claude" | "codex"),
+        kind: token ? "token" : "login",
+        minted_at: null,
+        expires_at: null,
         nickname: null,
         state: "connecting",
         last_checked_at: null,
@@ -133,4 +140,21 @@ export function mockSubscriptionAccountCommand(
     default:
       throw new Error(`Unsupported mock subscription command: ${command}`);
   }
+}
+
+/** Explicit synthetic provider completion, callable only inside the E2E bridge. */
+export function completeMockSubscriptionToken(
+  accountId: string,
+  mintedAt: number,
+) {
+  const account = accounts.find((row) => row.id === accountId);
+  if (account?.kind !== "token" || account.state !== "connecting")
+    throw new Error("No pending synthetic token setup");
+  Object.assign(account, {
+    state: "ready",
+    minted_at: mintedAt,
+    expires_at: mintedAt + 365 * 86400,
+    attempt_id: null,
+    last_error: null,
+  });
 }

@@ -149,17 +149,20 @@ fn secret_store() -> &'static SecretStore {
 }
 
 pub fn normalize_claude_token(raw: &str) -> Result<String, String> {
-    let token: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-    if token.chars().count() != TOKEN_LENGTH {
+    let mut token = String::with_capacity(raw.len());
+    token.extend(raw.chars().filter(|c| !c.is_whitespace()));
+    let length = token.chars().count();
+    if length != TOKEN_LENGTH {
+        zeroize::Zeroize::zeroize(&mut token);
         return Err(format!(
-            "Claude OAuth token must be {TOKEN_LENGTH} characters after whitespace is removed (got {})",
-            token.chars().count()
+            "Claude OAuth token must be {TOKEN_LENGTH} characters after whitespace is removed (got {length})"
         ));
     }
     if !token
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     {
+        zeroize::Zeroize::zeroize(&mut token);
         return Err("Claude OAuth token may contain only letters, numbers, `_`, and `-`".into());
     }
     Ok(token)
@@ -407,7 +410,10 @@ async fn fetch_usage(
 /// A minimal real inference call is the validity gate. Usage scope is
 /// deliberately not part of validity: setup-token mints infer successfully
 /// while lacking `user:profile`.
-async fn probe_inference(client: &reqwest::Client, token: &str) -> Result<Option<u16>, String> {
+pub(crate) async fn probe_inference(
+    client: &reqwest::Client,
+    token: &str,
+) -> Result<Option<u16>, String> {
     let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header("content-type", "application/json")
@@ -429,15 +435,7 @@ async fn probe_inference(client: &reqwest::Client, token: &str) -> Result<Option
     };
     let status = response.status();
     if status == StatusCode::UNAUTHORIZED {
-        let body = response
-            .json::<serde_json::Value>()
-            .await
-            .unwrap_or(serde_json::Value::Null);
-        let detail = body
-            .pointer("/error/message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("token rejected");
-        return Err(format!("Claude rejected this token (401): {detail}"));
+        return Err("Claude rejected this token (401); renew browser authorization".into());
     }
     Ok(Some(status.as_u16()))
 }

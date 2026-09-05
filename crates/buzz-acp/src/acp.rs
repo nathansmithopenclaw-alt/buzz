@@ -14,6 +14,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
+mod subscription_token;
+
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{
     PromptResponseUsage, StandardAdapterKind, StandardUsageTracker, TurnUsage, UsageTracker,
@@ -697,6 +699,16 @@ fn enforce_subscription_child_env(
     }
     let harness = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS")
         .map_err(|_| AcpError::Protocol("Missing subscription harness binding".into()))?;
+    let token_kind = match std::env::var("BUZZ_ACP_SUBSCRIPTION_KIND") {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(kind) if kind == "login" => false,
+        Ok(kind) if kind == "token" && harness == "claude" => true,
+        _ => {
+            return Err(AcpError::Protocol(
+                "Invalid subscription account kind".into(),
+            ))
+        }
+    };
     let home = std::env::var_os("BUZZ_ACP_SUBSCRIPTION_HOME")
         .ok_or_else(|| AcpError::Protocol("Missing subscription credential home".into()))?;
     let identity = crate::config::normalize_agent_command_identity(command);
@@ -766,9 +778,12 @@ fn enforce_subscription_child_env(
                 std::env::var_os("BUZZ_ACP_SUBSCRIPTION_CONFIG_HOME").ok_or_else(|| {
                     AcpError::Protocol("Missing validated Claude configuration home".into())
                 })?;
-            child
-                .env("CLAUDE_CONFIG_DIR", config_home)
-                .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home);
+            child.env("CLAUDE_CONFIG_DIR", config_home);
+            if token_kind {
+                subscription_token::supply_token(child, std::path::Path::new(&home))?;
+            } else {
+                child.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home);
+            }
         }
         "codex" => {
             child.env("CODEX_HOME", home);

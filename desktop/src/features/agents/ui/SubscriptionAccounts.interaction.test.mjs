@@ -35,6 +35,13 @@ Object.defineProperty(globalThis, "navigator", {
 const calls = [];
 let accounts, enabled, failSwitch, failRemove, failCancel;
 const capabilities = [
+  {
+    provider: "anthropic",
+    harness: "claude",
+    supported: true,
+    token_supported: true,
+    reason: null,
+  },
   { provider: "openai", harness: "codex", supported: true, reason: null },
   {
     provider: "xai",
@@ -56,6 +63,7 @@ globalThis.__TAURI_INTERNALS__ = dom.window.__TAURI_INTERNALS__ = {
       case "set_subscription_accounts_enabled":
         enabled = args.enabled;
         return;
+      case "begin_subscription_account_token":
       case "begin_subscription_account_login": {
         const existing = accounts.find(
           (account) => account.id === args.accountId,
@@ -69,6 +77,14 @@ globalThis.__TAURI_INTERNALS__ = dom.window.__TAURI_INTERNALS__ = {
           accounts.push(
             account({
               nickname: null,
+              kind:
+                command === "begin_subscription_account_token"
+                  ? "token"
+                  : "login",
+              harness:
+                command === "begin_subscription_account_token"
+                  ? "claude"
+                  : "codex",
               state: "connecting",
               attempt_id: "attempt-new",
             }),
@@ -450,4 +466,112 @@ test("auth-held custom harness retains resume access without inventing account s
   );
   await view.findByRole("button", { name: "Resume retained work" });
   assert.equal(view.getByRole("combobox").disabled, true);
+});
+
+test("token setup crosses only metadata IPC, nickname precedes selection, renewal works with experiment off", async () => {
+  const view = mount(
+    React.createElement(SubscriptionAccountsSettingsCard),
+    React.createElement(SubscriptionAccountSelector, {
+      agent: agent({ subscriptionAccountHarness: "claude" }),
+    }),
+  );
+  fireEvent.click(
+    await view.findByRole("button", { name: "Add Claude long-lived token" }),
+  );
+  await view.findByRole("button", { name: "Cancel token setup" });
+  assert.equal(view.queryByRole("textbox"), null);
+  assert.deepEqual(
+    calls.find(([name]) => name === "begin_subscription_account_token")[1],
+    { accountId: null },
+  );
+  const minted = Math.floor(Date.now() / 1000);
+  Object.assign(accounts[0], {
+    state: "ready",
+    minted_at: minted,
+    expires_at: minted + 365 * 86400,
+  });
+  await refresh();
+  const nickname = await view.findByRole("textbox", { name: /Nickname/ });
+  fireEvent.change(nickname, { target: { value: "Shared team" } });
+  fireEvent.click(view.getByRole("button", { name: "Save nickname" }));
+  await view.findByRole("option", {
+    name: "Shared team — Expires in 365 days",
+  });
+  fireEvent.change(view.getByRole("combobox"), {
+    target: { value: "account-a" },
+  });
+  await waitFor(() =>
+    assert.ok(
+      calls.some(
+        ([name, args]) =>
+          name === "switch_agent_subscription_account" &&
+          args.accountId === "account-a",
+      ),
+    ),
+  );
+  enabled = false;
+  await React.act(() =>
+    client.invalidateQueries({ queryKey: ["subscription-accounts-enabled"] }),
+  );
+  await waitFor(() =>
+    assert.equal(
+      view.getByRole("button", { name: "Add Claude long-lived token" })
+        .disabled,
+      true,
+    ),
+  );
+  fireEvent.click(view.getByRole("button", { name: "Renew" }));
+  await view.findByRole("button", { name: "Cancel token setup" });
+  assert.deepEqual(
+    calls
+      .filter(([name]) => name === "begin_subscription_account_token")
+      .at(-1)[1],
+    { accountId: "account-a" },
+  );
+  assert.equal(accounts[0].nickname, "Shared team");
+  assert.equal(
+    calls.filter(([name]) => name === "begin_subscription_account_login")
+      .length,
+    0,
+  );
+});
+
+test("expired token stays selected, cannot be selected anew and offers renewal without stop instructions", async () => {
+  accounts = [account({ kind: "token", expires_at: 1, minted_at: 0 })];
+  const view = mount(
+    React.createElement(SubscriptionAccountSelector, {
+      agent: agent({
+        subscriptionAccountId: "account-a",
+        subscriptionAccountError: "subscription_auth_required",
+      }),
+    }),
+  );
+  const option = await view.findByRole("option", { name: "Work — Expired" });
+  assert.equal(option.disabled, true);
+  assert.equal(view.getByRole("combobox").value, "account-a");
+  assert.match(view.container.textContent, /Renew in Settings/);
+  assert.doesNotMatch(view.container.textContent, /Stop the agent/);
+  assert.equal(
+    view.getByTestId("selected-token-expiry").textContent,
+    "Expired",
+  );
+});
+
+test("token card keeps a renewal notice without relying on notification permission", async () => {
+  accounts = [
+    account({ kind: "token", expires_at: Date.now() / 1000 + 29 * 86400 }),
+  ];
+  enabled = false;
+  const view = mount(React.createElement(SubscriptionAccountsSettingsCard));
+  const notice = await view.findByTestId("token-renewal-notice-account-a");
+  assert.match(notice.textContent, /within 30 days.*Choose Renew/);
+  assert.equal(view.getByRole("button", { name: "Renew" }).disabled, false);
+  assert.match(view.container.textContent, /local OS notifications/);
+  assert.match(view.container.textContent, /while Desktop is running/);
+  assert.doesNotMatch(view.container.textContent, /owner DM/);
+  accounts[0].expires_at = 1;
+  await refresh();
+  await waitFor(() =>
+    assert.match(notice.textContent, /has expired.*Choose Renew/),
+  );
 });

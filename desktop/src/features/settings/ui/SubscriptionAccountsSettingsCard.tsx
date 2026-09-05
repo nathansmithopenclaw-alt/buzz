@@ -1,3 +1,7 @@
+import {
+  subscriptionAccountExpiry,
+  subscriptionAccountNeedsRenewal,
+} from "@/features/agents/subscriptionAccountExpiry";
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -5,9 +9,11 @@ import {
   useSubscriptionAccountCapabilitiesQuery,
   useSubscriptionAccountsEnabledQuery,
   useSubscriptionAccountsQuery,
+  useSubscriptionAccountClock,
 } from "@/features/agents/subscriptionAccounts";
 import {
   beginSubscriptionAccountLogin,
+  beginSubscriptionAccountToken,
   cancelSubscriptionAccountLogin,
   removeSubscriptionAccount,
   renameSubscriptionAccount,
@@ -25,7 +31,15 @@ const stateLabels: Record<SubscriptionAccount["state"], string> = {
   unavailable: "Unavailable",
 };
 
-function AccountRow({ account }: { account: SubscriptionAccount }) {
+function AccountRow({
+  account,
+  now,
+}: {
+  account: SubscriptionAccount;
+  now: number;
+}) {
+  const token = account.kind === "token";
+  const expiry = subscriptionAccountExpiry(account, now);
   const client = useQueryClient();
   const [nickname, setNickname] = React.useState(account.nickname ?? "");
   const [confirmRemove, setConfirmRemove] = React.useState(false);
@@ -36,6 +50,8 @@ function AccountRow({ account }: { account: SubscriptionAccount }) {
         return renameSubscriptionAccount(account.id, nickname).then(() => {});
       if (action === "cancel")
         return cancelSubscriptionAccountLogin(account.id).then(() => {});
+      if (token)
+        return beginSubscriptionAccountToken(account.id).then(() => {});
       return beginSubscriptionAccountLogin(account.harness, account.id).then(
         () => {},
       );
@@ -56,11 +72,27 @@ function AccountRow({ account }: { account: SubscriptionAccount }) {
       <div>
         <p className="font-medium">{label}</p>
         <p className="text-xs text-muted-foreground">
-          {account.provider} · {account.harness}
+          {account.provider} · {token ? "Long-lived token" : account.harness}
         </p>
         <p role="status" className="text-sm">
-          {stateLabels[account.state]}
+          {token && account.state === "ready"
+            ? expiry?.expired
+              ? "Renewal needed"
+              : "Token ready"
+            : token && account.state === "connecting"
+              ? "Waiting for browser approval…"
+              : token && account.state === "needs_login"
+                ? "Renewal needed"
+                : stateLabels[account.state]}
         </p>
+        {expiry ? (
+          <p data-testid={`token-expiry-${account.id}`} className="text-sm">
+            {expiry.label}
+            {account.expires_at != null
+              ? ` · ${new Date(account.expires_at * 1000).toLocaleString()}`
+              : ""}
+          </p>
+        ) : null}
         {account.last_checked_at ? (
           <p className="text-xs text-muted-foreground">
             Checked {new Date(account.last_checked_at).toLocaleString()}
@@ -106,7 +138,7 @@ function AccountRow({ account }: { account: SubscriptionAccount }) {
             disabled={mutation.isPending}
             onClick={() => mutation.mutate("cancel")}
           >
-            Cancel login
+            {token ? "Cancel token setup" : "Cancel login"}
           </Button>
         ) : account.state !== "removal_pending" ? (
           <Button
@@ -114,7 +146,7 @@ function AccountRow({ account }: { account: SubscriptionAccount }) {
             disabled={mutation.isPending}
             onClick={() => mutation.mutate("reconnect")}
           >
-            Reconnect
+            {token ? "Renew" : "Reconnect"}
           </Button>
         ) : null}
         {account.state !== "connecting" ? (
@@ -127,18 +159,40 @@ function AccountRow({ account }: { account: SubscriptionAccount }) {
           </Button>
         ) : null}
       </div>
+      {subscriptionAccountNeedsRenewal(account, now) ? (
+        <p
+          role="note"
+          data-testid={`token-renewal-notice-${account.id}`}
+          className="text-sm text-destructive"
+        >
+          {expiry?.expired
+            ? "This token has expired."
+            : "This token expires within 30 days."}{" "}
+          {account.state === "connecting"
+            ? "Complete renewal in your browser to keep its agents running."
+            : "Choose Renew to keep its agents running."}
+        </p>
+      ) : null}
+      {token ? (
+        <p className="text-xs text-muted-foreground">
+          Renew in your browser. After approval, only this account’s agents
+          restart. Buzz can show local OS notifications at 30, 14, 7 and 1 days,
+          and at expiry, while Desktop is running. Notification permission is
+          requested when the first reminder is due.
+        </p>
+      ) : null}
       {confirmRemove ? (
         <div className="space-y-2">
           <p className="text-sm">
-            Sign out and remove {label} from this machine? Accounts still
-            selected or running cannot be removed.
+            {token ? "Remove" : "Sign out and remove"} {label} from this
+            machine? Accounts still selected or running cannot be removed.
           </p>
           <Button
             variant="destructive"
             disabled={mutation.isPending}
             onClick={() => mutation.mutate("remove")}
           >
-            Sign out and remove
+            {token ? "Remove token" : "Sign out and remove"}
           </Button>{" "}
           <Button
             variant="ghost"
@@ -161,12 +215,16 @@ function AccountRow({ account }: { account: SubscriptionAccount }) {
 export function SubscriptionAccountsSettingsCard() {
   const client = useQueryClient();
   const accounts = useSubscriptionAccountsQuery();
+  const now = useSubscriptionAccountClock();
   const capabilities = useSubscriptionAccountCapabilitiesQuery();
   const enabled = useSubscriptionAccountsEnabledQuery();
   const connecting =
     accounts.data?.some((account) => account.state === "connecting") ?? false;
   const add = useMutation({
-    mutationFn: (harness: string) => beginSubscriptionAccountLogin(harness),
+    mutationFn: ({ harness, token }: { harness: string; token?: boolean }) =>
+      token
+        ? beginSubscriptionAccountToken()
+        : beginSubscriptionAccountLogin(harness),
     onSuccess: async () =>
       client.invalidateQueries({ queryKey: subscriptionAccountsQueryKey }),
   });
@@ -177,11 +235,12 @@ export function SubscriptionAccountsSettingsCard() {
     >
       <SectionHeader
         title="Subscription Accounts"
-        description="Sign in through your provider, verify the subscription login, then choose a nickname. Credentials stay with the harness on this machine."
+        description="Sign in through your provider or approve a Claude long-lived token in your browser, then choose a nickname. Credentials stay on this machine."
       />
       <p className="text-xs text-muted-foreground">
-        Readiness checks confirm a local subscription login. They do not verify
-        a model turn, available quota, or billing. Browser login expires
+        Login checks confirm a local subscription login. Tokens are stored
+        securely by Buzz and expire after 365 days. These checks do not verify a
+        model turn, available quota, or billing. Browser login expires
         automatically if it is not completed.
       </p>
       {enabled.isError ? (
@@ -209,7 +268,7 @@ export function SubscriptionAccountsSettingsCard() {
         </p>
       ) : (
         accounts.data.map((account) => (
-          <AccountRow key={account.id} account={account} />
+          <AccountRow key={account.id} account={account} now={now} />
         ))
       )}
       <div className="space-y-2">
@@ -244,10 +303,27 @@ export function SubscriptionAccountsSettingsCard() {
                   accounts.isError ||
                   accounts.isPending
                 }
-                onClick={() => add.mutate(capability.harness)}
+                onClick={() => add.mutate({ harness: capability.harness })}
               >
                 Sign in with {capability.provider} ({capability.harness})
               </Button>
+              {capability.token_supported ? (
+                <Button
+                  variant="outline"
+                  disabled={
+                    !enabled.data ||
+                    connecting ||
+                    add.isPending ||
+                    accounts.isError ||
+                    accounts.isPending
+                  }
+                  onClick={() =>
+                    add.mutate({ harness: capability.harness, token: true })
+                  }
+                >
+                  Add Claude long-lived token
+                </Button>
+              ) : null}
               {!capability.supported ? (
                 <p className="text-xs text-muted-foreground">
                   {capability.reason ?? "This provider is not available yet."}

@@ -1,4 +1,4 @@
-//! Versioned, private metadata. Provider credentials are never opened by Buzz.
+//! Versioned, private non-secret metadata. Token credentials live in separate files.
 use std::{
     collections::HashSet,
     fs,
@@ -113,7 +113,7 @@ pub(super) fn save(root: &Path, registry: &Registry) -> Result<(), String> {
 }
 
 fn validate(registry: &Registry) -> Result<(), String> {
-    if registry.schema_version != 1 {
+    if !matches!(registry.schema_version, 1 | 2) {
         return Err("Unsupported account registry version".into());
     }
     if registry.accounts.len() > 100 {
@@ -129,6 +129,18 @@ fn validate(registry: &Registry) -> Result<(), String> {
                 (account.harness.as_str(), account.provider.as_str()),
                 ("claude", "anthropic") | ("codex", "openai") | ("grok", "xai")
             )
+            || !matches!(account.kind.as_str(), "login" | "token")
+            || account.kind == "token"
+                && (account.harness != "claude" || registry.schema_version < 2)
+            || match (account.minted_at, account.expires_at) {
+                (None, None) => false,
+                (Some(minted), Some(expires)) => {
+                    account.kind != "token"
+                        || minted < 0
+                        || minted.checked_add(super::tokens::LIFETIME_SECONDS) != Some(expires)
+                }
+                _ => true,
+            }
             || !matches!(
                 account.state.as_str(),
                 "connecting" | "ready" | "needs_login" | "removal_pending" | "unavailable"
