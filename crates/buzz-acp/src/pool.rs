@@ -2212,7 +2212,11 @@ async fn create_session_and_apply_model(
         patch_config_option_current_value(&mut applied_config_options, config_id, value);
     }
 
-    if let Some(desired_effort) = ctx.thinking_effort.as_deref() {
+    if let Some(desired_effort) = ctx
+        .thinking_effort
+        .as_deref()
+        .filter(|_| agent.startup_effort.is_none())
+    {
         let advertised = applied_config_options.clone();
         if !skip_unsupported_default_thinking_effort(
             &agent.acp,
@@ -12668,7 +12672,8 @@ done"#
         let obs = observer::ObserverHandle::in_process();
         agent.acp.set_observer(Some(obs.clone()), 0);
 
-        let ctx = make_prompt_context_no_owner();
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.thinking_effort = Some("low".to_string());
         create_session_and_apply_model(
             &mut agent,
             &ctx,
@@ -12705,7 +12710,8 @@ done"#
         let obs = observer::ObserverHandle::in_process();
         agent.acp.set_observer(Some(obs.clone()), 0);
 
-        let ctx = make_prompt_context_no_owner();
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.thinking_effort = Some("high".to_string());
         create_session_and_apply_model(
             &mut agent,
             &ctx,
@@ -12739,7 +12745,8 @@ done"#
         let obs = observer::ObserverHandle::in_process();
         agent.acp.set_observer(Some(obs.clone()), 0);
 
-        let ctx = make_prompt_context_no_owner();
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.thinking_effort = Some("high".to_string());
         create_session_and_apply_model(
             &mut agent,
             &ctx,

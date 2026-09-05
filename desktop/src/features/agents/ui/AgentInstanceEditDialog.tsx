@@ -31,7 +31,7 @@ import {
 import { useFeatureEnabled } from "@/shared/features";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import { AgentDialogEffortSection } from "./AgentDialogEffortField";
-import { EffortPickerField } from "./EffortPickerField";
+import { useInstanceEffort } from "./useInstanceEffort";
 import {
   instanceModelDropdownOptions,
   instanceProviderDropdownOptions,
@@ -117,6 +117,11 @@ export function AgentInstanceEditDialog({
   const startMutation = useStartManagedAgentMutation();
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
+  const instanceEffort = useInstanceEffort(
+    agent,
+    open,
+    configSurfaceQuery.data,
+  );
   const runtimes = runtimesQuery.data ?? [];
   const [name, setName] = React.useState(agent.name);
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
@@ -592,9 +597,6 @@ export function AgentInstanceEditDialog({
       }),
     );
   }
-  function handleOpenChange(next: boolean) {
-    onOpenChange(next);
-  }
   const inheritedModelLabel =
     inheritedModelDefault.source === "build"
       ? getBakedModelInheritLabel(inheritedModelDefault.value)
@@ -758,6 +760,7 @@ export function AgentInstanceEditDialog({
                   ? null
                   : undefined
                 : undefined, // "unknown" → omit always
+        effortLevel: instanceEffort.value,
         envVars: envVarsEqual(submitEnvVars, agent.envVars)
           ? undefined
           : submitEnvVars,
@@ -778,8 +781,6 @@ export function AgentInstanceEditDialog({
       const result = await updateMutation.mutateAsync(input);
       let savedAgent = result.agent;
       if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
-        // Standalone setter (mirrors start-on-app-launch) — not part of
-        // UpdateManagedAgentInput, so the frozen update shape stays frozen.
         savedAgent = await setManagedAgentAutoRestart(
           agent.pubkey,
           autoRestartOnConfigChange,
@@ -799,7 +800,7 @@ export function AgentInstanceEditDialog({
         );
       }
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
-      handleOpenChange(false);
+      onOpenChange(false);
       onUpdated?.(savedAgent);
       // The auto-restart policy deliberately never fires for a stopped or
       // failing agent (a broken agent must not auto-loop), so an edit meant
@@ -876,7 +877,7 @@ export function AgentInstanceEditDialog({
     : ADVANCED_FIELDS_MOTION_TRANSITION;
 
   return (
-    <Dialog onOpenChange={handleOpenChange} open={open}>
+    <Dialog onOpenChange={onOpenChange} open={open}>
       <ChooserDialogContent
         className="max-w-3xl border-0"
         contentClassName="pt-3"
@@ -888,7 +889,7 @@ export function AgentInstanceEditDialog({
           <div className="flex w-full items-center justify-end gap-2">
             <Button
               disabled={updateMutation.isPending || isAvatarUploadPending}
-              onClick={() => handleOpenChange(false)}
+              onClick={() => onOpenChange(false)}
               type="button"
               variant="outline"
             >
@@ -921,7 +922,7 @@ export function AgentInstanceEditDialog({
               <Button
                 className="w-full"
                 onClick={() => {
-                  handleOpenChange(false);
+                  onOpenChange(false);
                   onEditLinkedPersona();
                 }}
                 size="sm"
@@ -1169,8 +1170,8 @@ export function AgentInstanceEditDialog({
               scope="instance"
               setEnvVars={setEnvVars}
               validationError={modelValidationError ?? effortValidationError}
+              instanceEffort={instanceEffort}
             />
-            <EffortPickerField agent={agent} config={configSurfaceQuery.data} />
             <AgentAiDefaultsNotice
               onEditDefaults={() => setAiDefaultsOpen(true)}
               triggerRef={aiDefaultsTriggerRef}
@@ -1261,7 +1262,6 @@ export function AgentInstanceEditDialog({
               </AnimatePresence>
             </div>
 
-            {/* Error */}
             {updateMutation.error instanceof Error ? (
               <p className="text-sm text-destructive">
                 {updateMutation.error.message}

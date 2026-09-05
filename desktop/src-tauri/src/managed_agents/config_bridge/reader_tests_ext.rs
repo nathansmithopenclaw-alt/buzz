@@ -295,10 +295,9 @@ fn b4_canonical_effort_level_shadows_file_tier() {
     assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
 }
 
-/// B4: a record env var override still wins over record.effort_level, which
-/// becomes the overridden baseline.
+/// Canonical effort wins over a legacy env override, matching startup.
 #[test]
-fn b4_record_env_var_wins_over_canonical_effort_level() {
+fn canonical_effort_wins_over_legacy_record_env() {
     let mut record = test_record();
     record.effort_level = Some("low".to_string());
     record
@@ -309,10 +308,13 @@ fn b4_record_env_var_wins_over_canonical_effort_level() {
     let effort = surface
         .normalized
         .thinking_effort
-        .expect("env var must win over canonical effort");
-    assert_eq!(effort.value.as_deref(), Some("high"));
+        .expect("canonical effort must win over legacy env");
+    assert_eq!(effort.value.as_deref(), Some("low"));
     assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
-    assert_eq!(effort.overridden_value.as_deref(), Some("low"));
+    assert_eq!(
+        effort.overridden_value, None,
+        "suppressed legacy effort is not a running value"
+    );
 }
 
 /// B4: None effort_level does not introduce a spurious tier.
@@ -395,6 +397,9 @@ fn claude_config_dir_none_falls_back_to_home_claude_json() {
 fn effort_option_selected_by_category_drives_all_facts() {
     let mut record = test_record();
     record.effort_level = Some("high".to_string());
+    record
+        .env_vars
+        .insert("BUZZ_AGENT_THINKING_EFFORT".into(), "low".into());
     let runtime = buzz_agent_rt();
     let cache = SessionConfigCache {
         config_options: vec![AcpConfigOptionEntry {

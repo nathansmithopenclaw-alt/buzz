@@ -291,6 +291,7 @@ pub fn build_managed_agent_summary(
     )
     .map(str::to_owned);
     Ok(ManagedAgentSummary {
+        effort_level: record.effort_level.clone(),
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),

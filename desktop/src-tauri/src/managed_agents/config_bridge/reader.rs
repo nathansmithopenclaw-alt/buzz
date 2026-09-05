@@ -561,7 +561,7 @@ fn build_thinking_field(
     tiers: &InheritedConfigTiers,
 ) -> Option<NormalizedField> {
     // Tier ordering:
-    //   record env > record.effort_level (canonical Buzz-persisted) > ACP >
+    //   record.effort_level (canonical Buzz-persisted) > record env > ACP >
     //   persona env > global env > definition env > config file.
     //
     // `record.effort_level` is the B5 canonical value: the effort a spawn will
@@ -584,8 +584,11 @@ fn build_thinking_field(
     let canonical_effort = record.effort_level.as_deref();
 
     let tiers_list: &[(Option<&str>, ConfigOrigin)] = &[
-        (rec_env, ConfigOrigin::BuzzExplicit),
         (canonical_effort, ConfigOrigin::BuzzExplicit),
+        (
+            rec_env.filter(|_| canonical_effort.is_none()),
+            ConfigOrigin::BuzzExplicit,
+        ),
         (acp_effort.as_deref(), ConfigOrigin::AcpConfigOption),
         (pers_env, ConfigOrigin::PersonaDefault),
         (glob_env, ConfigOrigin::GlobalDefault),

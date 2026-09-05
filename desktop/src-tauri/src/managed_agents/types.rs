@@ -500,6 +500,8 @@ pub struct ManagedAgentRecord {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentSummary {
+    /// Canonical next-session effort, independent of the live session.
+    pub effort_level: Option<String>,
     pub pubkey: String,
     pub name: String,
     pub persona_id: Option<String>,

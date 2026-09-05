@@ -736,7 +736,6 @@ pub fn run() {
             get_baked_build_env_keys,
             get_baked_build_env,
             put_agent_session_config,
-            persist_agent_effort_level,
             get_global_agent_config,
             set_global_agent_config,
             set_agent_management_delegation,

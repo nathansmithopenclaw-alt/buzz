@@ -1,3 +1,7 @@
+import {
+  renderInstanceEffort,
+  type useInstanceEffort,
+} from "./useInstanceEffort";
 import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
@@ -185,6 +189,7 @@ export function AgentDialogEffortField({
 }
 
 export function AgentDialogEffortSection({
+  instanceEffort,
   nativeTuning,
   onBeforeChange,
   setEnvVars,
@@ -195,6 +200,7 @@ export function AgentDialogEffortSection({
   "envVars" | "nativeDefaultModel" | "nativeEffortOptions" | "onEnvVarChange"
 > & {
   envVars: EnvVarsValue;
+  instanceEffort?: ReturnType<typeof useInstanceEffort>;
   nativeTuning: {
     effortOptions: ReadonlyArray<{ id: string; name?: string | null }> | null;
     inheritedModel: string | null;
@@ -209,6 +215,12 @@ export function AgentDialogEffortSection({
   setEnvVars: React.Dispatch<React.SetStateAction<EnvVarsValue>>;
   validationError: string | null;
 }) {
+  const effortControl = renderInstanceEffort(instanceEffort, {
+    model: fieldProps.model,
+    runtime: fieldProps.runtime,
+    disabled: fieldProps.disabled,
+    effortOptions: nativeTuning.effortOptions,
+  });
   const onEnvVarChange = (key: string, value: string) => {
     onBeforeChange?.();
     setEnvVars((current) => {
@@ -224,14 +236,16 @@ export function AgentDialogEffortSection({
   };
   return (
     <div className="space-y-2">
-      <AgentDialogEffortField
-        {...fieldProps}
-        envVars={fieldProps.envVars}
-        nativeDefaultModel={nativeTuning.inheritedModel}
-        nativeEffortOptions={nativeTuning.effortOptions}
-        onEnvVarChange={onEnvVarChange}
-        onModelChange={onModelChange}
-      />
+      {effortControl ?? (
+        <AgentDialogEffortField
+          {...fieldProps}
+          envVars={fieldProps.envVars}
+          nativeDefaultModel={nativeTuning.inheritedModel}
+          nativeEffortOptions={nativeTuning.effortOptions}
+          onEnvVarChange={onEnvVarChange}
+          onModelChange={onModelChange}
+        />
+      )}
       {validationError ? (
         <p className="text-xs text-destructive" role="alert">
           {validationError}

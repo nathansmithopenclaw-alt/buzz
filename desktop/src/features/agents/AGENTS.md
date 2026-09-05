@@ -243,31 +243,21 @@ that frontend inventory.
    fields, and profile-wide activity selection. Caller context may control the
    panel shell or return navigation, but must not filter or replace profile
    content.
-14. **Thinking effort has two surfaces: a local-only WRITE control and a
-   read-only two-facts DISPLAY.** The write control is `EffortPickerField`
-   (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
-   `AgentInstanceEditDialog` beside the Model block. It is direct-write, not
-   part of the frozen `UpdateManagedAgentInput` shape: each selection calls
-   `persistAgentEffortLevel` and invalidates the config-surface query, mirroring
-   the `setManagedAgentAutoRestart` standalone-setter precedent. Its gating and
-   option compute live in the pure helper `ui/effortPicker.ts`
-   (`effortPickerState`): the picker renders only when
-   `agent.backend.type === "local"` **AND** a `thought_level` `effortConfigId`
-   has been discovered from the running session (absent pre-first-session and
-   for runtimes/models without effort support). Local-only is load-bearing, not
-   cosmetic — the Rust command rejects non-local backends because remote effort
-   is set at deploy time via `policy_env`. Because it reads its inputs from the
-   config surface the dialog already fetches (`useAgentConfigSurface`) and owns
-   its own mutation, it does **not** thread new props through the dialog (see
-   rule 11): keep effort state inside the section component, never as
-   dialog-level props. The read-only display is the `thinkingEffort`
-   normalized field rendered by `AgentConfigPanel` via `NormalizedRow`, which
-   already shows both facts — `field.value` (canonical, the effort the next
-   spawn will launch with) and, when a running ACP session differs,
-   `field.overriddenValue` struck through (the live session's current effort).
-   No component owns "configured vs current" logic; the reader's canonical tier
-   ordering feeds both facts. Do not add a second effort write path or restate
-   the two-facts logic in a component.
+14. **Instance effort is Save-gated.** `EffortPickerField` is controlled by
+   `AgentInstanceEditDialog`; it writes `effortLevel` through the normal locked
+   `update_managed_agent` call. Cancel and failed Save keep persisted effort
+   unchanged. The former standalone persistence command is removed.
+   When discovered native options make this picker available, it replaces the
+   legacy dialog effort field rather than appearing beside it; the Fast mode
+   control stays present. A saved canonical value remains visible if discovery
+   becomes unavailable. A catalog miss never renders a saved value as default.
+   Remote effort still belongs to deploy-time policy and rejects local writes.
+   Fork compatibility: the existing global/definition and pre-discovery effort
+   paths remain until the broader upstream fold. Canonical instance effort
+   takes precedence over legacy ACP effort both at spawn and session creation;
+   the legacy path is used only when canonical effort is absent. Clearing the
+   canonical instance override restores existing defaults, not an invented
+   token budget. No static catalog or qualifier migration is implied here.
 
    **Cut invariant — live mid-conversation effort machinery was deliberately
    removed.** Effort is spawn-scoped only: the worker holds one `startup_effort`

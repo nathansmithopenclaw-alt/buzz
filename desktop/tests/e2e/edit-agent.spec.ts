@@ -551,3 +551,115 @@ test.describe("edit agent dialog", () => {
     });
   });
 });
+
+// The real dialog and IPC mapper are exercised; persistence/failure is mocked
+// at the native boundary. Rust tests cover the locked record update separately.
+test("effort selection is singular, Cancel-safe, and retryable after Save failure", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    bakedBuildEnv: BAKED_DEFAULTS,
+    managedAgents: [
+      {
+        pubkey: AGENT_PUBKEY,
+        name: AGENT_NAME,
+        status: "stopped",
+        channelNames: ["agents"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function",
+  );
+  await page.evaluate(() => {
+    const win = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          args?: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      __effortTest: { value: string | null; writes: number; fail: boolean };
+    };
+    const original = win.__TAURI_INTERNALS__.invoke;
+    const state = { value: "low" as string | null, writes: 0, fail: true };
+    win.__effortTest = state;
+    win.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "persist_agent_effort_level")
+        throw new Error("Direct effort writes are forbidden");
+      if (command === "update_managed_agent") {
+        state.writes++;
+        if (state.fail) throw new Error("Effort save failed for test");
+        const result = (await original(command, args)) as {
+          agent: Record<string, unknown>;
+        };
+        const input = args?.input as { effortLevel?: string | null };
+        if (input.effortLevel !== undefined) state.value = input.effortLevel;
+        result.agent.effort_level = state.value;
+        return result;
+      }
+      const result = await original(command, args);
+      if (command === "list_managed_agents") {
+        const response = result as Array<Record<string, unknown>>;
+        for (const agent of response) agent.effort_level = state.value;
+      }
+      if (command === "get_agent_config_surface") {
+        return {
+          ...(result as Record<string, unknown>),
+          effortConfigId: "depth",
+          effortOptions: [
+            { value: "low", displayName: "Low" },
+            { value: "high", displayName: "High" },
+          ],
+        };
+      }
+      return result;
+    };
+  });
+  // Do not navigate/reload after installing the boundary wrapper.
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByRole("button", { name: `${AGENT_NAME} agent profile` })
+    .click();
+  await page.getByTestId("user-profile-edit-agent").click();
+  const effort = page.locator("#edit-agent-effort");
+  await expect(effort).toContainText("Low");
+  await expect(page.getByTestId("instance-agent-effort-select")).toHaveCount(0);
+  await pickDropdownOption(page, "edit-agent-effort", "High");
+  const state = () =>
+    page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __effortTest: {
+              value: string | null;
+              writes: number;
+              fail: boolean;
+            };
+          }
+        ).__effortTest,
+    );
+  expect((await state()).writes).toBe(0);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect((await state()).value).toBe("low");
+  await page.getByTestId("user-profile-edit-agent").click();
+  await expect(effort).toContainText("Low");
+  await pickDropdownOption(page, "edit-agent-effort", "High");
+  await page.getByTestId("edit-agent-dialog-submit").click();
+  await expect(
+    page.getByText("Effort save failed for test", { exact: true }),
+  ).toBeVisible();
+  await expect(effort).toContainText("High");
+  expect((await state()).value).toBe("low");
+  await page.evaluate(() => {
+    (
+      window as unknown as { __effortTest: { fail: boolean } }
+    ).__effortTest.fail = false;
+  });
+  await page.getByTestId("edit-agent-dialog-submit").click();
+  await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
+  expect((await state()).value).toBe("high");
+  await page.getByTestId("user-profile-edit-agent").click();
+  await expect(effort).toContainText("High");
+});
