@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
+
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const BAKED_DEFAULTS = [
@@ -663,3 +665,99 @@ test("effort selection is singular, Cancel-safe, and retryable after Save failur
   await page.getByTestId("user-profile-edit-agent").click();
   await expect(effort).toContainText("High");
 });
+
+for (const channelName of ["general", "alice-tyler"]) {
+  test(`hover card edits agent without leaving ${channelName}`, async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      bakedBuildEnv: BAKED_DEFAULTS,
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: [channelName],
+        },
+      ],
+    });
+    const channelId =
+      channelName === "general"
+        ? "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+        : "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+    await page.goto(`/#/channels/${channelId}`);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          (name) =>
+            (
+              window as Window & {
+                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                  channelName: string;
+                }) => boolean;
+              }
+            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+              channelName: name,
+            }) ?? false,
+          channelName,
+        ),
+      )
+      .toBe(true);
+    await page.evaluate(
+      ({ channelName, pubkey }) =>
+        (
+          window as Window & {
+            __BUZZ_E2E_EMIT_MOCK_MESSAGE__: (input: {
+              channelName: string;
+              pubkey: string;
+              content: string;
+            }) => unknown;
+          }
+        ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__({
+          channelName,
+          pubkey,
+          content: "Hover editor test message",
+        }),
+      { channelName, pubkey: AGENT_PUBKEY },
+    );
+    const route = page.url();
+    // Every message author avatar uses the same shared hover card.
+    const trigger = page
+      .getByTestId("message-row")
+      .filter({ hasText: "Hover editor test message" })
+      .locator("button")
+      .first();
+    await trigger.hover();
+    const action = page.getByTestId(`user-profile-edit-agent-${AGENT_PUBKEY}`);
+    await expect(action).toBeVisible();
+    await action.click();
+    const dialog = page.getByTestId("edit-agent-dialog");
+    await expect(dialog).toBeVisible();
+    await page.mouse.move(1, 1);
+    await expect(dialog).toBeVisible();
+    expect(page.url()).toBe(route);
+    await expect(page.getByTestId("user-profile-panel")).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(page.url()).toBe(route);
+    await trigger.hover();
+    await action.click();
+    await dialog
+      .getByRole("textbox", { name: "Agent name", exact: true })
+      .fill("Edited from conversation");
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: `test-results/hover-edit-${channelName}.png`,
+    });
+    await dialog
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    await expect(dialog).toHaveCount(0);
+    expect(page.url()).toBe(route);
+    await trigger.hover();
+    await action.click();
+    await expect(
+      dialog.getByRole("textbox", { name: "Agent name", exact: true }),
+    ).toHaveValue("Edited from conversation");
+  });
+}
