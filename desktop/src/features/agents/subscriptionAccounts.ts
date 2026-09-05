@@ -16,6 +16,10 @@ export function useSubscriptionAccountsQuery() {
     queryKey: subscriptionAccountsQueryKey,
     queryFn: listSubscriptionAccounts,
     staleTime: 0,
+    // Provider login happens in another app. Keep observing its completion
+    // even when WebKit still reports Buzz as unfocused on return.
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
     refetchInterval: (query) =>
       query.state.data?.some((account) => account.state === "connecting")
         ? 1000

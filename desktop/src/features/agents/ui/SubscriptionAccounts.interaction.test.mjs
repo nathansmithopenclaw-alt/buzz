@@ -116,7 +116,7 @@ const React = await import("react");
 const { render, cleanup, fireEvent, waitFor, within } = await import(
   "@testing-library/react"
 );
-const { QueryClient, QueryClientProvider } = await import(
+const { focusManager, QueryClient, QueryClientProvider } = await import(
   "@tanstack/react-query"
 );
 const { SubscriptionAccountSelector } = await import(
@@ -175,7 +175,7 @@ beforeEach(() => {
   calls.length = 0;
   client = new QueryClient({
     defaultOptions: {
-      queries: { retry: false, gcTime: Infinity },
+      queries: { retry: false, gcTime: Infinity, refetchOnWindowFocus: false },
       mutations: { retry: false, gcTime: Infinity },
     },
   });
@@ -183,9 +183,36 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   client.clear();
+  focusManager.setFocused(undefined);
   reportChannelBotTyping("other-channel", []);
 });
 after(() => dom.window.close());
+
+test("browser verification updates the rendered card while Buzz remains unfocused", async () => {
+  accounts = [account({ state: "connecting", nickname: null })];
+  const view = mount(React.createElement(SubscriptionAccountsSettingsCard));
+  await view.findByRole("button", { name: "Cancel login" });
+  focusManager.setFocused(false);
+  accounts[0].state = "ready";
+  accounts[0].attempt_id = null;
+  // No click, focus event, manual invalidation or replacement component.
+  await view.findByRole("textbox", { name: /Nickname/ }, { timeout: 2500 });
+  assert.equal(view.queryByRole("button", { name: "Cancel login" }), null);
+  assert.match(view.container.textContent, /Subscription login checked/);
+});
+
+test("returning from provider login refreshes before the next polling tick", async () => {
+  accounts = [account({ state: "connecting", nickname: null })];
+  const view = mount(React.createElement(SubscriptionAccountsSettingsCard));
+  await view.findByRole("button", { name: "Cancel login" });
+  focusManager.setFocused(false);
+  accounts[0].state = "ready";
+  await React.act(async () => {
+    focusManager.setFocused(true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  assert.ok(view.getByRole("textbox", { name: /Nickname/ }));
+});
 
 test("provider login precedes verification and nickname; Settings refresh reaches both selectors", async () => {
   const view = mount(

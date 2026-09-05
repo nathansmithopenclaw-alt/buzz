@@ -3,6 +3,7 @@ mod adapters;
 mod process;
 mod reservation;
 mod store;
+mod switch_admission;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,6 +17,7 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 pub(crate) use adapters::SubscriptionAccountCapability;
+pub(crate) use switch_admission::prepare_switch;
 
 /// Non-secret local account state. Paths and provider output never enter DTOs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -138,6 +140,14 @@ fn ensure_no_live_receipts(app: &AppHandle, id: &str) -> Result<(), String> {
 }
 
 fn ensure_no_live_receipts_at(directory: &std::path::Path, id: &str) -> Result<(), String> {
+    ensure_no_other_live_receipts_at(directory, id, None)
+}
+
+fn ensure_no_other_live_receipts_at(
+    directory: &std::path::Path,
+    id: &str,
+    owned_pid: Option<u32>,
+) -> Result<(), String> {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -158,6 +168,7 @@ fn ensure_no_live_receipts_at(directory: &std::path::Path, id: &str) -> Result<(
         let receipt: crate::managed_agents::ManagedAgentRuntimeReceipt =
             serde_json::from_slice(&bytes).map_err(|_| "Invalid saved runtime lease")?;
         if receipt.subscription_account_id.as_deref() == Some(id)
+            && owned_pid != Some(receipt.pid)
             && crate::managed_agents::process_is_running(receipt.pid)
         {
             return Err(
