@@ -88,14 +88,18 @@ export function SubscriptionAccountSelector({
     },
   });
   const selected = agent.subscriptionAccountId ?? null;
-  const legacy = selected === null && agent.claudeAccountId !== null;
+  const accountRequired = selected === null && Boolean(operation.data);
+  const legacy =
+    selected === null && !accountRequired && agent.claudeAccountId !== null;
   const selectedAccount = accounts.data?.find(
     (account) => account.id === selected,
   );
   const expiry = subscriptionAccountExpiry(selectedAccount, now);
-  const selectedValue = agent.subscriptionAccountInheritDefault
-    ? "__default__"
-    : (selected ?? (legacy ? "__legacy__" : ""));
+  const selectedValue = accountRequired
+    ? "__required__"
+    : agent.subscriptionAccountInheritDefault
+      ? "__default__"
+      : (selected ?? (legacy ? "__legacy__" : ""));
   const runningKnown = agent.runningSubscriptionAccountGeneration != null;
   const running = accounts.data?.find(
     (account) => account.id === agent.runningSubscriptionAccountId,
@@ -201,12 +205,14 @@ export function SubscriptionAccountSelector({
           >
             <span className="truncate">
               {agent.subscriptionAccountInheritDefault ? "Default · " : ""}
-              {selectedAccount?.nickname ??
-                (selected
-                  ? "Selected account unavailable"
-                  : legacy
-                    ? "Legacy Claude account"
-                    : "Ambient — harness’s current login")}
+              {accountRequired
+                ? "Account required — choose a named account"
+                : (selectedAccount?.nickname ??
+                  (selected
+                    ? "Selected account unavailable"
+                    : legacy
+                      ? "Legacy Claude account"
+                      : "Ambient — harness’s current login"))}
             </span>
             <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
           </Button>
@@ -219,6 +225,11 @@ export function SubscriptionAccountSelector({
             value={selectedValue || "__ambient__"}
             onValueChange={selectAccount}
           >
+            {accountRequired ? (
+              <DropdownMenuRadioItem value="__required__" disabled>
+                Account required — choose a named account
+              </DropdownMenuRadioItem>
+            ) : null}
             {canPause && defaultAccount.data ? (
               <DropdownMenuRadioItem
                 value="__default__"

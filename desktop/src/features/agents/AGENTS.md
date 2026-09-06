@@ -417,3 +417,5 @@ Claude token switching during active work requires an explicit preview and confi
 A generation-bound local resume acknowledgment also confirms the new broker is listening under its captured account binding. Startup recovery can run before the relay observer subscribes, so a missed lifecycle frame must not leave the account label unknown forever. A failed resume acknowledgment cannot advance readiness, and this receipt does not claim provider authentication.
 
 The agent profile and Agents Start/Restart actions also probe the exact broker generation before confirming its running account. This readiness probe never releases an authentication hold or resumes retained work. If confirmation fails, retain the running process and expose the error with Restart available; do not label a saved selection as a confirmed runtime binding.
+
+A detached or unfinished account operation with no saved binding renders an explicit Account required selection. Ambient must not appear selected while the durable spawn fence requires a named account.

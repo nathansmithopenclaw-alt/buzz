@@ -10,12 +10,14 @@ let accounts: SubscriptionAccount[] = [];
 let sequence = 0;
 let defaultAccount: string | null = null;
 let group: ClaudeAccountChangeStatus | null = null;
+const detached = new Set<string>();
 export function resetMockSubscriptionAccounts() {
   enabled = false;
   accounts = [];
   sequence = 0;
   defaultAccount = null;
   group = null;
+  detached.clear();
 }
 
 /** Test bridge lifecycle: login starts pending, never fabricates real verification. */
@@ -114,6 +116,8 @@ export function mockSubscriptionAccountCommand(
         const agent = agents.find((agent) => agent.pubkey === member.pubkey);
         if (!agent) throw new Error("Fixture agent unavailable");
         agent.subscription_account_id = group.destination;
+        if (group.destination) detached.delete(agent.pubkey);
+        else detached.add(agent.pubkey);
         agent.subscription_account_generation =
           (agent.subscription_account_generation ?? 0) + 1;
         if (request.kind === "default")
@@ -145,7 +149,15 @@ export function mockSubscriptionAccountCommand(
     case "retry_claude_account_change":
       throw new Error("No interrupted account operation in this fixture");
     case "agent_account_switch_status":
-      return null;
+      return detached.has(String(payload.pubkey))
+        ? {
+            id: "detached-fixture",
+            account_id: "removed-fixture",
+            phase: "paused",
+            error:
+              "Account detached. Choose a named account to resume retained work.",
+          }
+        : null;
     case "get_subscription_accounts_enabled":
       return enabled;
     case "set_subscription_accounts_enabled":

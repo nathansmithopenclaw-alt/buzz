@@ -480,4 +480,7 @@ test("default followers, explicit overrides, all-account scope and integrated re
   await closeSurface();
   selector = await profile("Helm", CLAUDE_AGENT);
   await expect(selector).toContainText("Agent stopped");
+  await expect(
+    selector.getByRole("button", { name: "Subscription account" }),
+  ).toHaveText("Account required — choose a named account");
 });

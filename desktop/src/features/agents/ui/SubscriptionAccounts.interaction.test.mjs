@@ -799,3 +799,54 @@ test("a persisted failed switch exposes retry and keeps the destination selectab
     ),
   );
 });
+
+test("a detached account is required, never displayed as selected Ambient", async () => {
+  operationStatus = {
+    id: "detached",
+    account_id: "removed",
+    phase: "paused",
+    error: "Account detached. Choose a named account to resume retained work.",
+  };
+  accounts = [
+    account({
+      harness: "claude",
+      provider: "anthropic",
+      kind: "token",
+      expires_at: Math.floor(Date.now() / 1000) + 86400,
+    }),
+  ];
+  const view = mount(
+    React.createElement(SubscriptionAccountSelector, {
+      agent: agent({ subscriptionAccountHarness: "claude", status: "stopped" }),
+    }),
+  );
+  await waitFor(() =>
+    assert.match(
+      view.getByRole("button", { name: "Subscription account" }).textContent,
+      /Account required/,
+    ),
+  );
+  await openAccountMenu(view);
+  assert.equal(
+    view
+      .getByRole("menuitemradio", {
+        name: "Account required — choose a named account",
+      })
+      .getAttribute("aria-checked"),
+    "true",
+  );
+  assert.equal(
+    view
+      .getByRole("menuitemradio", { name: "Ambient — harness’s current login" })
+      .getAttribute("aria-checked"),
+    "false",
+  );
+  assert.equal(
+    calls.filter(
+      ([command]) =>
+        command === "switch_agent_subscription_account" ||
+        command === "apply_claude_account_change",
+    ).length,
+    0,
+  );
+});
