@@ -297,7 +297,23 @@ test("token browser approval, nickname, Profile Runtime switch and feature-off r
 test("default followers, explicit overrides, all-account scope and integrated removal", async ({
   page,
 }, testInfo) => {
-  test.setTimeout(120_000);
+  test.setTimeout(90_000);
+  page.setDefaultTimeout(10_000);
+  async function closeSurface() {
+    const settings = page.getByTestId("settings-view");
+    if (await settings.isVisible()) {
+      await page
+        .getByRole("button", { name: "Back to app", exact: true })
+        .click();
+      await expect(settings).toHaveCount(0);
+    } else {
+      await page
+        .getByRole("button", { name: "Close panel", exact: true })
+        .click();
+      await expect(page.getByTestId("user-profile-panel")).toHaveCount(0);
+    }
+    await waitForAnimations(page);
+  }
   const second = "cb".repeat(32);
   await installMockBridge(page, {
     managedAgents: [
@@ -344,8 +360,7 @@ test("default followers, explicit overrides, all-account scope and integrated re
       card.getByRole("article", { name, exact: true }),
     ).toBeVisible();
   }
-  await page.keyboard.press("Escape");
-  await waitForAnimations(page);
+  await closeSurface();
   async function profile(name: string, pubkey: string) {
     await page.getByTestId("open-agents-view").click();
     await page.getByRole("button", { name: `${name} agent profile` }).click();
@@ -374,8 +389,7 @@ test("default followers, explicit overrides, all-account scope and integrated re
     }
     await dialog.getByRole("button", { name: "Apply account change" }).click();
     await expect(dialog).toHaveCount(0);
-    await page.keyboard.press("Escape");
-    await waitForAnimations(page);
+    await closeSurface();
   }
   await select("Helm", CLAUDE_AGENT, /^Primary —/);
   await select("Stopped worker", second, /^Primary —/);
@@ -385,8 +399,7 @@ test("default followers, explicit overrides, all-account scope and integrated re
   await expect(
     selector.getByRole("button", { name: "Subscription account" }),
   ).toHaveText(/Second/);
-  await page.keyboard.press("Escape");
-  await waitForAnimations(page);
+  await closeSurface();
   await openSettings(page, "agents");
   const defaultControl = page.getByRole("region", {
     name: "Default Claude account",
@@ -400,8 +413,7 @@ test("default followers, explicit overrides, all-account scope and integrated re
     .getByRole("button", { name: "Apply account change" })
     .click();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
-  await page.keyboard.press("Escape");
-  await waitForAnimations(page);
+  await closeSurface();
   await select("Helm", CLAUDE_AGENT, /^Use default · Second/);
   await openSettings(page, "agents");
   await defaultControl
@@ -421,21 +433,18 @@ test("default followers, explicit overrides, all-account scope and integrated re
     .getByRole("button", { name: "Apply account change" })
     .click();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
-  await page.keyboard.press("Escape");
-  await waitForAnimations(page);
+  await closeSurface();
   selector = await profile("Helm", CLAUDE_AGENT);
   await expect(
     selector.getByRole("button", { name: "Subscription account" }),
   ).toHaveText(/Default · Primary/);
-  await page.keyboard.press("Escape");
-  await waitForAnimations(page);
+  await closeSurface();
   selector = await profile("Stopped worker", second);
   await expect(
     selector.getByRole("button", { name: "Subscription account" }),
   ).toHaveText(/Second/);
   await expect(selector).toContainText("Agent stopped");
-  await page.keyboard.press("Escape");
-  await waitForAnimations(page);
+  await closeSurface();
   await openSettings(page, "agents");
   await card
     .getByRole("article", { name: "Second", exact: true })
@@ -468,8 +477,7 @@ test("default followers, explicit overrides, all-account scope and integrated re
     .click();
   await expect(card).toContainText("No subscription accounts saved");
   await expect(defaultControl).toContainText("Choose default account");
-  await page.keyboard.press("Escape");
-  await waitForAnimations(page);
+  await closeSurface();
   selector = await profile("Helm", CLAUDE_AGENT);
   await expect(selector).toContainText("Agent stopped");
 });
