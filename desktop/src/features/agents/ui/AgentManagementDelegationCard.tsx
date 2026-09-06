@@ -1,4 +1,10 @@
-import { AlertCircle, Loader, Search } from "lucide-react";
+import {
+  AlertCircle,
+  ChevronRight,
+  Loader,
+  Search,
+  UsersRound,
+} from "lucide-react";
 import * as React from "react";
 
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
@@ -104,7 +110,13 @@ export function AgentManagementDelegationCard({
         );
         onPersisted(result.config);
       } catch (err) {
-        setError(typeof err === "string" ? err : "Couldn't save the grant.");
+        setError(
+          err instanceof Error
+            ? err.message
+            : typeof err === "string"
+              ? err
+              : "Couldn't save the grant.",
+        );
         throw err;
       } finally {
         setSaving(false);
@@ -114,6 +126,7 @@ export function AgentManagementDelegationCard({
   );
 
   function openPicker(capability: DelegationCapability, label: string) {
+    setError(null);
     setSearch("");
     setPicker({
       capability,
@@ -128,12 +141,7 @@ export function AgentManagementDelegationCard({
     checked: boolean,
   ) {
     if (checked) {
-      setSearch("");
-      setPicker({
-        capability,
-        label,
-        draft: noneSubject(),
-      });
+      openPicker(capability, label);
       return;
     }
     try {
@@ -186,6 +194,16 @@ export function AgentManagementDelegationCard({
     return agents.filter((agent) => agent.name.toLowerCase().includes(query));
   }, [agents, search]);
 
+  const saveError = error ? (
+    <p
+      className="flex items-start gap-1.5 text-sm text-destructive"
+      role="alert"
+    >
+      <AlertCircle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+      {error}
+    </p>
+  ) : null;
+
   return (
     <div
       className="space-y-4 rounded-lg border border-border/70 px-4 py-4"
@@ -205,7 +223,10 @@ export function AgentManagementDelegationCard({
       <Button
         data-testid="agent-management-grant-all"
         disabled={saving || roster.length === 0}
-        onClick={() => setGrantAllOpen(true)}
+        onClick={() => {
+          setError(null);
+          setGrantAllOpen(true);
+        }}
         size="sm"
         type="button"
         variant="outline"
@@ -269,29 +290,41 @@ export function AgentManagementDelegationCard({
               data-testid={`agent-management-capability-${capability}`}
               key={capability}
             >
-              {on ? (
-                <button
-                  className="min-w-0 flex-1 text-left"
-                  disabled={saving}
-                  onClick={() => openPicker(capability, label)}
-                  type="button"
-                >
+              <button
+                aria-label={`Choose agents for ${label.toLowerCase()}`}
+                aria-haspopup="dialog"
+                className="group flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-sm text-left outline-none hover:text-primary focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-50"
+                disabled={saving}
+                onClick={() => openPicker(capability, label)}
+                type="button"
+              >
+                <span className="min-w-0 flex-1">
                   <span className="block text-sm">{label}</span>
-                  <span
-                    className="block text-xs text-muted-foreground"
-                    data-testid={`agent-management-capability-${capability}-summary`}
-                  >
-                    {subjectSummary(subject)}
+                  <span className="flex items-center gap-1 text-xs text-muted-foreground group-hover:text-primary">
+                    <UsersRound
+                      aria-hidden="true"
+                      className="size-3.5 shrink-0"
+                    />
+                    <span>Choose agents</span>
+                    {on ? (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span
+                          data-testid={`agent-management-capability-${capability}-summary`}
+                        >
+                          {subjectSummary(subject)}
+                        </span>
+                      </>
+                    ) : null}
                   </span>
-                </button>
-              ) : (
-                // Off is already the switch; a second summary line on every
-                // row pushes Agent defaults onto its max-height cap.
-                <div className="min-w-0 flex-1 text-left">
-                  <span className="text-sm">{label}</span>
-                </div>
-              )}
+                </span>
+                <ChevronRight
+                  aria-hidden="true"
+                  className="size-4 shrink-0 text-muted-foreground"
+                />
+              </button>
               <Switch
+                aria-label={label}
                 checked={on}
                 disabled={saving}
                 onCheckedChange={(checked) => {
@@ -303,12 +336,7 @@ export function AgentManagementDelegationCard({
         })}
       </div>
 
-      {error ? (
-        <p className="flex items-center gap-1.5 text-sm text-destructive">
-          <AlertCircle className="size-3.5 shrink-0" />
-          {error}
-        </p>
-      ) : null}
+      {!picker && !grantAllOpen ? saveError : null}
 
       <Dialog
         onOpenChange={(open) => {
@@ -335,6 +363,7 @@ export function AgentManagementDelegationCard({
                 autoCorrect="off"
                 className={MODAL_SEARCH_INPUT_CLASS}
                 data-testid="agent-management-picker-search"
+                disabled={saving}
                 id="agent-management-picker-search"
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder="Search agents"
@@ -360,6 +389,7 @@ export function AgentManagementDelegationCard({
                   roster.every((pubkey) => agentIsGranted(picker.draft, pubkey))
                 }
                 data-testid="agent-management-picker-all"
+                disabled={saving}
                 id="agent-management-picker-all"
                 onCheckedChange={(checked) => {
                   if (!picker) return;
@@ -411,6 +441,7 @@ export function AgentManagementDelegationCard({
                       </label>
                       <Checkbox
                         checked={checked}
+                        disabled={saving}
                         id={rowId}
                         onCheckedChange={() => {
                           if (!picker) return;
@@ -432,6 +463,7 @@ export function AgentManagementDelegationCard({
             </div>
           </div>
 
+          {saveError}
           <DialogFooter>
             <Button
               disabled={saving}
@@ -454,7 +486,12 @@ export function AgentManagementDelegationCard({
         </DialogContent>
       </Dialog>
 
-      <AlertDialog onOpenChange={setGrantAllOpen} open={grantAllOpen}>
+      <AlertDialog
+        onOpenChange={(open) => {
+          if (!saving) setGrantAllOpen(open);
+        }}
+        open={grantAllOpen}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
@@ -467,6 +504,7 @@ export function AgentManagementDelegationCard({
               you add them.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {saveError}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={saving}>Cancel</AlertDialogCancel>
             <AlertDialogAction

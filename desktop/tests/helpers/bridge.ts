@@ -607,6 +607,8 @@ type MockBridgeOptions = {
    * test can interleave edits and exercise the mid-save race handling.
    */
   globalConfigSaveDelayMs?: number;
+  agentManagementDelegationErrors?: string[];
+  agentManagementDelegationDelayMs?: number;
   /**
    * Override the `discover_agent_models` mock response. When set, the bridge
    * returns this catalog instead of the default per-harness model list.

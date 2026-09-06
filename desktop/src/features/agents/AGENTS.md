@@ -352,6 +352,20 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
   --mention <agent-pubkey> --content '!cancel'
 ```
 
+## Standing delegation editor
+
+Each permission exposes a labelled Choose agents button with a people icon and
+keyboard focus, whether granted or off. Its switch opens the picker when
+turning on and immediately revokes that permission when turning off. Picker
+edits persist only on Confirm; cancellation makes no write. While saving,
+selection and dismissal are disabled. Errors from the normalized Tauri Error
+remain inside the active dialog with the draft intact for retry.
+
+The native grant setter checks the private audit channel using relay-signed
+NIP-29 metadata and the current admin record's exact owner role. A metadata
+signer is the relay, not the channel creator. Missing ownership, another owner,
+public/archived channels, or mismatched discovery must not authorize a grant.
+
 ## The tests that enforce this
 
 - `agentManagement.test.mjs` — delegated patch validation, runtime-declared

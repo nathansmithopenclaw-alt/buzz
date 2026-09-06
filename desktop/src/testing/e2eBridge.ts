@@ -692,6 +692,8 @@ type E2eConfig = {
      * spec can interleave edits and exercise the mid-save race handling.
      */
     globalConfigSaveDelayMs?: number;
+    agentManagementDelegationErrors?: string[];
+    agentManagementDelegationDelayMs?: number;
     /**
      * Override the `discover_agent_models` mock response. When set, returns
      * this catalog instead of the default per-harness model list.
@@ -14547,6 +14549,12 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "set_agent_management_delegation": {
         setAgentManagementDelegationCallCount += 1;
+        const delay = activeConfig?.mock?.agentManagementDelegationDelayMs ?? 0;
+        if (delay > 0)
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        const error =
+          activeConfig?.mock?.agentManagementDelegationErrors?.shift();
+        if (error) throw new Error(error);
         const capabilities = (payload as { capabilities: unknown })
           .capabilities;
         lastAgentManagementDelegationPayload = capabilities;
