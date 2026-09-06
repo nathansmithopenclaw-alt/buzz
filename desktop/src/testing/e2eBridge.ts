@@ -989,6 +989,7 @@ type RawRelayAgent = {
 
 type RawManagedAgent = {
   subscription_account_id?: string | null;
+  subscription_account_inherit_default?: boolean;
   subscription_account_harness?: string | null;
   subscription_account_generation?: number;
   running_subscription_account_id?: string | null;
@@ -1949,6 +1950,8 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     subscription_account_harness: agent.subscription_account_harness ?? null,
     subscription_account_id: agent.subscription_account_id ?? null,
     subscription_account_generation: agent.subscription_account_generation ?? 0,
+    subscription_account_inherit_default:
+      agent.subscription_account_inherit_default ?? false,
     running_subscription_account_id:
       agent.running_subscription_account_id ?? null,
     running_subscription_account_generation:
@@ -14662,6 +14665,11 @@ export function maybeInstallE2eTauriMocks() {
       case "cancel_subscription_account_login":
       case "rename_subscription_account":
       case "remove_subscription_account":
+      case "get_claude_default_account":
+      case "get_claude_account_change_status":
+      case "preview_claude_account_change":
+      case "apply_claude_account_change":
+      case "retry_claude_account_change":
       case "agent_account_switch_status":
       case "switch_agent_subscription_account":
       case "resume_agent_subscription_work":

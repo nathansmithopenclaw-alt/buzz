@@ -28,14 +28,12 @@ import {
 } from "@/shared/api/tauriSubscriptionAccounts";
 import type { ManagedAgent } from "@/shared/api/types";
 import {
-  AlertDialog,
-  AlertDialogContent,
-  AlertDialogTitle,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogCancel,
-  AlertDialogAction,
-} from "@/shared/ui/alert-dialog";
+  useClaudeDefaultAccount,
+  useClaudeAccountChange,
+} from "../accountChanges";
+import { ClaudeAccountChangeDialog } from "./ClaudeAccountChangeDialog";
+import { ClaudeAccountChangeProgress } from "./ClaudeAccountChangeProgress";
+import type { ClaudeAccountChangeRequest } from "@/shared/api/tauriSubscriptionAccounts";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 
@@ -51,6 +49,8 @@ export function SubscriptionAccountSelector({
   const now = useSubscriptionAccountClock();
   const enabled = useSubscriptionAccountsEnabledQuery();
   const client = useQueryClient();
+  const defaultAccount = useClaudeDefaultAccount();
+  const group = useClaudeAccountChange();
   const operation = useQuery({
     queryKey: ["account-switch", agent.pubkey],
     queryFn: () => agentAccountSwitchStatus(agent.pubkey),
@@ -70,7 +70,9 @@ export function SubscriptionAccountSelector({
     if (operationRevision)
       void client.invalidateQueries({ queryKey: ["managed-agents"] });
   }, [client, operationRevision]);
-  const [destination, setDestination] = React.useState<string | undefined>();
+  const [destination, setDestination] = React.useState<
+    ClaudeAccountChangeRequest | undefined
+  >();
   const switching =
     useIsMutating({
       mutationKey: ["switch-subscription-account", agent.pubkey],
@@ -91,7 +93,9 @@ export function SubscriptionAccountSelector({
     (account) => account.id === selected,
   );
   const expiry = subscriptionAccountExpiry(selectedAccount, now);
-  const selectedValue = selected ?? (legacy ? "__legacy__" : "");
+  const selectedValue = agent.subscriptionAccountInheritDefault
+    ? "__default__"
+    : (selected ?? (legacy ? "__legacy__" : ""));
   const runningKnown = agent.runningSubscriptionAccountGeneration != null;
   const running = accounts.data?.find(
     (account) => account.id === agent.runningSubscriptionAccountId,
@@ -142,13 +146,33 @@ export function SubscriptionAccountSelector({
         account.kind === "token" &&
         account.state === "ready",
     );
+  const groupPending = Boolean(group.data && group.data.phase !== "complete");
   const busy =
-    switching || resume.isPending || activeSwitch || (working && !canPause);
+    switching ||
+    resume.isPending ||
+    activeSwitch ||
+    groupPending ||
+    (working && !canPause);
   const selectAccount = (value: string) => {
-    if (value === selected && !authHeld && !error) return;
-    const account = accounts.data?.find((item) => item.id === value);
+    const inheritDefault = value === "__default__";
+    const target = inheritDefault ? defaultAccount.data : value;
+    if (!target) return;
+    if (
+      target === selected &&
+      inheritDefault === Boolean(agent.subscriptionAccountInheritDefault) &&
+      !authHeld &&
+      !error
+    )
+      return;
+    const account = accounts.data?.find((item) => item.id === target);
     if (account?.harness === "claude" && account.kind === "token")
-      setDestination(value);
+      setDestination({
+        kind: "agent",
+        pubkey: agent.pubkey,
+        destination: target,
+        inherit_default: inheritDefault,
+        all_on_current: false,
+      });
     else mutation.mutate(value === "__ambient__" ? null : value);
   };
   const content = (
@@ -176,6 +200,7 @@ export function SubscriptionAccountSelector({
             className="w-full justify-between gap-2 font-normal"
           >
             <span className="truncate">
+              {agent.subscriptionAccountInheritDefault ? "Default · " : ""}
               {selectedAccount?.nickname ??
                 (selected
                   ? "Selected account unavailable"
@@ -194,6 +219,17 @@ export function SubscriptionAccountSelector({
             value={selectedValue || "__ambient__"}
             onValueChange={selectAccount}
           >
+            {canPause && defaultAccount.data ? (
+              <DropdownMenuRadioItem
+                value="__default__"
+                disabled={!enabled.data || defaultAccount.isError}
+              >
+                Use default ·{" "}
+                {accounts.data?.find(
+                  (account) => account.id === defaultAccount.data,
+                )?.nickname ?? "Unavailable account"}
+              </DropdownMenuRadioItem>
+            ) : null}
             <DropdownMenuRadioItem
               value="__ambient__"
               disabled={working || Boolean(operation.data)}
@@ -262,38 +298,17 @@ export function SubscriptionAccountSelector({
                 ? "Waiting for runtime account confirmation."
                 : "Agent stopped. This selection will apply when it starts."}
       </p>
-      <AlertDialog
-        open={destination !== undefined}
-        onOpenChange={(open) => {
-          if (!open) setDestination(undefined);
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogTitle>Switch this agent’s account?</AlertDialogTitle>
-          <AlertDialogDescription>
-            Use{" "}
-            {
-              accounts.data?.find((account) => account.id === destination)
-                ?.nickname
-            }{" "}
-            for this agent in every community on this Mac. Buzz will pause
-            active work, switch accounts, and continue saved work automatically.
-            Stopped runtimes stay stopped.
-          </AlertDialogDescription>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (destination) mutation.mutate(destination);
-                setDestination(undefined);
-              }}
-            >
-              Switch this agent
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-      {(error || authHeld) && selectedAccount?.kind === "token" ? (
+      {destination ? (
+        <ClaudeAccountChangeDialog
+          request={destination}
+          allowAll={Boolean(selected)}
+          onClose={() => setDestination(undefined)}
+        />
+      ) : null}
+      <ClaudeAccountChangeProgress pubkey={agent.pubkey} />
+      {(error || authHeld) &&
+      !groupPending &&
+      selectedAccount?.kind === "token" ? (
         <div className="space-y-1.5 text-xs">
           <p>
             Work is retained. Retry this account or choose another account

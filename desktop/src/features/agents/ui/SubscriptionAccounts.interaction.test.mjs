@@ -54,6 +54,29 @@ globalThis.__TAURI_INTERNALS__ = dom.window.__TAURI_INTERNALS__ = {
   invoke: async (command, args) => {
     calls.push([command, args]);
     switch (command) {
+      case "get_claude_default_account":
+        return null;
+      case "get_claude_account_change_status":
+        return null;
+      case "preview_claude_account_change":
+        return {
+          fingerprint: "fixture",
+          operation: {
+            id: "fixture",
+            phase: "applying",
+            error: null,
+            destination: args.request.destination ?? args.request.replacement,
+            change_default: args.request.kind === "default",
+            removing: args.request.kind === "remove",
+            members: [],
+          },
+        };
+      case "apply_claude_account_change":
+        if (args.request.kind === "remove")
+          accounts = accounts.filter(
+            (account) => account.id !== args.request.account_id,
+          );
+        return { id: "fixture", phase: "complete", error: null, members: [] };
       case "list_subscription_accounts":
         return structuredClone(accounts);
       case "subscription_account_capabilities":
@@ -580,15 +603,19 @@ test("token setup crosses only metadata IPC, nickname precedes selection, renewa
       .length,
     0,
   );
-  fireEvent.click(
-    await view.findByRole("button", { name: "Switch this agent" }),
+  await waitFor(() =>
+    assert.equal(
+      view.getByRole("button", { name: "Apply account change" }).disabled,
+      false,
+    ),
   );
+  fireEvent.click(view.getByRole("button", { name: "Apply account change" }));
   await waitFor(() =>
     assert.ok(
       calls.some(
         ([name, args]) =>
-          name === "switch_agent_subscription_account" &&
-          args.accountId === "account-a",
+          name === "apply_claude_account_change" &&
+          args.request.destination === "account-a",
       ),
     ),
   );
@@ -679,11 +706,17 @@ test("Claude setup offers only tokens and retired login retains removal", async 
   assert.equal(view.queryByRole("button", { name: "Reconnect" }), null);
   assert.match(view.container.textContent, /sign-in method has been retired/);
   fireEvent.click(view.getByRole("button", { name: "Remove" }));
-  fireEvent.click(view.getByRole("button", { name: "Sign out and remove" }));
+  await waitFor(() =>
+    assert.equal(
+      view.getByRole("button", { name: "Stop agents and remove" }).disabled,
+      false,
+    ),
+  );
+  fireEvent.click(view.getByRole("button", { name: "Stop agents and remove" }));
   await waitFor(() => assert.equal(accounts.length, 0));
 });
 
-test("active Claude work can switch only after the native single-agent confirmation", async () => {
+test("active Claude work can switch only after the native scoped confirmation", async () => {
   accounts = [
     account({
       harness: "claude",
@@ -700,28 +733,29 @@ test("active Claude work can switch only after the native single-agent confirmat
   );
   await chooseAccount(view, /Work/);
   assert.equal(
-    calls.filter(([name]) => name === "switch_agent_subscription_account")
-      .length,
+    calls.filter(([name]) => name === "apply_claude_account_change").length,
     0,
   );
   assert.match(
     (await view.findByRole("alertdialog")).textContent,
-    /Stopped runtimes stay stopped/,
+    /Stopped agents stay stopped/,
   );
   fireEvent.click(view.getByRole("button", { name: "Cancel" }));
   assert.equal(
-    calls.filter(([name]) => name === "switch_agent_subscription_account")
-      .length,
+    calls.filter(([name]) => name === "apply_claude_account_change").length,
     0,
   );
   await chooseAccount(view, /Work/);
-  fireEvent.click(
-    await view.findByRole("button", { name: "Switch this agent" }),
-  );
   await waitFor(() =>
     assert.equal(
-      calls.filter(([name]) => name === "switch_agent_subscription_account")
-        .length,
+      view.getByRole("button", { name: "Apply account change" }).disabled,
+      false,
+    ),
+  );
+  fireEvent.click(view.getByRole("button", { name: "Apply account change" }));
+  await waitFor(() =>
+    assert.equal(
+      calls.filter(([name]) => name === "apply_claude_account_change").length,
       1,
     ),
   );

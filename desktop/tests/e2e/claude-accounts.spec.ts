@@ -247,14 +247,14 @@ test("token browser approval, nickname, Profile Runtime switch and feature-off r
   await page.keyboard.press("End");
   await page.keyboard.press("Enter");
   await expect(page.getByRole("alertdialog")).toContainText(
-    "Stopped runtimes stay stopped",
+    "Stopped agents stay stopped",
   );
   expect(await commandCount(page, "switch_agent_subscription_account")).toBe(0);
   await page
     .getByRole("alertdialog")
     .screenshot({ path: testInfo.outputPath("ACCOUNT_CONFIRMATION.png") });
   await page
-    .getByRole("button", { name: "Switch this agent", exact: true })
+    .getByRole("button", { name: "Apply account change", exact: true })
     .click();
   await expect(
     selector.getByRole("button", { name: "Subscription account" }),
@@ -291,5 +291,185 @@ test("token browser approval, nickname, Profile Runtime switch and feature-off r
   ).toHaveCount(0);
   expect(await commandCount(page, "begin_subscription_account_token")).toBe(2);
   expect(await commandCount(page, "begin_subscription_account_login")).toBe(0);
-  expect(await commandCount(page, "switch_agent_subscription_account")).toBe(1);
+  expect(await commandCount(page, "apply_claude_account_change")).toBe(1);
+});
+
+test("default followers, explicit overrides, all-account scope and integrated removal", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(120_000);
+  const second = "cb".repeat(32);
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: CLAUDE_AGENT,
+        name: "Helm",
+        runtime: "claude",
+        status: "running",
+        channelNames: ["general"],
+        channelIds: [GENERAL_CHANNEL],
+      },
+      {
+        pubkey: second,
+        name: "Stopped worker",
+        runtime: "claude",
+        status: "stopped",
+        channelNames: ["general"],
+        channelIds: [GENERAL_CHANNEL],
+      },
+    ],
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await openSettings(page, "experimental");
+  await page.getByRole("switch", { name: "Subscription Accounts" }).click();
+  await page.getByTestId("settings-nav-agents").click();
+  const card = page.getByTestId("settings-subscription-accounts");
+  for (const [index, name] of ["Primary", "Second"].entries()) {
+    await card
+      .getByRole("button", { name: "Add Claude long-lived token" })
+      .click();
+    await expect(card.getByRole("article")).toHaveCount(index + 1);
+    await page.evaluate(
+      ({ id, now }) =>
+        window.__BUZZ_E2E_COMPLETE_SUBSCRIPTION_TOKEN__?.(id, now),
+      {
+        id: `mock-subscription-${index + 1}`,
+        now: Math.floor(Date.now() / 1000),
+      },
+    );
+    const row = card.getByRole("article").last();
+    await row.getByRole("textbox", { name: /Nickname/ }).fill(name);
+    await row.getByRole("button", { name: "Save nickname" }).click();
+    await expect(
+      card.getByRole("article", { name, exact: true }),
+    ).toBeVisible();
+  }
+  await page.keyboard.press("Escape");
+  await waitForAnimations(page);
+  async function profile(name: string, pubkey: string) {
+    await page.getByTestId("open-agents-view").click();
+    await page.getByRole("button", { name: `${name} agent profile` }).click();
+    const panel = page.getByTestId("user-profile-panel");
+    await panel.getByRole("tab", { name: "Runtime" }).click();
+    return panel.getByTestId(`subscription-account-selector-${pubkey}`);
+  }
+  async function select(
+    name: string,
+    pubkey: string,
+    account: RegExp,
+    all = false,
+  ) {
+    const selector = await profile(name, pubkey);
+    await selector
+      .getByRole("button", { name: "Subscription account" })
+      .click();
+    await page.getByRole("menuitemradio", { name: account }).click();
+    const dialog = page.getByRole("alertdialog");
+    if (all) {
+      await dialog
+        .getByRole("button", { name: "All agents on the current account" })
+        .click();
+      await expect(dialog).toContainText("2 agents on this Mac");
+      await expect(dialog).toContainText("1 running instances");
+    }
+    await dialog.getByRole("button", { name: "Apply account change" }).click();
+    await expect(dialog).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await waitForAnimations(page);
+  }
+  await select("Helm", CLAUDE_AGENT, /^Primary —/);
+  await select("Stopped worker", second, /^Primary —/);
+  await select("Helm", CLAUDE_AGENT, /^Second —/, true);
+  let selector = await profile("Stopped worker", second);
+  await expect(selector).toContainText("Agent stopped");
+  await expect(
+    selector.getByRole("button", { name: "Subscription account" }),
+  ).toHaveText(/Second/);
+  await page.keyboard.press("Escape");
+  await waitForAnimations(page);
+  await openSettings(page, "agents");
+  const defaultControl = page.getByRole("region", {
+    name: "Default Claude account",
+  });
+  await defaultControl.getByRole("button", { name: /Choose default/ }).click();
+  await page
+    .getByRole("menuitemradio", { name: "Second", exact: true })
+    .click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "Apply account change" })
+    .click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await waitForAnimations(page);
+  await select("Helm", CLAUDE_AGENT, /^Use default · Second/);
+  await openSettings(page, "agents");
+  await defaultControl
+    .getByRole("button", { name: "Second", exact: true })
+    .click();
+  await page
+    .getByRole("menuitemradio", { name: "Primary", exact: true })
+    .click();
+  await expect(page.getByRole("alertdialog")).toContainText(
+    "1 agents on this Mac",
+  );
+  await expect(page.getByRole("alertdialog")).not.toContainText(
+    "Stopped worker",
+  );
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "Apply account change" })
+    .click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await waitForAnimations(page);
+  selector = await profile("Helm", CLAUDE_AGENT);
+  await expect(
+    selector.getByRole("button", { name: "Subscription account" }),
+  ).toHaveText(/Default · Primary/);
+  await page.keyboard.press("Escape");
+  await waitForAnimations(page);
+  selector = await profile("Stopped worker", second);
+  await expect(
+    selector.getByRole("button", { name: "Subscription account" }),
+  ).toHaveText(/Second/);
+  await expect(selector).toContainText("Agent stopped");
+  await page.keyboard.press("Escape");
+  await waitForAnimations(page);
+  await openSettings(page, "agents");
+  await card
+    .getByRole("article", { name: "Second", exact: true })
+    .getByRole("button", { name: "Remove", exact: true })
+    .click();
+  await expect(page.getByRole("alertdialog")).toContainText("Stopped worker");
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "Move agents and remove" })
+    .click();
+  await expect(
+    card.getByRole("article", { name: "Second", exact: true }),
+  ).toHaveCount(0);
+  await card
+    .getByRole("article", { name: "Primary", exact: true })
+    .getByRole("button", { name: "Remove", exact: true })
+    .click();
+  await expect(page.getByRole("alertdialog")).toContainText(
+    "2 agents on this Mac",
+  );
+  await expect(page.getByRole("alertdialog")).toContainText(
+    "The default account will be cleared",
+  );
+  await page
+    .getByRole("alertdialog")
+    .screenshot({ path: testInfo.outputPath("STOP_AND_REMOVE.png") });
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "Stop agents and remove" })
+    .click();
+  await expect(card).toContainText("No subscription accounts saved");
+  await expect(defaultControl).toContainText("Choose default account");
+  await page.keyboard.press("Escape");
+  await waitForAnimations(page);
+  selector = await profile("Helm", CLAUDE_AGENT);
+  await expect(selector).toContainText("Agent stopped");
 });

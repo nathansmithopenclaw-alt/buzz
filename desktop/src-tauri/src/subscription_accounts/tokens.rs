@@ -223,7 +223,7 @@ fn begin_token(account_id: Option<String>, app: AppHandle) -> Result<Subscriptio
             logout_completed: false,
         });
     }
-    registry.schema_version = 2;
+    registry.schema_version = registry.schema_version.max(2);
     let home = store::home_at(&root, &id)?;
     let attempt = uuid::Uuid::new_v4().to_string();
     let account = store::account_mut(&mut registry, &id)?;
@@ -403,7 +403,7 @@ mod tests {
         let (_temp, root, id) = super::super::tests::registry();
         let mut registry = store::load(&root).unwrap();
         registry.accounts[0].kind = "token".into();
-        registry.schema_version = 2;
+        registry.schema_version = registry.schema_version.max(2);
         store::save(&root, &registry).unwrap();
         assert!(finish_token(
             &root,
@@ -441,7 +441,7 @@ mod tests {
             let (_temp, root, id) = super::super::tests::registry();
             let mut registry = store::load(&root).unwrap();
             registry.accounts[0].kind = "token".into();
-            registry.schema_version = 2;
+            registry.schema_version = registry.schema_version.max(2);
             store::save(&root, &registry).unwrap();
             finish_token(
                 &root,

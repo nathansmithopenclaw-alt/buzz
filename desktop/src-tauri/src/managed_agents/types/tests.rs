@@ -48,6 +48,7 @@ fn managed_agent_record_without_auth_tag_deserializes() {
     )
     .expect("legacy agent record without auth_tag should deserialize");
 
+    assert!(!record.subscription_account_inherit_default);
     assert_eq!(record.auth_tag, None);
     assert_eq!(record.avatar_url, None);
     assert_eq!(record.pubkey, "abcd1234");
@@ -748,6 +749,7 @@ fn summary_fixture(
         supports_claude_accounts: false,
         subscription_account_id: None,
         subscription_account_generation: 0,
+        subscription_account_inherit_default: false,
         subscription_account_harness: None,
         running_subscription_account_id: None,
         running_subscription_account_generation: None,

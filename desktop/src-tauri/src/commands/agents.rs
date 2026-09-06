@@ -651,7 +651,7 @@ pub async fn create_managed_agent(
             input.parallelism,
             linked_persona.as_ref(),
         )?;
-        let record = ManagedAgentRecord {
+        let mut record = ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: name.clone(),
             description: None,
@@ -695,6 +695,7 @@ pub async fn create_managed_agent(
             claude_account_id: None,
             subscription_account_id: None,
             subscription_account_generation: 0,
+            subscription_account_inherit_default: false,
             persona_source_version: snapshot_source_version,
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false
@@ -745,6 +746,7 @@ pub async fn create_managed_agent(
             effort_level: None,
         };
 
+        crate::subscription_accounts::defaults::initialize_agent(&app, &mut record, &personas)?;
         records.push(record);
         crate::managed_agents::sync_catalog_and_save_agents(&app, &records, &personas)?;
 

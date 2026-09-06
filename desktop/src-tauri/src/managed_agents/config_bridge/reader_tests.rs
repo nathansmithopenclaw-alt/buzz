@@ -128,6 +128,7 @@ fn test_record() -> ManagedAgentRecord {
         claude_account_id: None,
         subscription_account_id: None,
         subscription_account_generation: 0,
+        subscription_account_inherit_default: false,
     }
 }
 

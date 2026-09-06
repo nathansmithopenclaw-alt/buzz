@@ -320,6 +320,7 @@ pub fn build_managed_agent_summary(
         supports_claude_accounts,
         subscription_account_id: record.subscription_account_id.clone(),
         subscription_account_generation: record.subscription_account_generation,
+        subscription_account_inherit_default: record.subscription_account_inherit_default,
         subscription_account_harness,
         running_subscription_account_id: super::subscription_binding::ready_binding(pair_runtime)
             .map(|b| b.account_id.clone()),

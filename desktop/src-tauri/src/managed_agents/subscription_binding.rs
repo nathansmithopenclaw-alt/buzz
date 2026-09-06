@@ -45,6 +45,13 @@ pub(crate) fn configure(
     ] {
         command.env_remove(name);
     }
+    if record.subscription_account_inherit_default
+        && (record.subscription_account_id.is_none()
+            || (subscription_accounts::defaults::selected(app)? != record.subscription_account_id
+                && !super::account_group::allows_staged_default(app, record)?))
+    {
+        return Err("The default account change is incomplete; retry it in Settings".into());
+    }
     let Some(id) = record.subscription_account_id.as_deref() else {
         return Ok(None);
     };
@@ -659,9 +666,11 @@ pub async fn switch_agent_subscription_account(
     account_id: Option<String>,
     app: AppHandle,
 ) -> Result<SubscriptionSwitchResult, String> {
-    tauri::async_runtime::spawn_blocking(move || switch_account(pubkey, account_id, app, None))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        switch_account_scoped(pubkey, account_id, app, None, None, None)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Renewal may only restart bindings that still select this mint's account.
@@ -683,11 +692,92 @@ fn renewal_still_selected(
     selected == Some(expected) && current_mint == Some(expected_mint)
 }
 
+/// Capture immutable running intent before a parent operation publishes its journal.
+/// Caller holds the runtime transition and managed-agent store locks.
+pub(crate) fn capture_operation(
+    record: &ManagedAgentRecord,
+    account_id: &Option<String>,
+    previous: Option<super::account_switch::Operation>,
+    runtimes: &mut std::collections::HashMap<
+        super::ManagedAgentRuntimeKey,
+        super::ManagedAgentPairRuntime,
+    >,
+) -> Result<super::account_switch::Operation, String> {
+    let pubkey = &record.pubkey;
+    if let Some(mut op) = previous.clone().filter(|op| {
+        op.phase != "complete"
+            || (op.error.is_some() && account_id.as_deref() == Some(&op.account_id))
+    }) {
+        op.account_id = account_id.clone().ok_or("Missing destination account")?;
+        op.error = None;
+        Ok(op)
+    } else {
+        let live_keys = super::managed_agent_runtime_keys(runtimes, pubkey);
+        let mut captured = Vec::new();
+        for key in live_keys {
+            if let Some(runtime) = runtimes.get_mut(&key) {
+                if runtime
+                    .child
+                    .try_wait()
+                    .map_err(|e| e.to_string())?
+                    .is_none()
+                {
+                    captured.push(super::account_switch::Runtime {
+                        key,
+                        nonce: runtime.start_nonce.clone(),
+                        control_dir: runtime
+                            .account_control_dir
+                            .clone()
+                            .ok_or("Restart this agent once to enable safe switching")?,
+                        paused: false,
+                        run: true,
+                    });
+                }
+            }
+        }
+        // Failed destinations must not erase the intent of a runtime that exited.
+        if let Some(previous) = &previous {
+            if previous.error.is_some() {
+                for runtime in previous.runtimes.iter().filter(|r| r.run) {
+                    if !captured.iter().any(|r| r.key == runtime.key) {
+                        let mut missing = runtime.clone();
+                        missing.paused = false;
+                        captured.push(missing);
+                    }
+                }
+            }
+        }
+        Ok(super::account_switch::Operation {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            pubkey: pubkey.clone(),
+            account_id: account_id.clone().ok_or("Missing destination account")?,
+            generation: record
+                .subscription_account_generation
+                .checked_add(1)
+                .ok_or("Subscription binding generation exhausted")?,
+            phase: "pausing".into(),
+            error: None,
+            runtimes: captured,
+        })
+    }
+}
+
 pub(crate) fn switch_account(
     pubkey: String,
     account_id: Option<String>,
     app: AppHandle,
     expected: Option<(String, i64)>,
+) -> Result<SubscriptionSwitchResult, String> {
+    switch_account_scoped(pubkey, account_id, app, expected, None, None)
+}
+
+pub(crate) fn switch_account_scoped(
+    pubkey: String,
+    account_id: Option<String>,
+    app: AppHandle,
+    expected: Option<(String, i64)>,
+    group_id: Option<&str>,
+    inherit_default: Option<bool>,
 ) -> Result<SubscriptionSwitchResult, String> {
     let state = app.state::<AppState>();
     super::require_fleet_host(&state)?;
@@ -705,6 +795,7 @@ pub(crate) fn switch_account(
         .managed_agents_store_lock
         .lock()
         .map_err(|e| e.to_string())?;
+    super::account_group::guard_agent_change(&app, &pubkey, account_id.as_deref(), group_id)?;
     let mut records = super::load_managed_agents(&app)?;
     let record = super::find_managed_agent_mut(&mut records, &pubkey)?;
     if record.backend != super::BackendKind::Local {
@@ -754,6 +845,9 @@ pub(crate) fn switch_account(
         {
             return Err("Account is not ready; reconnect it in Settings".into());
         }
+        if account.kind == "token" {
+            subscription_accounts::defaults::validate_destination(&app, id)?;
+        }
         subscription_accounts::account_home(&app, id)?;
     }
     let previous = super::account_switch::read(&app, &pubkey)?;
@@ -765,62 +859,12 @@ pub(crate) fn switch_account(
         return Err("Choose a named Claude token account to recover this switch".into());
     }
     let mut operation = if durable {
-        if let Some(mut op) = previous.clone().filter(|op| {
-            op.phase != "complete"
-                || (op.error.is_some() && account_id.as_deref() == Some(&op.account_id))
-        }) {
-            op.account_id = account_id.clone().ok_or("Missing destination account")?;
-            op.error = None;
-            Some(op)
-        } else {
-            let live_keys = super::managed_agent_runtime_keys(&runtimes, &pubkey);
-            let mut captured = Vec::new();
-            for key in live_keys {
-                if let Some(runtime) = runtimes.get_mut(&key) {
-                    if runtime
-                        .child
-                        .try_wait()
-                        .map_err(|e| e.to_string())?
-                        .is_none()
-                    {
-                        captured.push(super::account_switch::Runtime {
-                            key,
-                            nonce: runtime.start_nonce.clone(),
-                            control_dir: runtime
-                                .account_control_dir
-                                .clone()
-                                .ok_or("Restart this agent once to enable safe switching")?,
-                            paused: false,
-                            run: true,
-                        });
-                    }
-                }
-            }
-            // Failed destinations must not erase the intent of a runtime that exited.
-            if let Some(previous) = &previous {
-                if previous.error.is_some() {
-                    for runtime in previous.runtimes.iter().filter(|r| r.run) {
-                        if !captured.iter().any(|r| r.key == runtime.key) {
-                            let mut missing = runtime.clone();
-                            missing.paused = false;
-                            captured.push(missing);
-                        }
-                    }
-                }
-            }
-            Some(super::account_switch::Operation {
-                id: uuid::Uuid::new_v4().simple().to_string(),
-                pubkey: pubkey.clone(),
-                account_id: account_id.clone().ok_or("Missing destination account")?,
-                generation: record
-                    .subscription_account_generation
-                    .checked_add(1)
-                    .ok_or("Subscription binding generation exhausted")?,
-                phase: "pausing".into(),
-                error: None,
-                runtimes: captured,
-            })
-        }
+        Some(capture_operation(
+            record,
+            &account_id,
+            previous,
+            &mut runtimes,
+        )?)
     } else {
         None
     };
@@ -922,6 +966,12 @@ pub(crate) fn switch_account(
             }
         }
         let record = super::find_managed_agent_mut(&mut records, &pubkey)?;
+        record.subscription_account_inherit_default = super::account_group::binding_mode(
+            inherit_default,
+            record.subscription_account_inherit_default,
+            record.subscription_account_id.as_deref(),
+            account_id.as_deref(),
+        );
         record.subscription_account_id = account_id.clone();
         record.subscription_account_generation = operation
             .as_ref()
@@ -1072,6 +1122,76 @@ pub(crate) fn ready_binding(
             )
         })
         .and_then(|r| r.subscription_binding.as_ref())
+}
+
+/// Stop and detach every captured community while retaining unfinished provider
+/// sessions. The paused child fence requires a named account before any Start.
+pub(crate) fn detach_account(app: &AppHandle, pubkey: &str, group_id: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let _store = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    super::account_group::guard_agent_change(app, pubkey, None, Some(group_id))?;
+    let mut records = super::load_managed_agents(app)?;
+    let mut runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let _accounts = subscription_accounts::lifecycle_lock()
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let mut op =
+        super::account_switch::read(app, pubkey)?.ok_or("Missing account detachment intent")?;
+    for index in 0..op.runtimes.len() {
+        let runtime = &op.runtimes[index];
+        if runtime.run && !runtime.paused {
+            control(&runtime.control_dir, &runtime.nonce, &op.id, "pause")?;
+            op.runtimes[index].paused = true;
+            super::account_switch::save(app, &op)?;
+        }
+    }
+    op.phase = "paused".into();
+    super::account_switch::save(app, &op)?;
+    for runtime in &op.runtimes {
+        if !runtime.run {
+            continue;
+        }
+        let key = &runtime.key;
+        if let Some(mut runtime) = runtimes.remove(key) {
+            if let Err(error) = super::terminate_process(runtime.child.id())
+                .and_then(|()| runtime.child.wait().map(|_| ()).map_err(|e| e.to_string()))
+            {
+                runtimes.insert(key.clone(), runtime);
+                return Err(error);
+            }
+            super::remove_agent_runtime_receipt(app, key);
+            state.clear_agent_session_cache(key);
+        } else {
+            super::terminate_untracked_pair_runtime(app, key)?;
+        }
+    }
+    let record = super::find_managed_agent_mut(&mut records, pubkey)?;
+    record.subscription_account_id = None;
+    record.subscription_account_inherit_default = false;
+    record.subscription_account_generation = op.generation;
+    record.claude_account_id = Some(super::CREDENTIALS_FILE_ACCOUNT_ID.into());
+    record.start_on_app_launch = false;
+    record.runtime_pid = None;
+    record.updated_at = crate::util::now_iso();
+    record.last_stopped_at = Some(record.updated_at.clone());
+    record.last_error =
+        Some("Account detached. Choose a named account to resume retained work.".into());
+    super::save_managed_agents(app, &records)?;
+    for runtime in &mut op.runtimes {
+        runtime.run = false;
+    }
+    op.error = Some("Account detached. Choose a named account to resume retained work.".into());
+    super::account_switch::save(app, &op)
 }
 
 /// Explicitly resume retained work after reconnect; never an automatic login side effect.

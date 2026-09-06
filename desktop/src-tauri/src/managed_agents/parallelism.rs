@@ -106,6 +106,7 @@ mod tests {
             claude_account_id: None,
             subscription_account_id: None,
             subscription_account_generation: 0,
+            subscription_account_inherit_default: false,
             persona_source_version: None,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,

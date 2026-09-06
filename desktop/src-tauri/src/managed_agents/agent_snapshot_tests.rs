@@ -36,8 +36,9 @@ fn minimal_record() -> ManagedAgentRecord {
         model: Some("claude-opus-4".to_string()),
         provider: Some("anthropic".to_string()),
         claude_account_id: None,
-        subscription_account_id: None,
+        subscription_account_id: Some("LOCAL_ACCOUNT_MUST_NOT_EXPORT".into()),
         subscription_account_generation: 0,
+        subscription_account_inherit_default: true,
         persona_source_version: Some("v1.0".to_string()), // MUST NOT appear
         env_vars: {
             let mut m = BTreeMap::new();
@@ -673,4 +674,13 @@ fn unsupported_version_is_rejected() {
     let result = decode_snapshot_json(&bytes);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Unsupported snapshot version"));
+}
+
+#[test]
+fn local_default_binding_never_enters_portable_snapshot() {
+    let snapshot = build_snapshot(&minimal_record(), MemoryLevel::None, vec![], None);
+    let bytes = encode_snapshot_json(&snapshot).unwrap();
+    let value = String::from_utf8(bytes).unwrap();
+    assert!(!value.contains("LOCAL_ACCOUNT_MUST_NOT_EXPORT"));
+    assert!(!value.contains("subscription_account_inherit_default"));
 }

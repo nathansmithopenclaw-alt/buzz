@@ -92,3 +92,62 @@ export const agentAccountSwitchStatus = (pubkey: string) =>
   invokeTauri<AccountSwitchStatus | null>("agent_account_switch_status", {
     pubkey,
   });
+
+export type ClaudeAccountChangeRequest =
+  | {
+      kind: "agent";
+      pubkey: string;
+      destination: string;
+      inherit_default: boolean;
+      all_on_current: boolean;
+    }
+  | { kind: "default"; destination: string }
+  | { kind: "remove"; account_id: string; replacement: string | null };
+export type ClaudeAccountChangeStatus = {
+  id: string;
+  phase: "applying" | "paused" | "removing" | "complete";
+  error: string | null;
+  destination: string | null;
+  change_default: boolean;
+  removing: boolean;
+  members: Array<{
+    pubkey: string;
+    name: string;
+    running_count: number;
+    community_count: number;
+    done: boolean;
+    error: string | null;
+  }>;
+};
+export type ClaudeAccountChangePreview = {
+  fingerprint: string;
+  operation: ClaudeAccountChangeStatus;
+};
+export const getClaudeDefaultAccount = () =>
+  invokeTauri<string | null>("get_claude_default_account");
+export const previewClaudeAccountChange = (
+  request: ClaudeAccountChangeRequest,
+) =>
+  invokeTauri<ClaudeAccountChangePreview>("preview_claude_account_change", {
+    request,
+  });
+export const applyClaudeAccountChange = (
+  request: ClaudeAccountChangeRequest,
+  fingerprint: string,
+) =>
+  invokeTauri<ClaudeAccountChangeStatus>("apply_claude_account_change", {
+    request,
+    fingerprint,
+  });
+export const retryClaudeAccountChange = (
+  id: string,
+  destination: string | null = null,
+) =>
+  invokeTauri<ClaudeAccountChangeStatus>("retry_claude_account_change", {
+    id,
+    destination,
+  });
+export const getClaudeAccountChangeStatus = () =>
+  invokeTauri<ClaudeAccountChangeStatus | null>(
+    "get_claude_account_change_status",
+  );

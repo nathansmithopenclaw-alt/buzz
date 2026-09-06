@@ -592,6 +592,7 @@ pub async fn confirm_team_snapshot_import(
             claude_account_id: None,
             subscription_account_id: None,
             subscription_account_generation: 0,
+            subscription_account_inherit_default: false,
             persona_source_version: None,
             env_vars: std::collections::BTreeMap::new(),
             start_on_app_launch: false,

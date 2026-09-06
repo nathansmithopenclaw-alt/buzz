@@ -47,6 +47,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         claude_account_id: None,
         subscription_account_id: None,
         subscription_account_generation: 0,
+        subscription_account_inherit_default: false,
         persona_source_version: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,

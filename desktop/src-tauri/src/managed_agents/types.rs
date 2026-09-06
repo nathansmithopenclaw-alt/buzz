@@ -136,6 +136,7 @@ impl AgentDefinition {
             claude_account_id: self.claude_account_id,
             subscription_account_id: None,
             subscription_account_generation: 0,
+            subscription_account_inherit_default: false,
             persona_source_version: None,
             env_vars: self.env_vars,
             start_on_app_launch: false,
@@ -332,6 +333,10 @@ pub struct ManagedAgentRecord {
     /// Local-only subscription binding; excluded from portable definitions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_account_id: Option<String>,
+    /// The saved account is materialized by a durable default change; spawning
+    /// never silently substitutes a different payer from global settings.
+    #[serde(default)]
+    pub subscription_account_inherit_default: bool,
     /// Monotonic local binding revision, never a provider session identifier.
     #[serde(default)]
     pub subscription_account_generation: u64,
@@ -546,6 +551,7 @@ pub struct ManagedAgentSummary {
     pub subscription_account_id: Option<String>,
     pub subscription_account_generation: u64,
     pub subscription_account_harness: Option<String>,
+    pub subscription_account_inherit_default: bool,
     pub running_subscription_account_id: Option<String>,
     pub running_subscription_account_generation: Option<u64>,
     pub subscription_account_error: Option<String>,

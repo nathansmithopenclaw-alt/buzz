@@ -1,3 +1,7 @@
+import { ClaudeDefaultAccountControl } from "@/features/agents/ui/ClaudeDefaultAccountControl";
+import { ClaudeAccountChangeDialog } from "@/features/agents/ui/ClaudeAccountChangeDialog";
+import { ClaudeAccountChangeProgress } from "@/features/agents/ui/ClaudeAccountChangeProgress";
+import { useClaudeAccountChange } from "@/features/agents/accountChanges";
 import {
   subscriptionAccountExpiry,
   subscriptionAccountNeedsRenewal,
@@ -41,6 +45,18 @@ function AccountRow({
   now: number;
 }) {
   const token = account.kind === "token";
+  const accounts = useSubscriptionAccountsQuery();
+  const group = useClaudeAccountChange();
+  const groupPending = Boolean(group.data && group.data.phase !== "complete");
+  const replacement = accounts.data?.find(
+    (other) =>
+      other.id !== account.id &&
+      other.harness === "claude" &&
+      other.kind === "token" &&
+      other.state === "ready" &&
+      other.nickname &&
+      !subscriptionAccountExpiry(other, now)?.expired,
+  );
   const expiry = subscriptionAccountExpiry(account, now);
   const client = useQueryClient();
   const [nickname, setNickname] = React.useState(account.nickname ?? "");
@@ -155,7 +171,7 @@ function AccountRow({
         {account.state !== "connecting" ? (
           <Button
             variant="ghost"
-            disabled={mutation.isPending}
+            disabled={mutation.isPending || groupPending}
             onClick={() => setConfirmRemove(true)}
           >
             {account.state === "removal_pending" ? "Retry removal" : "Remove"}
@@ -190,7 +206,16 @@ function AccountRow({
           requested when the first reminder is due.
         </p>
       ) : null}
-      {confirmRemove ? (
+      {confirmRemove && account.harness === "claude" ? (
+        <ClaudeAccountChangeDialog
+          request={{
+            kind: "remove",
+            account_id: account.id,
+            replacement: replacement?.id ?? null,
+          }}
+          onClose={() => setConfirmRemove(false)}
+        />
+      ) : confirmRemove ? (
         <div className="space-y-2">
           <p className="text-sm">
             {token ? "Remove" : "Sign out and remove"} {label} from this
@@ -262,6 +287,8 @@ export function SubscriptionAccountsSettingsCard() {
           Existing selections remain enforced; recovery stays available.
         </p>
       ) : null}
+      <ClaudeDefaultAccountControl />
+      <ClaudeAccountChangeProgress />
       {accounts.isPending ? (
         <p role="status">Loading accounts…</p>
       ) : accounts.isError ? (

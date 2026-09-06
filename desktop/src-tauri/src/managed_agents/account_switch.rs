@@ -62,17 +62,39 @@ fn read_at(
     };
     let operation: Operation =
         serde_json::from_str(&raw).map_err(|_| "Invalid account switch journal")?;
+    validate_at(&operation, pubkey, runtime_root)?;
+    Ok(Some(operation))
+}
+
+pub(crate) fn validate_captured(app: &AppHandle, operation: &Operation) -> Result<(), String> {
+    let runtime_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("agents/subscription-runtime");
+    validate_at(operation, &operation.pubkey, &runtime_root)
+}
+
+fn validate_at(
+    operation: &Operation,
+    pubkey: &str,
+    runtime_root: &std::path::Path,
+) -> Result<(), String> {
     if operation.pubkey != pubkey
+        || pubkey.len() != 64
+        || !pubkey.bytes().all(|c| c.is_ascii_hexdigit())
         || operation.id.len() != 32
         || !operation.id.bytes().all(|c| c.is_ascii_hexdigit())
         || !["pausing", "paused", "restarting", "complete"].contains(&operation.phase.as_str())
+        || operation.runtimes.len() > 64
         || operation.runtimes.iter().any(|r| r.key.pubkey != pubkey)
     {
         return Err("Invalid account switch journal identity".into());
     }
+    let mut seen = std::collections::HashSet::new();
     for runtime in &operation.runtimes {
         let key = ManagedAgentRuntimeKey::new(runtime.key.pubkey.clone(), &runtime.key.relay_url)?;
-        if key != runtime.key {
+        if key != runtime.key || !seen.insert(key.clone()) {
             return Err("Noncanonical account switch runtime".into());
         }
         if runtime.nonce.is_empty() && runtime.control_dir.as_os_str().is_empty() && runtime.paused
@@ -86,10 +108,11 @@ fn read_at(
             return Err("Invalid account switch control identity".into());
         }
     }
-    Ok(Some(operation))
+    Ok(())
 }
 
 pub(crate) fn save(app: &AppHandle, operation: &Operation) -> Result<(), String> {
+    validate_captured(app, operation)?;
     let path = path(app, &operation.pubkey)?;
     save_at(&path, operation)
 }
@@ -112,6 +135,7 @@ pub(crate) fn check_spawn(
     record: &super::ManagedAgentRecord,
     key: &ManagedAgentRuntimeKey,
 ) -> Result<(), String> {
+    super::account_group::guard_spawn(app, record)?;
     if let Some(op) = read(app, &record.pubkey)? {
         admit_spawn(
             &op,
@@ -167,6 +191,7 @@ pub(crate) fn set_running(
     key: &ManagedAgentRuntimeKey,
     run: bool,
 ) -> Result<(), String> {
+    super::account_group::ensure_child(app, &key.pubkey)?;
     if let Some(mut op) = read(app, &key.pubkey)? {
         if run && op.phase != "complete" {
             return Err("Finish or retry the account switch first".into());

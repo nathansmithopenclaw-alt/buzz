@@ -1,13 +1,21 @@
 import type { RawManagedAgent } from "@/shared/api/tauri";
-import type { SubscriptionAccount } from "@/shared/api/tauriSubscriptionAccounts";
+import type {
+  ClaudeAccountChangeRequest,
+  ClaudeAccountChangeStatus,
+  SubscriptionAccount,
+} from "@/shared/api/tauriSubscriptionAccounts";
 
 let enabled = false;
 let accounts: SubscriptionAccount[] = [];
 let sequence = 0;
+let defaultAccount: string | null = null;
+let group: ClaudeAccountChangeStatus | null = null;
 export function resetMockSubscriptionAccounts() {
   enabled = false;
   accounts = [];
   sequence = 0;
+  defaultAccount = null;
+  group = null;
 }
 
 /** Test bridge lifecycle: login starts pending, never fabricates real verification. */
@@ -16,6 +24,9 @@ export function mockSubscriptionAccountCommand(
   payload: Record<string, unknown>,
   agents: Pick<
     RawManagedAgent,
+    | "name"
+    | "status"
+    | "subscription_account_inherit_default"
     | "pubkey"
     | "subscription_account_id"
     | "subscription_account_generation"
@@ -27,7 +38,112 @@ export function mockSubscriptionAccountCommand(
 ): unknown {
   const id = String(payload.id ?? "");
   const account = accounts.find((row) => row.id === id);
+  const preview = (request: ClaudeAccountChangeRequest) => {
+    const origin =
+      request.kind === "agent"
+        ? agents.find((agent) => agent.pubkey === request.pubkey)
+        : null;
+    const source =
+      request.kind === "remove"
+        ? request.account_id
+        : request.kind === "default"
+          ? defaultAccount
+          : origin?.subscription_account_id;
+    const members = agents.filter((agent) =>
+      request.kind === "default"
+        ? agent.subscription_account_inherit_default
+        : request.kind === "remove"
+          ? agent.subscription_account_id === source
+          : agent.pubkey === request.pubkey ||
+            (request.all_on_current &&
+              source &&
+              agent.subscription_account_id === source),
+    );
+    const destination =
+      request.kind === "remove" ? request.replacement : request.destination;
+    const operation: ClaudeAccountChangeStatus = {
+      id: "synthetic-group",
+      phase: "applying",
+      error: null,
+      destination,
+      change_default:
+        request.kind === "default" ||
+        (source != null &&
+          source === defaultAccount &&
+          (request.kind === "remove" || request.all_on_current)),
+      removing: request.kind === "remove",
+      members: members.map((agent) => ({
+        pubkey: agent.pubkey,
+        name: agent.name,
+        running_count: agent.status === "running" ? 1 : 0,
+        community_count: 1,
+        done: false,
+        error: null,
+      })),
+    };
+    return {
+      fingerprint: JSON.stringify([
+        request,
+        defaultAccount,
+        members.map((agent) => [
+          agent.pubkey,
+          agent.subscription_account_id,
+          agent.subscription_account_generation,
+          agent.status,
+        ]),
+      ]),
+      operation,
+    };
+  };
   switch (command) {
+    case "get_claude_default_account":
+      return defaultAccount;
+    case "get_claude_account_change_status":
+      return structuredClone(group);
+    case "preview_claude_account_change":
+      return preview(payload.request as ClaudeAccountChangeRequest);
+    case "apply_claude_account_change": {
+      const request = payload.request as ClaudeAccountChangeRequest;
+      const captured = preview(request);
+      if (captured.fingerprint !== payload.fingerprint)
+        throw new Error(
+          "Account state changed. Review the affected agents again.",
+        );
+      group = captured.operation;
+      for (const member of group.members) {
+        const agent = agents.find((agent) => agent.pubkey === member.pubkey);
+        if (!agent) throw new Error("Fixture agent unavailable");
+        agent.subscription_account_id = group.destination;
+        agent.subscription_account_generation =
+          (agent.subscription_account_generation ?? 0) + 1;
+        if (request.kind === "default")
+          agent.subscription_account_inherit_default = true;
+        if (request.kind === "agent" && request.pubkey === agent.pubkey)
+          agent.subscription_account_inherit_default = request.inherit_default;
+        if (!group.destination) {
+          agent.subscription_account_inherit_default = false;
+          agent.status = "stopped";
+          agent.running_subscription_account_id = null;
+          agent.running_subscription_account_generation = null;
+          agent.claude_account_id = null;
+        }
+        if (agent.status === "running") {
+          agent.running_subscription_account_id = group.destination;
+          agent.running_subscription_account_generation =
+            agent.subscription_account_generation;
+        }
+        member.done = true;
+      }
+      if (group.change_default) defaultAccount = group.destination;
+      if (request.kind === "remove")
+        accounts = accounts.filter(
+          (account) => account.id !== request.account_id,
+        );
+      group.phase = "complete";
+      return structuredClone(group);
+    }
+    case "retry_claude_account_change":
+      throw new Error("No interrupted account operation in this fixture");
     case "agent_account_switch_status":
       return null;
     case "get_subscription_accounts_enabled":
@@ -128,6 +244,7 @@ export function mockSubscriptionAccountCommand(
       )
         throw new Error("Subscription account unavailable");
       agent.subscription_account_id = selectedId;
+      agent.subscription_account_inherit_default = false;
       agent.subscription_account_generation =
         (agent.subscription_account_generation ?? 0) + 1;
       agent.claude_account_id = null;
