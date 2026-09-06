@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
+
 import { installMockBridge } from "../helpers/bridge";
 
 const FIRST = "11".repeat(32);
@@ -358,4 +360,119 @@ test("save does not overwrite a grant that landed mid-flight", async ({
   expect(
     stored?.agent_management_delegations[SECOND]?.capabilities.agent_creation,
   ).toBe(false);
+});
+
+test("permission pickers are explicit, keyboard accessible, and persist on reopen", async ({
+  page,
+}, testInfo) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      { pubkey: FIRST, name: "Alpha" },
+      { pubkey: SECOND, name: "Beta" },
+    ],
+  });
+  await openAgentDefaults(page);
+  const card = page.getByTestId("agent-management-delegation-card");
+  const choose = card.getByRole("button", {
+    name: "Choose agents for update existing agents",
+  });
+  await expect(card.getByText("Choose agents", { exact: true })).toHaveCount(5);
+  await expect(choose).toHaveAttribute("aria-haspopup", "dialog");
+  await choose.focus();
+  await page.keyboard.press("Enter");
+  const picker = page.getByTestId("agent-management-picker");
+  await expect(picker).toBeVisible();
+  await picker
+    .getByTestId(`agent-management-picker-agent-${FIRST}`)
+    .getByRole("checkbox")
+    .check();
+  await picker.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(
+    await invokeMock(page, "get_agent_management_delegation_set_call_count"),
+  ).toBe(0);
+  await choose.click();
+  await expect(
+    picker
+      .getByTestId(`agent-management-picker-agent-${FIRST}`)
+      .getByRole("checkbox"),
+  ).not.toBeChecked();
+  await picker
+    .getByTestId(`agent-management-picker-agent-${SECOND}`)
+    .getByRole("checkbox")
+    .check();
+  await page.getByTestId("agent-management-picker-confirm").click();
+  await expect(picker).not.toBeVisible();
+  await expect(
+    card.getByTestId("agent-management-capability-agent_config-summary"),
+  ).toHaveText("1 agent");
+  await expect(card).toBeVisible();
+  await choose.click();
+  await expect(
+    picker
+      .getByTestId(`agent-management-picker-agent-${SECOND}`)
+      .getByRole("checkbox"),
+  ).toBeChecked();
+  await expect(
+    picker
+      .getByTestId(`agent-management-picker-agent-${FIRST}`)
+      .getByRole("checkbox"),
+  ).not.toBeChecked();
+  await waitForAnimations(page);
+  await picker.screenshot({
+    path: testInfo.outputPath("delegation-agent-picker.png"),
+  });
+  await picker.getByRole("button", { name: "Cancel", exact: true }).click();
+  await waitForAnimations(page);
+  await card.screenshot({
+    path: testInfo.outputPath("delegation-choose-agents.png"),
+  });
+});
+
+test("save errors remain in the picker with the draft intact for retry", async ({
+  page,
+}, testInfo) => {
+  await installMockBridge(page, {
+    managedAgents: [{ pubkey: FIRST, name: "Alpha" }],
+    agentManagementDelegationErrors: [
+      "Audit channel ownership is unavailable. Try again.",
+    ],
+    agentManagementDelegationDelayMs: 800,
+  });
+  await openAgentDefaults(page);
+  await page
+    .getByRole("switch", { name: "Create agents", exact: true })
+    .click();
+  const picker = page.getByTestId("agent-management-picker");
+  const alpha = picker
+    .getByTestId(`agent-management-picker-agent-${FIRST}`)
+    .getByRole("checkbox");
+  await alpha.check();
+  await page.getByTestId("agent-management-picker-confirm").click();
+  await expect(alpha).toBeDisabled();
+  await expect(picker.getByRole("alert")).toHaveText(
+    "Audit channel ownership is unavailable. Try again.",
+  );
+  await expect(alpha).toBeChecked();
+  expect(await invokeMock(page, "get_global_agent_config")).toMatchObject({
+    agent_management_delegation: null,
+    agent_management_delegations: {},
+  });
+  await waitForAnimations(page);
+  await picker.screenshot({
+    path: testInfo.outputPath("delegation-save-error.png"),
+  });
+  await page.getByTestId("agent-management-picker-confirm").click();
+  await expect(picker).not.toBeVisible();
+  await expect(
+    page.getByTestId("agent-management-capability-agent_creation-summary"),
+  ).toHaveText("1 agent");
+  expect(
+    await invokeMock(page, "get_agent_management_delegation_set_call_count"),
+  ).toBe(2);
+  await page
+    .getByRole("switch", { name: "Create agents", exact: true })
+    .click();
+  await expect(
+    page.getByRole("switch", { name: "Create agents", exact: true }),
+  ).not.toBeChecked();
 });

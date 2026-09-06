@@ -81,14 +81,46 @@ fn resolve_audit_channel_id(
     Ok(agent_management_audit_channel_uuid(owner_hex, relay_scope).to_string())
 }
 
-/// Fail closed if a kind:39000 for this id exists but was not created by the
-/// current Desktop owner. The uuid5 inputs are public, so a pre-created
-/// channel on a multi-tenant relay is otherwise a squat.
+/// NIP-29 discovery is relay-signed, not creator-signed. Establish ownership
+/// from the relay's current admin roles for this exact private channel. The
+/// deterministic UUID alone is not authority: another user can pre-create it.
 fn require_owner_audit_metadata(
     metadata: &nostr::Event,
+    admins: &nostr::Event,
+    channel_id: &str,
     owner: &nostr::PublicKey,
 ) -> Result<(), String> {
-    if metadata.pubkey != *owner {
+    for (event, kind) in [(metadata, 39_000), (admins, 39_001)] {
+        if event.kind != nostr::Kind::Custom(kind)
+            || event.tags.identifier() != Some(channel_id)
+            || event.verify().is_err()
+        {
+            return Err("invalid audit channel discovery; grant was not signed".into());
+        }
+    }
+    if metadata.pubkey != admins.pubkey {
+        return Err("audit channel discovery signers disagree; grant was not signed".into());
+    }
+    if !metadata
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice() == ["private"])
+        || metadata.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().is_some_and(|name| name == "public")
+                || (values.first().is_some_and(|name| name == "archived")
+                    && values.get(1).is_some_and(|value| value == "true"))
+        })
+    {
+        return Err("audit channel must be private and active; grant was not signed".into());
+    }
+    let owner_hex = owner.to_hex();
+    if !admins.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        values.first().is_some_and(|name| name == "p")
+            && values.get(1) == Some(&owner_hex)
+            && values.get(2).is_some_and(|role| role == "owner")
+    }) {
         return Err(
             "audit channel exists but is not owned by this Desktop owner; grant was not signed"
                 .into(),
@@ -120,15 +152,26 @@ async fn ensure_agent_management_audit_channel(
             );
         }
     }
-    require_owner_audit_metadata(metadata.as_ref().expect("checked above"), &owner)?;
-
-    if !owner_is_audit_member(state, &channel_id, &owner_hex).await? {
-        let uuid = uuid::Uuid::parse_str(&channel_id)
-            .map_err(|_| "invalid delegation audit channel UUID".to_string())?;
-        let builder = events::build_join(uuid)?;
-        submit_event_with_keys(builder, state, owner_keys, None).await?;
-        state.mark_pending_owned_channel(&owner_hex, &channel_id);
+    // Creation emits metadata before admin roles. Wait for the latter too;
+    // a pending-owner UI hint must never bypass this authorization check.
+    let mut admins = None;
+    for attempt in 0..3 {
+        admins = channel_discovery(state, &channel_id, 39_001).await?;
+        if admins.is_some() {
+            break;
+        }
+        if attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
     }
+    let admins = admins
+        .ok_or("audit channel ownership not yet available; grant was not signed; try again")?;
+    require_owner_audit_metadata(
+        metadata.as_ref().expect("checked above"),
+        &admins,
+        &channel_id,
+        &owner,
+    )?;
 
     Ok(channel_id)
 }
@@ -180,37 +223,24 @@ async fn channel_metadata(
     state: &AppState,
     channel_id: &str,
 ) -> Result<Option<nostr::Event>, String> {
+    channel_discovery(state, channel_id, 39_000).await
+}
+
+async fn channel_discovery(
+    state: &AppState,
+    channel_id: &str,
+    kind: u16,
+) -> Result<Option<nostr::Event>, String> {
     let events = query_relay(
         state,
         &[serde_json::json!({
-            "kinds": [39000],
+            "kinds": [kind],
             "#d": [channel_id],
             "limit": 1
         })],
     )
     .await?;
     Ok(events.into_iter().next())
-}
-
-async fn owner_is_audit_member(
-    state: &AppState,
-    channel_id: &str,
-    owner_hex: &str,
-) -> Result<bool, String> {
-    if state.is_pending_owned_channel(owner_hex, channel_id) {
-        return Ok(true);
-    }
-    let events = query_relay(
-        state,
-        &[serde_json::json!({
-            "kinds": [39002],
-            "#d": [channel_id],
-            "#p": [owner_hex],
-            "limit": 1
-        })],
-    )
-    .await?;
-    Ok(!events.is_empty())
 }
 
 fn is_duplicate_channel_rejection(error: &str) -> bool {
@@ -220,8 +250,8 @@ fn is_duplicate_channel_rejection(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        existing_audit_channel_id, is_duplicate_channel_rejection, require_owner_audit_metadata,
-        resolve_audit_channel_id,
+        ensure_agent_management_audit_channel, existing_audit_channel_id,
+        is_duplicate_channel_rejection, require_owner_audit_metadata, resolve_audit_channel_id,
     };
     use crate::managed_agents::{
         global_config::{
@@ -305,20 +335,183 @@ mod tests {
 
     fn metadata_event(keys: &Keys, channel_id: &str) -> nostr::Event {
         EventBuilder::new(Kind::Custom(39_000), "{}")
-            .tags([Tag::parse(["d", channel_id]).unwrap()])
+            .tags([
+                Tag::parse(["d", channel_id]).unwrap(),
+                Tag::parse(["private"]).unwrap(),
+            ])
             .sign_with_keys(keys)
             .unwrap()
     }
 
+    fn admin_event(relay: &Keys, channel_id: &str, owner: &Keys, role: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(39_001), "")
+            .tags([
+                Tag::parse(["d", channel_id]).unwrap(),
+                Tag::parse(["p", &owner.public_key().to_hex(), role]).unwrap(),
+            ])
+            .sign_with_keys(relay)
+            .unwrap()
+    }
+
     #[test]
-    fn require_owner_audit_metadata_reuses_owner_and_fails_closed_on_squat() {
+    fn relay_signed_audit_discovery_accepts_owner_role() {
+        let relay = Keys::generate();
         let owner = Keys::generate();
-        let attacker = Keys::generate();
-        require_owner_audit_metadata(&metadata_event(&owner, AUDIT), &owner.public_key()).unwrap();
-        let err =
-            require_owner_audit_metadata(&metadata_event(&attacker, AUDIT), &owner.public_key())
-                .unwrap_err();
-        assert!(err.contains("not owned by this Desktop owner"));
-        assert!(err.contains("grant was not signed"));
+        assert_ne!(relay.public_key(), owner.public_key());
+        require_owner_audit_metadata(
+            &metadata_event(&relay, AUDIT),
+            &admin_event(&relay, AUDIT, &owner, "owner"),
+            AUDIT,
+            &owner.public_key(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn audit_discovery_rejects_non_owner_and_wrong_channel_or_signer() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let other = Keys::generate();
+        let metadata = metadata_event(&relay, AUDIT);
+        for admins in [
+            admin_event(&relay, AUDIT, &owner, "admin"),
+            admin_event(&relay, AUDIT, &owner, "member"),
+            admin_event(&relay, AUDIT, &other, "owner"),
+            admin_event(&relay, "different-channel", &owner, "owner"),
+            admin_event(&other, AUDIT, &owner, "owner"),
+            metadata.clone(),
+        ] {
+            assert!(
+                require_owner_audit_metadata(&metadata, &admins, AUDIT, &owner.public_key())
+                    .is_err()
+            );
+        }
+        let mut tampered = admin_event(&relay, AUDIT, &other, "owner");
+        tampered.tags = admin_event(&relay, AUDIT, &owner, "owner").tags;
+        assert!(
+            require_owner_audit_metadata(&metadata, &tampered, AUDIT, &owner.public_key()).is_err()
+        );
+    }
+
+    #[test]
+    fn audit_discovery_rejects_public_archived_and_mismatched_metadata() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let admins = admin_event(&relay, AUDIT, &owner, "owner");
+        for tags in [
+            vec![vec!["d", AUDIT]],
+            vec![vec!["d", AUDIT], vec!["public"]],
+            vec![vec!["d", AUDIT], vec!["private"], vec!["public"]],
+            vec![vec!["d", AUDIT], vec!["private"], vec!["archived", "true"]],
+            vec![vec!["d", "different-channel"], vec!["private"]],
+        ] {
+            let metadata = EventBuilder::new(Kind::Custom(39_000), "")
+                .tags(tags.into_iter().map(|tag| Tag::parse(tag).unwrap()))
+                .sign_with_keys(&relay)
+                .unwrap();
+            assert!(
+                require_owner_audit_metadata(&metadata, &admins, AUDIT, &owner.public_key())
+                    .is_err()
+            );
+        }
+    }
+
+    // Exercise the actual ensure path and HTTP query shape with relay-signed
+    // NIP-29 discovery, including create -> metadata -> delayed admin emission.
+    // No owner credentials, live relay, or durable grants are involved.
+    #[tokio::test]
+    async fn ensure_audit_channel_uses_relay_roles_for_existing_and_new_channels() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (create, owns_channel) in [(false, true), (true, true), (false, false)] {
+            let relay = Keys::generate();
+            let owner = Keys::generate();
+            let metadata = metadata_event(&relay, AUDIT);
+            let other = Keys::generate();
+            let admins = admin_event(
+                &relay,
+                AUDIT,
+                if owns_channel { &owner } else { &other },
+                "owner",
+            );
+            let mut replies = vec![];
+            if create {
+                replies.push(("/query", Some(39_000), "[]".to_string()));
+                replies.push((
+                    "/events",
+                    None,
+                    r#"{"accepted":true,"event_id":"test-create","message":""}"#.to_string(),
+                ));
+            }
+            replies.push((
+                "/query",
+                Some(39_000),
+                serde_json::to_string(&vec![metadata]).unwrap(),
+            ));
+            replies.push(("/query", Some(39_001), "[]".to_string()));
+            replies.push((
+                "/query",
+                Some(39_001),
+                serde_json::to_string(&vec![admins]).unwrap(),
+            ));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for (path, kind, body) in replies {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut buf = [0; 4096];
+                    loop {
+                        let n = stream.read(&mut buf).await.unwrap();
+                        assert_ne!(n, 0);
+                        request.extend_from_slice(&buf[..n]);
+                        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&request[..end]);
+                            let length: usize = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length: ")
+                                        .map(|v| v.parse().unwrap())
+                                })
+                                .unwrap();
+                            if request.len() >= end + 4 + length {
+                                assert!(headers.starts_with(&format!("POST {path} HTTP/1.1")));
+                                let json: serde_json::Value =
+                                    serde_json::from_slice(&request[end + 4..]).unwrap();
+                                if let Some(kind) = kind {
+                                    assert_eq!(
+                                        json,
+                                        serde_json::json!([{"kinds":[kind],"#d":[AUDIT],"limit":1}])
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+            let state = crate::app_state::build_app_state();
+            *state.keys.lock().unwrap() = owner.clone();
+            if !owns_channel {
+                state.mark_pending_owned_channel(&owner.public_key().to_hex(), AUDIT);
+            }
+            *state.relay_url_override.lock().unwrap() = Some(format!("http://{addr}"));
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                ensure_agent_management_audit_channel(&state, &owner, Some(AUDIT)),
+            )
+            .await
+            .unwrap();
+            if owns_channel {
+                assert_eq!(result.unwrap(), AUDIT);
+            } else {
+                assert!(result
+                    .unwrap_err()
+                    .contains("not owned by this Desktop owner"));
+            }
+            server.await.unwrap();
+        }
     }
 }
