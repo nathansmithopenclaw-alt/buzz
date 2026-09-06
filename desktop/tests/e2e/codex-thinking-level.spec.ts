@@ -285,3 +285,36 @@ test("failed model discovery preserves a visible saved effort", async ({
     dialog.getByText("Saved thinking level: low.", { exact: false }),
   ).toBeVisible();
 });
+
+test("profile activity without a channel route can change the exact reported conversation", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: AGENT,
+        name: "Codex Colleague",
+        runtime: "codex",
+        status: "running",
+        channelNames: ["agents"],
+      },
+    ],
+    observerControlResults: [{ type: "switch_effort", status: "queued" }],
+  });
+  await page.goto(`/#/agents?profile=${AGENT}&profileView=activity`);
+  await expect(page.getByTestId("user-profile-activity-view")).toBeVisible();
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_SEED_LIVE_OBSERVER_EVENTS__ === "function",
+  );
+  await seed(page, "session_config_captured", config("low"), 1);
+  const picker = page.getByTestId("conversation-effort-picker");
+  await expect(picker).toBeVisible();
+  await picker.getByLabel("Thinking level").click();
+  await page.getByRole("menuitemradio", { name: "High", exact: true }).click();
+  await expect(picker.getByRole("status")).toContainText("Queued");
+  expect(
+    await page.evaluate(
+      () => window.__BUZZ_E2E_OBSERVER_CONTROLS__?.at(-1)?.payload,
+    ),
+  ).toMatchObject({ channelId: CHANNEL, sessionId: SESSION, effort: "high" });
+});

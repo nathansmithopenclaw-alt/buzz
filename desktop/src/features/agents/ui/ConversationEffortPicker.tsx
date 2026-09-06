@@ -33,7 +33,7 @@ export function ConversationEffortPicker({
   events,
 }: {
   pubkey: string;
-  channelId: string;
+  channelId: string | null;
   events: readonly ObserverEvent[];
 }) {
   const retained = getAgentSessionConfigs(pubkey);
@@ -45,8 +45,9 @@ export function ConversationEffortPicker({
   const [pending, setPending] = React.useState<EffortRequest | null>(null);
   const [message, setMessage] = React.useState<string | null>(null);
   const selection =
-    choices.find((choice) => choice.sessionId === selectedSession) ??
-    (choices.length === 1 ? choices[0] : undefined);
+    choices.find(
+      (choice) => `${choice.channelId}:${choice.sessionId}` === selectedSession,
+    ) ?? (choices.length === 1 ? choices[0] : undefined);
   const subscription = React.useRef<() => void>(() => {});
   const id = React.useId();
   React.useEffect(() => () => subscription.current(), []);
@@ -55,7 +56,7 @@ export function ConversationEffortPicker({
     if (!selection || pending) return;
     const request = {
       requestId: crypto.randomUUID(),
-      channelId,
+      channelId: selection.channelId,
       sessionId: selection.sessionId,
       effort,
     };
@@ -115,12 +116,14 @@ export function ConversationEffortPicker({
           <PersonaDropdownField
             id={`${id}-conversation`}
             disabled={pending !== null}
-            value={selection?.sessionId ?? ""}
+            value={
+              selection ? `${selection.channelId}:${selection.sessionId}` : ""
+            }
             onValueChange={setSelectedSession}
             placeholder="Choose a conversation"
-            options={choices.map((choice) => ({
-              value: choice.sessionId,
-              label: `Conversation · ${new Date(choice.timestamp).toLocaleString()}`,
+            options={choices.map((choice, index) => ({
+              value: `${choice.channelId}:${choice.sessionId}`,
+              label: `${choice.label ?? `Conversation ${index + 1}`} · ${new Date(choice.timestamp).toLocaleString()}`,
             }))}
           />
         </>

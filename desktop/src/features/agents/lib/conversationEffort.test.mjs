@@ -155,3 +155,25 @@ test("retained sessions are bounded", () => {
   assert.equal(retained.length, 128);
   assert.equal(retained[0].seq, 72);
 });
+
+test("profile-wide activity keeps exact channel targets even when adapter IDs coincide", () => {
+  const choices = conversationEfforts(
+    [
+      frame(),
+      frame({
+        channelId: "other",
+        payload: { ...native("low"), conversationLabel: "Other channel" },
+      }),
+    ],
+    null,
+  );
+  assert.equal(choices.length, 2);
+  assert.deepEqual(choices.map((c) => c.channelId).sort(), [
+    "channel",
+    "other",
+  ]);
+  assert.equal(
+    choices.find((c) => c.channelId === "other").label,
+    "Other channel",
+  );
+});

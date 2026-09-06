@@ -180,20 +180,23 @@ impl AgentPool {
                 self.live_effort.finish(request, "expired", observer);
                 continue;
             }
-            let target = self
-                .agents_mut()
-                .iter()
-                .enumerate()
-                .find_map(|(index, slot)| {
-                    slot.as_ref()?
-                        .state
-                        .sessions
-                        .iter()
-                        .find_map(|(scope, id)| {
-                            (scope.channel_id() == request.channel_id && id == &request.session_id)
-                                .then(|| (index, scope.clone()))
-                        })
-                });
+            let mut targets = Vec::new();
+            for (index, slot) in self.agents_mut().iter().enumerate() {
+                if let Some(agent) = slot {
+                    for (scope, id) in &agent.state.sessions {
+                        if scope.channel_id() == request.channel_id && id == &request.session_id {
+                            targets.push((index, scope.clone()));
+                        }
+                    }
+                }
+            }
+            if targets.len() > 1 {
+                // Some adapters use process-local session IDs. Never pick an
+                // arbitrary worker if the reported channel/session is ambiguous.
+                self.live_effort.finish(request, "unavailable", observer);
+                continue;
+            }
+            let target = targets.pop();
             let Some((index, scope)) = target else {
                 if self.effort_target_is_busy(request.channel_id) {
                     self.live_effort.pending.push_back(pending);

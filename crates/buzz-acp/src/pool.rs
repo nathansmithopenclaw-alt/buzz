@@ -2303,6 +2303,7 @@ async fn create_session_and_apply_model(
     let captured_config = serde_json::json!({
             "configOptions": applied_config_options,
             "liveEffortSwitching": channel.scope.is_some(),
+            "conversationLabel": channel.name,
             "conversationId": channel.scope.map(|scope| scope.root_event_id().map(str::to_owned)
                 .unwrap_or_else(|| scope.channel_id().to_string())),
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),

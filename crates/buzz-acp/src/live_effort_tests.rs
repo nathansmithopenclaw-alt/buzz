@@ -298,3 +298,29 @@ async fn pending_edit_holds_exact_owner_without_blocking_another_idle_worker() {
         "never mutate the sibling adapter"
     );
 }
+
+#[tokio::test]
+async fn duplicate_adapter_session_ids_do_not_select_an_arbitrary_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let channel = Uuid::new_v4();
+    let first = SessionScope::Thread {
+        channel_id: channel,
+        root_event_id: "a".repeat(64),
+    };
+    let second = SessionScope::Thread {
+        channel_id: channel,
+        root_event_id: "b".repeat(64),
+    };
+    let owner = agent(&first, &dir.path().join("first"), "apply").await;
+    let mut other = agent(&second, &dir.path().join("second"), "apply").await;
+    other.index = 1;
+    let mut pool = AgentPool::from_slots(vec![Some(owner), Some(other)]);
+    let observer = ObserverHandle::in_process();
+    pool.queue_live_effort(&request(channel, "same-session", "high"), Some(&observer));
+    pool.apply_pending_effort(Some(&observer)).await;
+    assert_eq!(status(&observer), "unavailable");
+    assert!(!dir.path().join("first").exists());
+    assert!(!dir.path().join("second").exists());
+    assert!(pool.try_claim(Some(&first)).is_some());
+    assert!(pool.try_claim(Some(&second)).is_some());
+}

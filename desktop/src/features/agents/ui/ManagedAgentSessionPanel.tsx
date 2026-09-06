@@ -149,7 +149,7 @@ export function ManagedAgentSessionPanel({
         />
       ) : null}
 
-      {canChangeEffort && hasObserver && channelId ? (
+      {canChangeEffort && hasObserver ? (
         <ConversationEffortPicker
           key={`${agent.pubkey}:${channelId}`}
           pubkey={agent.pubkey}

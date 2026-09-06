@@ -4,6 +4,8 @@ import { compareObserverEvents } from "../observerEventOrdering";
 
 type NativeOption = { value: string; label: string };
 export type ConversationEffort = {
+  channelId: string;
+  label: string | null;
   sessionId: string;
   timestamp: string;
   value: string;
@@ -67,6 +69,7 @@ export function retainSessionConfigs(
       ...event,
       payload: {
         conversationId: config?.conversationId,
+        conversationLabel: config?.conversationLabel,
         liveEffortSwitching: config?.liveEffortSwitching,
         configOptions: Array.isArray(config?.configOptions)
           ? config.configOptions.filter(
@@ -85,11 +88,11 @@ export function retainSessionConfigs(
 /** Read only exact-session native snapshots; a later empty snapshot removes support. */
 export function conversationEfforts(
   events: readonly ObserverEvent[],
-  channelId: string,
+  channelId: string | null,
 ): ConversationEffort[] {
   return retainSessionConfigs([], events)
     .flatMap((event) => {
-      if (event.channelId !== channelId) return [];
+      if (channelId && event.channelId !== channelId) return [];
       const config = object(event.payload);
       if (config?.liveEffortSwitching !== true) return [];
       if (!Array.isArray(config?.configOptions)) return [];
@@ -101,6 +104,11 @@ export function conversationEfforts(
       if (options.length === 0) return [];
       return [
         {
+          channelId: event.channelId as string,
+          label:
+            typeof config.conversationLabel === "string"
+              ? config.conversationLabel
+              : null,
           sessionId: event.sessionId as string,
           timestamp: event.timestamp,
           value: option.currentValue,
