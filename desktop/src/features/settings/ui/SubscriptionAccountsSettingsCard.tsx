@@ -34,7 +34,9 @@ const stateLabels: Record<SubscriptionAccount["state"], string> = {
 function AccountRow({
   account,
   now,
+  loginAvailable,
 }: {
+  loginAvailable: boolean | undefined;
   account: SubscriptionAccount;
   now: number;
 }) {
@@ -140,7 +142,8 @@ function AccountRow({
           >
             {token ? "Cancel token setup" : "Cancel login"}
           </Button>
-        ) : account.state !== "removal_pending" ? (
+        ) : account.state !== "removal_pending" &&
+          (token || loginAvailable !== false) ? (
           <Button
             variant="outline"
             disabled={mutation.isPending}
@@ -171,6 +174,12 @@ function AccountRow({
           {account.state === "connecting"
             ? "Complete renewal in your browser to keep its agents running."
             : "Choose Renew to keep its agents running."}
+        </p>
+      ) : null}
+      {!token && loginAvailable === false ? (
+        <p className="text-sm text-muted-foreground">
+          This sign-in method has been retired. Move its agents to a long-lived
+          token, then remove this account.
         </p>
       ) : null}
       {token ? (
@@ -268,7 +277,15 @@ export function SubscriptionAccountsSettingsCard() {
         </p>
       ) : (
         accounts.data.map((account) => (
-          <AccountRow key={account.id} account={account} now={now} />
+          <AccountRow
+            key={account.id}
+            account={account}
+            now={now}
+            loginAvailable={capabilities.data?.some(
+              (capability) =>
+                capability.harness === account.harness && capability.supported,
+            )}
+          />
         ))
       )}
       <div className="space-y-2">
@@ -276,7 +293,8 @@ export function SubscriptionAccountsSettingsCard() {
         <p className="text-xs text-muted-foreground">
           Your browser may already be signed into a provider account. To add a
           different Claude account, sign into that account on claude.ai first,
-          then start the login here. Check the account shown before authorizing.
+          then add a long-lived token here. Check the account shown before
+          authorizing.
         </p>
         {capabilities.isPending ? (
           <p role="status">Checking providers…</p>
@@ -293,20 +311,22 @@ export function SubscriptionAccountsSettingsCard() {
         ) : (
           capabilities.data.map((capability) => (
             <div key={capability.harness} className="space-y-1">
-              <Button
-                variant="outline"
-                disabled={
-                  !enabled.data ||
-                  !capability.supported ||
-                  connecting ||
-                  add.isPending ||
-                  accounts.isError ||
-                  accounts.isPending
-                }
-                onClick={() => add.mutate({ harness: capability.harness })}
-              >
-                Sign in with {capability.provider} ({capability.harness})
-              </Button>
+              {!capability.token_supported || capability.supported ? (
+                <Button
+                  variant="outline"
+                  disabled={
+                    !enabled.data ||
+                    !capability.supported ||
+                    connecting ||
+                    add.isPending ||
+                    accounts.isError ||
+                    accounts.isPending
+                  }
+                  onClick={() => add.mutate({ harness: capability.harness })}
+                >
+                  Sign in with {capability.provider} ({capability.harness})
+                </Button>
+              ) : null}
               {capability.token_supported ? (
                 <Button
                   variant="outline"

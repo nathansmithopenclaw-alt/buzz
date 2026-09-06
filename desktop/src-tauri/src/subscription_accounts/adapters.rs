@@ -21,13 +21,18 @@ pub(crate) struct SubscriptionAccountCapability {
 
 pub(super) fn capabilities() -> Vec<SubscriptionAccountCapability> {
     vec![
-        SubscriptionAccountCapability { provider: "anthropic", harness: "claude", supported: cfg!(target_os = "macos"), token_supported: cfg!(unix), reason: if cfg!(target_os = "macos") { None } else { Some("Credential-only isolation currently requires macOS Keychain") } },
+        SubscriptionAccountCapability { provider: "anthropic", harness: "claude", supported: false, token_supported: cfg!(unix), reason: Some("Claude accounts use long-lived tokens") },
         SubscriptionAccountCapability { provider: "openai", harness: "codex", supported: cfg!(unix), token_supported: false, reason: if cfg!(unix) { None } else { Some("Login process containment is not implemented on this platform") } },
         SubscriptionAccountCapability { provider: "xai", harness: "grok", supported: false, token_supported: false, reason: Some("Grok 1.0.13 exposes login/logout but no documented subscription status check; configuration preservation also needs validation") },
     ]
 }
 
 pub(super) fn provider(harness: &str) -> Result<&'static str, String> {
+    // Existing login consumers retain their guarded runtime path during migration.
+    // New login and reconnect use login_provider below.
+    if harness == "claude" && cfg!(target_os = "macos") {
+        return Ok("anthropic");
+    }
     let capability = capabilities()
         .into_iter()
         .find(|entry| entry.harness == harness)
@@ -39,6 +44,37 @@ pub(super) fn provider(harness: &str) -> Result<&'static str, String> {
             .into());
     }
     Ok(capability.provider)
+}
+
+pub(super) fn login_provider(harness: &str) -> Result<&'static str, String> {
+    if harness == "claude" {
+        return Err("Claude subscription sign-in has been retired. Add a Claude long-lived token in Settings → AI.".into());
+    }
+    provider(harness)
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    #[test]
+    fn claude_offers_tokens_and_rejects_login_without_disabling_existing_cleanup() {
+        let claude = capabilities()
+            .into_iter()
+            .find(|c| c.harness == "claude")
+            .unwrap();
+        assert!(!claude.supported);
+        assert_eq!(claude.token_supported, cfg!(unix));
+        assert!(login_provider("claude")
+            .unwrap_err()
+            .contains("long-lived token"));
+        assert_eq!(args("claude", "logout").unwrap(), ["auth", "logout"]);
+    }
+
+    #[test]
+    fn openai_login_remains_available_on_supported_platforms() {
+        assert_eq!(login_provider("codex").is_ok(), cfg!(unix));
+    }
 }
 
 /// Authentication commands run with a small environment, so login cannot

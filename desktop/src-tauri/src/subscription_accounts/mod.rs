@@ -352,7 +352,7 @@ fn begin_account_login(
     account_id: Option<String>,
     app: AppHandle,
 ) -> Result<SubscriptionAccount, String> {
-    let provider = adapters::provider(&harness)?;
+    let provider = adapters::login_provider(&harness)?;
     let executable = crate::managed_agents::resolve_command(&harness)
         .ok_or("Install the provider CLI before adding its account")?;
     let _guard = lifecycle_lock()

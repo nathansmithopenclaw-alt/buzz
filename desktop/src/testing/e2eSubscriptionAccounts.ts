@@ -39,8 +39,8 @@ export function mockSubscriptionAccountCommand(
           provider: "anthropic",
           harness: "claude",
           token_supported: true,
-          supported: true,
-          reason: null,
+          supported: false,
+          reason: "Claude accounts use long-lived tokens",
         },
         { provider: "openai", harness: "codex", supported: true, reason: null },
         {

@@ -86,7 +86,8 @@ test("Subscription Accounts explains migration without token entry or fabricated
   ).toBeDisabled();
   const legacy = page.getByTestId("settings-claude-accounts");
   await expect(legacy).toContainText("Account A");
-  await expect(legacy).toContainText("Each saved account requires a new login");
+  await expect(legacy).toContainText("Add and name a long-lived token");
+  await expect(card.getByRole("button", { name: /Sign in with anthropic/ })).toHaveCount(0);
   await expect(page.getByLabel("Claude OAuth token")).toHaveCount(0);
 });
 
@@ -120,8 +121,8 @@ test("legacy account selection is preserved and active turns block switching wit
   const selector = page.getByTestId(
     `subscription-account-selector-${CLAUDE_AGENT}`,
   );
-  const picker = selector.getByRole("combobox");
-  await expect(picker).toHaveValue("__legacy__");
+  const picker = selector.getByRole("button", { name: "Subscription account" });
+  await expect(picker).toContainText("Legacy Claude account");
   await seedTurn(page, "turn_started");
   await expect(picker).toBeDisabled();
   await expect(selector).toContainText("Finish the active turn");
@@ -129,9 +130,10 @@ test("legacy account selection is preserved and active turns block switching wit
   expect(await commandCount(page, "note_claude_account_switch_queued")).toBe(0);
   await seedTurn(page, "turn_completed");
   await expect(picker).toBeEnabled();
-  await expect(picker).toHaveValue("__legacy__");
-  await picker.selectOption("");
-  await expect(picker).toHaveValue("");
+  await expect(picker).toContainText("Legacy Claude account");
+  await picker.click();
+  await page.getByRole("menuitemradio", { name: /Ambient — harness/ }).click();
+  await expect(picker).toContainText("Ambient");
   expect(await commandCount(page, "switch_agent_subscription_account")).toBe(1);
 });
 
@@ -155,7 +157,9 @@ test("unassigned agent exposes explicit ambient choice and honest running state"
   const selector = page.getByTestId(
     `subscription-account-selector-${CLAUDE_AGENT}`,
   );
-  await expect(selector.getByRole("combobox")).toHaveValue("");
+  await expect(
+    selector.getByRole("button", { name: "Subscription account" }),
+  ).toContainText("Ambient");
   await expect(selector).toContainText(
     "Applies to this agent in every conversation",
   );
@@ -174,14 +178,15 @@ test("Agents profile Runtime switches accounts without opening a DM", async ({
   const selector = panel.getByTestId(
     `subscription-account-selector-${CLAUDE_AGENT}`,
   );
-  const picker = selector.getByRole("combobox");
-  await expect(picker).toHaveValue("__legacy__");
+  const picker = selector.getByRole("button", { name: "Subscription account" });
+  await expect(picker).toContainText("Legacy Claude account");
   await seedTurn(page, "turn_started");
   await expect(picker).toBeDisabled();
   await seedTurn(page, "turn_completed");
   await expect(picker).toBeEnabled();
-  await picker.selectOption("");
-  await expect(picker).toHaveValue("");
+  await picker.click();
+  await page.getByRole("menuitemradio", { name: /Ambient — harness/ }).click();
+  await expect(picker).toContainText("Ambient");
   expect(await commandCount(page, "switch_agent_subscription_account")).toBe(1);
   expect(await commandCount(page, "open_dm")).toBe(0);
   await expect(page.getByTestId("edit-agent-dialog")).toHaveCount(0);
@@ -229,10 +234,17 @@ test("token browser approval, nickname, Profile Runtime switch and feature-off r
   const selector = panel.getByTestId(
     `subscription-account-selector-${CLAUDE_AGENT}`,
   );
-  await selector.getByRole("combobox").selectOption("mock-subscription-1");
-  await expect(selector.getByRole("combobox")).toHaveValue(
-    "mock-subscription-1",
-  );
+  await selector.getByRole("button", { name: "Subscription account" }).click();
+  const menu = page.getByRole("menu");
+  await expect(
+    menu.getByRole("menuitemradio", { name: /Fleet token/ }),
+  ).toBeVisible();
+  await menu.screenshot({ path: testInfo.outputPath("ACCOUNT_MENU.png") });
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await expect(
+    selector.getByRole("button", { name: "Subscription account" }),
+  ).toContainText("Fleet token");
   await expect(selector.getByTestId("selected-token-expiry")).toHaveText(
     "Expires in 29 days",
   );

@@ -6,7 +6,7 @@ import {
 import { deleteClaudeAccount } from "@/shared/api/tauriClaudeAccounts";
 import { Button } from "@/shared/ui/button";
 
-/** Keep legacy bindings recoverable until explicit login and rebind succeeds. */
+/** Keep legacy bindings recoverable until explicit token selection succeeds. */
 export function ClaudeAccountsSettingsCard() {
   const client = useQueryClient();
   const accounts = useClaudeAccountsQuery();
@@ -20,9 +20,8 @@ export function ClaudeAccountsSettingsCard() {
     <section className="space-y-3" data-testid="settings-claude-accounts">
       <p className="text-sm font-medium">Legacy Claude accounts</p>
       <p className="text-sm text-muted-foreground">
-        Existing selections remain in place. Sign in above, verify and name the
-        new account, then explicitly select it for each agent before removing
-        the old entry. Each saved account requires a new login.
+        Existing selections remain in place. Add and name a long-lived token
+        above, then select it for each agent before removing the old entry.
       </p>
       {accounts.isError ? (
         <p role="alert">

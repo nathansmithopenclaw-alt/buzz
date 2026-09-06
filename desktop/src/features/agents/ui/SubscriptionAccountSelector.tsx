@@ -1,5 +1,13 @@
 import { subscriptionAccountExpiry } from "@/features/agents/subscriptionAccountExpiry";
 import * as React from "react";
+import { ChevronDown } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import {
   useIsMutating,
   useMutation,
@@ -94,62 +102,88 @@ export function SubscriptionAccountSelector({
       <label className="text-sm font-medium" htmlFor={id}>
         Subscription account
       </label>
-      <select
-        id={id}
-        aria-describedby={`${id}-scope ${id}-status`}
-        value={selectedValue}
-        disabled={
-          busy ||
-          (!agent.subscriptionAccountHarness && !selected && !legacy) ||
-          accounts.isPending ||
-          accounts.isError ||
-          enabled.isPending ||
-          enabled.isError
-        }
-        className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm"
-        onChange={(event) => mutation.mutate(event.target.value || null)}
-      >
-        <option value="">Ambient — harness’s current login</option>
-        {legacy ? (
-          <option value="__legacy__" disabled>
-            Legacy Claude account — re-login and rebind required
-          </option>
-        ) : null}
-        {selected && !selectedAccount ? (
-          <option value={selected} disabled>
-            Selected account unavailable
-          </option>
-        ) : null}
-        {accounts.data
-          ?.filter(
-            (account) =>
-              account.id === selected ||
-              (account.harness === agent.subscriptionAccountHarness &&
-                account.state === "ready" &&
-                account.nickname),
-          )
-          .map((account) => (
-            <option
-              key={account.id}
-              value={account.id}
-              disabled={
-                subscriptionAccountExpiry(account, now)?.expired ||
-                !enabled.data ||
-                account.state !== "ready" ||
-                !account.nickname ||
-                account.harness !== agent.subscriptionAccountHarness
-              }
-            >
-              {account.nickname ?? "Unnamed account"}
-              {subscriptionAccountExpiry(account, now)
-                ? ` — ${subscriptionAccountExpiry(account, now)?.label}`
-                : ""}
-              {account.state !== "ready"
-                ? ` — ${account.state.replaceAll("_", " ")}`
-                : ""}
-            </option>
-          ))}
-      </select>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            id={id}
+            variant="outline"
+            aria-describedby={`${id}-scope ${id}-status`}
+            disabled={
+              busy ||
+              (!agent.subscriptionAccountHarness && !selected && !legacy) ||
+              accounts.isPending ||
+              accounts.isError ||
+              enabled.isPending ||
+              enabled.isError
+            }
+            className="w-full justify-between gap-2 font-normal"
+          >
+            <span className="truncate">
+              {selectedAccount?.nickname ??
+                (selected
+                  ? "Selected account unavailable"
+                  : legacy
+                    ? "Legacy Claude account"
+                    : "Ambient — harness’s current login")}
+            </span>
+            <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          className="min-w-[var(--radix-dropdown-menu-trigger-width)]"
+        >
+          <DropdownMenuRadioGroup
+            value={selectedValue || "__ambient__"}
+            onValueChange={(value) =>
+              mutation.mutate(value === "__ambient__" ? null : value)
+            }
+          >
+            <DropdownMenuRadioItem value="__ambient__">
+              Ambient — harness’s current login
+            </DropdownMenuRadioItem>
+            {legacy ? (
+              <DropdownMenuRadioItem value="__legacy__" disabled>
+                Legacy Claude account — re-login and rebind required
+              </DropdownMenuRadioItem>
+            ) : null}
+            {selected && !selectedAccount ? (
+              <DropdownMenuRadioItem value={selected} disabled>
+                Selected account unavailable
+              </DropdownMenuRadioItem>
+            ) : null}
+            {accounts.data
+              ?.filter(
+                (account) =>
+                  account.id === selected ||
+                  (account.harness === agent.subscriptionAccountHarness &&
+                    account.state === "ready" &&
+                    account.nickname),
+              )
+              .map((account) => (
+                <DropdownMenuRadioItem
+                  key={account.id}
+                  value={account.id}
+                  disabled={
+                    subscriptionAccountExpiry(account, now)?.expired ||
+                    !enabled.data ||
+                    account.state !== "ready" ||
+                    !account.nickname ||
+                    account.harness !== agent.subscriptionAccountHarness
+                  }
+                >
+                  {account.nickname ?? "Unnamed account"}
+                  {subscriptionAccountExpiry(account, now)
+                    ? ` — ${subscriptionAccountExpiry(account, now)?.label}`
+                    : ""}
+                  {account.state !== "ready"
+                    ? ` — ${account.state.replaceAll("_", " ")}`
+                    : ""}
+                </DropdownMenuRadioItem>
+              ))}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <p id={`${id}-scope`} className="text-xs text-muted-foreground">
         Applies to this agent in every conversation.
       </p>
