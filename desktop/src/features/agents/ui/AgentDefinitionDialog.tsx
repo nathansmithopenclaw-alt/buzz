@@ -578,7 +578,7 @@ export function AgentDefinitionDialog({
     instanceEffort,
     model,
     selectedRuntime,
-    nativeTuning.effortOptions,
+    nativeTuning,
   );
   const canSubmit =
     baseCanSubmit &&

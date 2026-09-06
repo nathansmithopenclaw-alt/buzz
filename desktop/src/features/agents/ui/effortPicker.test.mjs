@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   EFFORT_DEFAULT_DROPDOWN_VALUE,
   effortPickerState,
+  discoveredEffortCatalog,
   validateSavedEffort,
   effortSelectionToPersistedValue,
 } from "./effortPicker.ts";
@@ -126,4 +127,28 @@ test("a model change rejects an unsupported effort without silently clearing it"
 test("unrelated edits and failed discovery preserve the saved effort", () => {
   assert.equal(validateSavedEffort("ultra", false, []), null);
   assert.equal(validateSavedEffort("ultra", true, null), null);
+});
+
+test("discovery with no effort control is an unknown catalog, not an empty one", () => {
+  // A runtime that advertises no thought_level returns effortConfigId null and
+  // an empty option list. Reading that as "zero valid levels" rejected every
+  // level the picker offered from the session config surface and wedged Save.
+  assert.equal(discoveredEffortCatalog(null, []), null);
+  assert.equal(discoveredEffortCatalog(undefined, []), null);
+  assert.equal(
+    validateSavedEffort("high", true, discoveredEffortCatalog(null, [])),
+    null,
+  );
+  // A real discovered catalog still validates.
+  assert.deepEqual(discoveredEffortCatalog("depth", [{ id: "low" }]), [
+    { id: "low" },
+  ]);
+  assert.match(
+    validateSavedEffort(
+      "high",
+      true,
+      discoveredEffortCatalog("depth", [{ id: "low" }]),
+    ),
+    /not supported/,
+  );
 });

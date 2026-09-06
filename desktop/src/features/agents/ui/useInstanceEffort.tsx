@@ -5,14 +5,22 @@ import type {
   RuntimeConfigSurface,
 } from "@/shared/api/types";
 import { EffortPickerField } from "./EffortPickerField";
-import { effortPickerState, validateSavedEffort } from "./effortPicker";
+import {
+  discoveredEffortCatalog,
+  effortPickerState,
+  validateSavedEffort,
+} from "./effortPicker";
 import { Button } from "@/shared/ui/button";
 
 export function instanceEffortError(
   instance: ReturnType<typeof useInstanceEffort> | undefined,
   model: string,
   runtime: AcpRuntimeCatalogEntry | undefined,
-  options: readonly { id: string }[] | null,
+  /** Discovery result as a pair: an option list is only meaningful with its configId. */
+  discovered: {
+    effortConfigId: string | null | undefined;
+    effortOptions: readonly { id: string }[] | null;
+  },
 ): string | null {
   if (!instance?.agent) return null;
   return validateSavedEffort(
@@ -21,7 +29,10 @@ export function instanceEffortError(
       model !== (instance.agent.model ?? "") ||
       (runtime?.command != null &&
         runtime.command !== instance.agent.agentCommand),
-    options,
+    discoveredEffortCatalog(
+      discovered.effortConfigId,
+      discovered.effortOptions,
+    ),
   );
 }
 

@@ -27,6 +27,25 @@ export function validateSavedEffort(
   return `Thinking level ${value} is not supported by this model. Choose an available level or inherit defaults.`;
 }
 
+/**
+ * The discovered effort catalog, or null when discovery advertises no effort
+ * control at all.
+ *
+ * `discover_agent_models` returns an EMPTY option list for every runtime that
+ * exposes no `thought_level` (the mesh and OpenRouter paths return
+ * `effort_options: Vec::new()` outright), so an empty list means "this probe
+ * knows nothing about effort" — never "no level is valid". The picker itself
+ * falls back to the session config surface in that case, so validating against
+ * the empty probe list would reject every level the user can see offered and
+ * wedge Save with no reachable selection.
+ */
+export function discoveredEffortCatalog(
+  effortConfigId: string | null | undefined,
+  effortOptions: readonly { id: string }[] | null | undefined,
+): readonly { id: string }[] | null {
+  return effortConfigId ? (effortOptions ?? null) : null;
+}
+
 /** Gate and options for the Save-gated local effort control. */
 export function effortPickerState({
   backend,

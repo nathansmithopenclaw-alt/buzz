@@ -1,10 +1,4 @@
-import {
-  AlertCircle,
-  ChevronRight,
-  Loader,
-  Search,
-  UsersRound,
-} from "lucide-react";
+import { AlertCircle, Loader, Search, UsersRound } from "lucide-react";
 import * as React from "react";
 
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
@@ -206,7 +200,7 @@ export function AgentManagementDelegationCard({
 
   return (
     <div
-      className="space-y-4 rounded-lg border border-border/70 px-4 py-4"
+      className="space-y-3 rounded-lg border border-border/70 px-4 py-3"
       data-testid="agent-management-delegation-card"
     >
       <div className="space-y-1">
@@ -280,13 +274,22 @@ export function AgentManagementDelegationCard({
         </div>
       ) : null}
 
-      <div className="grid gap-3 sm:grid-cols-2">
+      {/*
+        Every row carries the "Choose agents" affordance, so this grid is the
+        tallest block in the Agent defaults dialog. Keep it compact and keep
+        the label on one line: at 1280x900 the dialog is capped at
+        max-h-[calc(100vh-2rem)], and a second label line on the widest
+        capability pushes it onto that cap, which silently absorbs the
+        model-field growth canary in
+        global-agent-config-screenshots.spec.ts 04.
+      */}
+      <div className="grid gap-2 sm:grid-cols-2">
         {DELEGATION_CAPABILITIES.map(([capability, label]) => {
           const subject = subjects[capability];
           const on = subjectIsOn(subject);
           return (
             <div
-              className="flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2"
+              className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-1.5"
               data-testid={`agent-management-capability-${capability}`}
               key={capability}
             >
@@ -318,10 +321,6 @@ export function AgentManagementDelegationCard({
                     ) : null}
                   </span>
                 </span>
-                <ChevronRight
-                  aria-hidden="true"
-                  className="size-4 shrink-0 text-muted-foreground"
-                />
               </button>
               <Switch
                 aria-label={label}
