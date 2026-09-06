@@ -25,12 +25,12 @@ async fn real_codex_preserves_conversation_across_queued_effort_change() {
     let session_id = session.session_id;
     let model =
         std::env::var("BUZZ_TEST_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.6-sol[low]".into());
-    let switched = acp.session_set_model(&session_id, &model).await.unwrap();
-    let config = if switched.get("configOptions").is_some() {
-        switched
-    } else {
-        session.raw
-    };
+    let method = crate::acp::resolve_model_switch_method(&session.raw, &model)
+        .expect("model advertised by the real adapter");
+    let config = acp
+        .apply_model_switch_method(&session_id, &method)
+        .await
+        .unwrap();
     let option = effort_option(&config).expect("native thought_level option");
     assert!(supports_value(&option["options"], "high"));
     let low = acp
@@ -102,10 +102,15 @@ async fn real_codex_preserves_conversation_across_queued_effort_change() {
         control_rx.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
-    let (worker, (_, first_text)) = running.await.unwrap();
+    let (mut worker, (_, first_text)) = running.await.unwrap();
     assert!(
         first_text.contains("REMEMBERED"),
         "unexpected first response: {first_text}"
+    );
+    let expected_model = model.split('[').next().unwrap();
+    assert_eq!(
+        worker.acp.take_turn_usage().unwrap().model.as_deref(),
+        Some(expected_model)
     );
     pool.task_map_mut().remove(&task_id);
     pool.return_agent(worker);
@@ -129,6 +134,10 @@ async fn real_codex_preserves_conversation_across_queued_effort_change() {
     assert!(
         second_text.contains(&nonce),
         "conversation memory lost: {second_text}"
+    );
+    assert_eq!(
+        worker.acp.take_turn_usage().unwrap().model.as_deref(),
+        Some(expected_model)
     );
     worker.acp.shutdown().await;
     println!("REAL_CODEX_EFFORT_OK adapter={} model={} session={} low->high; busy queued; unchanged session; memory retained; startup default low", init["agentInfo"], model, session_id);

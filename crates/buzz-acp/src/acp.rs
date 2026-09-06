@@ -1321,9 +1321,8 @@ impl AcpClient {
                 self.background_mode.label()
             ),
         }
-        // Standard adapters (Claude, Codex) do not put the model on their usage
-        // notifications, so `models.currentModelId` here is the only source for
-        // the NIP-AM `model` field on those paths.
+        // Standard adapters omit the model on usage notifications. Retain the
+        // adapter's reported selection and refresh it after native changes.
         self.record_standard_session_model(&session_id, &result);
         tracing::info!(target: "acp::session", "session created: {session_id}");
         Ok(SessionNewResponse {
@@ -1405,7 +1404,11 @@ impl AcpClient {
             "configId": config_id,
             "value": value,
         });
-        self.send_request("session/set_config_option", params).await
+        let result = self
+            .send_request("session/set_config_option", params)
+            .await?;
+        self.record_standard_session_model(session_id, &result);
+        Ok(result)
     }
 
     /// Send `session/set_model` (unstable ACP path).
@@ -1426,18 +1429,27 @@ impl AcpClient {
         Ok(result)
     }
 
-    /// Record `models.currentModelId` from a `session/new` or `session/set_model`
-    /// response into the standard-adapter usage tracker. No-op for adapters that
+    /// Record the adapter's current model from stable controls or legacy model
+    /// state into the standard-adapter usage tracker. No-op for adapters that
     /// report the model on their own usage notifications (goose, buzz-agent) and
     /// for responses that carry no model state.
     fn record_standard_session_model(&mut self, session_id: &str, result: &serde_json::Value) {
         if self.standard_adapter.is_none() {
             return;
         }
-        if let Some(model) = result
-            .pointer("/models/currentModelId")
-            .and_then(serde_json::Value::as_str)
-        {
+        let stable = result["configOptions"].as_array().and_then(|options| {
+            options.iter().find_map(|option| {
+                (option["category"].as_str() == Some("model"))
+                    .then(|| option["currentValue"].as_str())
+                    .flatten()
+                    .filter(|value| !value.is_empty())
+            })
+        });
+        if let Some(model) = stable.or_else(|| {
+            result
+                .pointer("/models/currentModelId")
+                .and_then(serde_json::Value::as_str)
+        }) {
             self.standard_usage.record_session_model(session_id, model);
         }
     }
@@ -3398,6 +3410,10 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
     #[cfg(not(windows))]
     let _ = cmd;
 }
+
+#[cfg(test)]
+#[path = "acp_model_usage_tests.rs"]
+mod model_usage_tests;
 
 #[cfg(test)]
 mod tests {
