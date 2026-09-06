@@ -588,6 +588,23 @@ fn control(dir: &Path, nonce: &str, token: &str, action: &str) -> Result<(), Str
     )
 }
 
+fn resume_and_confirm_lifecycle(
+    dir: &Path,
+    nonce: &str,
+    token: &str,
+    lifecycle: &mut ManagedAgentRuntimeLifecycle,
+) -> Result<(), String> {
+    control(dir, nonce, token, "resume_auth")?;
+    // This exact generation acknowledged from its subscribed broker loop.
+    // Startup recovery can precede the UI's relay observer subscription, so
+    // its one-shot lifecycle frame is not the only readiness receipt. This
+    // proves listening under the binding, not provider authentication.
+    if *lifecycle == ManagedAgentRuntimeLifecycle::Starting {
+        *lifecycle = ManagedAgentRuntimeLifecycle::Listening;
+    }
+    Ok(())
+}
+
 /// A saved selection and a successful spawn are separate facts.
 #[derive(Serialize)]
 pub struct SubscriptionSwitchResult {
@@ -966,11 +983,14 @@ pub(crate) fn switch_account(
                 op.phase = "complete".into();
                 super::account_switch::save(&app, op)?;
                 for key in &keys {
-                    if let Some(runtime) = runtimes.get(key) {
-                        if let Some(dir) = &runtime.account_control_dir {
-                            if let Err(error) =
-                                control(dir, &runtime.start_nonce, &token, "resume_auth")
-                            {
+                    if let Some(runtime) = runtimes.get_mut(key) {
+                        if let Some(dir) = &runtime.process.account_control_dir {
+                            if let Err(error) = resume_and_confirm_lifecycle(
+                                dir,
+                                &runtime.start_nonce,
+                                &token,
+                                &mut runtime.lifecycle,
+                            ) {
                                 result.failed_restart_count += 1;
                                 result.errors.push(error);
                             }

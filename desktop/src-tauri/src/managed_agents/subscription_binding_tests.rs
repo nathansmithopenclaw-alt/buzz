@@ -222,6 +222,55 @@ fn safe_switch_control_ignores_stale_ack_and_refuses_busy_before_selection() {
 }
 
 #[test]
+fn resumed_generation_confirms_listening_without_relay_lifecycle_delivery() {
+    for (status, initial, expected) in [
+        (
+            "resumed",
+            ManagedAgentRuntimeLifecycle::Starting,
+            ManagedAgentRuntimeLifecycle::Listening,
+        ),
+        (
+            "resume_failed",
+            ManagedAgentRuntimeLifecycle::Starting,
+            ManagedAgentRuntimeLifecycle::Starting,
+        ),
+        (
+            "resumed",
+            ManagedAgentRuntimeLifecycle::Ready,
+            ManagedAgentRuntimeLifecycle::Ready,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let responder = std::thread::spawn(move || {
+            let start = Instant::now();
+            while !path.join("request.json").exists() && start.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let mut request: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path.join("request.json")).unwrap()).unwrap();
+            assert_eq!(request["action"], "resume_auth");
+            request["status"] = status.into();
+            super::super::atomic_write_json_restricted(
+                &path.join("response.json"),
+                request.to_string().as_bytes(),
+            )
+            .unwrap();
+        });
+        let mut lifecycle = initial;
+        let result = resume_and_confirm_lifecycle(
+            dir.path(),
+            "current-generation",
+            &"a".repeat(32),
+            &mut lifecycle,
+        );
+        responder.join().unwrap();
+        assert_eq!(result.is_ok(), status == "resumed");
+        assert_eq!(lifecycle, expected);
+    }
+}
+
+#[test]
 fn local_binding_survives_disk_roundtrip_but_never_enters_portable_definition() {
     let definition:super::super::AgentDefinition=serde_json::from_value(serde_json::json!({"id":"fixture","display_name":"Fixture","avatar_url":null,"system_prompt":"prompt","created_at":"now","updated_at":"now"})).unwrap();
     let mut record = definition.into_agent_record();
