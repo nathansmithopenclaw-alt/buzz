@@ -87,7 +87,9 @@ test("Subscription Accounts explains migration without token entry or fabricated
   const legacy = page.getByTestId("settings-claude-accounts");
   await expect(legacy).toContainText("Account A");
   await expect(legacy).toContainText("Add and name a long-lived token");
-  await expect(card.getByRole("button", { name: /Sign in with anthropic/ })).toHaveCount(0);
+  await expect(
+    card.getByRole("button", { name: /Sign in with anthropic/ }),
+  ).toHaveCount(0);
   await expect(page.getByLabel("Claude OAuth token")).toHaveCount(0);
 });
 
@@ -163,7 +165,9 @@ test("unassigned agent exposes explicit ambient choice and honest running state"
   await expect(selector).toContainText(
     "Applies to this agent in every conversation",
   );
-  await expect(selector).toContainText("Running account not confirmed");
+  await expect(selector).toContainText(
+    "Waiting for runtime account confirmation",
+  );
 });
 
 test("Agents profile Runtime switches accounts without opening a DM", async ({
@@ -242,6 +246,16 @@ test("token browser approval, nickname, Profile Runtime switch and feature-off r
   await menu.screenshot({ path: testInfo.outputPath("ACCOUNT_MENU.png") });
   await page.keyboard.press("End");
   await page.keyboard.press("Enter");
+  await expect(page.getByRole("alertdialog")).toContainText(
+    "Stopped runtimes stay stopped",
+  );
+  expect(await commandCount(page, "switch_agent_subscription_account")).toBe(0);
+  await page
+    .getByRole("alertdialog")
+    .screenshot({ path: testInfo.outputPath("ACCOUNT_CONFIRMATION.png") });
+  await page
+    .getByRole("button", { name: "Switch this agent", exact: true })
+    .click();
   await expect(
     selector.getByRole("button", { name: "Subscription account" }),
   ).toContainText("Fleet token");

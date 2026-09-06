@@ -81,3 +81,14 @@ export const switchAgentSubscriptionAccount = (
 
 export const resumeAgentSubscriptionWork = (pubkey: string) =>
   invokeTauri<void>("resume_agent_subscription_work", { pubkey });
+
+export type AccountSwitchStatus = {
+  id: string;
+  account_id: string;
+  phase: "pausing" | "paused" | "restarting" | "complete";
+  error: string | null;
+};
+export const agentAccountSwitchStatus = (pubkey: string) =>
+  invokeTauri<AccountSwitchStatus | null>("agent_account_switch_status", {
+    pubkey,
+  });

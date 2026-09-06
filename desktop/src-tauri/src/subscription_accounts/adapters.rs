@@ -53,30 +53,6 @@ pub(super) fn login_provider(harness: &str) -> Result<&'static str, String> {
     provider(harness)
 }
 
-#[cfg(test)]
-mod login_tests {
-    use super::*;
-
-    #[test]
-    fn claude_offers_tokens_and_rejects_login_without_disabling_existing_cleanup() {
-        let claude = capabilities()
-            .into_iter()
-            .find(|c| c.harness == "claude")
-            .unwrap();
-        assert!(!claude.supported);
-        assert_eq!(claude.token_supported, cfg!(unix));
-        assert!(login_provider("claude")
-            .unwrap_err()
-            .contains("long-lived token"));
-        assert_eq!(args("claude", "logout").unwrap(), ["auth", "logout"]);
-    }
-
-    #[test]
-    fn openai_login_remains_available_on_supported_platforms() {
-        assert_eq!(login_provider("codex").is_ok(), cfg!(unix));
-    }
-}
-
 /// Authentication commands run with a small environment, so login cannot
 /// silently select an inherited API key, cloud provider, or ambient OAuth token.
 pub(super) fn isolated_command(
@@ -171,4 +147,28 @@ pub(super) fn verify_status(harness: &str, output: &[u8]) -> Result<(), String> 
         return Err("Provider did not confirm subscription authentication; reconnect with a subscription account".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    #[test]
+    fn claude_offers_tokens_and_rejects_login_without_disabling_existing_cleanup() {
+        let claude = capabilities()
+            .into_iter()
+            .find(|c| c.harness == "claude")
+            .unwrap();
+        assert!(!claude.supported);
+        assert_eq!(claude.token_supported, cfg!(unix));
+        assert!(login_provider("claude")
+            .unwrap_err()
+            .contains("long-lived token"));
+        assert_eq!(args("claude", "logout").unwrap(), ["auth", "logout"]);
+    }
+
+    #[test]
+    fn openai_login_remains_available_on_supported_platforms() {
+        assert_eq!(login_provider("codex").is_ok(), cfg!(unix));
+    }
 }

@@ -210,7 +210,7 @@ fn safe_switch_control_ignores_stale_ack_and_refuses_busy_before_selection() {
         assert_eq!(request["nonce"], "current-generation");
         super::super::atomic_write_json(
             &path.join("response.json"),
-            serde_json::json!({"nonce":"current-generation","token":worker_token,"status":"busy"})
+            serde_json::json!({"nonce":"current-generation","token":worker_token,"request_id":request["request_id"],"status":"busy"})
                 .to_string()
                 .as_bytes(),
         )
@@ -247,17 +247,17 @@ fn control_response_never_follows_symlinks_or_reads_oversized_files() {
     std::fs::write(&unrelated, "synthetic fixture content").unwrap();
     let response = directory.path().join("response.json");
     std::os::unix::fs::symlink(&unrelated, &response).unwrap();
-    assert!(read_control_response(&response)
+    assert!(read_control_file(&response, 2048)
         .unwrap_err()
         .contains("response path"));
     std::fs::remove_file(&response).unwrap();
     std::fs::write(&response, vec![b'x'; 2049]).unwrap();
-    assert!(read_control_response(&response)
+    assert!(read_control_file(&response, 2048)
         .unwrap_err()
         .contains("bounded"));
     std::fs::write(&response, "{}").unwrap();
     assert_eq!(
-        read_control_response(&response).unwrap().as_deref(),
+        read_control_file(&response, 2048).unwrap().as_deref(),
         Some("{}")
     );
 }

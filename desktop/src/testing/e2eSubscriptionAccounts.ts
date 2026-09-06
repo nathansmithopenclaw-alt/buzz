@@ -28,6 +28,8 @@ export function mockSubscriptionAccountCommand(
   const id = String(payload.id ?? "");
   const account = accounts.find((row) => row.id === id);
   switch (command) {
+    case "agent_account_switch_status":
+      return null;
     case "get_subscription_accounts_enabled":
       return enabled;
     case "set_subscription_accounts_enabled":

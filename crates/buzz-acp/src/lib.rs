@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod account_control;
+mod account_handoff;
 mod acp;
 mod answered_watermark;
 mod auth_recovery;
@@ -3388,8 +3389,19 @@ async fn tokio_main() -> Result<()> {
             .filter(|event| answered_event_ids.contains(&event.event))
             .map(|event| event.event.id)
             .collect();
-        recovery.complete(&completed)?;
+        // The handoff journal is authoritative for interrupted work. A progress
+        // reply can satisfy the generic answered watermark without finishing
+        // the provider turn; it must not erase a saved continuation.
+        if std::env::var_os("BUZZ_ACP_ACCOUNT_SWITCH_ID").is_none() {
+            recovery.complete(&completed)?;
+        }
         queue = queue.with_auth_recovery(recovery);
+        if std::env::var("BUZZ_ACP_ACCOUNT_SWITCH_RESUME").as_deref() == Ok("1") {
+            let token = std::env::var("BUZZ_ACP_ACCOUNT_SWITCH_ID")?;
+            account_handoff::validate(&token, queue.held_auth_batches())?;
+            queue.validate_auth_channels(&subscribed_channel_ids)?;
+            queue.resume_after_auth()?;
+        }
     }
 
     // Online means the harness can receive work, not merely that its socket is
@@ -3659,12 +3671,14 @@ async fn tokio_main() -> Result<()> {
     // defect this exists to close, restated as a type-checker rule.
     let exit_cause: Option<ShutdownCause>;
     let mut account_control = account_control::AccountControl::from_env();
+    let mut pending_account_pause: Option<String> = None;
     let mut reported_auth_blocked = false;
     let mut account_control_tick = tokio::time::interval(Duration::from_millis(250));
     account_control_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        let account_request_pending = account_control.has_pending_request();
+        let account_request_pending =
+            account_control.has_pending_request() || pending_account_pause.is_some();
         if account_request_pending {
             drain_idle_agent_notifications(&mut pool).await;
         }
@@ -3677,9 +3691,85 @@ async fn tokio_main() -> Result<()> {
         if let Err(error) = account_control.poll(account_switch_busy) {
             tracing::warn!(%error, "subscription account control request rejected");
         }
+        if let Some(token) = account_control.take_pause() {
+            let mut persisted = queue.begin_account_pause(token.clone());
+            for meta in pool.task_map_mut().values_mut() {
+                if let Some(mut batch) = meta.recoverable_batch.clone() {
+                    for delivery in meta.successful_steer_deliveries.values() {
+                        if let Some(event) = &delivery.event {
+                            if !batch.events.iter().any(|e| e.event.id == event.event.id) {
+                                batch.events.push(event.clone());
+                            }
+                        }
+                    }
+                    if persisted.is_err() {
+                        break;
+                    }
+                    // A missing session after interruption must never become a new prompt.
+                    if let Err(error) = account_handoff::save(&token, &batch.scope, "", false)
+                        .and_then(|()| queue.hold_for_auth(batch))
+                    {
+                        persisted = Err(error);
+                        break;
+                    }
+                }
+            }
+            if let Err(error) = persisted {
+                tracing::error!(%error, "account pause could not retain work");
+                let _ = account_control.finish_pause(false);
+            } else {
+                for meta in pool.task_map_mut().values_mut() {
+                    if let Some(tx) = meta.control_tx.take() {
+                        let _ = tx.send(ControlSignal::AccountSwitch {
+                            token: token.clone(),
+                        });
+                    }
+                }
+                pending_account_pause = Some(token);
+            }
+        }
+        if let Some(token) = pending_account_pause.as_ref() {
+            if !account_switch_busy {
+                let mut saved = (|| -> anyhow::Result<()> {
+                    for agent in pool.agents_mut().iter().flatten() {
+                        for (scope, id) in &agent.state.sessions {
+                            account_handoff::save_idle(token, scope, id)?;
+                        }
+                    }
+                    for batch in queue.held_auth_batches() {
+                        account_handoff::inherit_if_missing(token, &batch.scope)?;
+                    }
+                    queue.finish_account_pause()?;
+                    account_handoff::validate(token, queue.held_auth_batches())
+                })();
+                if saved.is_ok() {
+                    // Reap adapter process groups before acknowledging the handoff.
+                    // Desktop only owns the broker PID and must not race its
+                    // one-second shutdown grace against orphaned old-account tools.
+                    for agent in pool.agents_mut().iter_mut().flatten() {
+                        if let Err(error) = agent.acp.shutdown_for_account_switch().await {
+                            saved = Err(error.into());
+                            break;
+                        }
+                    }
+                }
+                if let Err(error) = &saved {
+                    tracing::error!(%error, "account handoff incomplete");
+                }
+                account_control
+                    .finish_pause(saved.is_ok())
+                    .map_err(anyhow::Error::msg)?;
+                pending_account_pause = None;
+            }
+        }
         if account_control.take_resume_auth() {
-            let resumed = queue
-                .validate_auth_channels(&subscribed_channel_ids)
+            let handoff = std::env::var("BUZZ_ACP_ACCOUNT_SWITCH_ID").ok();
+            let resumed = handoff
+                .as_deref()
+                .map_or(Ok(()), |token| {
+                    account_handoff::validate(token, queue.held_auth_batches())
+                })
+                .and_then(|()| queue.validate_auth_channels(&subscribed_channel_ids))
                 .and_then(|()| queue.resume_after_auth())
                 .map(|_| ())
                 .map_err(|error| error.to_string());
@@ -5857,7 +5947,11 @@ fn interrupt_in_flight_for_shutdown(pool: &mut AgentPool) -> Vec<FlushBatch> {
         };
         interrupted.push(batch);
         if let Some(tx) = meta.control_tx.take() {
-            let _ = tx.send(ControlSignal::Cancel);
+            let signal = std::env::var("BUZZ_ACP_ACCOUNT_SWITCH_ID")
+                .map_or(ControlSignal::Cancel, |token| {
+                    ControlSignal::AccountSwitch { token }
+                });
+            let _ = tx.send(signal);
         }
     }
     interrupted
@@ -6049,9 +6143,25 @@ fn handle_prompt_result(
             PromptSource::Heartbeat => None,
         });
     if matches!(&result.outcome, PromptOutcome::Ok(_)) {
-        if let Some(batch) = &recovery_batch {
-            if let Err(error) = queue.complete_auth_recovery(batch) {
-                tracing::error!(%error, "failed to retire completed authentication recovery receipt");
+        if let PromptSource::Channel(scope) = &result.source {
+            let id = result
+                .agent
+                .state
+                .sessions
+                .get(scope)
+                .map_or("", String::as_str);
+            if let Err(error) = queue.confirm_completed_account_scope(scope, id) {
+                tracing::error!(%error, "could not confirm completed account scope");
+            }
+        }
+        let retired = recovery_batch
+            .as_ref()
+            .map_or(Ok(()), |batch| queue.complete_auth_recovery(batch));
+        if let Err(error) = retired {
+            tracing::error!(%error, "failed to retire completed authentication recovery receipt");
+        } else if let PromptSource::Channel(scope) = &result.source {
+            if let Err(error) = account_handoff::complete(scope) {
+                tracing::error!(%error, "could not retire account session handoff");
             }
         }
     } else if matches!(&result.outcome, PromptOutcome::Error(error) if is_auth_error(error))
@@ -12484,6 +12594,95 @@ mod error_outcome_emission_tests {
     /// An auth-class `PromptOutcome::Error` must dead-letter immediately
     /// (the batch is never requeued) so the user sees a re-auth hint at once
     /// rather than after 10 futile retries.
+    #[tokio::test]
+    async fn natural_completion_during_account_pause_retires_the_actual_recovery_receipt() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            attempt: 1,
+            channel_id,
+            scope: scope::SessionScope::Conversation { channel_id },
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: Some(batch.clone()),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashMap::new(),
+            },
+        );
+        let recovery_dir = tempfile::tempdir().unwrap();
+        let mut queue = EventQueue::new(config::DedupMode::Queue).with_auth_recovery(
+            auth_recovery::AuthRecovery::open(
+                &recovery_dir.path().canonicalize().unwrap(),
+                "agent",
+                "relay",
+            )
+            .unwrap(),
+        );
+        queue.hold_for_auth(batch.clone()).unwrap();
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Ok(acp::StopReason::EndTurn),
+            batch: None,
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        assert!(queue.held_auth_batches().is_empty());
+        assert_eq!(queue.resume_after_auth().unwrap(), 0);
+        assert!(queue.flush_next().is_none());
+        let reopened = auth_recovery::AuthRecovery::open(
+            &recovery_dir.path().canonicalize().unwrap(),
+            "agent",
+            "relay",
+        )
+        .unwrap();
+        assert!(reopened.batches().is_empty());
+    }
+
     #[tokio::test]
     async fn auth_error_retains_request_without_automatic_retry() {
         let keys = nostr::Keys::generate();

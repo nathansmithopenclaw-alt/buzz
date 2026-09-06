@@ -1949,7 +1949,8 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     subscription_account_harness: agent.subscription_account_harness ?? null,
     subscription_account_id: agent.subscription_account_id ?? null,
     subscription_account_generation: agent.subscription_account_generation ?? 0,
-    running_subscription_account_id: agent.running_subscription_account_id ?? null,
+    running_subscription_account_id:
+      agent.running_subscription_account_id ?? null,
     running_subscription_account_generation:
       agent.running_subscription_account_generation ?? null,
     subscription_account_error: agent.subscription_account_error ?? null,
@@ -5924,8 +5925,8 @@ async function handleGetChannelReconnectRepair(
   config: E2eConfig | undefined,
 ): Promise<RelayEvent[]> {
   const kinds = new Set([
-    5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003,
-    48100, 48101, 48102, 48103,
+    5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003, 48100,
+    48101, 48102, 48103,
   ]);
   const filter: Record<string, unknown> = {
     "#h": [args.channelId],
@@ -12144,7 +12145,8 @@ export function maybeInstallE2eTauriMocks() {
         ...mesh.servingUsage,
       };
   };
-  window.__BUZZ_E2E_COMPLETE_SUBSCRIPTION_TOKEN__ = completeMockSubscriptionToken;
+  window.__BUZZ_E2E_COMPLETE_SUBSCRIPTION_TOKEN__ =
+    completeMockSubscriptionToken;
   let seedTurnSeq = Date.now();
   window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ = ({
     agentPubkey,
@@ -14660,6 +14662,7 @@ export function maybeInstallE2eTauriMocks() {
       case "cancel_subscription_account_login":
       case "rename_subscription_account":
       case "remove_subscription_account":
+      case "agent_account_switch_status":
       case "switch_agent_subscription_account":
       case "resume_agent_subscription_work":
         return mockSubscriptionAccountCommand(

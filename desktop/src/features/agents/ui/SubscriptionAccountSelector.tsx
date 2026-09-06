@@ -12,6 +12,7 @@ import {
   useIsMutating,
   useMutation,
   useQueryClient,
+  useQuery,
 } from "@tanstack/react-query";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import {
@@ -22,9 +23,19 @@ import {
 } from "@/features/agents/subscriptionAccounts";
 import {
   resumeAgentSubscriptionWork,
+  agentAccountSwitchStatus,
   switchAgentSubscriptionAccount,
 } from "@/shared/api/tauriSubscriptionAccounts";
 import type { ManagedAgent } from "@/shared/api/types";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 
@@ -40,6 +51,13 @@ export function SubscriptionAccountSelector({
   const now = useSubscriptionAccountClock();
   const enabled = useSubscriptionAccountsEnabledQuery();
   const client = useQueryClient();
+  const operation = useQuery({
+    queryKey: ["account-switch", agent.pubkey],
+    queryFn: () => agentAccountSwitchStatus(agent.pubkey),
+    refetchInterval: 750,
+    enabled: agent.subscriptionAccountHarness === "claude",
+  });
+  const [destination, setDestination] = React.useState<string | undefined>();
   const switching =
     useIsMutating({
       mutationKey: ["switch-subscription-account", agent.pubkey],
@@ -73,18 +91,23 @@ export function SubscriptionAccountSelector({
       await Promise.all([
         client.invalidateQueries({ queryKey: ["managed-agents"] }),
         client.invalidateQueries({ queryKey: subscriptionAccountsQueryKey }),
+        client.invalidateQueries({
+          queryKey: ["account-switch", agent.pubkey],
+        }),
       ]);
     },
   });
   const authHeld =
     agent.subscriptionAccountError === "subscription_auth_required";
-  const error = mutation.isError
-    ? String(mutation.error)
-    : mutation.data?.failed_restart_count
-      ? `Account selected; ${mutation.data.failed_restart_count} runtime restart failed. ${mutation.data.errors.join(" ")}`
-      : authHeld
-        ? null
-        : agent.subscriptionAccountError;
+  const error =
+    operation.data?.error ??
+    (mutation.isError
+      ? String(mutation.error)
+      : mutation.data?.failed_restart_count
+        ? `Account selected; ${mutation.data.failed_restart_count} runtime restart failed. ${mutation.data.errors.join(" ")}`
+        : authHeld
+          ? null
+          : agent.subscriptionAccountError);
   if (!agent.subscriptionAccountHarness && !selected && !legacy && !authHeld)
     return null;
   const unavailable =
@@ -93,7 +116,28 @@ export function SubscriptionAccountSelector({
       selectedAccount?.state !== "ready" ||
       !selectedAccount.nickname ||
       selectedAccount.harness !== agent.subscriptionAccountHarness);
-  const busy = working || switching || resume.isPending;
+  const activeSwitch = Boolean(
+    operation.data &&
+      operation.data.phase !== "complete" &&
+      !operation.data.error,
+  );
+  const canPause =
+    agent.subscriptionAccountHarness === "claude" &&
+    accounts.data?.some(
+      (account) =>
+        account.harness === "claude" &&
+        account.kind === "token" &&
+        account.state === "ready",
+    );
+  const busy =
+    switching || resume.isPending || activeSwitch || (working && !canPause);
+  const selectAccount = (value: string) => {
+    if (value === selected && !authHeld && !error) return;
+    const account = accounts.data?.find((item) => item.id === value);
+    if (account?.harness === "claude" && account.kind === "token")
+      setDestination(value);
+    else mutation.mutate(value === "__ambient__" ? null : value);
+  };
   const content = (
     <div
       className="space-y-1.5"
@@ -135,11 +179,12 @@ export function SubscriptionAccountSelector({
         >
           <DropdownMenuRadioGroup
             value={selectedValue || "__ambient__"}
-            onValueChange={(value) =>
-              mutation.mutate(value === "__ambient__" ? null : value)
-            }
+            onValueChange={selectAccount}
           >
-            <DropdownMenuRadioItem value="__ambient__">
+            <DropdownMenuRadioItem
+              value="__ambient__"
+              disabled={working || Boolean(operation.data)}
+            >
               Ambient — harness’s current login
             </DropdownMenuRadioItem>
             {legacy ? (
@@ -192,14 +237,67 @@ export function SubscriptionAccountSelector({
         role="status"
         className="text-xs text-muted-foreground"
       >
-        {busy
-          ? working
-            ? "Finish the active turn before switching accounts."
-            : "Applying account selection…"
-          : runningKnown
-            ? `Running: ${agent.runningSubscriptionAccountId ? (running?.nickname ?? "Unavailable account") : "Ambient — harness’s current login"}`
-            : "Running account not confirmed."}
+        {working && !canPause
+          ? "Finish the active turn before switching accounts."
+          : switching || activeSwitch
+            ? operation.data?.phase === "restarting"
+              ? "Starting the selected account and resuming saved work…"
+              : "Pausing this agent and saving unfinished work…"
+            : runningKnown
+              ? `Running: ${agent.runningSubscriptionAccountId ? (running?.nickname ?? "Unavailable account") : "Ambient — harness’s current login"}`
+              : agent.status === "running"
+                ? "Waiting for runtime account confirmation."
+                : "Agent stopped. This selection will apply when it starts."}
       </p>
+      <AlertDialog
+        open={destination !== undefined}
+        onOpenChange={(open) => {
+          if (!open) setDestination(undefined);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogTitle>Switch this agent’s account?</AlertDialogTitle>
+          <AlertDialogDescription>
+            Use{" "}
+            {
+              accounts.data?.find((account) => account.id === destination)
+                ?.nickname
+            }{" "}
+            for this agent in every community on this Mac. Buzz will pause
+            active work, switch accounts, and continue saved work automatically.
+            Stopped runtimes stay stopped.
+          </AlertDialogDescription>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (destination) mutation.mutate(destination);
+                setDestination(undefined);
+              }}
+            >
+              Switch this agent
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {(error || authHeld) && selectedAccount?.kind === "token" ? (
+        <div className="space-y-1.5 text-xs">
+          <p>
+            Work is retained. Retry this account or choose another account
+            above.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() =>
+              mutation.mutate(operation.data?.account_id ?? selected)
+            }
+          >
+            Retry account switch
+          </Button>
+        </div>
+      ) : null}
       {expiry ? (
         <p className="text-xs" data-testid="selected-token-expiry">
           {expiry.label}
@@ -208,7 +306,7 @@ export function SubscriptionAccountSelector({
       {unavailable ? (
         <p className="text-xs text-destructive">
           Selected account unavailable.{" "}
-          {selectedAccount?.kind === "token" ? "Renew" : "Reconnect"} it in
+          {selectedAccount?.kind === "token" ? "Renew" : "Reconnect"} in
           Settings → AI; another account will not be chosen automatically.
         </p>
       ) : null}
@@ -239,12 +337,11 @@ export function SubscriptionAccountSelector({
           </Button>
         </div>
       ) : null}
-      {authHeld ? (
+      {authHeld && selectedAccount?.kind !== "token" ? (
         <div className="space-y-2 text-xs">
           <p>
-            {selectedAccount?.kind === "token"
-              ? "Authentication paused this agent. Renew in Settings → AI, then resume retained work."
-              : "Authentication paused this agent. Stop the agent, reconnect in Settings → AI, then start it and resume retained work."}
+            Authentication paused this agent. Stop the agent, reconnect in
+            Settings → AI, then start it and resume retained work.
           </p>
           <Button
             size="sm"

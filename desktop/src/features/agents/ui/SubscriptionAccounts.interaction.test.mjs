@@ -33,7 +33,7 @@ Object.defineProperty(globalThis, "navigator", {
   configurable: true,
 });
 const calls = [];
-let accounts, enabled, failSwitch, failRemove, failCancel;
+let accounts, enabled, failSwitch, failRemove, failCancel, operationStatus;
 const capabilities = [
   {
     provider: "anthropic",
@@ -112,6 +112,8 @@ globalThis.__TAURI_INTERNALS__ = dom.window.__TAURI_INTERNALS__ = {
           throw new Error("Account is still selected by an agent");
         accounts = accounts.filter((item) => item.id !== args.id);
         return;
+      case "agent_account_switch_status":
+        return operationStatus ?? null;
       case "resume_agent_subscription_work":
         return;
       case "switch_agent_subscription_account":
@@ -196,6 +198,7 @@ async function refresh() {
   );
 }
 beforeEach(() => {
+  operationStatus = null;
   accounts = [];
   enabled = true;
   failSwitch = false;
@@ -526,6 +529,14 @@ test("token setup crosses only metadata IPC, nickname precedes selection, renewa
   fireEvent.click(view.getByRole("button", { name: "Save nickname" }));
   await waitFor(() => assert.equal(accounts[0].nickname, "Shared team"));
   await chooseAccount(view, "Shared team — Expires in 365 days");
+  assert.equal(
+    calls.filter(([name]) => name === "switch_agent_subscription_account")
+      .length,
+    0,
+  );
+  fireEvent.click(
+    await view.findByRole("button", { name: "Switch this agent" }),
+  );
   await waitFor(() =>
     assert.ok(
       calls.some(
@@ -624,4 +635,87 @@ test("Claude setup offers only tokens and retired login retains removal", async 
   fireEvent.click(view.getByRole("button", { name: "Remove" }));
   fireEvent.click(view.getByRole("button", { name: "Sign out and remove" }));
   await waitFor(() => assert.equal(accounts.length, 0));
+});
+
+test("active Claude work can switch only after the native single-agent confirmation", async () => {
+  accounts = [
+    account({
+      harness: "claude",
+      provider: "anthropic",
+      kind: "token",
+      expires_at: Math.floor(Date.now() / 1000) + 86400,
+    }),
+  ];
+  reportChannelBotTyping("other-channel", [pubkey]);
+  const view = mount(
+    React.createElement(SubscriptionAccountSelector, {
+      agent: agent({ subscriptionAccountHarness: "claude", status: "running" }),
+    }),
+  );
+  await chooseAccount(view, /Work/);
+  assert.equal(
+    calls.filter(([name]) => name === "switch_agent_subscription_account")
+      .length,
+    0,
+  );
+  assert.match(
+    (await view.findByRole("alertdialog")).textContent,
+    /Stopped runtimes stay stopped/,
+  );
+  fireEvent.click(view.getByRole("button", { name: "Cancel" }));
+  assert.equal(
+    calls.filter(([name]) => name === "switch_agent_subscription_account")
+      .length,
+    0,
+  );
+  await chooseAccount(view, /Work/);
+  fireEvent.click(
+    await view.findByRole("button", { name: "Switch this agent" }),
+  );
+  await waitFor(() =>
+    assert.equal(
+      calls.filter(([name]) => name === "switch_agent_subscription_account")
+        .length,
+      1,
+    ),
+  );
+});
+
+test("a persisted failed switch exposes retry and keeps the destination selectable", async () => {
+  accounts = [
+    account({
+      harness: "claude",
+      provider: "anthropic",
+      kind: "token",
+      expires_at: Math.floor(Date.now() / 1000) + 86400,
+    }),
+  ];
+  operationStatus = {
+    id: "op",
+    account_id: "account-a",
+    phase: "restarting",
+    error: "Selected account could not start",
+  };
+  const view = mount(
+    React.createElement(SubscriptionAccountSelector, {
+      agent: agent({
+        subscriptionAccountHarness: "claude",
+        subscriptionAccountId: "account-a",
+      }),
+    }),
+  );
+  await view.findByRole("button", { name: "Retry account switch" });
+  assert.equal(
+    view.getByRole("button", { name: "Subscription account" }).disabled,
+    false,
+  );
+  assert.match(view.container.textContent, /Selected account could not start/);
+  fireEvent.click(view.getByRole("button", { name: "Retry account switch" }));
+  await waitFor(() =>
+    assert.equal(
+      calls.filter(([name]) => name === "switch_agent_subscription_account")
+        .length,
+      1,
+    ),
+  );
 });

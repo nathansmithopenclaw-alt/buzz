@@ -881,6 +881,30 @@ pub async fn start_managed_agent(
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
     crate::managed_agents::require_fleet_host(&state)?;
+    {
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let _store = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        crate::relay::assert_expected_relay_scope(
+            expected_relay_url.as_deref(),
+            &crate::relay::relay_api_base_url_with_override(&state),
+        )?;
+        crate::relay::assert_expected_signer(
+            expected_signer_pubkey.as_deref(),
+            &workspace_owner_hex(&state)?,
+        )?;
+        let records = load_managed_agents(&app)?;
+        if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
+            if let Some(key) = crate::managed_agents::workspace_pair_key(&app, record) {
+                crate::managed_agents::account_switch::set_running(&app, &key, true)?;
+            }
+        }
+    }
     // Owner-initiated start: forget automatic crash-loop state so a human
     // can recover a flapping agent. Automatic resurrection must call
     // `start_managed_agent_inner` instead — clearing here would reset the

@@ -902,6 +902,35 @@ impl AcpClient {
         }
     }
 
+    /// A token switch cannot acknowledge teardown when child exit is unconfirmed.
+    pub async fn shutdown_for_account_switch(&mut self) -> Result<(), AcpError> {
+        // Capture the group before polling: an exited adapter can still have live
+        // tool descendants, and try_wait clears the child's process identity.
+        let Some(pid) = self.child.id() else {
+            return Ok(());
+        };
+        #[cfg(unix)]
+        let stopped = {
+            use nix::sys::signal::{killpg, Signal};
+            use nix::unistd::Pid;
+            matches!(
+                killpg(Pid::from_raw(pid as i32), Signal::SIGKILL),
+                Ok(()) | Err(nix::errno::Errno::ESRCH)
+            )
+        };
+        #[cfg(not(unix))]
+        let stopped = kill_process_group(pid);
+        if !stopped {
+            return Err(AcpError::Protocol(
+                "Could not stop the old account's adapter process group".into(),
+            ));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait())
+            .await
+            .map_err(|_| AcpError::Protocol("Old account adapter exit is unconfirmed".into()))??;
+        Ok(())
+    }
+
     /// Spawn the agent binary as a subprocess and connect to its stdio pipes.
     ///
     /// `has_generated_codex_config` must be true when `codex_network_env()` successfully
@@ -1286,6 +1315,32 @@ impl AcpClient {
         tracing::info!(target: "acp::session", "session created: {session_id}");
         Ok(SessionNewResponse {
             session_id,
+            raw: result,
+        })
+    }
+
+    /// Restore the provider session selected by a durable account handoff.
+    /// Failure is terminal for this handoff; never substitute session/new.
+    pub async fn session_load_full(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<SessionNewResponse, AcpError> {
+        if let Ok(harness) = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS") {
+            validate_subscription_project_context(&harness, std::path::Path::new(cwd))?;
+        }
+        let result = self
+            .send_request(
+                "session/load",
+                serde_json::json!({
+                    "sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers,
+                }),
+            )
+            .await?;
+        self.record_standard_session_model(session_id, &result);
+        Ok(SessionNewResponse {
+            session_id: session_id.to_owned(),
             raw: result,
         })
     }
@@ -4873,6 +4928,44 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn account_switch_teardown_reaps_live_adapter_and_is_idempotent() {
+        let mut client = spawn_inert_client().await;
+        client.shutdown_for_account_switch().await.unwrap();
+        assert!(client.child.try_wait().unwrap().is_some());
+        client.shutdown_for_account_switch().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn account_switch_teardown_stops_tools_after_adapter_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("late-write");
+        let mut client = AcpClient::spawn(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "(sleep 0.4; echo late > \"$1\") & echo spawned; exit 0".into(),
+                "fixture".into(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(client.reader.next().await.unwrap().unwrap(), "spawned");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        client.shutdown_for_account_switch().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+        assert!(
+            !marker.exists(),
+            "old account tool survived adapter teardown"
+        );
+        assert!(client.child.try_wait().unwrap().is_some());
     }
 
     fn background_tasks_message(session_id: &str, tasks: serde_json::Value) -> serde_json::Value {

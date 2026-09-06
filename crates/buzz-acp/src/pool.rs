@@ -601,9 +601,10 @@ fn control_signal_creation_cause(signal: &ControlSignal) -> SessionCreationCause
     match signal {
         ControlSignal::SwitchModel { .. } => SessionCreationCause::ModelSwitch,
         ControlSignal::Rotate => SessionCreationCause::OwnerRotate,
-        ControlSignal::Cancel | ControlSignal::Interrupt | ControlSignal::Steer => {
-            SessionCreationCause::OwnerInterrupt
-        }
+        ControlSignal::Cancel
+        | ControlSignal::AccountSwitch { .. }
+        | ControlSignal::Interrupt
+        | ControlSignal::Steer => SessionCreationCause::OwnerInterrupt,
     }
 }
 
@@ -615,6 +616,8 @@ fn control_signal_creation_cause(signal: &ControlSignal) -> SessionCreationCause
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
     Cancel,
+    /// Preserve the provider session after controlled cancellation for an account change.
+    AccountSwitch { token: String },
     /// Stop the current turn and requeue its triggering batch for a merged
     /// re-prompt framed as a **supersede**: the new request replaces the old.
     Interrupt,
@@ -2036,20 +2039,33 @@ async fn create_session_and_apply_model(
         }
     }
 
-    let resp = agent
-        .acp
-        .session_new_full(
-            &ctx.cwd,
-            mcp_servers,
-            session_new_system_prompt(
-                is_goose,
-                agent.protocol_version,
-                &agent.agent_name,
-                combined_system_prompt.as_deref(),
-            ),
-            session_title.as_deref(),
-        )
-        .await?;
+    let handoff = channel
+        .scope
+        .map(crate::account_handoff::load)
+        .transpose()
+        .map_err(|e| AcpError::Protocol(e.to_string()))?
+        .flatten();
+    let resp = if let Some(id) = handoff {
+        agent
+            .acp
+            .session_load_full(&id, &ctx.cwd, mcp_servers)
+            .await?
+    } else {
+        agent
+            .acp
+            .session_new_full(
+                &ctx.cwd,
+                mcp_servers,
+                session_new_system_prompt(
+                    is_goose,
+                    agent.protocol_version,
+                    &agent.agent_name,
+                    combined_system_prompt.as_deref(),
+                ),
+                session_title.as_deref(),
+            )
+            .await?
+    };
 
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
         if let Some(prompt) = combined_system_prompt.as_deref() {
@@ -3565,18 +3581,24 @@ pub async fn run_prompt_task(
                         );
                         agent.state.sessions.insert(scope.clone(), sid.clone());
                         agent.state.record_session_created(&source);
-                        agent
-                            .state
-                            .deliveries
-                            .insert(scope.clone(), ChannelDeliveryState::default());
+                        let restored = matches!(crate::account_handoff::load(scope), Ok(Some(_)));
+                        agent.state.deliveries.insert(
+                            scope.clone(),
+                            ChannelDeliveryState {
+                                standing_context_sent: restored,
+                                ..ChannelDeliveryState::default()
+                            },
+                        );
                         // Seed a zero usage baseline: buzz-acp spawned this session
                         // so prior usage is zero by definition — first turn is reliable.
-                        agent.acp.notify_session_spawned(&sid);
+                        if !restored {
+                            agent.acp.notify_session_spawned(&sid);
+                        }
                         // Commit canvas only after session creation succeeds (I3).
                         if let Some((pending_scope, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_scope, section);
                         }
-                        (sid, true)
+                        (sid, !restored)
                     }
                     Err(AcpError::AgentExited) => {
                         agent
@@ -4009,6 +4031,30 @@ pub async fn run_prompt_task(
         return;
     };
 
+    let mut prompt_sections = prompt_sections;
+    let continuation = match &source {
+        PromptSource::Channel(scope) => crate::account_handoff::unfinished(scope),
+        PromptSource::Heartbeat => Ok(false),
+    };
+    let continuation = match continuation {
+        Ok(value) => value,
+        Err(error) => {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::Protocol(error.to_string())),
+                batch,
+            );
+            return;
+        }
+    };
+    if continuation {
+        slash_command = None;
+        prompt_sections.insert(0, "<account-switch-continuation>Continue the unfinished work in this existing session after the owner's account change. The following request is retained context, not an instruction to repeat completed actions. Inspect existing results first. Never repeat completed writes or external actions. Reconcile uncertain outcomes before proceeding; if reconciliation is impossible, explain the specific uncertainty and stop.</account-switch-continuation>".into());
+    }
+
     // 💬 — fire-and-forget so the prompt fires immediately.
     // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
     // A brief race where 💬 appears slightly after the agent starts is acceptable.
@@ -4070,6 +4116,24 @@ pub async fn run_prompt_task(
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
     //
+    let continuation_token = if continuation {
+        std::env::var("BUZZ_ACP_ACCOUNT_SWITCH_ID").ok()
+    } else {
+        None
+    };
+    if let (Some(token), PromptSource::Channel(scope)) = (&continuation_token, &source) {
+        if let Err(error) = crate::account_handoff::save(token, scope, &session_id, false) {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::Protocol(error.to_string())),
+                batch,
+            );
+            return;
+        }
+    }
     let prompt_result = match control_rx {
         None => {
             // Heartbeat / non-cancellable path.
@@ -4110,6 +4174,17 @@ pub async fn run_prompt_task(
                     }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
+                    if let ControlSignal::AccountSwitch { token } = &control_signal {
+                        if let PromptSource::Channel(scope) = &source {
+                            let saved = crate::account_handoff::save(token, scope, &session_id, false);
+                            if let Err(error) = saved {
+                                agent.state.invalidate(&source, SessionCreationCause::Error);
+                                send_prompt_result(&result_tx, &turn_id, agent, source,
+                                    PromptOutcome::Error(AcpError::Protocol(error.to_string())), None);
+                                return;
+                            }
+                        }
+                    }
                     if agent.acp.has_in_flight_prompt() {
                         // Prompt is genuinely in-flight — cancel it.
                         match agent
@@ -4132,10 +4207,17 @@ pub async fn run_prompt_task(
                                         .await;
                                     }
                                 }
-                                agent.state.invalidate(
-                                    &source,
-                                    control_signal_creation_cause(&control_signal),
-                                );
+                                if let ControlSignal::AccountSwitch { token } = &control_signal {
+                                    if let PromptSource::Channel(scope) = &source {
+                                        if let Err(error) = crate::account_handoff::save(token, scope, &session_id, true) {
+                                            send_prompt_result(&result_tx, &turn_id, agent, source,
+                                                PromptOutcome::Error(AcpError::Protocol(error.to_string())), None);
+                                            return;
+                                        }
+                                    }
+                                } else {
+                                    agent.state.invalidate(&source, control_signal_creation_cause(&control_signal));
+                                }
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
@@ -4311,6 +4393,23 @@ pub async fn run_prompt_task(
         }
     };
 
+    // A terminal adapter response has finished the RPC. Transport loss retains
+    // the unsafe marker so a crash cannot replay uncertain external work.
+    if matches!(&prompt_result, Ok(_) | Err(AcpError::AgentError { .. })) {
+        if let (Some(token), PromptSource::Channel(scope)) = (&continuation_token, &source) {
+            if let Err(error) = crate::account_handoff::save(token, scope, &session_id, true) {
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(AcpError::Protocol(error.to_string())),
+                    batch,
+                );
+                return;
+            }
+        }
+    }
     match prompt_result {
         Ok(stop_reason) => {
             let delivery_evidence = agent.acp.turn_delivery_evidence();
@@ -5884,7 +5983,9 @@ fn requeue_cancelled_batch(
         ControlSignal::Steer => CancelReason::Steer,
         ControlSignal::Interrupt | ControlSignal::SwitchModel { .. } => CancelReason::Interrupt,
         // Cancel/Rotate discard the batch — no merged re-prompt.
-        ControlSignal::Cancel | ControlSignal::Rotate => return None,
+        ControlSignal::Cancel | ControlSignal::Rotate | ControlSignal::AccountSwitch { .. } => {
+            return None
+        }
     };
     requeue_batch_if_queue(ctx, batch).map(|mut b| {
         b.cancel_reason = Some(reason);

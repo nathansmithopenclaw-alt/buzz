@@ -751,6 +751,7 @@ pub fn run() {
             subscription_accounts::rename_subscription_account,
             subscription_accounts::remove_subscription_account,
             managed_agents::subscription_binding::switch_agent_subscription_account,
+            managed_agents::account_switch::agent_account_switch_status,
             managed_agents::subscription_binding::resume_agent_subscription_work,
             managed_agents::add_claude_account,
             managed_agents::delete_claude_account,
