@@ -1,4 +1,5 @@
 import * as React from "react";
+import { retainSessionConfigs } from "./lib/conversationEffort";
 
 import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
 import type { RelayEvent, ManagedAgent } from "@/shared/api/types";
@@ -82,6 +83,12 @@ type AgentObserverStoreListener = (update?: AgentObserverStoreUpdate) => void;
 
 const listeners = new Set<AgentObserverStoreListener>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
+const sessionConfigsByAgent = new Map<string, readonly ObserverEvent[]>();
+export function getAgentSessionConfigs(
+  pubkey: string,
+): readonly ObserverEvent[] {
+  return sessionConfigsByAgent.get(normalizePubkey(pubkey)) ?? EMPTY_EVENTS;
+}
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
 
@@ -302,6 +309,10 @@ function appendAgentEvents(
   if (added.length === 0) return null;
 
   const sortedAdded = [...added].sort(compareObserverEvents);
+  sessionConfigsByAgent.set(
+    key,
+    retainSessionConfigs(getAgentSessionConfigs(key), sortedAdded),
+  );
   const sorted = allAtEnd
     ? [...current, ...sortedAdded]
     : [...current, ...sortedAdded].sort(compareObserverEvents);
@@ -967,6 +978,7 @@ export function resetAgentObserverStore() {
   startPromise = null;
   eventProcessingQueue = Promise.resolve();
   eventsByAgent.clear();
+  sessionConfigsByAgent.clear();
   transcriptByAgent.clear();
   evictionFloorByAgent.clear();
   snapshotByAgent.clear();

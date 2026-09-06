@@ -954,9 +954,7 @@ test.describe("global agent config screenshots", () => {
     // Codex hides the provider picker and advertises Fast mode natively even
     // though its persisted model carries an effort qualifier.
     await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
-    await expect(page.locator("#persona-model")).toContainText(
-      "gpt-5.6-sol[medium]",
-    );
+    await expect(page.locator("#persona-model")).toContainText("GPT-5.6 Sol");
     await expect(page.getByTestId("agent-fast-mode-field")).toBeVisible({
       timeout: 10_000,
     });
@@ -997,10 +995,9 @@ test.describe("global agent config screenshots", () => {
       },
     });
     await page.getByTestId("user-profile-edit-agent").click();
-    await expect(page.locator("#persona-model")).toContainText(
-      "gpt-5.6-sol[medium]",
-      { timeout: 10_000 },
-    );
+    await expect(page.locator("#persona-model")).toContainText("GPT-5.6 Sol", {
+      timeout: 10_000,
+    });
     await expect(
       page.getByTestId("definition-agent-fast-mode-toggle"),
     ).toBeChecked();

@@ -14,6 +14,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
+#[path = "codex_model_config.rs"]
+mod codex_model_config;
+pub use codex_model_config::resolve_model_switch_method;
 mod subscription_token;
 
 use crate::observer::{ObserverContext, ObserverHandle};
@@ -131,6 +134,8 @@ pub(crate) struct TurnDeliveryEvidence {
     pub publish_attempt_count: usize,
     /// Number of those calls that emitted a failed/error update.
     pub publish_failure_count: usize,
+    /// Candidate CLI receipts, verified against signed relay events before use.
+    pub published_event_ids: HashSet<nostr::EventId>,
     publish_tool_ids: HashSet<String>,
     failed_publish_tool_ids: HashSet<String>,
 }
@@ -169,6 +174,9 @@ impl TurnDeliveryEvidence {
     }
 
     fn record_tool_call_update(&mut self, update: &serde_json::Value) {
+        // Claude supplies completed Bash input in an update, after the initial
+        // tool_call. Process either shape before interpreting the result.
+        self.record_tool_call(update);
         let Some(tool_id) = update.get("toolCallId").and_then(|value| value.as_str()) else {
             return;
         };
@@ -183,6 +191,14 @@ impl TurnDeliveryEvidence {
             || update.pointer("/rawOutput/error").is_some();
         if failed && self.failed_publish_tool_ids.insert(tool_id.to_owned()) {
             self.publish_failure_count += 1;
+        }
+        if !failed && update.get("status").and_then(|v| v.as_str()) == Some("completed") {
+            if let Some(output) = update.get("rawOutput") {
+                crate::publication_receipts::collect_candidates(
+                    output,
+                    &mut self.published_event_ids,
+                );
+            }
         }
     }
 }
@@ -865,47 +881,9 @@ fn validate_subscription_codex_config(config: &serde_json::Value) -> Result<(), 
     Ok(())
 }
 
-fn validate_subscription_project_context(
-    harness: &str,
-    cwd: &std::path::Path,
-) -> Result<(), AcpError> {
-    for parent in cwd.ancestors() {
-        let names: &[&str] = if harness == "claude" {
-            &[".claude/settings.json", ".claude/settings.local.json"]
-        } else {
-            &[".codex/config.toml"]
-        };
-        for name in names {
-            let path = parent.join(name);
-            let meta = match std::fs::metadata(&path) {
-                Ok(meta) => meta,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => {
-                    return Err(AcpError::Protocol(format!(
-                        "Project configuration unavailable: {e}"
-                    )))
-                }
-            };
-            if !meta.is_file() || meta.len() > 1024 * 1024 {
-                return Err(AcpError::Protocol(
-                    "Project configuration is not a bounded regular file".into(),
-                ));
-            }
-            let raw = std::fs::read_to_string(path)?;
-            let value: serde_json::Value = if harness == "claude" {
-                serde_json::from_str(&raw)
-                    .map_err(|_| AcpError::Protocol("Invalid Claude project settings".into()))?
-            } else {
-                let value: toml::Value = raw
-                    .parse()
-                    .map_err(|_| AcpError::Protocol("Invalid Codex project settings".into()))?;
-                serde_json::to_value(value).map_err(|e| AcpError::Protocol(e.to_string()))?
-            };
-            validate_subscription_codex_config(&value)?;
-        }
-    }
-    Ok(())
-}
+#[path = "subscription_project.rs"]
+mod subscription_project;
+use subscription_project::validate_subscription_project_context;
 
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
@@ -935,6 +913,35 @@ impl AcpClient {
             Ok(Err(e)) => tracing::debug!("child wait error after kill: {e}"),
             Err(_) => tracing::warn!("child did not exit within 5s after SIGKILL — abandoning"),
         }
+    }
+
+    /// A token switch cannot acknowledge teardown when child exit is unconfirmed.
+    pub async fn shutdown_for_account_switch(&mut self) -> Result<(), AcpError> {
+        // Capture the group before polling: an exited adapter can still have live
+        // tool descendants, and try_wait clears the child's process identity.
+        let Some(pid) = self.child.id() else {
+            return Ok(());
+        };
+        #[cfg(unix)]
+        let stopped = {
+            use nix::sys::signal::{killpg, Signal};
+            use nix::unistd::Pid;
+            matches!(
+                killpg(Pid::from_raw(pid as i32), Signal::SIGKILL),
+                Ok(()) | Err(nix::errno::Errno::ESRCH)
+            )
+        };
+        #[cfg(not(unix))]
+        let stopped = kill_process_group(pid);
+        if !stopped {
+            return Err(AcpError::Protocol(
+                "Could not stop the old account's adapter process group".into(),
+            ));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait())
+            .await
+            .map_err(|_| AcpError::Protocol("Old account adapter exit is unconfirmed".into()))??;
+        Ok(())
     }
 
     /// Spawn the agent binary as a subprocess and connect to its stdio pipes.
@@ -1314,13 +1321,38 @@ impl AcpClient {
                 self.background_mode.label()
             ),
         }
-        // Standard adapters (Claude, Codex) do not put the model on their usage
-        // notifications, so `models.currentModelId` here is the only source for
-        // the NIP-AM `model` field on those paths.
+        // Standard adapters omit the model on usage notifications. Retain the
+        // adapter's reported selection and refresh it after native changes.
         self.record_standard_session_model(&session_id, &result);
         tracing::info!(target: "acp::session", "session created: {session_id}");
         Ok(SessionNewResponse {
             session_id,
+            raw: result,
+        })
+    }
+
+    /// Restore the provider session selected by a durable account handoff.
+    /// Failure is terminal for this handoff; never substitute session/new.
+    pub async fn session_load_full(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<SessionNewResponse, AcpError> {
+        if let Ok(harness) = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS") {
+            validate_subscription_project_context(&harness, std::path::Path::new(cwd))?;
+        }
+        let result = self
+            .send_request(
+                "session/load",
+                serde_json::json!({
+                    "sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers,
+                }),
+            )
+            .await?;
+        self.record_standard_session_model(session_id, &result);
+        Ok(SessionNewResponse {
+            session_id: session_id.to_owned(),
             raw: result,
         })
     }
@@ -1372,7 +1404,11 @@ impl AcpClient {
             "configId": config_id,
             "value": value,
         });
-        self.send_request("session/set_config_option", params).await
+        let result = self
+            .send_request("session/set_config_option", params)
+            .await?;
+        self.record_standard_session_model(session_id, &result);
+        Ok(result)
     }
 
     /// Send `session/set_model` (unstable ACP path).
@@ -1393,18 +1429,27 @@ impl AcpClient {
         Ok(result)
     }
 
-    /// Record `models.currentModelId` from a `session/new` or `session/set_model`
-    /// response into the standard-adapter usage tracker. No-op for adapters that
+    /// Record the adapter's current model from stable controls or legacy model
+    /// state into the standard-adapter usage tracker. No-op for adapters that
     /// report the model on their own usage notifications (goose, buzz-agent) and
     /// for responses that carry no model state.
     fn record_standard_session_model(&mut self, session_id: &str, result: &serde_json::Value) {
         if self.standard_adapter.is_none() {
             return;
         }
-        if let Some(model) = result
-            .pointer("/models/currentModelId")
-            .and_then(serde_json::Value::as_str)
-        {
+        let stable = result["configOptions"].as_array().and_then(|options| {
+            options.iter().find_map(|option| {
+                (option["category"].as_str() == Some("model"))
+                    .then(|| option["currentValue"].as_str())
+                    .flatten()
+                    .filter(|value| !value.is_empty())
+            })
+        });
+        if let Some(model) = stable.or_else(|| {
+            result
+                .pointer("/models/currentModelId")
+                .and_then(serde_json::Value::as_str)
+        }) {
             self.standard_usage.record_session_model(session_id, model);
         }
     }
@@ -3151,6 +3196,12 @@ pub enum ModelSwitchMethod {
         config_id: String,
         option_value: String,
     },
+    /// Stable model selection followed by an explicitly advertised reasoning effort.
+    ConfigOptionWithEffort {
+        config_id: String,
+        option_value: String,
+        effort: String,
+    },
     /// Unstable: use `session/set_model` with this model_id.
     SetModel { model_id: String },
 }
@@ -3222,65 +3273,6 @@ pub fn extract_thought_level_config_id(result: &serde_json::Value) -> Option<Str
             return Some(config_id.to_string());
         }
     }
-    None
-}
-
-/// Match a desired model ID against a fresh `session/new` response.
-///
-/// Returns the correct ACP method to call, or `None` if no match.
-///
-/// **Precedence**: stable `configOptions` first (spec-blessed), then unstable
-/// `availableModels`. The fresh `session/new` response is always authoritative.
-pub fn resolve_model_switch_method(
-    session_new_result: &serde_json::Value,
-    desired_model: &str,
-) -> Option<ModelSwitchMethod> {
-    // 1. Search stable configOptions for a "model"-category entry whose
-    //    options contain a value matching desired_model.
-    for config_opt in extract_model_config_options(session_new_result) {
-        // Adapters disagree on the key: the ACP spec says `configId`, but
-        // claude-agent-acp emits `id`. Accept both; the set request always
-        // uses `configId` on the wire.
-        let config_id = match config_opt
-            .get("configId")
-            .or_else(|| config_opt.get("id"))
-            .and_then(|v| v.as_str())
-        {
-            Some(id) => id,
-            None => continue,
-        };
-        if let Some(options) = config_opt.get("options").and_then(|v| v.as_array()) {
-            for opt in options {
-                if let Some(advertised) = opt.get("value").and_then(|v| v.as_str()) {
-                    if !model_catalog_value_matches(desired_model, advertised) {
-                        continue;
-                    }
-                    return Some(ModelSwitchMethod::ConfigOption {
-                        config_id: config_id.to_string(),
-                        option_value: advertised.to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    // 2. Search unstable availableModels for a matching modelId.
-    if let Some(models) = extract_model_state(session_new_result) {
-        if let Some(available) = models.get("availableModels").and_then(|v| v.as_array()) {
-            for model in available {
-                if let Some(advertised) = model.get("modelId").and_then(|v| v.as_str()) {
-                    if !model_catalog_value_matches(desired_model, advertised) {
-                        continue;
-                    }
-                    return Some(ModelSwitchMethod::SetModel {
-                        model_id: advertised.to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    // 3. No match.
     None
 }
 
@@ -3418,6 +3410,10 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
     #[cfg(not(windows))]
     let _ = cmd;
 }
+
+#[cfg(test)]
+#[path = "acp_model_usage_tests.rs"]
+mod model_usage_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4963,6 +4959,44 @@ mod tests {
             .expect("spawn cat as inert client")
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn account_switch_teardown_reaps_live_adapter_and_is_idempotent() {
+        let mut client = spawn_inert_client().await;
+        client.shutdown_for_account_switch().await.unwrap();
+        assert!(client.child.try_wait().unwrap().is_some());
+        client.shutdown_for_account_switch().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn account_switch_teardown_stops_tools_after_adapter_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("late-write");
+        let mut client = AcpClient::spawn(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "(sleep 0.4; echo late > \"$1\") & echo spawned; exit 0".into(),
+                "fixture".into(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(client.reader.next().await.unwrap().unwrap(), "spawned");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        client.shutdown_for_account_switch().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+        assert!(
+            !marker.exists(),
+            "old account tool survived adapter teardown"
+        );
+        assert!(client.child.try_wait().unwrap().is_some());
+    }
+
     fn background_tasks_message(session_id: &str, tasks: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "jsonrpc": "2.0",
@@ -5512,6 +5546,30 @@ printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
         let snippet = normalized_snippet(&text, FINAL_ANSWER_SNIPPET_CHARS).unwrap();
         assert_eq!(snippet.chars().count(), FINAL_ANSWER_SNIPPET_CHARS + 1);
         assert!(snippet.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn delivery_evidence_accepts_claude_late_bash_input_and_cli_receipt() {
+        let mut client = spawn_inert_client().await;
+        let event_id = "a".repeat(64);
+        for update in [
+            serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"bash-1", "title":"Bash"}),
+            serde_json::json!({"sessionUpdate":"tool_call_update", "toolCallId":"bash-1",
+                "rawInput":{"command":"buzz messages send --content result"}}),
+            serde_json::json!({"sessionUpdate":"tool_call_update", "toolCallId":"bash-1", "status":"completed",
+                "rawOutput":[{"type":"text", "text":serde_json::json!({"accepted":true,"event_id":event_id}).to_string()}]}),
+        ] {
+            let message = serde_json::json!({"params":{"update":update}});
+            let _ = client.handle_session_update(&message);
+            let _ = client.handle_session_update(&message);
+        }
+        let evidence = client.turn_delivery_evidence();
+        assert_eq!(evidence.publish_attempt_count, 1);
+        assert_eq!(evidence.publish_failure_count, 0);
+        assert_eq!(
+            evidence.published_event_ids,
+            HashSet::from([nostr::EventId::from_hex(&event_id).unwrap()])
+        );
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

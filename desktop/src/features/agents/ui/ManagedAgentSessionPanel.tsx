@@ -1,4 +1,5 @@
 import * as React from "react";
+import { ConversationEffortPicker } from "./ConversationEffortPicker";
 import {
   CircleAlert,
   CircleDot,
@@ -40,6 +41,7 @@ import {
 import { buildTranscriptState } from "./agentSessionTranscript";
 
 type ManagedAgentSessionPanelProps = {
+  canChangeEffort?: boolean;
   agent: Pick<ManagedAgent, "pubkey" | "name" | "status"> & {
     avatarUrl?: string | null;
   };
@@ -60,6 +62,7 @@ type ManagedAgentSessionPanelProps = {
 };
 
 export function ManagedAgentSessionPanel({
+  canChangeEffort = false,
   agent,
   autoTail = false,
   channelId = null,
@@ -146,6 +149,14 @@ export function ManagedAgentSessionPanel({
         />
       ) : null}
 
+      {canChangeEffort && hasObserver ? (
+        <ConversationEffortPicker
+          key={`${agent.pubkey}:${channelId}`}
+          pubkey={agent.pubkey}
+          channelId={channelId}
+          events={combinedEvents}
+        />
+      ) : null}
       <SessionBody
         agentAvatarUrl={agent.avatarUrl ?? null}
         agentName={agent.name}

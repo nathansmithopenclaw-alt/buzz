@@ -27,6 +27,7 @@ pub(super) fn registry() -> (tempfile::TempDir, PathBuf, String) {
             schema_version: 1,
             enabled: true,
             accounts: vec![account],
+            claude_default_account_id: None,
         },
     )
     .unwrap();
@@ -439,4 +440,31 @@ fn reservation_rejects_symlink_and_unparseable_crash_record() {
     std::fs::remove_file(&path).unwrap();
     std::fs::write(&path, b"partial").unwrap();
     assert!(reservation::ensure_clear(&root, &id).is_err());
+}
+
+#[test]
+fn default_registry_upgrade_retains_token_metadata_and_rejects_old_writer() {
+    let (_temp, root, id) = registry();
+    let mut value = store::load(&root).unwrap();
+    assert!(value.claude_default_account_id.is_none());
+    value.schema_version = 3;
+    value.accounts[0].kind = "token".into();
+    value.accounts[0].minted_at = Some(100);
+    value.accounts[0].expires_at = Some(100 + 365 * 86400);
+    value.claude_default_account_id = Some(id.clone());
+    store::save(&root, &value).unwrap();
+    let restored = store::load(&root).unwrap();
+    assert_eq!(
+        restored.claude_default_account_id.as_deref(),
+        Some(id.as_str())
+    );
+    assert_eq!(restored.accounts[0].minted_at, Some(100));
+    value.schema_version = 2;
+    assert!(store::save(&root, &value).is_err());
+    value.schema_version = 3;
+    value.claude_default_account_id = Some(uuid::Uuid::new_v4().to_string());
+    assert!(store::save(&root, &value).is_err());
+    value.claude_default_account_id = Some(id);
+    value.accounts[0].kind = "login".into();
+    assert!(store::save(&root, &value).is_err());
 }

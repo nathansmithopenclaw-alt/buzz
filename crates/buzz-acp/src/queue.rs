@@ -220,6 +220,8 @@ pub enum QueueLoss {
 ///     else: push_front with original received_at, set exponential backoff retry_after with jitter
 /// ```
 pub struct EventQueue {
+    account_pause_token: Option<String>,
+    account_pause_error: Option<String>,
     auth_recovery: Option<crate::auth_recovery::AuthRecovery>,
     auth_held: Vec<FlushBatch>,
     auth_blocked: bool,
@@ -272,6 +274,8 @@ impl EventQueue {
     /// derive the deadline from the configured `max_turn_duration`.
     pub fn new(dedup_mode: DedupMode) -> Self {
         Self {
+            account_pause_token: None,
+            account_pause_error: None,
             auth_recovery: None,
             auth_held: Vec::new(),
             auth_blocked: false,
@@ -309,6 +313,73 @@ impl EventQueue {
         self
     }
 
+    /// Persist incoming work while the Desktop replaces this broker.
+    pub(crate) fn begin_account_pause(&mut self, token: String) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.auth_recovery.is_some(),
+            "Durable work storage unavailable"
+        );
+        self.account_pause_token = Some(token);
+        self.auth_blocked = true;
+        Ok(())
+    }
+
+    pub(crate) fn confirm_completed_account_scope(
+        &self,
+        scope: &SessionScope,
+        id: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(token) = &self.account_pause_token {
+            crate::account_handoff::completed_during_pause(token, scope, id)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_account_pause(&mut self) -> anyhow::Result<()> {
+        if let Some(error) = &self.account_pause_error {
+            anyhow::bail!(error.clone());
+        }
+        let token = self
+            .account_pause_token
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Missing pause identity"))?;
+        let mut batches = Vec::new();
+        for (scope, events) in &self.queues {
+            batches.push(FlushBatch {
+                channel_id: scope.channel_id(),
+                scope: scope.clone(),
+                events: events
+                    .iter()
+                    .map(|e| BatchEvent {
+                        event: e.event.clone(),
+                        prompt_tag: e.prompt_tag.clone(),
+                        received_at: e.received_at,
+                    })
+                    .collect(),
+                cancelled_events: self
+                    .cancelled_batches
+                    .get(scope)
+                    .cloned()
+                    .unwrap_or_default(),
+                cancel_reason: self.cancel_reasons.get(scope).copied(),
+                attempt: 1,
+            });
+        }
+        anyhow::ensure!(
+            self.withheld_native_steer.values().all(Vec::is_empty),
+            "Steer delivery remains unconfirmed"
+        );
+        for batch in batches {
+            crate::account_handoff::save_idle(&token, &batch.scope, "")?;
+            self.hold_for_auth(batch)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn held_auth_batches(&self) -> &[FlushBatch] {
+        &self.auth_held
+    }
+
     pub(crate) fn auth_recovery_enabled(&self) -> bool {
         self.auth_recovery.is_some()
     }
@@ -332,7 +403,21 @@ impl EventQueue {
             .auth_recovery
             .as_mut()
             .map_or(Ok(()), |store| store.hold(&batch));
-        self.auth_held.push(batch);
+        // The journal de-duplicates event identities; keep the live hold equally idempotent.
+        let mut batch = batch;
+        let ids: HashSet<_> = self
+            .auth_held
+            .iter()
+            .flat_map(|b| b.events.iter().chain(&b.cancelled_events))
+            .map(|e| e.event.id)
+            .collect();
+        batch.events.retain(|e| !ids.contains(&e.event.id));
+        batch
+            .cancelled_events
+            .retain(|e| !ids.contains(&e.event.id));
+        if !batch.events.is_empty() || !batch.cancelled_events.is_empty() {
+            self.auth_held.push(batch);
+        }
         persisted
     }
 
@@ -363,7 +448,11 @@ impl EventQueue {
         self.in_flight_batches.get(scope).cloned()
     }
 
-    pub(crate) fn complete_auth_recovery(&mut self, batch: &FlushBatch) -> anyhow::Result<()> {
+    pub(crate) fn complete_auth_recovery(
+        &mut self,
+        batch: &FlushBatch,
+        completed_since: Option<u64>,
+    ) -> anyhow::Result<()> {
         if let Some(store) = &mut self.auth_recovery {
             let ids = batch
                 .events
@@ -371,10 +460,25 @@ impl EventQueue {
                 .chain(&batch.cancelled_events)
                 .map(|event| event.event.id)
                 .collect();
-            store.complete(&ids)?;
+            if let Some(since) = completed_since {
+                store.finish(&ids, since)?;
+            } else {
+                store.complete(&ids)?;
+            }
         }
-        for event in batch.events.iter().chain(&batch.cancelled_events) {
-            self.auth_retained_ids.remove(&event.event.id);
+        let ids: HashSet<_> = batch
+            .events
+            .iter()
+            .chain(&batch.cancelled_events)
+            .map(|e| e.event.id)
+            .collect();
+        for held in &mut self.auth_held {
+            held.events.retain(|e| !ids.contains(&e.event.id));
+            held.cancelled_events.retain(|e| !ids.contains(&e.event.id));
+        }
+        self.auth_held.retain(|b| !b.events.is_empty());
+        for id in ids {
+            self.auth_retained_ids.remove(&id);
         }
         Ok(())
     }
@@ -421,6 +525,28 @@ impl EventQueue {
         // including after resume while the original is queued or in flight.
         if self.auth_retained_ids.contains(&event.event.id) {
             return false;
+        }
+        if let Some(token) = self.account_pause_token.clone() {
+            let batch = FlushBatch {
+                channel_id: event.channel_id,
+                scope: event.scope,
+                events: vec![BatchEvent {
+                    event: event.event,
+                    prompt_tag: event.prompt_tag,
+                    received_at: event.received_at,
+                }],
+                cancelled_events: Vec::new(),
+                cancel_reason: None,
+                attempt: 1,
+            };
+            let saved = crate::account_handoff::save_idle(&token, &batch.scope, "")
+                .and_then(|()| self.hold_for_auth(batch));
+            if let Err(error) = saved {
+                tracing::error!(%error, "could not retain work during account switch");
+                self.account_pause_error = Some(error.to_string());
+                return false;
+            }
+            return true;
         }
         debug_assert_eq!(
             event.scope.channel_id(),
@@ -2516,6 +2642,32 @@ mod tests {
     }
 
     // ── Step 2: scope partitioning ──────────────────────────────────────────
+
+    #[test]
+    fn natural_completion_retires_live_hold_and_retry_cannot_duplicate_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::auth_recovery::AuthRecovery::open(
+            &root.path().canonicalize().unwrap(),
+            "fixture-agent",
+            "fixture-relay",
+        )
+        .unwrap();
+        let mut queue = EventQueue::new(DedupMode::Queue).with_auth_recovery(recovery);
+        let batch = make_single_batch("saved unfinished work");
+        queue.hold_for_auth(batch.clone()).unwrap();
+        queue.hold_for_auth(batch.clone()).unwrap();
+        assert_eq!(queue.held_auth_batches().len(), 1);
+        queue.complete_auth_recovery(&batch, Some(0)).unwrap();
+        assert_eq!(queue.resume_after_auth().unwrap(), 0);
+        assert!(queue.flush_next().is_none());
+        let reopened = crate::auth_recovery::AuthRecovery::open(
+            &root.path().canonicalize().unwrap(),
+            "fixture-agent",
+            "fixture-relay",
+        )
+        .unwrap();
+        assert!(reopened.batches().is_empty());
+    }
 
     #[test]
     fn two_threads_in_one_channel_are_independent_partitions() {

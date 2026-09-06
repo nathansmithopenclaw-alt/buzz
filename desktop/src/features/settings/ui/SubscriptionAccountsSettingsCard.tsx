@@ -1,3 +1,7 @@
+import { ClaudeDefaultAccountControl } from "@/features/agents/ui/ClaudeDefaultAccountControl";
+import { ClaudeAccountChangeDialog } from "@/features/agents/ui/ClaudeAccountChangeDialog";
+import { ClaudeAccountChangeProgress } from "@/features/agents/ui/ClaudeAccountChangeProgress";
+import { useClaudeAccountChange } from "@/features/agents/accountChanges";
 import {
   subscriptionAccountExpiry,
   subscriptionAccountNeedsRenewal,
@@ -34,11 +38,25 @@ const stateLabels: Record<SubscriptionAccount["state"], string> = {
 function AccountRow({
   account,
   now,
+  loginAvailable,
 }: {
+  loginAvailable: boolean | undefined;
   account: SubscriptionAccount;
   now: number;
 }) {
   const token = account.kind === "token";
+  const accounts = useSubscriptionAccountsQuery();
+  const group = useClaudeAccountChange();
+  const groupPending = Boolean(group.data && group.data.phase !== "complete");
+  const replacement = accounts.data?.find(
+    (other) =>
+      other.id !== account.id &&
+      other.harness === "claude" &&
+      other.kind === "token" &&
+      other.state === "ready" &&
+      other.nickname &&
+      !subscriptionAccountExpiry(other, now)?.expired,
+  );
   const expiry = subscriptionAccountExpiry(account, now);
   const client = useQueryClient();
   const [nickname, setNickname] = React.useState(account.nickname ?? "");
@@ -140,7 +158,8 @@ function AccountRow({
           >
             {token ? "Cancel token setup" : "Cancel login"}
           </Button>
-        ) : account.state !== "removal_pending" ? (
+        ) : account.state !== "removal_pending" &&
+          (token || loginAvailable !== false) ? (
           <Button
             variant="outline"
             disabled={mutation.isPending}
@@ -152,7 +171,7 @@ function AccountRow({
         {account.state !== "connecting" ? (
           <Button
             variant="ghost"
-            disabled={mutation.isPending}
+            disabled={mutation.isPending || groupPending}
             onClick={() => setConfirmRemove(true)}
           >
             {account.state === "removal_pending" ? "Retry removal" : "Remove"}
@@ -173,6 +192,12 @@ function AccountRow({
             : "Choose Renew to keep its agents running."}
         </p>
       ) : null}
+      {!token && loginAvailable === false ? (
+        <p className="text-sm text-muted-foreground">
+          This sign-in method has been retired. Move its agents to a long-lived
+          token, then remove this account.
+        </p>
+      ) : null}
       {token ? (
         <p className="text-xs text-muted-foreground">
           Renew in your browser. After approval, only this account’s agents
@@ -181,7 +206,16 @@ function AccountRow({
           requested when the first reminder is due.
         </p>
       ) : null}
-      {confirmRemove ? (
+      {confirmRemove && account.harness === "claude" ? (
+        <ClaudeAccountChangeDialog
+          request={{
+            kind: "remove",
+            account_id: account.id,
+            replacement: replacement?.id ?? null,
+          }}
+          onClose={() => setConfirmRemove(false)}
+        />
+      ) : confirmRemove ? (
         <div className="space-y-2">
           <p className="text-sm">
             {token ? "Remove" : "Sign out and remove"} {label} from this
@@ -253,6 +287,8 @@ export function SubscriptionAccountsSettingsCard() {
           Existing selections remain enforced; recovery stays available.
         </p>
       ) : null}
+      <ClaudeDefaultAccountControl />
+      <ClaudeAccountChangeProgress />
       {accounts.isPending ? (
         <p role="status">Loading accounts…</p>
       ) : accounts.isError ? (
@@ -268,7 +304,15 @@ export function SubscriptionAccountsSettingsCard() {
         </p>
       ) : (
         accounts.data.map((account) => (
-          <AccountRow key={account.id} account={account} now={now} />
+          <AccountRow
+            key={account.id}
+            account={account}
+            now={now}
+            loginAvailable={capabilities.data?.some(
+              (capability) =>
+                capability.harness === account.harness && capability.supported,
+            )}
+          />
         ))
       )}
       <div className="space-y-2">
@@ -276,7 +320,8 @@ export function SubscriptionAccountsSettingsCard() {
         <p className="text-xs text-muted-foreground">
           Your browser may already be signed into a provider account. To add a
           different Claude account, sign into that account on claude.ai first,
-          then start the login here. Check the account shown before authorizing.
+          then add a long-lived token here. Check the account shown before
+          authorizing.
         </p>
         {capabilities.isPending ? (
           <p role="status">Checking providers…</p>
@@ -293,20 +338,22 @@ export function SubscriptionAccountsSettingsCard() {
         ) : (
           capabilities.data.map((capability) => (
             <div key={capability.harness} className="space-y-1">
-              <Button
-                variant="outline"
-                disabled={
-                  !enabled.data ||
-                  !capability.supported ||
-                  connecting ||
-                  add.isPending ||
-                  accounts.isError ||
-                  accounts.isPending
-                }
-                onClick={() => add.mutate({ harness: capability.harness })}
-              >
-                Sign in with {capability.provider} ({capability.harness})
-              </Button>
+              {!capability.token_supported || capability.supported ? (
+                <Button
+                  variant="outline"
+                  disabled={
+                    !enabled.data ||
+                    !capability.supported ||
+                    connecting ||
+                    add.isPending ||
+                    accounts.isError ||
+                    accounts.isPending
+                  }
+                  onClick={() => add.mutate({ harness: capability.harness })}
+                >
+                  Sign in with {capability.provider} ({capability.harness})
+                </Button>
+              ) : null}
               {capability.token_supported ? (
                 <Button
                   variant="outline"

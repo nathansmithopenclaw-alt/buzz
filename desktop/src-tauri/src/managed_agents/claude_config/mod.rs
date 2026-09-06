@@ -44,6 +44,8 @@ pub fn apply_claude_model_env(command: &mut std::process::Command, effective_mod
 pub fn apply_effort_env(command: &mut std::process::Command, effort_level: Option<&str>) {
     if let Some(e) = effort_level {
         command.env(EFFORT_LEVEL_ENV_VAR, e);
+        command.env_remove("BUZZ_ACP_THINKING_EFFORT");
+        command.env_remove("BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT");
     }
     // None: no canonical value — leave whatever descriptor.env wrote intact.
 }

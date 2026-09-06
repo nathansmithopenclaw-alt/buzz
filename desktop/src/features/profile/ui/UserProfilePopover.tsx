@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Activity, Headphones, MessageSquare } from "lucide-react";
+import { Activity, Headphones, MessageSquare, Pencil } from "lucide-react";
 
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
@@ -39,6 +39,15 @@ import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
+
+import type { ManagedAgent } from "@/shared/api/types";
+
+const EditAgentDialog = React.lazy(async () => {
+  const { UserProfileEditAgentDialog } = await import(
+    "./UserProfileEditAgentDialog"
+  );
+  return { default: UserProfileEditAgentDialog };
+});
 
 type UserProfilePopoverProps = {
   children: React.ReactNode;
@@ -131,6 +140,12 @@ export function UserProfilePopover({
   botIdenticonValue,
 }: UserProfilePopoverProps) {
   const [open, setOpen] = React.useState(false);
+  const triggerRef = React.useRef<HTMLDivElement | HTMLSpanElement | null>(
+    null,
+  );
+  const [editingAgent, setEditingAgent] = React.useState<ManagedAgent | null>(
+    null,
+  );
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -184,50 +199,77 @@ export function UserProfilePopover({
 
   const TriggerElement = triggerElement;
   return (
-    <Popover onOpenChange={setOpen} open={open}>
-      <PopoverAnchor asChild>
-        <TriggerElement
-          aria-label={triggerAriaLabel}
-          role={canOpenProfilePanel ? "button" : undefined}
-          tabIndex={canOpenProfilePanel ? 0 : undefined}
-          onClick={handleTriggerClick}
-          onKeyDown={(e) => {
-            if (
-              (e.key === "Enter" || e.key === " ") &&
-              canOpenProfilePanel &&
-              openProfilePanel
-            ) {
-              e.preventDefault();
-              e.stopPropagation();
+    <>
+      <Popover onOpenChange={setOpen} open={open}>
+        <PopoverAnchor asChild>
+          <TriggerElement
+            ref={(node) => {
+              triggerRef.current = node;
+            }}
+            aria-label={triggerAriaLabel}
+            role={canOpenProfilePanel ? "button" : undefined}
+            tabIndex={canOpenProfilePanel ? 0 : undefined}
+            onClick={handleTriggerClick}
+            onKeyDown={(e) => {
+              if (
+                (e.key === "Enter" || e.key === " ") &&
+                canOpenProfilePanel &&
+                openProfilePanel
+              ) {
+                e.preventDefault();
+                e.stopPropagation();
+                clearHoverTimer();
+                setOpen(false);
+                openProfilePanel(pubkey);
+              }
+            }}
+            onMouseEnter={handleTriggerMouseEnter}
+            onMouseLeave={handleMouseLeave}
+            className={cn(
+              "inline-flex",
+              canOpenProfilePanel && "cursor-pointer [&_*]:cursor-pointer",
+            )}
+          >
+            {children}
+          </TriggerElement>
+        </PopoverAnchor>
+        {open ? (
+          <UserProfilePopoverBody
+            botIdenticonValue={botIdenticonValue}
+            canOpenProfilePanel={canOpenProfilePanel}
+            onEditAgent={(agent) => {
               clearHoverTimer();
               setOpen(false);
-              openProfilePanel(pubkey);
-            }
-          }}
-          onMouseEnter={handleTriggerMouseEnter}
-          onMouseLeave={handleMouseLeave}
-          className={cn(
-            "inline-flex",
-            canOpenProfilePanel && "cursor-pointer [&_*]:cursor-pointer",
-          )}
-        >
-          {children}
-        </TriggerElement>
-      </PopoverAnchor>
-      {open ? (
-        <UserProfilePopoverBody
-          botIdenticonValue={botIdenticonValue}
-          canOpenProfilePanel={canOpenProfilePanel}
-          onBeforeAction={clearHoverTimer}
-          onContentMouseEnter={handleContentMouseEnter}
-          onMouseLeave={handleMouseLeave}
-          onTriggerClick={handleTriggerClick}
-          pubkey={pubkey}
-          role={role}
-          setOpen={setOpen}
-        />
+              setEditingAgent(agent);
+            }}
+            onBeforeAction={clearHoverTimer}
+            onContentMouseEnter={handleContentMouseEnter}
+            onMouseLeave={handleMouseLeave}
+            onTriggerClick={handleTriggerClick}
+            pubkey={pubkey}
+            role={role}
+            setOpen={setOpen}
+          />
+        ) : null}
+      </Popover>
+      {editingAgent ? (
+        <React.Suspense fallback={null}>
+          <EditAgentDialog
+            agent={editingAgent}
+            canEdit
+            initialFocus={undefined}
+            onEditLinkedPersona={undefined}
+            open
+            onOpenChange={(nextOpen) => {
+              if (!nextOpen) {
+                setEditingAgent(null);
+                requestAnimationFrame(() => triggerRef.current?.focus());
+              }
+            }}
+          />
+        </React.Suspense>
       ) : null}
-    </Popover>
+    </>
   );
 }
 
@@ -238,6 +280,7 @@ export function UserProfilePopover({
  * that render hundreds of instances (~40ms per card when this was eager).
  */
 function UserProfilePopoverBody({
+  onEditAgent,
   botIdenticonValue,
   canOpenProfilePanel,
   onBeforeAction,
@@ -248,6 +291,7 @@ function UserProfilePopoverBody({
   role,
   setOpen,
 }: {
+  onEditAgent: (agent: ManagedAgent) => void;
   botIdenticonValue?: string;
   canOpenProfilePanel: boolean;
   onBeforeAction: () => void;
@@ -481,6 +525,21 @@ function UserProfilePopoverBody({
               />
             ))}
           </div>
+        ) : null}
+
+        {isOwner === true && managedAgent ? (
+          <button
+            className="flex w-full items-center gap-2 rounded-lg border border-border/60 px-3 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted/50"
+            data-testid={`user-profile-edit-agent-${pubkey}`}
+            onClick={() => onEditAgent(managedAgent)}
+            type="button"
+          >
+            <Pencil
+              aria-hidden="true"
+              className="h-4 w-4 text-muted-foreground"
+            />
+            Edit agent
+          </button>
         ) : null}
 
         {canViewActivity ? (

@@ -218,6 +218,10 @@ impl SpawnConfigSnapshot {
             env: {
                 let mut env = descriptor.env.clone();
                 env.remove(EFFORT_LEVEL_ENV_VAR);
+                if record.effort_level.is_some() {
+                    env.remove("BUZZ_ACP_THINKING_EFFORT");
+                    env.remove("BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT");
+                }
                 env
             },
             relay_url: relay_url.to_string(),

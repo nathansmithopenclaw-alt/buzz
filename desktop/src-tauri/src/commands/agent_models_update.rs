@@ -1,5 +1,32 @@
 use super::*;
 
+fn validate_effort_update(
+    record: &ManagedAgentRecord,
+    effort: Option<&Option<String>>,
+) -> Result<(), String> {
+    if effort.is_some() && record.backend != crate::managed_agents::BackendKind::Local {
+        return Err("Remote effort is set at deploy time".to_string());
+    }
+    if effort.and_then(Option::as_ref).is_some_and(|value| {
+        value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control)
+    }) {
+        return Err("Effort must be a non-empty adapter value of at most 128 bytes".to_string());
+    }
+    Ok(())
+}
+
+fn apply_effort_update(record: &mut ManagedAgentRecord, effort: Option<Option<String>>) {
+    if let Some(value) = effort {
+        record.effort_level = value;
+        // These are competing ACP transports, not provider credentials or
+        // global defaults. Clearing the instance override restores inheritance.
+        record.env_vars.retain(|key, _| {
+            !key.eq_ignore_ascii_case("BUZZ_ACP_THINKING_EFFORT")
+                && !key.eq_ignore_ascii_case("BUZZ_ACP_EFFORT_LEVEL")
+        });
+    }
+}
+
 pub(crate) fn managed_agent_access_policy_changed(
     current_mode: crate::managed_agents::RespondTo,
     current_allowlist: &[String],
@@ -83,6 +110,7 @@ pub async fn update_managed_agent(
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
+        validate_effort_update(record, input.effort_level.as_ref())?;
 
         let mut name_changed = false;
         if let Some(name_update) = input.name {
@@ -141,6 +169,10 @@ pub async fn update_managed_agent(
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;
         }
+
+        // Apply after env replacement so a submitted legacy key cannot undo
+        // the effort edit. This shares the normal locked Save transaction.
+        apply_effort_update(record, input.effort_level);
 
         // Native provider/model fields are authoritative. Keep the typed marker
         // derived for new records while retaining legacy typed records for

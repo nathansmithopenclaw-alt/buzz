@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   EFFORT_DEFAULT_DROPDOWN_VALUE,
   effortPickerState,
+  validateSavedEffort,
   effortSelectionToPersistedValue,
 } from "./effortPicker.ts";
 
@@ -52,7 +53,7 @@ test("options lead with the adapter-default sentinel then adapter values", () =>
     currentEffort: null,
   });
   assert.deepEqual(state.options, [
-    { label: "Adapter default", value: EFFORT_DEFAULT_DROPDOWN_VALUE },
+    { label: "Inherit defaults", value: EFFORT_DEFAULT_DROPDOWN_VALUE },
     { label: "Low", value: "low" },
     { label: "High", value: "high" },
   ]);
@@ -78,14 +79,19 @@ test("current effort preselects the matching option", () => {
   assert.equal(state.selectValue, "high");
 });
 
-test("an unknown current effort falls back to the adapter-default sentinel", () => {
+test("an unavailable saved effort stays visible without becoming the default", () => {
   const state = effortPickerState({
     backend: localBackend,
     effortConfigId: "thought_level",
     effortOptions: options,
     currentEffort: "extreme",
   });
-  assert.equal(state.selectValue, EFFORT_DEFAULT_DROPDOWN_VALUE);
+  assert.equal(state.selectValue, "extreme");
+  assert.deepEqual(state.options.at(-1), {
+    label: "extreme (unavailable)",
+    value: "extreme",
+    disabled: true,
+  });
 });
 
 test("a null current effort selects the adapter-default sentinel", () => {
@@ -107,4 +113,17 @@ test("the sentinel selection persists as null (clear to adapter default)", () =>
 
 test("a concrete selection persists as its explicit effort level", () => {
   assert.equal(effortSelectionToPersistedValue("high"), "high");
+});
+
+test("a model change rejects an unsupported effort without silently clearing it", () => {
+  assert.match(
+    validateSavedEffort("ultra", true, [{ id: "low" }]),
+    /not supported/,
+  );
+  assert.equal(validateSavedEffort("low", true, [{ id: "low" }]), null);
+  assert.equal(validateSavedEffort(null, true, [{ id: "low" }]), null);
+});
+test("unrelated edits and failed discovery preserve the saved effort", () => {
+  assert.equal(validateSavedEffort("ultra", false, []), null);
+  assert.equal(validateSavedEffort("ultra", true, null), null);
 });

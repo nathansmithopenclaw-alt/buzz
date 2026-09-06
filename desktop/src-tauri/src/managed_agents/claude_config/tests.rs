@@ -125,3 +125,18 @@ fn b5_canonical_effort_injected_when_no_user_collision() {
         "canonical effort must be injected when no collision"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn canonical_effort_suppresses_legacy_in_real_child_environment() {
+    let mut cmd = std::process::Command::new("/usr/bin/env");
+    cmd.env_clear();
+    cmd.env("BUZZ_ACP_THINKING_EFFORT", "low");
+    cmd.env("BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT", "true");
+    apply_effort_env(&mut cmd, Some("high"));
+    let output = cmd.output().expect("spawn environment probe");
+    assert!(output.status.success());
+    let env = String::from_utf8(output.stdout).expect("UTF-8 probe output");
+    assert!(env.contains("BUZZ_ACP_EFFORT_LEVEL=high"));
+    assert!(!env.contains("BUZZ_ACP_THINKING_EFFORT"));
+}

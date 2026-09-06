@@ -223,7 +223,7 @@ test("required-model harnesses always keep the control", () => {
 test("definition and instance dialogs place model tuning directly below model", async () => {
   for (const [filename, modelMarker] of [
     ["AgentDefinitionDialog.tsx", "<PersonaModelField"],
-    ["AgentInstanceEditDialog.tsx", 'htmlFor="edit-agent-model"'],
+    ["AgentInstanceEditDialog.tsx", "<AgentInstanceModelField"],
   ]) {
     const source = await readFile(
       new URL(`./${filename}`, import.meta.url),
@@ -236,13 +236,14 @@ test("definition and instance dialogs place model tuning directly below model", 
     assert.ok(model >= 0, `${filename} must render Model`);
     assert.ok(effort > model, `${filename} must render Effort after Model`);
     if (filename === "AgentInstanceEditDialog.tsx") {
-      assert.ok(
-        effortPicker > effort,
-        `${filename} must render the adapter effort picker after model tuning`,
+      assert.equal(
+        effortPicker,
+        -1,
+        `${filename} must not mount a second effort control outside the shared section`,
       );
       assert.ok(
-        advanced > effortPicker,
-        `${filename} must render both effort controls before Advanced`,
+        source.includes("instanceEffort={instanceEffort}"),
+        `${filename} must pass its Save-gated draft into the shared effort section`,
       );
     }
     assert.ok(

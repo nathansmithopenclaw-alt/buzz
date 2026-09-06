@@ -19,6 +19,12 @@
 //!
 //! `AcpClient` is NOT Clone — ownership moves out on claim and back on return.
 
+#[path = "pool_fast_mode.rs"]
+mod fast_mode;
+use fast_mode::apply_fast_mode;
+#[cfg(test)]
+use fast_mode::resolve_fast_mode_config_option;
+
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -182,6 +188,8 @@ pub struct ChannelDeliveryState {
 /// spawning a real agent subprocess.
 #[derive(Default)]
 pub struct SessionState {
+    /// Last accepted native configuration, scoped exactly like the ACP session.
+    pub configs: HashMap<SessionScope, serde_json::Value>,
     /// session scope → session_id
     pub sessions: HashMap<SessionScope, String>,
     pub heartbeat_session: Option<String>,
@@ -250,6 +258,7 @@ impl SessionState {
     /// Invalidate a single session scope's session and turn counter.
     /// Returns `true` if the scope had an active session.
     pub fn invalidate_scope(&mut self, scope: &SessionScope, cause: SessionCreationCause) -> bool {
+        self.configs.remove(scope);
         self.turn_counts.remove(scope);
         self.core_sections.remove(scope);
         self.canvas_sections.remove(scope);
@@ -347,6 +356,7 @@ impl SessionState {
             self.heartbeat_pending_cause = Some(cause);
         }
         self.sessions.clear();
+        self.configs.clear();
         self.turn_counts.clear();
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
@@ -506,6 +516,7 @@ impl OwnedAgent {
 /// (running inside a spawned task). The `task_map` tracks in-flight
 /// tasks for panic recovery.
 pub struct AgentPool {
+    pub(crate) live_effort: crate::live_effort::LiveEffortQueue,
     account_quiesced: bool,
     agents: Vec<Option<OwnedAgent>>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
@@ -595,9 +606,10 @@ fn control_signal_creation_cause(signal: &ControlSignal) -> SessionCreationCause
     match signal {
         ControlSignal::SwitchModel { .. } => SessionCreationCause::ModelSwitch,
         ControlSignal::Rotate => SessionCreationCause::OwnerRotate,
-        ControlSignal::Cancel | ControlSignal::Interrupt | ControlSignal::Steer => {
-            SessionCreationCause::OwnerInterrupt
-        }
+        ControlSignal::Cancel
+        | ControlSignal::AccountSwitch { .. }
+        | ControlSignal::Interrupt
+        | ControlSignal::Steer => SessionCreationCause::OwnerInterrupt,
     }
 }
 
@@ -609,6 +621,8 @@ fn control_signal_creation_cause(signal: &ControlSignal) -> SessionCreationCause
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
     Cancel,
+    /// Preserve the provider session after controlled cancellation for an account change.
+    AccountSwitch { token: String },
     /// Stop the current turn and requeue its triggering batch for a merged
     /// re-prompt framed as a **supersede**: the new request replaces the old.
     Interrupt,
@@ -1068,6 +1082,7 @@ impl AgentPool {
             session_owners: HashMap::new(),
             exclusive_session,
             exclusive_park_notices: HashSet::new(),
+            live_effort: Default::default(),
         }
     }
 
@@ -1130,6 +1145,14 @@ impl AgentPool {
         if self.account_quiesced {
             return None;
         }
+        // Hold the worker briefly at its response boundary until an exact-
+        // session effort edit settles. Other workers remain available.
+        let effort_ready =
+            |agent: &OwnedAgent| {
+                !agent.state.sessions.iter().any(|(scope, session)| {
+                    self.live_effort.has_session(scope.channel_id(), session)
+                })
+            };
         // Pass 1: prefer agent with existing session for this scope.
         if let Some(scope) = scope {
             let idx = self.agents.iter().position(|slot| {
@@ -1138,6 +1161,9 @@ impl AgentPool {
                     .unwrap_or(false)
             });
             if let Some(i) = idx {
+                if !effort_ready(self.agents[i].as_ref().unwrap()) {
+                    return None;
+                }
                 return self.agents[i].take();
             }
         }
@@ -1146,7 +1172,7 @@ impl AgentPool {
         let exclusive = self.exclusive_session;
         let idx = self.agents.iter().position(|slot| {
             slot.as_ref()
-                .map(|a| exclusive_worker_can_claim(&a.state, scope, exclusive))
+                .map(|a| effort_ready(a) && exclusive_worker_can_claim(&a.state, scope, exclusive))
                 .unwrap_or(false)
         });
         idx.map(|i| self.agents[i].take().unwrap())
@@ -1491,6 +1517,15 @@ impl AgentPool {
             return false;
         };
         scopes.any(|scope| scope != first)
+    }
+
+    pub(crate) fn effort_target_is_busy(&self, channel_id: Uuid) -> bool {
+        self.task_map.values().any(|task| {
+            task.channel_id == Some(channel_id)
+                || self.session_owners.iter().any(|(scope, owner)| {
+                    scope.channel_id() == channel_id && *owner == task.agent_index
+                })
+        })
     }
 
     /// Idle-path model switch: set `desired_model` on the idle agent for
@@ -2030,20 +2065,33 @@ async fn create_session_and_apply_model(
         }
     }
 
-    let resp = agent
-        .acp
-        .session_new_full(
-            &ctx.cwd,
-            mcp_servers,
-            session_new_system_prompt(
-                is_goose,
-                agent.protocol_version,
-                &agent.agent_name,
-                combined_system_prompt.as_deref(),
-            ),
-            session_title.as_deref(),
-        )
-        .await?;
+    let handoff = channel
+        .scope
+        .map(crate::account_handoff::load)
+        .transpose()
+        .map_err(|e| AcpError::Protocol(e.to_string()))?
+        .flatten();
+    let resp = if let Some(id) = handoff {
+        agent
+            .acp
+            .session_load_full(&id, &ctx.cwd, mcp_servers)
+            .await?
+    } else {
+        agent
+            .acp
+            .session_new_full(
+                &ctx.cwd,
+                mcp_servers,
+                session_new_system_prompt(
+                    is_goose,
+                    agent.protocol_version,
+                    &agent.agent_name,
+                    combined_system_prompt.as_deref(),
+                ),
+                session_title.as_deref(),
+            )
+            .await?
+    };
 
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
         if let Some(prompt) = combined_system_prompt.as_deref() {
@@ -2212,7 +2260,11 @@ async fn create_session_and_apply_model(
         patch_config_option_current_value(&mut applied_config_options, config_id, value);
     }
 
-    if let Some(desired_effort) = ctx.thinking_effort.as_deref() {
+    if let Some(desired_effort) = ctx
+        .thinking_effort
+        .as_deref()
+        .filter(|_| agent.startup_effort.is_none())
+    {
         let advertised = applied_config_options.clone();
         if !skip_unsupported_default_thinking_effort(
             &agent.acp,
@@ -2248,10 +2300,12 @@ async fn create_session_and_apply_model(
     // carries the pre-set `currentValue`, so patch the applied option to the
     // value the session is actually running. A rejected effort or a model with
     // no `thought_level` option leaves the snapshot untouched.
-    agent.acp.observe(
-        "session_config_captured",
-        serde_json::json!({
+    let captured_config = serde_json::json!({
             "configOptions": applied_config_options,
+            "liveEffortSwitching": channel.scope.is_some(),
+            "conversationLabel": channel.name,
+            "conversationId": channel.scope.map(|scope| scope.root_event_id().map(str::to_owned)
+                .unwrap_or_else(|| scope.channel_id().to_string())),
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
             // `models` must come from the SAME snapshot as configOptions — the
             // post-switch snapshot on a successful switch, session/new otherwise.
@@ -2265,8 +2319,30 @@ async fn create_session_and_apply_model(
             // Pair identity for the desktop session-config cache, which is
             // keyed by (agent, relay) like the lifecycle frames.
             "relayUrl": ctx.relay_url,
-        }),
-    );
+    });
+    if let Some(scope) = channel.scope {
+        agent
+            .state
+            .configs
+            .insert(scope.clone(), captured_config.clone());
+    }
+    if let (Some(scope), Some(observer)) = (channel.scope, agent.acp.observer_handle()) {
+        observer.emit(
+            "session_config_captured",
+            Some(agent.index),
+            &observer::ObserverContext {
+                channel_id: Some(scope.channel_id().to_string()),
+                session_id: Some(resp.session_id.clone()),
+                turn_id: None,
+                started_at: None,
+            },
+            captured_config,
+        );
+    } else {
+        agent
+            .acp
+            .observe("session_config_captured", captured_config);
+    }
 
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support
@@ -2339,30 +2415,24 @@ async fn apply_model_switch(
     method: &ModelSwitchMethod,
 ) -> Result<ModelSwitchOutcome, AcpError> {
     let selected_model = match method {
-        ModelSwitchMethod::ConfigOption { option_value, .. } => option_value.as_str(),
+        ModelSwitchMethod::ConfigOption { option_value, .. }
+        | ModelSwitchMethod::ConfigOptionWithEffort { option_value, .. } => option_value.as_str(),
         ModelSwitchMethod::SetModel { model_id } => model_id.as_str(),
     };
     let method_label = match method {
         ModelSwitchMethod::ConfigOption { config_id, .. } => {
             format!("configOption (configId={config_id})")
         }
+        ModelSwitchMethod::ConfigOptionWithEffort { .. } => {
+            "configOption (model + effort)".to_string()
+        }
         ModelSwitchMethod::SetModel { .. } => "set_model".to_string(),
     };
 
-    let result = tokio::time::timeout(MODEL_SWITCH_TIMEOUT, async {
-        match method {
-            ModelSwitchMethod::ConfigOption {
-                config_id,
-                option_value,
-            } => {
-                acp.session_set_config_option(session_id, config_id, option_value)
-                    .await
-            }
-            ModelSwitchMethod::SetModel { model_id } => {
-                acp.session_set_model(session_id, model_id).await
-            }
-        }
-    })
+    let result = tokio::time::timeout(
+        MODEL_SWITCH_TIMEOUT,
+        acp.apply_model_switch_method(session_id, method),
+    )
     .await;
 
     match result {
@@ -2574,79 +2644,6 @@ fn skip_unsupported_default_thinking_effort(
         }),
     );
     true
-}
-
-async fn apply_fast_mode(
-    acp: &mut AcpClient,
-    session_id: &str,
-    enabled: bool,
-    config_options: &serde_json::Value,
-) -> Result<serde_json::Value, AcpError> {
-    let (config_id, value) = resolve_fast_mode_config_option(config_options, enabled)?;
-    let response = tokio::time::timeout(
-        MODEL_SWITCH_TIMEOUT,
-        acp.session_set_config_option(session_id, config_id, value),
-    )
-    .await
-    .map_err(|_| AcpError::Timeout(MODEL_SWITCH_TIMEOUT))??;
-    tracing::info!(
-        target: "pool::fast_mode",
-        fast_mode = enabled,
-        "applied native Fast mode via configOption on session {session_id}"
-    );
-    acp.observe(
-        "fast_mode_selection_verified",
-        serde_json::json!({ "enabled": enabled, "configId": config_id }),
-    );
-    Ok(response
-        .get("configOptions")
-        .cloned()
-        .unwrap_or_else(|| config_options.clone()))
-}
-
-fn resolve_fast_mode_config_option(
-    config_options: &serde_json::Value,
-    enabled: bool,
-) -> Result<(&str, &'static str), AcpError> {
-    let option = config_options.as_array().and_then(|options| {
-        options.iter().find(|option| {
-            let id = option
-                .get("id")
-                .or_else(|| option.get("configId"))
-                .and_then(|value| value.as_str());
-            id == Some("fast")
-                || id == Some("fast-mode")
-                || (option.get("category").and_then(|value| value.as_str()) == Some("model_config")
-                    && option
-                        .get("name")
-                        .or_else(|| option.get("displayName"))
-                        .and_then(|value| value.as_str())
-                        .is_some_and(|name| name.eq_ignore_ascii_case("fast mode")))
-        })
-    });
-    let config_id = option
-        .and_then(|option| option.get("id").or_else(|| option.get("configId")))
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            AcpError::Protocol(
-                "configured Fast mode is not available for the selected model".to_string(),
-            )
-        })?;
-    let desired = if enabled { "on" } else { "off" };
-    let advertised = option
-        .and_then(|option| option.get("options"))
-        .and_then(|value| value.as_array())
-        .is_some_and(|options| {
-            options
-                .iter()
-                .any(|option| option.get("value").and_then(|value| value.as_str()) == Some(desired))
-        });
-    if !advertised {
-        return Err(AcpError::Protocol(format!(
-            "Fast mode value {desired:?} is not advertised for the selected model"
-        )));
-    }
-    Ok((config_id, desired))
 }
 
 /// Outcome of applying a worker's spawn-scoped startup effort at session creation.
@@ -3106,17 +3103,35 @@ fn self_authored_report_filter(
 async fn self_authored_answer_receipts(
     watch: &PublicationWatch,
     rest: &RestClient,
-) -> Option<Vec<(Uuid, String, u64)>> {
-    let filter = self_authored_report_filter(watch, rest.keys.public_key());
-    match timeout(
-        CONTEXT_FETCH_TIMEOUT,
-        rest.query(std::slice::from_ref(&filter)),
-    )
-    .await
-    {
+    evidence: &TurnDeliveryEvidence,
+) -> Option<(bool, Vec<(Uuid, String, u64)>)> {
+    let mut filters = vec![self_authored_report_filter(watch, rest.keys.public_key())];
+    if !evidence.published_event_ids.is_empty() {
+        filters.push(
+            nostr::Filter::new()
+                .ids(evidence.published_event_ids.iter().copied())
+                .author(rest.keys.public_key())
+                .limit(crate::publication_receipts::MAX_CANDIDATES),
+        );
+    }
+    match timeout(CONTEXT_FETCH_TIMEOUT, rest.query(&filters)).await {
         Ok(Ok(events)) => match events.as_array() {
             Some(events) => match answered_receipts_for_watch(watch, events.iter().cloned()) {
-                Ok(receipts) => Some(receipts),
+                Ok(receipts) => {
+                    let delivered = !receipts.is_empty()
+                        || events.iter().any(|raw| {
+                            serde_json::from_value::<nostr::Event>(raw.clone()).is_ok_and(|event| {
+                                crate::publication_receipts::verified_candidate(
+                                    &event,
+                                    &evidence.published_event_ids,
+                                    rest.keys.public_key(),
+                                    watch.channel_id,
+                                    watch.turn_started_at,
+                                )
+                            })
+                        });
+                    Some((delivered, receipts))
+                }
                 Err(error) => {
                     tracing::warn!(
                         channel = %watch.channel_id,
@@ -3262,7 +3277,9 @@ fn spawn_publication_silence_notice(
     let turn_id = turn_id.to_string();
     tokio::spawn(async move {
         if !publication_missing(&watch, &ctx.publication_tracker) {
-            if let Some(receipts) = self_authored_answer_receipts(&watch, &ctx.rest_client).await {
+            if let Some((_, receipts)) =
+                self_authored_answer_receipts(&watch, &ctx.rest_client, &evidence).await
+            {
                 persist_answered_receipts(&ctx, receipts);
             }
             return;
@@ -3272,14 +3289,16 @@ fn spawn_publication_silence_notice(
         // a successful report does not race its own failure notice.
         tokio::time::sleep(PUBLICATION_SETTLE_DELAY).await;
         if !publication_missing(&watch, &ctx.publication_tracker) {
-            if let Some(receipts) = self_authored_answer_receipts(&watch, &ctx.rest_client).await {
+            if let Some((_, receipts)) =
+                self_authored_answer_receipts(&watch, &ctx.rest_client, &evidence).await
+            {
                 persist_answered_receipts(&ctx, receipts);
             }
             return;
         }
-        match self_authored_answer_receipts(&watch, &ctx.rest_client).await {
-            Some(receipts) if receipts.is_empty() => {}
-            Some(receipts) => {
+        match self_authored_answer_receipts(&watch, &ctx.rest_client, &evidence).await {
+            Some((false, _)) => {}
+            Some((true, receipts)) => {
                 persist_answered_receipts(&ctx, receipts);
                 return;
             }
@@ -3634,18 +3653,24 @@ pub async fn run_prompt_task(
                         );
                         agent.state.sessions.insert(scope.clone(), sid.clone());
                         agent.state.record_session_created(&source);
-                        agent
-                            .state
-                            .deliveries
-                            .insert(scope.clone(), ChannelDeliveryState::default());
+                        let restored = matches!(crate::account_handoff::load(scope), Ok(Some(_)));
+                        agent.state.deliveries.insert(
+                            scope.clone(),
+                            ChannelDeliveryState {
+                                standing_context_sent: restored,
+                                ..ChannelDeliveryState::default()
+                            },
+                        );
                         // Seed a zero usage baseline: buzz-acp spawned this session
                         // so prior usage is zero by definition — first turn is reliable.
-                        agent.acp.notify_session_spawned(&sid);
+                        if !restored {
+                            agent.acp.notify_session_spawned(&sid);
+                        }
                         // Commit canvas only after session creation succeeds (I3).
                         if let Some((pending_scope, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_scope, section);
                         }
-                        (sid, true)
+                        (sid, !restored)
                     }
                     Err(AcpError::AgentExited) => {
                         agent
@@ -4078,6 +4103,30 @@ pub async fn run_prompt_task(
         return;
     };
 
+    let mut prompt_sections = prompt_sections;
+    let continuation = match &source {
+        PromptSource::Channel(scope) => crate::account_handoff::unfinished(scope),
+        PromptSource::Heartbeat => Ok(false),
+    };
+    let continuation = match continuation {
+        Ok(value) => value,
+        Err(error) => {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::Protocol(error.to_string())),
+                batch,
+            );
+            return;
+        }
+    };
+    if continuation {
+        slash_command = None;
+        prompt_sections.insert(0, "<account-switch-continuation>Continue the unfinished work in this existing session after the owner's account change. The following request is retained context, not an instruction to repeat completed actions. Inspect existing results first. Never repeat completed writes or external actions. Reconcile uncertain outcomes before proceeding; if reconciliation is impossible, explain the specific uncertainty and stop.</account-switch-continuation>".into());
+    }
+
     // 💬 — fire-and-forget so the prompt fires immediately.
     // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
     // A brief race where 💬 appears slightly after the agent starts is acceptable.
@@ -4139,6 +4188,24 @@ pub async fn run_prompt_task(
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
     //
+    let continuation_token = if continuation {
+        std::env::var("BUZZ_ACP_ACCOUNT_SWITCH_ID").ok()
+    } else {
+        None
+    };
+    if let (Some(token), PromptSource::Channel(scope)) = (&continuation_token, &source) {
+        if let Err(error) = crate::account_handoff::save(token, scope, &session_id, false) {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::Protocol(error.to_string())),
+                batch,
+            );
+            return;
+        }
+    }
     let prompt_result = match control_rx {
         None => {
             // Heartbeat / non-cancellable path.
@@ -4179,6 +4246,17 @@ pub async fn run_prompt_task(
                     }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
+                    if let ControlSignal::AccountSwitch { token } = &control_signal {
+                        if let PromptSource::Channel(scope) = &source {
+                            let saved = crate::account_handoff::save(token, scope, &session_id, false);
+                            if let Err(error) = saved {
+                                agent.state.invalidate(&source, SessionCreationCause::Error);
+                                send_prompt_result(&result_tx, &turn_id, agent, source,
+                                    PromptOutcome::Error(AcpError::Protocol(error.to_string())), None);
+                                return;
+                            }
+                        }
+                    }
                     if agent.acp.has_in_flight_prompt() {
                         // Prompt is genuinely in-flight — cancel it.
                         match agent
@@ -4201,10 +4279,17 @@ pub async fn run_prompt_task(
                                         .await;
                                     }
                                 }
-                                agent.state.invalidate(
-                                    &source,
-                                    control_signal_creation_cause(&control_signal),
-                                );
+                                if let ControlSignal::AccountSwitch { token } = &control_signal {
+                                    if let PromptSource::Channel(scope) = &source {
+                                        if let Err(error) = crate::account_handoff::save(token, scope, &session_id, true) {
+                                            send_prompt_result(&result_tx, &turn_id, agent, source,
+                                                PromptOutcome::Error(AcpError::Protocol(error.to_string())), None);
+                                            return;
+                                        }
+                                    }
+                                } else {
+                                    agent.state.invalidate(&source, control_signal_creation_cause(&control_signal));
+                                }
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
@@ -4380,6 +4465,23 @@ pub async fn run_prompt_task(
         }
     };
 
+    // A terminal adapter response has finished the RPC. Transport loss retains
+    // the unsafe marker so a crash cannot replay uncertain external work.
+    if matches!(&prompt_result, Ok(_) | Err(AcpError::AgentError { .. })) {
+        if let (Some(token), PromptSource::Channel(scope)) = (&continuation_token, &source) {
+            if let Err(error) = crate::account_handoff::save(token, scope, &session_id, true) {
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(AcpError::Protocol(error.to_string())),
+                    batch,
+                );
+                return;
+            }
+        }
+    }
     match prompt_result {
         Ok(stop_reason) => {
             let delivery_evidence = agent.acp.turn_delivery_evidence();
@@ -5953,7 +6055,9 @@ fn requeue_cancelled_batch(
         ControlSignal::Steer => CancelReason::Steer,
         ControlSignal::Interrupt | ControlSignal::SwitchModel { .. } => CancelReason::Interrupt,
         // Cancel/Rotate discard the batch — no merged re-prompt.
-        ControlSignal::Cancel | ControlSignal::Rotate => return None,
+        ControlSignal::Cancel | ControlSignal::Rotate | ControlSignal::AccountSwitch { .. } => {
+            return None
+        }
     };
     requeue_batch_if_queue(ctx, batch).map(|mut b| {
         b.cancel_reason = Some(reason);
@@ -9102,6 +9206,62 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         assert!(!merged.exact.contains(&silent_turn.id.to_hex()));
     }
 
+    #[tokio::test]
+    async fn flat_dm_publish_is_pull_verified_without_a_reply_tag() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        let event = buzz_sdk::build_message(channel, "done", None, &[], false, &[])
+            .unwrap()
+            .sign_with_keys(&keys)
+            .unwrap();
+        let id = event.id;
+        let watch = PublicationWatch {
+            channel_id: channel,
+            trigger_event_id: "a".repeat(64),
+            answered_event_ids: vec!["a".repeat(64)],
+            is_dm: true,
+            observed_at_start: 0,
+            turn_started_at: event.created_at,
+            thread_tags: ThreadTags::default(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let body = serde_json::json!([event]).to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 16384];
+            let read = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..read]);
+            assert!(
+                request.contains(&id.to_hex()),
+                "the query must include the exact CLI receipt id"
+            );
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let rest = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys,
+            auth_tag_json: None,
+        };
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.published_event_ids.insert(id);
+        let (delivered, replies) = self_authored_answer_receipts(&watch, &rest, &evidence)
+            .await
+            .unwrap();
+        assert!(
+            delivered,
+            "flat DM publication must suppress the false silence warning"
+        );
+        assert!(
+            replies.is_empty(),
+            "delivery does not manufacture a thread reply"
+        );
+        server.await.unwrap();
+    }
+
     #[test]
     fn context_target_uses_thread_scope_root_not_last_event_tags() {
         let ch = Uuid::new_v4();
@@ -12121,7 +12281,7 @@ done"#
         assert!(resolve_fast_mode_config_option(&json!([]), true)
             .unwrap_err()
             .to_string()
-            .contains("not available"));
+            .contains("did not advertise a Fast mode control"));
     }
 }
 
@@ -12668,7 +12828,8 @@ done"#
         let obs = observer::ObserverHandle::in_process();
         agent.acp.set_observer(Some(obs.clone()), 0);
 
-        let ctx = make_prompt_context_no_owner();
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.thinking_effort = Some("low".to_string());
         create_session_and_apply_model(
             &mut agent,
             &ctx,
@@ -12705,7 +12866,8 @@ done"#
         let obs = observer::ObserverHandle::in_process();
         agent.acp.set_observer(Some(obs.clone()), 0);
 
-        let ctx = make_prompt_context_no_owner();
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.thinking_effort = Some("high".to_string());
         create_session_and_apply_model(
             &mut agent,
             &ctx,
@@ -12739,7 +12901,8 @@ done"#
         let obs = observer::ObserverHandle::in_process();
         agent.acp.set_observer(Some(obs.clone()), 0);
 
-        let ctx = make_prompt_context_no_owner();
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.thinking_effort = Some("high".to_string());
         create_session_and_apply_model(
             &mut agent,
             &ctx,
@@ -13087,6 +13250,72 @@ done"#
         assert_eq!(agent.desired_model.as_deref(), Some("model-b"));
         assert!(!agent.state.sessions.contains_key(&scopes[0]));
         assert!(!pool.session_owners.contains_key(&scopes[0]));
+    }
+
+    #[tokio::test]
+    async fn codex_qualified_model_preserves_fast_controls_at_session_start() {
+        let script = r#"import json,sys
+options = [
+ {"id":"model","category":"model","currentValue":"gpt-6-astra","options":[{"value":"gpt-5.6-sol"}]},
+ {"id":"reasoning-effort","category":"thought_level","currentValue":"low","options":[{"value":"medium"}]},
+ {"id":"fast-mode","category":"model_config","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}
+]
+for line in sys.stdin:
+ r=json.loads(line); method=r['method']; p=r.get('params',{})
+ if method=='session/new':
+  result={'sessionId':'sess-1','configOptions':options,'models':{'availableModels':[{'modelId':'gpt-5.6-sol[medium]'}]}}
+ elif method=='session/set_model': result={}
+ elif method=='session/set_config_option':
+  for o in options:
+   if o['id']==p['configId']: o['currentValue']=p['value']
+  result={'configOptions':options}
+ else: result={}
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
+"#;
+        let acp = AcpClient::spawn(
+            "python3",
+            &["-u".into(), "-c".into(), script.into()],
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+        let mut agent = switching_agent(acp, "gpt-5.6-sol[medium]");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.fast_mode = Some(true);
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("qualified model must retain current Fast mode controls");
+        let cap = capture(&obs);
+        for (id, value) in [
+            ("model", "gpt-5.6-sol"),
+            ("reasoning-effort", "medium"),
+            ("fast-mode", "on"),
+        ] {
+            assert!(cap["configOptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["id"] == id && o["currentValue"] == value));
+        }
+        assert!(obs
+            .snapshot()
+            .iter()
+            .any(|e| e.kind == "fast_mode_selection_verified"));
+        agent.acp.shutdown().await;
     }
 
     #[tokio::test]

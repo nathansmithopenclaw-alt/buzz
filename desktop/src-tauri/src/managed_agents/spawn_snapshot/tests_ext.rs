@@ -262,3 +262,20 @@ fn unchanged_session_policy_does_not_require_restart() {
     let thread = snapshot_under(AcpSessionPolicy::Thread);
     assert!(policy_transition_diff(&thread, &snapshot_under(AcpSessionPolicy::Thread)).is_empty());
 }
+
+#[test]
+fn canonical_effort_suppresses_legacy_restart_noise() {
+    let mut configured = record();
+    configured.effort_level = Some("high".into());
+    let baseline = snap(&configured);
+    configured
+        .env_vars
+        .insert("BUZZ_ACP_THINKING_EFFORT".into(), "low".into());
+    assert_eq!(snap(&configured), baseline);
+    configured.effort_level = None;
+    assert_ne!(
+        snap(&configured),
+        snap(&record()),
+        "legacy fallback still affects an unconfigured agent"
+    );
+}

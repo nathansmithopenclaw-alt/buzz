@@ -164,6 +164,17 @@ test("Codex instance edits expose effort through the saved model qualifier", () 
   assert.equal(field(model, "effort").value, "ultra");
 });
 
+test("Codex create and definition edits expose native effort and preserve saved qualifiers", () => {
+  const model = deriveAgentConfigFieldModel({
+    config: { ...config, model: "gpt-6-astra[high]" },
+    runtime: runtime("codex", { effortModelQualifier: true }),
+    scope: "definition",
+  });
+  assert.equal(field(model, "effort").value, "high");
+  assert.equal(field(model, "effort").optionSource, "harnessNative");
+  assert.deepEqual(model.omissions, []);
+});
+
 test("catalog mismatch cleanup is named and restricted to onboarding", () => {
   const selectedRuntime = runtime("buzz-agent", {
     modelEnvVar: "BUZZ_AGENT_MODEL",

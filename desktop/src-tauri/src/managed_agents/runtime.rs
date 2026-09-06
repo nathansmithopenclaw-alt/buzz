@@ -291,6 +291,7 @@ pub fn build_managed_agent_summary(
     )
     .map(str::to_owned);
     Ok(ManagedAgentSummary {
+        effort_level: record.effort_level.clone(),
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
@@ -319,6 +320,7 @@ pub fn build_managed_agent_summary(
         supports_claude_accounts,
         subscription_account_id: record.subscription_account_id.clone(),
         subscription_account_generation: record.subscription_account_generation,
+        subscription_account_inherit_default: record.subscription_account_inherit_default,
         subscription_account_harness,
         running_subscription_account_id: super::subscription_binding::ready_binding(pair_runtime)
             .map(|b| b.account_id.clone()),
@@ -425,6 +427,7 @@ pub fn spawn_agent_child(
         return Err(error);
     }
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    super::account_switch::check_spawn(app, record, &runtime_key)?;
     // Resolve the effective harness (agent command) from the linked persona, so
     // persona harness edits propagate on the next spawn; an explicit per-agent
     // override wins. `agent_args` and `mcp_command` are pure derivations of the
@@ -1221,7 +1224,15 @@ pub fn start_managed_agent_process(
     record.last_error = None;
     record.last_error_code = None;
 
-    runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
+    let mut runtime = ManagedAgentPairRuntime::starting(process);
+    // The profile Start command runs this on its blocking worker. Its first
+    // lifecycle frame can precede the observer subscription; confirm the exact
+    // broker locally without releasing authentication holds.
+    if let Err(error) = super::subscription_binding::probe_runtime_binding(&mut runtime) {
+        record.last_error = Some(error.clone());
+        runtime.error = Some(error);
+    }
+    runtimes.insert(key, runtime);
     Ok(())
 }
 

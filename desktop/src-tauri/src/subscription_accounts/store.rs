@@ -16,6 +16,8 @@ pub(super) struct Registry {
     #[serde(default)]
     pub enabled: bool,
     pub accounts: Vec<SubscriptionAccount>,
+    #[serde(default)]
+    pub claude_default_account_id: Option<String>,
 }
 
 pub(super) fn root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -113,11 +115,20 @@ pub(super) fn save(root: &Path, registry: &Registry) -> Result<(), String> {
 }
 
 fn validate(registry: &Registry) -> Result<(), String> {
-    if !matches!(registry.schema_version, 1 | 2) {
+    if !matches!(registry.schema_version, 1..=3) {
         return Err("Unsupported account registry version".into());
     }
     if registry.accounts.len() > 100 {
         return Err("Subscription account limit reached (100)".into());
+    }
+    if let Some(id) = &registry.claude_default_account_id {
+        if registry.schema_version < 3
+            || !registry.accounts.iter().any(|account| {
+                &account.id == id && account.harness == "claude" && account.kind == "token"
+            })
+        {
+            return Err("Invalid default Claude account".into());
+        }
     }
     let mut ids = HashSet::new();
     for account in &registry.accounts {

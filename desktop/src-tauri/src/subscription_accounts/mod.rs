@@ -1,5 +1,6 @@
 //! Local subscription accounts. The harness owns all provider credentials.
 mod adapters;
+pub(crate) mod defaults;
 mod process;
 pub(crate) mod reminders;
 mod reservation;
@@ -352,7 +353,7 @@ fn begin_account_login(
     account_id: Option<String>,
     app: AppHandle,
 ) -> Result<SubscriptionAccount, String> {
-    let provider = adapters::provider(&harness)?;
+    let provider = adapters::login_provider(&harness)?;
     let executable = crate::managed_agents::resolve_command(&harness)
         .ok_or("Install the provider CLI before adding its account")?;
     let _guard = lifecycle_lock()
@@ -557,7 +558,15 @@ pub(crate) async fn remove_subscription_account(id: String, app: AppHandle) -> R
         .map_err(|_| "Account removal worker failed".to_string())?
 }
 
-fn remove_account(id: &str, app: &AppHandle) -> Result<(), String> {
+pub(crate) fn remove_account(id: &str, app: &AppHandle) -> Result<(), String> {
+    remove_account_scoped(id, app, None)
+}
+
+pub(crate) fn remove_account_scoped(
+    id: &str,
+    app: &AppHandle,
+    group_id: Option<&str>,
+) -> Result<(), String> {
     let (root, home, harness, logout_completed, token_kind) = {
         let state = app.state::<crate::app_state::AppState>();
         let _store = state
@@ -567,6 +576,7 @@ fn remove_account(id: &str, app: &AppHandle) -> Result<(), String> {
         let _guard = lifecycle_lock()
             .lock()
             .map_err(|_| "Account lifecycle unavailable")?;
+        crate::managed_agents::account_group::guard_removal(app, id, group_id)?;
         ensure_unused(id)?;
         ensure_no_live_receipts(app, id)?;
         if crate::managed_agents::load_managed_agents(app)?
@@ -577,6 +587,9 @@ fn remove_account(id: &str, app: &AppHandle) -> Result<(), String> {
         }
         let root = store::root(app)?;
         let mut registry = store::load(&root)?;
+        if registry.claude_default_account_id.as_deref() == Some(id) {
+            return Err("Move or clear the default Claude account before removal".into());
+        }
         let account = store::account_mut(&mut registry, id)?;
         if account.attempt_id.is_some()
             || !attempts()

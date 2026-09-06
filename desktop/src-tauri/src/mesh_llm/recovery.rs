@@ -450,6 +450,7 @@ mod tests {
             claude_account_id: None,
             subscription_account_id: None,
             subscription_account_generation: 0,
+            subscription_account_inherit_default: false,
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,

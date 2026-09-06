@@ -210,7 +210,7 @@ fn safe_switch_control_ignores_stale_ack_and_refuses_busy_before_selection() {
         assert_eq!(request["nonce"], "current-generation");
         super::super::atomic_write_json(
             &path.join("response.json"),
-            serde_json::json!({"nonce":"current-generation","token":worker_token,"status":"busy"})
+            serde_json::json!({"nonce":"current-generation","token":worker_token,"request_id":request["request_id"],"status":"busy"})
                 .to_string()
                 .as_bytes(),
         )
@@ -219,6 +219,99 @@ fn safe_switch_control_ignores_stale_ack_and_refuses_busy_before_selection() {
     let result = control(dir.path(), "current-generation", &token, "quiesce");
     responder.join().unwrap();
     assert!(result.unwrap_err().contains("busy"));
+}
+
+#[test]
+fn resumed_generation_confirms_listening_without_relay_lifecycle_delivery() {
+    for (status, initial, expected) in [
+        (
+            "resumed",
+            ManagedAgentRuntimeLifecycle::Starting,
+            ManagedAgentRuntimeLifecycle::Listening,
+        ),
+        (
+            "resume_failed",
+            ManagedAgentRuntimeLifecycle::Starting,
+            ManagedAgentRuntimeLifecycle::Starting,
+        ),
+        (
+            "resumed",
+            ManagedAgentRuntimeLifecycle::Ready,
+            ManagedAgentRuntimeLifecycle::Ready,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let responder = std::thread::spawn(move || {
+            let start = Instant::now();
+            while !path.join("request.json").exists() && start.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let mut request: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path.join("request.json")).unwrap()).unwrap();
+            assert_eq!(request["action"], "resume_auth");
+            request["status"] = status.into();
+            super::super::atomic_write_json_restricted(
+                &path.join("response.json"),
+                request.to_string().as_bytes(),
+            )
+            .unwrap();
+        });
+        let mut lifecycle = initial;
+        let result = resume_and_confirm_lifecycle(
+            dir.path(),
+            "current-generation",
+            &"a".repeat(32),
+            &mut lifecycle,
+        );
+        responder.join().unwrap();
+        assert_eq!(result.is_ok(), status == "resumed");
+        assert_eq!(lifecycle, expected);
+    }
+}
+
+#[test]
+fn normal_start_probe_confirms_binding_only_after_the_exact_broker_ack() {
+    for (status, initial, expected) in [
+        (
+            "listening",
+            ManagedAgentRuntimeLifecycle::Starting,
+            ManagedAgentRuntimeLifecycle::Listening,
+        ),
+        (
+            "busy",
+            ManagedAgentRuntimeLifecycle::Starting,
+            ManagedAgentRuntimeLifecycle::Starting,
+        ),
+        (
+            "listening",
+            ManagedAgentRuntimeLifecycle::Ready,
+            ManagedAgentRuntimeLifecycle::Ready,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let responder = std::thread::spawn(move || {
+            let start = Instant::now();
+            while !path.join("request.json").exists() && start.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let mut request: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path.join("request.json")).unwrap()).unwrap();
+            assert_eq!(request["action"], "probe");
+            request["status"] = status.into();
+            super::super::atomic_write_json_restricted(
+                &path.join("response.json"),
+                request.to_string().as_bytes(),
+            )
+            .unwrap();
+        });
+        let mut lifecycle = initial;
+        let result = probe_and_confirm_lifecycle(dir.path(), "current-generation", &mut lifecycle);
+        responder.join().unwrap();
+        assert_eq!(result.is_ok(), status == "listening");
+        assert_eq!(lifecycle, expected);
+    }
 }
 
 #[test]
@@ -247,17 +340,17 @@ fn control_response_never_follows_symlinks_or_reads_oversized_files() {
     std::fs::write(&unrelated, "synthetic fixture content").unwrap();
     let response = directory.path().join("response.json");
     std::os::unix::fs::symlink(&unrelated, &response).unwrap();
-    assert!(read_control_response(&response)
+    assert!(read_control_file(&response, 2048)
         .unwrap_err()
         .contains("response path"));
     std::fs::remove_file(&response).unwrap();
     std::fs::write(&response, vec![b'x'; 2049]).unwrap();
-    assert!(read_control_response(&response)
+    assert!(read_control_file(&response, 2048)
         .unwrap_err()
         .contains("bounded"));
     std::fs::write(&response, "{}").unwrap();
     assert_eq!(
-        read_control_response(&response).unwrap().as_deref(),
+        read_control_file(&response, 2048).unwrap().as_deref(),
         Some("{}")
     );
 }
@@ -305,4 +398,55 @@ fn renewal_never_overwrites_a_newer_selection_or_mint() {
         assert!(!renewal_still_selected(selected, "a", Some(10), 10));
     }
     assert!(!renewal_still_selected(Some("a"), "a", Some(11), 10));
+}
+
+#[test]
+fn selected_codex_account_preserves_mcp_working_directory() {
+    for cwd in [".", "../tools", "/absolute/tools"] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("account");
+        let launch_dir = root.path().join("work");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&launch_dir).unwrap();
+        std::fs::write(
+            source.join("config.toml"),
+            format!("[mcp_servers.computer-use]\ncommand = '/bin/true'\ncwd = '{cwd}'\n"),
+        )
+        .unwrap();
+        let mut command = Command::new("/bin/true");
+        command
+            .env_clear()
+            .env("CODEX_HOME", &source)
+            .current_dir(&launch_dir);
+        apply_subscription_env(&mut command, "codex", &target).unwrap();
+        assert_eq!(command.get_current_dir(), Some(launch_dir.as_path()));
+        let config: toml::Table = std::fs::read_to_string(target.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            config["mcp_servers"]["computer-use"]["cwd"].as_str(),
+            Some(cwd)
+        );
+        assert_eq!(config["forced_login_method"].as_str(), Some("chatgpt"));
+        assert_eq!(config["cli_auth_credentials_store"].as_str(), Some("file"));
+    }
+}
+
+#[test]
+fn mcp_cwd_exception_does_not_accept_other_ambiguous_paths() {
+    for raw in [
+        "cwd = '.'",
+        "[other.server]\ncwd = '.'",
+        "[mcp_servers.test]\npath = '.'",
+        "[mcp_servers.test.env]\ncwd = '.'",
+    ] {
+        let mut config: toml::Table = raw.parse().unwrap();
+        assert!(
+            normalize_config_paths(&mut config, Path::new("/source")).is_err(),
+            "{raw}"
+        );
+    }
 }

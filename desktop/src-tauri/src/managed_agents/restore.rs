@@ -104,6 +104,8 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
+    super::account_group::recover(app)?;
+    super::account_switch::recover(app)?;
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
     let mut agents_to_start: Vec<super::ManagedAgentRecord>;
     {

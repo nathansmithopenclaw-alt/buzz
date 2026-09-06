@@ -1,3 +1,4 @@
+import { AgentInstanceModelField } from "./AgentInstanceModelField";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -31,7 +32,7 @@ import {
 import { useFeatureEnabled } from "@/shared/features";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import { AgentDialogEffortSection } from "./AgentDialogEffortField";
-import { EffortPickerField } from "./EffortPickerField";
+import { useInstanceEffort, instanceEffortError } from "./useInstanceEffort";
 import {
   instanceModelDropdownOptions,
   instanceProviderDropdownOptions,
@@ -117,6 +118,11 @@ export function AgentInstanceEditDialog({
   const startMutation = useStartManagedAgentMutation();
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
+  const instanceEffort = useInstanceEffort(
+    agent,
+    open,
+    configSurfaceQuery.data,
+  );
   const runtimes = runtimesQuery.data ?? [];
   const [name, setName] = React.useState(agent.name);
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
@@ -589,11 +595,12 @@ export function AgentInstanceEditDialog({
         nextValue,
         clearKnownModelOnCustomEntry: false,
         isModelCustom: false,
+        effortModelQualifier:
+          selectedRuntime?.effortModelQualifier &&
+          agent.effortLevel == null &&
+          instanceEffort.value == null,
       }),
     );
-  }
-  function handleOpenChange(next: boolean) {
-    onOpenChange(next);
   }
   const inheritedModelLabel =
     inheritedModelDefault.source === "build"
@@ -642,6 +649,12 @@ export function AgentInstanceEditDialog({
       Number.isInteger(maxTurnsPerSessionNumber) &&
       maxTurnsPerSessionNumber >= 0 &&
       maxTurnsPerSessionNumber <= 10000);
+  const savedEffortError = instanceEffortError(
+    instanceEffort,
+    model,
+    selectedRuntime,
+    nativeTuning.effortOptions,
+  );
   const canSubmit =
     computeEditAgentFormValidity({
       name,
@@ -658,6 +671,7 @@ export function AgentInstanceEditDialog({
     providerValid &&
     !modelValidationError &&
     !effortValidationError &&
+    !savedEffortError &&
     sessionResidencyValid &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
@@ -758,6 +772,7 @@ export function AgentInstanceEditDialog({
                   ? null
                   : undefined
                 : undefined, // "unknown" → omit always
+        effortLevel: instanceEffort.value,
         envVars: envVarsEqual(submitEnvVars, agent.envVars)
           ? undefined
           : submitEnvVars,
@@ -778,8 +793,6 @@ export function AgentInstanceEditDialog({
       const result = await updateMutation.mutateAsync(input);
       let savedAgent = result.agent;
       if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
-        // Standalone setter (mirrors start-on-app-launch) — not part of
-        // UpdateManagedAgentInput, so the frozen update shape stays frozen.
         savedAgent = await setManagedAgentAutoRestart(
           agent.pubkey,
           autoRestartOnConfigChange,
@@ -799,7 +812,7 @@ export function AgentInstanceEditDialog({
         );
       }
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
-      handleOpenChange(false);
+      onOpenChange(false);
       onUpdated?.(savedAgent);
       // The auto-restart policy deliberately never fires for a stopped or
       // failing agent (a broken agent must not auto-loop), so an edit meant
@@ -876,7 +889,7 @@ export function AgentInstanceEditDialog({
     : ADVANCED_FIELDS_MOTION_TRANSITION;
 
   return (
-    <Dialog onOpenChange={handleOpenChange} open={open}>
+    <Dialog onOpenChange={onOpenChange} open={open}>
       <ChooserDialogContent
         className="max-w-3xl border-0"
         contentClassName="pt-3"
@@ -888,7 +901,7 @@ export function AgentInstanceEditDialog({
           <div className="flex w-full items-center justify-end gap-2">
             <Button
               disabled={updateMutation.isPending || isAvatarUploadPending}
-              onClick={() => handleOpenChange(false)}
+              onClick={() => onOpenChange(false)}
               type="button"
               variant="outline"
             >
@@ -921,7 +934,7 @@ export function AgentInstanceEditDialog({
               <Button
                 className="w-full"
                 onClick={() => {
-                  handleOpenChange(false);
+                  onOpenChange(false);
                   onEditLinkedPersona();
                 }}
                 size="sm"
@@ -1106,57 +1119,18 @@ export function AgentInstanceEditDialog({
               />
             ) : null}
 
-            {/* Model */}
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-model"
-              >
-                Model
-                {modelRequired ? (
-                  <span className="ml-1 text-destructive" aria-hidden="true">
-                    *
-                  </span>
-                ) : (
-                  <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-                )}
-              </label>
-              <PersonaDropdownField
-                disabled={updateMutation.isPending || modelDiscoveryLoading}
-                id="edit-agent-model"
-                onValueChange={handleModelDropdownChange}
-                options={modelDropdownOptions}
-                placeholder="Default model"
-                value={modelSelectValue}
-              />
-              {showCustomModelInput ? (
-                <div
-                  className={cn(
-                    "mt-2 flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    aria-label="Custom model ID"
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
-                    )}
-                    disabled={updateMutation.isPending}
-                    id="edit-agent-custom-model"
-                    onChange={(event) => setModel(event.target.value)}
-                    placeholder="Custom model ID"
-                    value={model}
-                  />
-                </div>
-              ) : null}
-              {modelStatusMessage ? (
-                <p className="text-xs text-muted-foreground">
-                  {modelStatusMessage}
-                </p>
-              ) : null}
-            </div>
+            <AgentInstanceModelField
+              disabled={updateMutation.isPending}
+              loading={modelDiscoveryLoading}
+              modelRequired={modelRequired}
+              model={model}
+              modelSelectValue={modelSelectValue}
+              modelDropdownOptions={modelDropdownOptions}
+              showCustomModelInput={showCustomModelInput}
+              modelStatusMessage={modelStatusMessage}
+              onModelChange={handleModelDropdownChange}
+              onCustomModelChange={setModel}
+            />
             <AgentDialogEffortSection
               disabled={updateMutation.isPending || modelDiscoveryLoading}
               envVars={envVars}
@@ -1168,9 +1142,13 @@ export function AgentInstanceEditDialog({
               runtime={selectedRuntime}
               scope="instance"
               setEnvVars={setEnvVars}
-              validationError={modelValidationError ?? effortValidationError}
+              validationError={
+                modelValidationError ??
+                effortValidationError ??
+                savedEffortError
+              }
+              instanceEffort={instanceEffort}
             />
-            <EffortPickerField agent={agent} config={configSurfaceQuery.data} />
             <AgentAiDefaultsNotice
               onEditDefaults={() => setAiDefaultsOpen(true)}
               triggerRef={aiDefaultsTriggerRef}
@@ -1261,7 +1239,6 @@ export function AgentInstanceEditDialog({
               </AnimatePresence>
             </div>
 
-            {/* Error */}
             {updateMutation.error instanceof Error ? (
               <p className="text-sm text-destructive">
                 {updateMutation.error.message}

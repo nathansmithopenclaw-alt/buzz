@@ -45,6 +45,13 @@ pub(crate) fn configure(
     ] {
         command.env_remove(name);
     }
+    if record.subscription_account_inherit_default
+        && (record.subscription_account_id.is_none()
+            || (subscription_accounts::defaults::selected(app)? != record.subscription_account_id
+                && !super::account_group::allows_staged_default(app, record)?))
+    {
+        return Err("The default account change is incomplete; retry it in Settings".into());
+    }
     let Some(id) = record.subscription_account_id.as_deref() else {
         return Ok(None);
     };
@@ -300,22 +307,57 @@ fn validate_codex_project_config(cwd: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 fn normalize_config_paths(table: &mut toml::Table, source: &Path) -> Result<(), String> {
+    normalize_config_table_paths(table, source, &[])
+}
+
+fn normalize_config_table_paths(
+    table: &mut toml::Table,
+    source: &Path,
+    scope: &[&str],
+) -> Result<(), String> {
     for (key, value) in table {
+        let mut child_scope = scope.to_vec();
+        child_scope.push(key.as_str());
         match value {
-   toml::Value::Table(child)=>normalize_config_paths(child,source)?,
-   toml::Value::String(path) if key.ends_with("_file")||key.ends_with("_dir")||key.ends_with("_path")||key=="model_catalog_json"=>{
-    if path.starts_with('~') {return Err("Codex configuration path uses shell expansion; use an absolute path before selecting an account".into())}
-    if !path.is_empty()&&!Path::new(path).is_absolute(){*path=source.join(&*path).to_string_lossy().into_owned();}
-   },
-   // An ambiguous relative path may control tools or permissions. Fail rather
-   // than silently reinterpret it from a different configuration directory.
-   toml::Value::String(path) if (key=="path"||key=="cwd") && !path.is_empty()&&!Path::new(path).is_absolute()=>return Err("Codex configuration contains an unsupported relative path; use an absolute path before selecting an account".into()),
-   toml::Value::Array(values)=>for value in values {if let toml::Value::Table(child)=value {normalize_config_paths(child,source)?;}},
-   _=>{},
-  }
+            toml::Value::Table(child) => normalize_config_table_paths(child, source, &child_scope)?,
+            // MCP cwd is passed to process launch, not resolved against CODEX_HOME.
+            // Account selection preserves the launch directory, so preserve this
+            // value too. Rebasing it onto either config home would change behavior.
+            toml::Value::String(_)
+                if key == "cwd" && scope.len() == 2 && scope[0] == "mcp_servers" => {}
+            toml::Value::String(path)
+                if key.ends_with("_file")
+                    || key.ends_with("_dir")
+                    || key.ends_with("_path")
+                    || key == "model_catalog_json" =>
+            {
+                if path.starts_with('~') {
+                    return Err("Codex configuration path uses shell expansion; use an absolute path before selecting an account".into());
+                }
+                if !path.is_empty() && !Path::new(path).is_absolute() {
+                    *path = source.join(&*path).to_string_lossy().into_owned();
+                }
+            }
+            toml::Value::String(path)
+                if (key == "path" || key == "cwd")
+                    && !path.is_empty()
+                    && !Path::new(path).is_absolute() =>
+            {
+                return Err("Codex configuration contains an unsupported relative path; use an absolute path before selecting an account".into());
+            }
+            toml::Value::Array(values) => {
+                for value in values {
+                    if let toml::Value::Table(child) = value {
+                        normalize_config_table_paths(child, source, &child_scope)?;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
+
 fn compose_codex_config(
     source: &Path,
     destination: &Path,
@@ -419,12 +461,13 @@ pub(crate) fn configure_control(
     private_runtime_dir(&root)?;
     let dir = root.join(nonce);
     private_runtime_dir(&dir)?;
+    super::account_switch::configure(app, key, command)?;
     command
         .env("BUZZ_ACP_ACCOUNT_CONTROL_DIR", &dir)
         .env("BUZZ_ACP_AUTH_RECOVERY_DIR", root.join("auth-recovery"));
     Ok(dir)
 }
-fn private_runtime_dir(path: &Path) -> Result<(), String> {
+pub(crate) fn private_runtime_dir(path: &Path) -> Result<(), String> {
     if !path.exists() {
         #[cfg(unix)]
         {
@@ -453,7 +496,7 @@ fn private_runtime_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn read_control_response(path: &Path) -> Result<Option<String>, String> {
+pub(crate) fn read_control_file(path: &Path, limit: u64) -> Result<Option<String>, String> {
     use std::io::Read;
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -472,14 +515,14 @@ fn read_control_response(path: &Path) -> Result<Option<String>, String> {
     let metadata = file
         .metadata()
         .map_err(|_| "Invalid subscription control response")?;
-    if !metadata.is_file() || metadata.len() > 2048 {
+    if !metadata.is_file() || metadata.len() > limit {
         return Err("Subscription control response exceeds its bounded file contract".into());
     }
     let mut bytes = Vec::new();
-    file.take(2049)
+    file.take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "Could not read subscription control response")?;
-    if bytes.len() > 2048 {
+    if bytes.len() as u64 > limit {
         return Err("Subscription control response exceeds its bounded file contract".into());
     }
     String::from_utf8(bytes)
@@ -493,21 +536,44 @@ fn control(dir: &Path, nonce: &str, token: &str, action: &str) -> Result<(), Str
     {
         return Err("Invalid subscription control request path".into());
     }
+    // A durable pause acknowledgment remains authoritative after Desktop restarts.
+    if action == "pause" {
+        if let Some(raw) = read_control_file(&dir.join("response.json"), 2048)? {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if value["nonce"] == nonce && value["token"] == token && value["status"] == "paused"
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
     super::atomic_write_json_restricted(
         &dir.join("request.json"),
-        serde_json::json!({"nonce":nonce,"token":token,"action":action})
+        serde_json::json!({"nonce":nonce,"token":token,"action":action,"request_id":request_id})
             .to_string()
             .as_bytes(),
     )?;
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
-        if let Some(raw) = read_control_response(&dir.join("response.json"))? {
+    while start.elapsed() < Duration::from_secs(if action == "pause" { 60 } else { 10 }) {
+        if let Some(raw) = read_control_file(&dir.join("response.json"), 2048)? {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if value["nonce"] == nonce && value["token"] == token {
+                if value["nonce"] == nonce
+                    && value["token"] == token
+                    && value["request_id"] == request_id
+                {
                     match value["status"].as_str() {
+                        Some("paused") if action == "pause" => return Ok(()),
+                        Some("pause_failed") => {
+                            return Err(
+                                "Safe continuation could not be confirmed; work remains paused"
+                                    .into(),
+                            )
+                        }
                         Some("quiesced") if action == "quiesce" => return Ok(()),
                         Some("released") if action == "release" => return Ok(()),
                         Some("resumed") if action == "resume_auth" => return Ok(()),
+                        Some("listening") if action == "probe" => return Ok(()),
                         Some("resume_failed") => {
                             return Err("Retained work could not be resumed; see agent error".into())
                         }
@@ -524,10 +590,63 @@ fn control(dir: &Path, nonce: &str, token: &str, action: &str) -> Result<(), Str
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+    if action == "probe" {
+        return Err("The agent started but has not confirmed its account binding yet. Restart to retry the check.".into());
+    }
     Err(
-        "Agent did not confirm an idle account-switch barrier; stop it before changing accounts"
+        "Agent has not confirmed the account handoff; work remains paused. Retry to check again."
             .into(),
     )
+}
+
+pub(crate) fn probe_runtime_binding(
+    runtime: &mut super::ManagedAgentPairRuntime,
+) -> Result<(), String> {
+    if runtime.lifecycle != ManagedAgentRuntimeLifecycle::Starting
+        || runtime.subscription_binding.is_none()
+    {
+        return Ok(());
+    }
+    let dir = runtime
+        .process
+        .account_control_dir
+        .as_deref()
+        .ok_or("Runtime account confirmation unavailable")?;
+    probe_and_confirm_lifecycle(dir, &runtime.start_nonce, &mut runtime.lifecycle)
+}
+
+fn probe_and_confirm_lifecycle(
+    dir: &Path,
+    nonce: &str,
+    lifecycle: &mut ManagedAgentRuntimeLifecycle,
+) -> Result<(), String> {
+    control(
+        dir,
+        nonce,
+        &uuid::Uuid::new_v4().simple().to_string(),
+        "probe",
+    )?;
+    if *lifecycle == ManagedAgentRuntimeLifecycle::Starting {
+        *lifecycle = ManagedAgentRuntimeLifecycle::Listening;
+    }
+    Ok(())
+}
+
+fn resume_and_confirm_lifecycle(
+    dir: &Path,
+    nonce: &str,
+    token: &str,
+    lifecycle: &mut ManagedAgentRuntimeLifecycle,
+) -> Result<(), String> {
+    control(dir, nonce, token, "resume_auth")?;
+    // This exact generation acknowledged from its subscribed broker loop.
+    // Startup recovery can precede the UI's relay observer subscription, so
+    // its one-shot lifecycle frame is not the only readiness receipt. This
+    // proves listening under the binding, not provider authentication.
+    if *lifecycle == ManagedAgentRuntimeLifecycle::Starting {
+        *lifecycle = ManagedAgentRuntimeLifecycle::Listening;
+    }
+    Ok(())
 }
 
 /// A saved selection and a successful spawn are separate facts.
@@ -542,12 +661,16 @@ pub struct SubscriptionSwitchResult {
 
 /// Atomically fence admissions, stop idle children, save, then restart with a new generation.
 #[tauri::command]
-pub fn switch_agent_subscription_account(
+pub async fn switch_agent_subscription_account(
     pubkey: String,
     account_id: Option<String>,
     app: AppHandle,
 ) -> Result<SubscriptionSwitchResult, String> {
-    switch_account(pubkey, account_id, app, None)
+    tauri::async_runtime::spawn_blocking(move || {
+        switch_account_scoped(pubkey, account_id, app, None, None, None)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Renewal may only restart bindings that still select this mint's account.
@@ -569,14 +692,101 @@ fn renewal_still_selected(
     selected == Some(expected) && current_mint == Some(expected_mint)
 }
 
-fn switch_account(
+/// Capture immutable running intent before a parent operation publishes its journal.
+/// Caller holds the runtime transition and managed-agent store locks.
+pub(crate) fn capture_operation(
+    record: &ManagedAgentRecord,
+    account_id: &Option<String>,
+    previous: Option<super::account_switch::Operation>,
+    runtimes: &mut std::collections::HashMap<
+        super::ManagedAgentRuntimeKey,
+        super::ManagedAgentPairRuntime,
+    >,
+) -> Result<super::account_switch::Operation, String> {
+    let pubkey = &record.pubkey;
+    if let Some(mut op) = previous.clone().filter(|op| {
+        op.phase != "complete"
+            || (op.error.is_some() && account_id.as_deref() == Some(&op.account_id))
+    }) {
+        op.account_id = account_id.clone().ok_or("Missing destination account")?;
+        op.error = None;
+        Ok(op)
+    } else {
+        let live_keys = super::managed_agent_runtime_keys(runtimes, pubkey);
+        let mut captured = Vec::new();
+        for key in live_keys {
+            if let Some(runtime) = runtimes.get_mut(&key) {
+                if runtime
+                    .child
+                    .try_wait()
+                    .map_err(|e| e.to_string())?
+                    .is_none()
+                {
+                    captured.push(super::account_switch::Runtime {
+                        key,
+                        nonce: runtime.start_nonce.clone(),
+                        control_dir: runtime
+                            .account_control_dir
+                            .clone()
+                            .ok_or("Restart this agent once to enable safe switching")?,
+                        paused: false,
+                        run: true,
+                    });
+                }
+            }
+        }
+        // Failed destinations must not erase the intent of a runtime that exited.
+        if let Some(previous) = &previous {
+            if previous.error.is_some() {
+                for runtime in previous.runtimes.iter().filter(|r| r.run) {
+                    if !captured.iter().any(|r| r.key == runtime.key) {
+                        let mut missing = runtime.clone();
+                        missing.paused = false;
+                        captured.push(missing);
+                    }
+                }
+            }
+        }
+        Ok(super::account_switch::Operation {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            pubkey: pubkey.clone(),
+            account_id: account_id.clone().ok_or("Missing destination account")?,
+            generation: record
+                .subscription_account_generation
+                .checked_add(1)
+                .ok_or("Subscription binding generation exhausted")?,
+            phase: "pausing".into(),
+            error: None,
+            runtimes: captured,
+        })
+    }
+}
+
+pub(crate) fn switch_account(
     pubkey: String,
     account_id: Option<String>,
     app: AppHandle,
     expected: Option<(String, i64)>,
 ) -> Result<SubscriptionSwitchResult, String> {
+    switch_account_scoped(pubkey, account_id, app, expected, None, None)
+}
+
+pub(crate) fn switch_account_scoped(
+    pubkey: String,
+    account_id: Option<String>,
+    app: AppHandle,
+    expected: Option<(String, i64)>,
+    group_id: Option<&str>,
+    inherit_default: Option<bool>,
+) -> Result<SubscriptionSwitchResult, String> {
     let state = app.state::<AppState>();
     super::require_fleet_host(&state)?;
+    if state
+        .shutdown_started
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err("Desktop is shutting down".into());
+    }
     let _transition = state
         .managed_agent_runtime_transition
         .lock()
@@ -585,6 +795,7 @@ fn switch_account(
         .managed_agents_store_lock
         .lock()
         .map_err(|e| e.to_string())?;
+    super::account_group::guard_agent_change(&app, &pubkey, account_id.as_deref(), group_id)?;
     let mut records = super::load_managed_agents(&app)?;
     let record = super::find_managed_agent_mut(&mut records, &pubkey)?;
     if record.backend != super::BackendKind::Local {
@@ -634,9 +845,40 @@ fn switch_account(
         {
             return Err("Account is not ready; reconnect it in Settings".into());
         }
+        if account.kind == "token" {
+            subscription_accounts::defaults::validate_destination(&app, id)?;
+        }
         subscription_accounts::account_home(&app, id)?;
     }
-    let keys = super::managed_agent_runtime_keys(&runtimes, &pubkey);
+    let previous = super::account_switch::read(&app, &pubkey)?;
+    let durable = harness == Some("claude")
+        && account_id.as_deref().is_some_and(|id| {
+            subscription_accounts::load_account(&app, id).is_ok_and(|a| a.kind == "token")
+        });
+    if previous.is_some() && !durable {
+        return Err("Choose a named Claude token account to recover this switch".into());
+    }
+    let mut operation = if durable {
+        Some(capture_operation(
+            record,
+            &account_id,
+            previous,
+            &mut runtimes,
+        )?)
+    } else {
+        None
+    };
+    let resuming_retry = operation.as_ref().is_some_and(|op| op.phase == "complete");
+    let keys = operation
+        .as_ref()
+        .map(|op| {
+            op.runtimes
+                .iter()
+                .filter(|r| r.run)
+                .map(|r| r.key.clone())
+                .collect()
+        })
+        .unwrap_or_else(|| super::managed_agent_runtime_keys(&runtimes, &pubkey));
     let owned_lease = keys
         .first()
         .and_then(|key| runtimes.get(key))
@@ -656,10 +898,33 @@ fn switch_account(
     )?;
     // Admission and effects share one execution seam: a busy destination cannot
     // quiesce a working runtime or persist a different account selection.
-    admission.execute(|| {
-        let token = uuid::Uuid::new_v4().simple().to_string();
+    let outcome = admission.execute(|| {
+        if let Some(op) = &operation {
+            super::account_switch::save(&app, op)?;
+        }
+        let token = operation
+            .as_ref()
+            .map(|op| op.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+        if let Some(op) = operation.as_mut() {
+            for index in 0..op.runtimes.len() {
+                if op.runtimes[index].run && !op.runtimes[index].paused {
+                    let captured = &op.runtimes[index];
+                    control(&captured.control_dir, &captured.nonce, &token, "pause")?;
+                    op.runtimes[index].paused = true;
+                    super::account_switch::save(&app, op)?;
+                }
+            }
+            if !resuming_retry {
+                op.phase = "paused".into();
+            }
+            super::account_switch::save(&app, op)?;
+        }
         let mut held: Vec<(PathBuf, String)> = Vec::new();
         for key in &keys {
+            if operation.is_some() {
+                break;
+            }
             if let Some(runtime) = runtimes.get(key) {
                 let outcome = runtime
                     .account_control_dir
@@ -681,6 +946,9 @@ fn switch_account(
         }
         // Teardown precedes persist, so no old-account runtime survives a saved change.
         for key in &keys {
+            if resuming_retry {
+                continue;
+            }
             if let Some(mut runtime) = runtimes.remove(key) {
                 if let Err(e) = super::terminate_process(runtime.child.id())
                     .and_then(|()| runtime.child.wait().map(|_| ()).map_err(|e| e.to_string()))
@@ -693,14 +961,27 @@ fn switch_account(
                 }
                 super::remove_agent_runtime_receipt(&app, key);
                 state.clear_agent_session_cache(key);
+            } else {
+                super::terminate_untracked_pair_runtime(&app, key)?;
             }
         }
         let record = super::find_managed_agent_mut(&mut records, &pubkey)?;
+        record.subscription_account_inherit_default = super::account_group::binding_mode(
+            inherit_default,
+            record.subscription_account_inherit_default,
+            record.subscription_account_id.as_deref(),
+            account_id.as_deref(),
+        );
         record.subscription_account_id = account_id.clone();
-        record.subscription_account_generation = record
-            .subscription_account_generation
-            .checked_add(1)
-            .ok_or("Subscription binding generation exhausted")?;
+        record.subscription_account_generation = operation
+            .as_ref()
+            .map(|op| Ok(op.generation))
+            .unwrap_or_else(|| {
+                record
+                    .subscription_account_generation
+                    .checked_add(1)
+                    .ok_or("Subscription binding generation exhausted")
+            })?;
         // Explicit ambient selection must override inherited legacy Claude accounts.
         record.claude_account_id = Some(super::CREDENTIALS_FILE_ACCOUNT_ID.into());
         record.updated_at = crate::util::now_iso();
@@ -708,7 +989,19 @@ fn switch_account(
         let generation = record.subscription_account_generation;
         let snapshot = record.clone();
         super::save_managed_agents(&app, &records)?;
+        if let Some(op) = operation.as_mut() {
+            if !resuming_retry {
+                op.phase = "restarting".into();
+            }
+            super::account_switch::save(&app, op)?;
+        }
         drop(account_guard);
+        if state
+            .shutdown_started
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("Desktop is shutting down; saved switch resumes next launch".into());
+        }
         let owner = state
             .keys
             .lock()
@@ -721,7 +1014,21 @@ fn switch_account(
             failed_restart_count: 0,
             errors: Vec::new(),
         };
-        for key in keys {
+        for key in &keys {
+            if resuming_retry {
+                if let Some(runtime) = runtimes.get_mut(key) {
+                    if runtime
+                        .child
+                        .try_wait()
+                        .map_err(|e| e.to_string())?
+                        .is_none()
+                    {
+                        continue;
+                    }
+                }
+                runtimes.remove(key);
+                super::terminate_untracked_pair_runtime(&app, key)?;
+            }
             match super::spawn_agent_child(&app, &snapshot, &key.relay_url, true, owner.as_deref())
             {
                 Ok(mut process) => {
@@ -745,7 +1052,10 @@ fn switch_account(
                         result.failed_restart_count += 1;
                         result.errors.push(e);
                     } else {
-                        runtimes.insert(key, super::ManagedAgentPairRuntime::starting(process));
+                        runtimes.insert(
+                            key.clone(),
+                            super::ManagedAgentPairRuntime::starting(process),
+                        );
                         result.restarted_count += 1;
                     }
                 }
@@ -755,21 +1065,133 @@ fn switch_account(
                 }
             }
         }
+        if result.errors.is_empty() {
+            if let Some(op) = operation.as_mut() {
+                op.phase = "complete".into();
+                super::account_switch::save(&app, op)?;
+                for key in &keys {
+                    if let Some(runtime) = runtimes.get_mut(key) {
+                        if let Some(dir) = &runtime.process.account_control_dir {
+                            if let Err(error) = resume_and_confirm_lifecycle(
+                                dir,
+                                &runtime.start_nonce,
+                                &token,
+                                &mut runtime.lifecycle,
+                            ) {
+                                result.failed_restart_count += 1;
+                                result.errors.push(error);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if !result.errors.is_empty() {
             let record = super::find_managed_agent_mut(&mut records, &pubkey)?;
             record.last_error = Some(result.errors.join("; "));
             super::save_managed_agents(&app, &records)?;
         }
         Ok(result)
-    })
+    });
+    if let Some(op) = operation.as_mut() {
+        let error = match &outcome {
+            Err(error) => Some(error.clone()),
+            Ok(result) if !result.errors.is_empty() => Some(result.errors.join("; ")),
+            _ => None,
+        };
+        if let Some(error) = error {
+            op.error = if error == "Desktop is shutting down; saved switch resumes next launch" {
+                None
+            } else {
+                Some(error)
+            };
+            super::account_switch::save(&app, op)?;
+        }
+    }
+    outcome
 }
 
 pub(crate) fn ready_binding(
     runtime: Option<&super::ManagedAgentPairRuntime>,
 ) -> Option<&RuntimeBinding> {
     runtime
-        .filter(|r| r.lifecycle == ManagedAgentRuntimeLifecycle::Ready)
+        .filter(|r| {
+            matches!(
+                r.lifecycle,
+                ManagedAgentRuntimeLifecycle::Ready | ManagedAgentRuntimeLifecycle::Listening
+            )
+        })
         .and_then(|r| r.subscription_binding.as_ref())
+}
+
+/// Stop and detach every captured community while retaining unfinished provider
+/// sessions. The paused child fence requires a named account before any Start.
+pub(crate) fn detach_account(app: &AppHandle, pubkey: &str, group_id: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let _store = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    super::account_group::guard_agent_change(app, pubkey, None, Some(group_id))?;
+    let mut records = super::load_managed_agents(app)?;
+    let mut runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let _accounts = subscription_accounts::lifecycle_lock()
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let mut op =
+        super::account_switch::read(app, pubkey)?.ok_or("Missing account detachment intent")?;
+    for index in 0..op.runtimes.len() {
+        let runtime = &op.runtimes[index];
+        if runtime.run && !runtime.paused {
+            control(&runtime.control_dir, &runtime.nonce, &op.id, "pause")?;
+            op.runtimes[index].paused = true;
+            super::account_switch::save(app, &op)?;
+        }
+    }
+    op.phase = "paused".into();
+    super::account_switch::save(app, &op)?;
+    for runtime in &op.runtimes {
+        if !runtime.run {
+            continue;
+        }
+        let key = &runtime.key;
+        if let Some(mut runtime) = runtimes.remove(key) {
+            if let Err(error) = super::terminate_process(runtime.child.id())
+                .and_then(|()| runtime.child.wait().map(|_| ()).map_err(|e| e.to_string()))
+            {
+                runtimes.insert(key.clone(), runtime);
+                return Err(error);
+            }
+            super::remove_agent_runtime_receipt(app, key);
+            state.clear_agent_session_cache(key);
+        } else {
+            super::terminate_untracked_pair_runtime(app, key)?;
+        }
+    }
+    let record = super::find_managed_agent_mut(&mut records, pubkey)?;
+    record.subscription_account_id = None;
+    record.subscription_account_inherit_default = false;
+    record.subscription_account_generation = op.generation;
+    record.claude_account_id = Some(super::CREDENTIALS_FILE_ACCOUNT_ID.into());
+    record.start_on_app_launch = false;
+    record.runtime_pid = None;
+    record.updated_at = crate::util::now_iso();
+    record.last_stopped_at = Some(record.updated_at.clone());
+    record.last_error =
+        Some("Account detached. Choose a named account to resume retained work.".into());
+    super::save_managed_agents(app, &records)?;
+    for runtime in &mut op.runtimes {
+        runtime.run = false;
+    }
+    op.error = Some("Account detached. Choose a named account to resume retained work.".into());
+    super::account_switch::save(app, &op)
 }
 
 /// Explicitly resume retained work after reconnect; never an automatic login side effect.

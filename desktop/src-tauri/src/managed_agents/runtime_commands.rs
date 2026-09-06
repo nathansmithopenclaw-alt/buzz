@@ -281,6 +281,9 @@ fn start_pair(
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
     let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    if expected_updated_at.is_none() {
+        super::account_switch::set_running(&app, &key, true)?;
+    }
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -353,6 +356,7 @@ pub fn stop_managed_agent_runtime(
     let mut records = load_managed_agents(&app)?;
     let record = find_managed_agent_mut(&mut records, &pubkey)?;
     let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    super::account_switch::set_running(&app, &key, false)?;
     let mut runtimes = state
         .managed_agent_processes
         .lock()

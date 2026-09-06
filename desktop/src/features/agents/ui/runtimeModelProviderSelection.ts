@@ -1,4 +1,5 @@
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import { parseModelEffortQualifier } from "./agentModelCatalog";
 import { AGENT_FAST_MODE_ENV_KEY } from "../lib/agentConfigCore";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
@@ -149,6 +150,7 @@ export function selectionOnModelDropdownChange(
     clearKnownModelOnCustomEntry: boolean;
     /** Caller-computed: whether the current model is outside the known options. */
     isModelCustom: boolean;
+    effortModelQualifier?: boolean;
   },
 ): RuntimeModelProviderSelection {
   const next = { ...current };
@@ -165,5 +167,14 @@ export function selectionOnModelDropdownChange(
   next.isCustomModelEditing = false;
   next.model =
     params.nextValue === AUTO_MODEL_DROPDOWN_VALUE ? "" : params.nextValue;
+  const previousEffort = parseModelEffortQualifier(current.model).effort;
+  if (
+    params.effortModelQualifier &&
+    next.model &&
+    previousEffort &&
+    !parseModelEffortQualifier(next.model).effort
+  ) {
+    next.model = `${next.model}[${previousEffort}]`;
+  }
   return next;
 }

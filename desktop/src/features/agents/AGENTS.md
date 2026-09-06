@@ -63,10 +63,11 @@ that frontend inventory.
    `GOOSE_THINKING_EFFORT`, and Claude persists
    `BUZZ_ACP_THINKING_EFFORT`, which buzz-acp validates and applies through the
    adapter's native `effort` config option after model selection.
-3. **Field absence has a named reason, not a boolean.** Codex instance edits
+3. **Field absence has a named reason, not a boolean.** Codex instance and definition edits
    expose effort through the runtime-declared `effortModelQualifier` capability:
    the control reads and writes the saved model ID's `[level]` suffix and uses
-   the adapter's live native values. Global/definition/onboarding surfaces keep Codex effort
+   the adapter's live native values. Local managed-instance profile edits use the
+   canonical `effortLevel` override when native discovery is available. Global/onboarding surfaces keep Codex effort
    `ownedByModelId`; unsupported harnesses are `unsupportedByHarness`. Claude's
    control uses the selected model's live native values verbatim (including
    `default`); when either adapter omits effort for that model, render an explicit
@@ -243,40 +244,36 @@ that frontend inventory.
    fields, and profile-wide activity selection. Caller context may control the
    panel shell or return navigation, but must not filter or replace profile
    content.
-14. **Thinking effort has two surfaces: a local-only WRITE control and a
-   read-only two-facts DISPLAY.** The write control is `EffortPickerField`
-   (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
-   `AgentInstanceEditDialog` beside the Model block. It is direct-write, not
-   part of the frozen `UpdateManagedAgentInput` shape: each selection calls
-   `persistAgentEffortLevel` and invalidates the config-surface query, mirroring
-   the `setManagedAgentAutoRestart` standalone-setter precedent. Its gating and
-   option compute live in the pure helper `ui/effortPicker.ts`
-   (`effortPickerState`): the picker renders only when
-   `agent.backend.type === "local"` **AND** a `thought_level` `effortConfigId`
-   has been discovered from the running session (absent pre-first-session and
-   for runtimes/models without effort support). Local-only is load-bearing, not
-   cosmetic — the Rust command rejects non-local backends because remote effort
-   is set at deploy time via `policy_env`. Because it reads its inputs from the
-   config surface the dialog already fetches (`useAgentConfigSurface`) and owns
-   its own mutation, it does **not** thread new props through the dialog (see
-   rule 11): keep effort state inside the section component, never as
-   dialog-level props. The read-only display is the `thinkingEffort`
-   normalized field rendered by `AgentConfigPanel` via `NormalizedRow`, which
-   already shows both facts — `field.value` (canonical, the effort the next
-   spawn will launch with) and, when a running ACP session differs,
-   `field.overriddenValue` struck through (the live session's current effort).
-   No component owns "configured vs current" logic; the reader's canonical tier
-   ordering feeds both facts. Do not add a second effort write path or restate
-   the two-facts logic in a component.
+14. **Instance effort is Save-gated.** `EffortPickerField` is controlled by
+   the instance dialog or profile editor; it writes `effortLevel` through the normal locked
+   `update_managed_agent` call. Cancel and failed Save keep persisted effort
+   unchanged. The former standalone persistence command is removed.
+   When discovered native options make this picker available, it replaces the
+   legacy dialog effort field rather than appearing beside it; the Fast mode
+   control stays present. A saved canonical value remains visible if discovery
+   becomes unavailable. A catalog miss never renders a saved value as default.
+   Remote effort still belongs to deploy-time policy and rejects local writes.
+   Fork compatibility: the existing global/definition and pre-discovery effort
+   paths remain until the broader upstream fold. Canonical instance effort
+   takes precedence over legacy ACP effort both at spawn and session creation;
+   the legacy path is used only when canonical effort is absent. Clearing the
+   canonical instance override restores existing defaults, not an invented
+   token budget. No static catalog or qualifier migration is implied here.
 
-   **Cut invariant — live mid-conversation effort machinery was deliberately
-   removed.** Effort is spawn-scoped only: the worker holds one `startup_effort`
-   read from `BUZZ_ACP_EFFORT_LEVEL` and applies it once at session creation
-   (`apply_startup_effort` in `buzz-acp/src/pool.rs`); there is no pool-level
-   effort authority, no live effort switching, and no effort-ack frame. Do not
-   reintroduce a live effort-switch RPC, a pool effort field, or a
-   mid-conversation effort control without a plan ruling. The archived live-effort
-   machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
+   **Live effort is a separate, session-only control.** Nathan's 2026-09-06
+   plan ruling extends the former startup-only cut to existing conversations.
+   Saved defaults still apply through `startup_effort` at session creation.
+   The owner-authenticated `switch_effort` command names an exact channel and
+   ACP session. Queue it until the current response finishes, fence the owning
+   worker's next claim, then call the native `session/set_config_option` on that
+   same session. Never cancel, rotate, replay a prompt, edit global config, or
+   mutate the saved default to implement an effort pick. Native supported
+   options and an advertised `liveEffortSwitching` capability gate the control.
+   Only a matching request/channel/session/value receipt with a confirmed
+   native currentValue is applied; queued, rejected and unconfirmed are distinct.
+   Bound pending requests and replay receipts, invalidate stale session targets,
+   and retire poisoned transport streams. Retain small configuration snapshots
+   independently of the activity window; session rotation supersedes the old target.
 
 15. **The persona `description` is public display metadata.** It is optional,
    capped at 280 characters, and validated through the shared visible-text
@@ -435,3 +432,13 @@ treat a config-behavior diff without a matching AGENTS.md diff (or an explicit
 ## Fork-local Subscription Account tokens
 
 Token creation availability comes from Rust `token_supported`; components never infer it from a harness id. Token material does not cross IPC. `kind`, `minted_at`, and `expires_at` are non-secret account metadata; timestamps are UNIX seconds. The shared expiry projection rounds positive partial days up and shows Expired at zero without erasing the selected account. Settings AI owns mint, nickname and renewal; the shared selector remains in Agents Profile Runtime, Edit Agent and the DM header. Renewal is available when the creation experiment is disabled. Login accounts retain exclusive runtime admission; token accounts do not acquire a lease or reservation. See `docs/subscription-token-accounts.md` for the local storage and acceptance boundary.
+
+Account pickers use the shared DropdownMenu radio items and Button components, including keyboard focus and portal behavior. Do not use browser-native select elements for account selection. Claude browser login creation/reconnect is retired; Rust advertises token setup only while preserving cleanup of existing login accounts. Existing selections must remain visible until explicitly migrated.
+
+Claude token switching during active work requires an explicit preview and confirmation. Rust persists destination, generation, running intent and per-relay pause receipts before replacing a runtime. The common spawn boundary fences incomplete/failed operations; reconciliation cannot restart a captured stopped runtime. Only an explicit Start changes that intent. The broker journals active and arriving work, acknowledges cancellation cleanup, then loads the exact provider session under the selected token. Unknown cleanup or missing session references retain the hold. Operation progress is persisted and queried independently of component lifetime; each observed durable transition refreshes the managed-agent cache, including startup recovery with no picker mutation. Token authentication notices point to Retry account switch or another account, matching the rendered controls. A spawn/selection receipt does not prove provider authentication or successful resumed work. Other harnesses retain their idle-only switch gate. Default, all-current-account and removal workflows share a durable Mac-local parent operation. Its preview captures every affected agent across communities and compares saved generations, default, token mint and actual runtime intent again under the write locks. Existing bindings migrate as explicit overrides; only new local Claude agents or an explicit Use default selection enroll in the default. The selected account ID remains materialized per agent; spawn never silently substitutes a changed default. Parent progress retains completed members, fences competing changes, and exposes Retry or another destination after failure. Explicit Stops must survive preparation, restart and retargeting. Removal moves consumers or stops/detaches them before deleting credentials; a detached agent keeps its work held until a named account is selected. Default changes never switch explicit overrides. Switch-back remains explicit and quota tracking remains separate.
+
+A generation-bound local resume acknowledgment also confirms the new broker is listening under its captured account binding. Startup recovery can run before the relay observer subscribes, so a missed lifecycle frame must not leave the account label unknown forever. A failed resume acknowledgment cannot advance readiness, and this receipt does not claim provider authentication.
+
+The agent profile and Agents Start/Restart actions also probe the exact broker generation before confirming its running account. This readiness probe never releases an authentication hold or resumes retained work. If confirmation fails, retain the running process and expose the error with Restart available; do not label a saved selection as a confirmed runtime binding.
+
+A detached or unfinished account operation with no saved binding renders an explicit Account required selection. Ambient must not appear selected while the durable spawn fence requires a named account.

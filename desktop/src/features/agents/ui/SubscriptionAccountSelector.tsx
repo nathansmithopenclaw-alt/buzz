@@ -1,9 +1,18 @@
 import { subscriptionAccountExpiry } from "@/features/agents/subscriptionAccountExpiry";
 import * as React from "react";
+import { ChevronDown } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import {
   useIsMutating,
   useMutation,
   useQueryClient,
+  useQuery,
 } from "@tanstack/react-query";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import {
@@ -14,9 +23,17 @@ import {
 } from "@/features/agents/subscriptionAccounts";
 import {
   resumeAgentSubscriptionWork,
+  agentAccountSwitchStatus,
   switchAgentSubscriptionAccount,
 } from "@/shared/api/tauriSubscriptionAccounts";
 import type { ManagedAgent } from "@/shared/api/types";
+import {
+  useClaudeDefaultAccount,
+  useClaudeAccountChange,
+} from "../accountChanges";
+import { ClaudeAccountChangeDialog } from "./ClaudeAccountChangeDialog";
+import { ClaudeAccountChangeProgress } from "./ClaudeAccountChangeProgress";
+import type { ClaudeAccountChangeRequest } from "@/shared/api/tauriSubscriptionAccounts";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 
@@ -32,6 +49,30 @@ export function SubscriptionAccountSelector({
   const now = useSubscriptionAccountClock();
   const enabled = useSubscriptionAccountsEnabledQuery();
   const client = useQueryClient();
+  const defaultAccount = useClaudeDefaultAccount();
+  const group = useClaudeAccountChange();
+  const operation = useQuery({
+    queryKey: ["account-switch", agent.pubkey],
+    queryFn: () => agentAccountSwitchStatus(agent.pubkey),
+    refetchInterval: 750,
+    enabled: agent.subscriptionAccountHarness === "claude",
+  });
+  const operationRevision = operation.data
+    ? JSON.stringify([
+        operation.data.id,
+        operation.data.phase,
+        operation.data.error,
+      ])
+    : null;
+  React.useEffect(() => {
+    // Startup recovery has no picker mutation to invalidate the cached stopped
+    // agent. Refresh once per durable transition, including the initial read.
+    if (operationRevision)
+      void client.invalidateQueries({ queryKey: ["managed-agents"] });
+  }, [client, operationRevision]);
+  const [destination, setDestination] = React.useState<
+    ClaudeAccountChangeRequest | undefined
+  >();
   const switching =
     useIsMutating({
       mutationKey: ["switch-subscription-account", agent.pubkey],
@@ -47,12 +88,18 @@ export function SubscriptionAccountSelector({
     },
   });
   const selected = agent.subscriptionAccountId ?? null;
-  const legacy = selected === null && agent.claudeAccountId !== null;
+  const accountRequired = selected === null && Boolean(operation.data);
+  const legacy =
+    selected === null && !accountRequired && agent.claudeAccountId !== null;
   const selectedAccount = accounts.data?.find(
     (account) => account.id === selected,
   );
   const expiry = subscriptionAccountExpiry(selectedAccount, now);
-  const selectedValue = selected ?? (legacy ? "__legacy__" : "");
+  const selectedValue = accountRequired
+    ? "__required__"
+    : agent.subscriptionAccountInheritDefault
+      ? "__default__"
+      : (selected ?? (legacy ? "__legacy__" : ""));
   const runningKnown = agent.runningSubscriptionAccountGeneration != null;
   const running = accounts.data?.find(
     (account) => account.id === agent.runningSubscriptionAccountId,
@@ -65,18 +112,23 @@ export function SubscriptionAccountSelector({
       await Promise.all([
         client.invalidateQueries({ queryKey: ["managed-agents"] }),
         client.invalidateQueries({ queryKey: subscriptionAccountsQueryKey }),
+        client.invalidateQueries({
+          queryKey: ["account-switch", agent.pubkey],
+        }),
       ]);
     },
   });
   const authHeld =
     agent.subscriptionAccountError === "subscription_auth_required";
-  const error = mutation.isError
-    ? String(mutation.error)
-    : mutation.data?.failed_restart_count
-      ? `Account selected; ${mutation.data.failed_restart_count} runtime restart failed. ${mutation.data.errors.join(" ")}`
-      : authHeld
-        ? null
-        : agent.subscriptionAccountError;
+  const error =
+    operation.data?.error ??
+    (mutation.isError
+      ? String(mutation.error)
+      : mutation.data?.failed_restart_count
+        ? `Account selected; ${mutation.data.failed_restart_count} runtime restart failed. ${mutation.data.errors.join(" ")}`
+        : authHeld
+          ? null
+          : agent.subscriptionAccountError);
   if (!agent.subscriptionAccountHarness && !selected && !legacy && !authHeld)
     return null;
   const unavailable =
@@ -85,7 +137,48 @@ export function SubscriptionAccountSelector({
       selectedAccount?.state !== "ready" ||
       !selectedAccount.nickname ||
       selectedAccount.harness !== agent.subscriptionAccountHarness);
-  const busy = working || switching || resume.isPending;
+  const activeSwitch = Boolean(
+    operation.data &&
+      operation.data.phase !== "complete" &&
+      !operation.data.error,
+  );
+  const canPause =
+    agent.subscriptionAccountHarness === "claude" &&
+    accounts.data?.some(
+      (account) =>
+        account.harness === "claude" &&
+        account.kind === "token" &&
+        account.state === "ready",
+    );
+  const groupPending = Boolean(group.data && group.data.phase !== "complete");
+  const busy =
+    switching ||
+    resume.isPending ||
+    activeSwitch ||
+    groupPending ||
+    (working && !canPause);
+  const selectAccount = (value: string) => {
+    const inheritDefault = value === "__default__";
+    const target = inheritDefault ? defaultAccount.data : value;
+    if (!target) return;
+    if (
+      target === selected &&
+      inheritDefault === Boolean(agent.subscriptionAccountInheritDefault) &&
+      !authHeld &&
+      !error
+    )
+      return;
+    const account = accounts.data?.find((item) => item.id === target);
+    if (account?.harness === "claude" && account.kind === "token")
+      setDestination({
+        kind: "agent",
+        pubkey: agent.pubkey,
+        destination: target,
+        inherit_default: inheritDefault,
+        all_on_current: false,
+      });
+    else mutation.mutate(value === "__ambient__" ? null : value);
+  };
   const content = (
     <div
       className="space-y-1.5"
@@ -94,62 +187,108 @@ export function SubscriptionAccountSelector({
       <label className="text-sm font-medium" htmlFor={id}>
         Subscription account
       </label>
-      <select
-        id={id}
-        aria-describedby={`${id}-scope ${id}-status`}
-        value={selectedValue}
-        disabled={
-          busy ||
-          (!agent.subscriptionAccountHarness && !selected && !legacy) ||
-          accounts.isPending ||
-          accounts.isError ||
-          enabled.isPending ||
-          enabled.isError
-        }
-        className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm"
-        onChange={(event) => mutation.mutate(event.target.value || null)}
-      >
-        <option value="">Ambient — harness’s current login</option>
-        {legacy ? (
-          <option value="__legacy__" disabled>
-            Legacy Claude account — re-login and rebind required
-          </option>
-        ) : null}
-        {selected && !selectedAccount ? (
-          <option value={selected} disabled>
-            Selected account unavailable
-          </option>
-        ) : null}
-        {accounts.data
-          ?.filter(
-            (account) =>
-              account.id === selected ||
-              (account.harness === agent.subscriptionAccountHarness &&
-                account.state === "ready" &&
-                account.nickname),
-          )
-          .map((account) => (
-            <option
-              key={account.id}
-              value={account.id}
-              disabled={
-                subscriptionAccountExpiry(account, now)?.expired ||
-                !enabled.data ||
-                account.state !== "ready" ||
-                !account.nickname ||
-                account.harness !== agent.subscriptionAccountHarness
-              }
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            id={id}
+            variant="outline"
+            aria-describedby={`${id}-scope ${id}-status`}
+            disabled={
+              busy ||
+              (!agent.subscriptionAccountHarness && !selected && !legacy) ||
+              accounts.isPending ||
+              accounts.isError ||
+              enabled.isPending ||
+              enabled.isError
+            }
+            className="w-full justify-between gap-2 font-normal"
+          >
+            <span className="truncate">
+              {agent.subscriptionAccountInheritDefault ? "Default · " : ""}
+              {accountRequired
+                ? "Account required — choose a named account"
+                : (selectedAccount?.nickname ??
+                  (selected
+                    ? "Selected account unavailable"
+                    : legacy
+                      ? "Legacy Claude account"
+                      : "Ambient — harness’s current login"))}
+            </span>
+            <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          className="min-w-[var(--radix-dropdown-menu-trigger-width)]"
+        >
+          <DropdownMenuRadioGroup
+            value={selectedValue || "__ambient__"}
+            onValueChange={selectAccount}
+          >
+            {accountRequired ? (
+              <DropdownMenuRadioItem value="__required__" disabled>
+                Account required — choose a named account
+              </DropdownMenuRadioItem>
+            ) : null}
+            {canPause && defaultAccount.data ? (
+              <DropdownMenuRadioItem
+                value="__default__"
+                disabled={!enabled.data || defaultAccount.isError}
+              >
+                Use default ·{" "}
+                {accounts.data?.find(
+                  (account) => account.id === defaultAccount.data,
+                )?.nickname ?? "Unavailable account"}
+              </DropdownMenuRadioItem>
+            ) : null}
+            <DropdownMenuRadioItem
+              value="__ambient__"
+              disabled={working || Boolean(operation.data)}
             >
-              {account.nickname ?? "Unnamed account"}
-              {subscriptionAccountExpiry(account, now)
-                ? ` — ${subscriptionAccountExpiry(account, now)?.label}`
-                : ""}
-              {account.state !== "ready"
-                ? ` — ${account.state.replaceAll("_", " ")}`
-                : ""}
-            </option>
-          ))}
-      </select>
+              Ambient — harness’s current login
+            </DropdownMenuRadioItem>
+            {legacy ? (
+              <DropdownMenuRadioItem value="__legacy__" disabled>
+                Legacy Claude account — re-login and rebind required
+              </DropdownMenuRadioItem>
+            ) : null}
+            {selected && !selectedAccount ? (
+              <DropdownMenuRadioItem value={selected} disabled>
+                Selected account unavailable
+              </DropdownMenuRadioItem>
+            ) : null}
+            {accounts.data
+              ?.filter(
+                (account) =>
+                  account.id === selected ||
+                  (account.harness === agent.subscriptionAccountHarness &&
+                    account.state === "ready" &&
+                    account.nickname),
+              )
+              .map((account) => (
+                <DropdownMenuRadioItem
+                  key={account.id}
+                  value={account.id}
+                  disabled={
+                    subscriptionAccountExpiry(account, now)?.expired ||
+                    !enabled.data ||
+                    account.state !== "ready" ||
+                    !account.nickname ||
+                    account.harness !== agent.subscriptionAccountHarness
+                  }
+                >
+                  {account.nickname ?? "Unnamed account"}
+                  {subscriptionAccountExpiry(account, now)
+                    ? ` — ${subscriptionAccountExpiry(account, now)?.label}`
+                    : ""}
+                  {account.state !== "ready"
+                    ? ` — ${account.state.replaceAll("_", " ")}`
+                    : ""}
+                </DropdownMenuRadioItem>
+              ))}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <p id={`${id}-scope`} className="text-xs text-muted-foreground">
         Applies to this agent in every conversation.
       </p>
@@ -158,14 +297,46 @@ export function SubscriptionAccountSelector({
         role="status"
         className="text-xs text-muted-foreground"
       >
-        {busy
-          ? working
-            ? "Finish the active turn before switching accounts."
-            : "Applying account selection…"
-          : runningKnown
-            ? `Running: ${agent.runningSubscriptionAccountId ? (running?.nickname ?? "Unavailable account") : "Ambient — harness’s current login"}`
-            : "Running account not confirmed."}
+        {working && !canPause
+          ? "Finish the active turn before switching accounts."
+          : switching || activeSwitch
+            ? operation.data?.phase === "restarting"
+              ? "Starting the selected account and resuming saved work…"
+              : "Pausing this agent and saving unfinished work…"
+            : runningKnown
+              ? `Running: ${agent.runningSubscriptionAccountId ? (running?.nickname ?? "Unavailable account") : "Ambient — harness’s current login"}`
+              : agent.status === "running"
+                ? "Waiting for runtime account confirmation."
+                : "Agent stopped. This selection will apply when it starts."}
       </p>
+      {destination ? (
+        <ClaudeAccountChangeDialog
+          request={destination}
+          allowAll={Boolean(selected)}
+          onClose={() => setDestination(undefined)}
+        />
+      ) : null}
+      <ClaudeAccountChangeProgress pubkey={agent.pubkey} />
+      {(error || authHeld) &&
+      !groupPending &&
+      selectedAccount?.kind === "token" ? (
+        <div className="space-y-1.5 text-xs">
+          <p>
+            Work is retained. Retry this account or choose another account
+            above.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() =>
+              mutation.mutate(operation.data?.account_id ?? selected)
+            }
+          >
+            Retry account switch
+          </Button>
+        </div>
+      ) : null}
       {expiry ? (
         <p className="text-xs" data-testid="selected-token-expiry">
           {expiry.label}
@@ -174,7 +345,7 @@ export function SubscriptionAccountSelector({
       {unavailable ? (
         <p className="text-xs text-destructive">
           Selected account unavailable.{" "}
-          {selectedAccount?.kind === "token" ? "Renew" : "Reconnect"} it in
+          {selectedAccount?.kind === "token" ? "Renew" : "Reconnect"} in
           Settings → AI; another account will not be chosen automatically.
         </p>
       ) : null}
@@ -205,12 +376,11 @@ export function SubscriptionAccountSelector({
           </Button>
         </div>
       ) : null}
-      {authHeld ? (
+      {authHeld && selectedAccount?.kind !== "token" ? (
         <div className="space-y-2 text-xs">
           <p>
-            {selectedAccount?.kind === "token"
-              ? "Authentication paused this agent. Renew in Settings → AI, then resume retained work."
-              : "Authentication paused this agent. Stop the agent, reconnect in Settings → AI, then start it and resume retained work."}
+            Authentication paused this agent. Stop the agent, reconnect in
+            Settings → AI, then start it and resume retained work.
           </p>
           <Button
             size="sm"

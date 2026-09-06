@@ -33,12 +33,12 @@ Object.defineProperty(globalThis, "navigator", {
   configurable: true,
 });
 const calls = [];
-let accounts, enabled, failSwitch, failRemove, failCancel;
+let accounts, enabled, failSwitch, failRemove, failCancel, operationStatus;
 const capabilities = [
   {
     provider: "anthropic",
     harness: "claude",
-    supported: true,
+    supported: false,
     token_supported: true,
     reason: null,
   },
@@ -54,6 +54,29 @@ globalThis.__TAURI_INTERNALS__ = dom.window.__TAURI_INTERNALS__ = {
   invoke: async (command, args) => {
     calls.push([command, args]);
     switch (command) {
+      case "get_claude_default_account":
+        return null;
+      case "get_claude_account_change_status":
+        return null;
+      case "preview_claude_account_change":
+        return {
+          fingerprint: "fixture",
+          operation: {
+            id: "fixture",
+            phase: "applying",
+            error: null,
+            destination: args.request.destination ?? args.request.replacement,
+            change_default: args.request.kind === "default",
+            removing: args.request.kind === "remove",
+            members: [],
+          },
+        };
+      case "apply_claude_account_change":
+        if (args.request.kind === "remove")
+          accounts = accounts.filter(
+            (account) => account.id !== args.request.account_id,
+          );
+        return { id: "fixture", phase: "complete", error: null, members: [] };
       case "list_subscription_accounts":
         return structuredClone(accounts);
       case "subscription_account_capabilities":
@@ -112,6 +135,8 @@ globalThis.__TAURI_INTERNALS__ = dom.window.__TAURI_INTERNALS__ = {
           throw new Error("Account is still selected by an agent");
         accounts = accounts.filter((item) => item.id !== args.id);
         return;
+      case "agent_account_switch_status":
+        return operationStatus ?? null;
       case "resume_agent_subscription_work":
         return;
       case "switch_agent_subscription_account":
@@ -129,12 +154,11 @@ globalThis.__TAURI_INTERNALS__ = dom.window.__TAURI_INTERNALS__ = {
   transformCallback: () => 1,
 };
 const React = await import("react");
-const { render, cleanup, fireEvent, waitFor, within } = await import(
+const { render, cleanup, fireEvent, waitFor } = await import(
   "@testing-library/react"
 );
-const { focusManager, QueryClient, QueryClientProvider } = await import(
-  "@tanstack/react-query"
-);
+const { focusManager, QueryClient, QueryClientProvider, useQuery } =
+  await import("@tanstack/react-query");
 const { SubscriptionAccountSelector } = await import(
   "./SubscriptionAccountSelector.tsx"
 );
@@ -177,12 +201,26 @@ function mount(...children) {
     React.createElement(QueryClientProvider, { client }, ...children),
   );
 }
+async function openAccountMenu(view, picker) {
+  picker ??= await view.findByRole("button", { name: "Subscription account" });
+  await waitFor(() => assert.equal(picker.disabled, false));
+  fireEvent.keyDown(picker, { key: "ArrowDown", code: "ArrowDown" });
+  await view.findByRole("menu");
+}
+function closeAccountMenu(view) {
+  fireEvent.keyDown(view.getByRole("menu"), { key: "Escape", code: "Escape" });
+}
+async function chooseAccount(view, name) {
+  await openAccountMenu(view);
+  fireEvent.click(await view.findByRole("menuitemradio", { name }));
+}
 async function refresh() {
   await React.act(async () =>
     client.invalidateQueries({ queryKey: ["subscription-accounts"] }),
   );
 }
 beforeEach(() => {
+  operationStatus = null;
   accounts = [];
   enabled = true;
   failSwitch = false;
@@ -203,6 +241,53 @@ afterEach(() => {
   reportChannelBotTyping("other-channel", []);
 });
 after(() => dom.window.close());
+
+test("startup switch recovery refreshes a cached stopped agent without a picker mutation", async () => {
+  accounts = [account({ harness: "claude", kind: "token" })];
+  operationStatus = {
+    id: "recovered-switch",
+    account_id: "account-a",
+    phase: "complete",
+    error: null,
+  };
+  const stopped = agent({
+    status: "stopped",
+    subscriptionAccountHarness: "claude",
+    subscriptionAccountId: "account-a",
+  });
+  let reads = 0;
+  function RestoredProfile() {
+    const result = useQuery({
+      queryKey: ["managed-agents"],
+      initialData: [stopped],
+      staleTime: Infinity,
+      queryFn: async () => {
+        reads += 1;
+        return [
+          {
+            ...stopped,
+            status: "running",
+            runningSubscriptionAccountId: "account-a",
+            runningSubscriptionAccountGeneration: 2,
+          },
+        ];
+      },
+    });
+    return React.createElement(SubscriptionAccountSelector, {
+      agent: result.data[0],
+    });
+  }
+  const view = mount(React.createElement(RestoredProfile));
+  await waitFor(() =>
+    assert.match(view.container.textContent, /Running: Work/),
+  );
+  assert.equal(reads, 1);
+  assert.equal(
+    calls.filter(([command]) => command === "switch_agent_subscription_account")
+      .length,
+    0,
+  );
+});
 
 test("browser verification updates the rendered card while Buzz remains unfocused", async () => {
   accounts = [account({ state: "connecting", nickname: null })];
@@ -260,12 +345,27 @@ test("provider login precedes verification and nickname; Settings refresh reache
   const nickname = await view.findByRole("textbox", { name: /Nickname/ });
   fireEvent.change(nickname, { target: { value: "Team account" } });
   fireEvent.click(view.getByRole("button", { name: "Save nickname" }));
-  await waitFor(() =>
-    assert.equal(
-      view.getAllByRole("option", { name: "Team account" }).length,
-      2,
-    ),
+  await waitFor(() => assert.equal(accounts[0].nickname, "Team account"));
+  await openAccountMenu(
+    view,
+    view.getAllByRole("button", { name: "Subscription account" })[0],
   );
+  await view.findByRole("menuitemradio", { name: "Team account" });
+  closeAccountMenu(view);
+  await waitFor(() => assert.equal(view.queryByRole("menu"), null));
+  // Escape closes the nested popover as well; reopen through the real trigger.
+  if (
+    view.getAllByRole("button", { name: "Subscription account" }).length === 1
+  )
+    fireEvent.click(
+      view.getByRole("button", { name: "Change subscription account" }),
+    );
+  await openAccountMenu(
+    view,
+    view.getAllByRole("button", { name: "Subscription account" }).at(-1),
+  );
+  await view.findByRole("menuitemradio", { name: "Team account" });
+  closeAccountMenu(view);
   assert.deepEqual(
     calls.find(([name]) => name === "begin_subscription_account_login")[1],
     { harness: "codex", accountId: null },
@@ -282,13 +382,19 @@ test("expired selected account stays visible; reconnect preserves id and nicknam
       agent: agent({ subscriptionAccountId: "account-a" }),
     }),
   );
-  const picker = await view.findByRole("combobox");
+  const picker = await view.findByRole("button", {
+    name: "Subscription account",
+  });
   await waitFor(() => assert.equal(picker.disabled, false));
-  assert.equal(picker.value, "account-a");
+  assert.match(picker.textContent, /Work/);
+  await openAccountMenu(view, picker);
   assert.equal(
-    view.getByRole("option", { name: /Work — needs login/ }).disabled,
-    true,
+    view
+      .getByRole("menuitemradio", { name: /Work — needs login/ })
+      .getAttribute("aria-disabled"),
+    "true",
   );
+  closeAccountMenu(view);
   fireEvent.click(view.getByRole("button", { name: "Reconnect" }));
   await view.findByRole("button", { name: "Cancel login" });
   assert.deepEqual(
@@ -333,9 +439,9 @@ test("experiment off preserves selected account, reconnect and explicit ambient 
   });
   assert.equal(signIn.disabled, true);
   assert.equal(view.getByRole("button", { name: "Reconnect" }).disabled, false);
-  const picker = view.getByRole("combobox");
-  assert.equal(picker.value, "account-a");
-  fireEvent.change(picker, { target: { value: "" } });
+  const picker = view.getByRole("button", { name: "Subscription account" });
+  assert.match(picker.textContent, /Work/);
+  await chooseAccount(view, /Ambient — harness/);
   await waitFor(() =>
     assert.ok(
       calls.some(
@@ -353,8 +459,9 @@ test("active work in another channel blocks switching without queuing", async ()
   const view = mount(
     React.createElement(SubscriptionAccountSelector, { agent: agent() }),
   );
-  const picker = await view.findByRole("combobox");
-  await view.findByRole("option", { name: "Work" });
+  const picker = await view.findByRole("button", {
+    name: "Subscription account",
+  });
   assert.equal(picker.disabled, true);
   assert.match(view.container.textContent, /Finish the active turn/);
   assert.equal(calls.filter(([name]) => name.includes("switch")).length, 0);
@@ -368,10 +475,7 @@ test("restart failure stays visible and does not claim selected account is runni
       agent: agent({ runningSubscriptionAccountGeneration: 0 }),
     }),
   );
-  await view.findByRole("option", { name: "Work" });
-  fireEvent.change(view.getByRole("combobox"), {
-    target: { value: "account-a" },
-  });
+  await chooseAccount(view, "Work");
   await view.findByRole("alert");
   assert.match(view.container.textContent, /runtime restart failed/);
   assert.match(view.container.textContent, /Running: Ambient/);
@@ -390,18 +494,13 @@ test("legacy and missing selections cannot be mistaken for ambient", async () =>
       }),
     }),
   );
-  const [legacy, missing] = await view.findAllByRole("combobox");
+  const [legacy, missing] = await view.findAllByRole("button", {
+    name: "Subscription account",
+  });
   await waitFor(() => assert.equal(legacy.disabled, false));
-  assert.equal(legacy.value, "__legacy__");
-  assert.equal(missing.value, "missing");
-  assert.match(
-    within(legacy).getByRole("option", { selected: true }).textContent,
-    /Legacy/,
-  );
-  assert.match(
-    within(missing).getByRole("option", { selected: true }).textContent,
-    /unavailable/,
-  );
+
+  assert.match(legacy.textContent, /Legacy/);
+  assert.match(missing.textContent, /unavailable/);
 });
 
 test("referenced account removal error leaves recovery controls intact", async () => {
@@ -465,7 +564,10 @@ test("auth-held custom harness retains resume access without inventing account s
     }),
   );
   await view.findByRole("button", { name: "Resume retained work" });
-  assert.equal(view.getByRole("combobox").disabled, true);
+  assert.equal(
+    view.getByRole("button", { name: "Subscription account" }).disabled,
+    true,
+  );
 });
 
 test("token setup crosses only metadata IPC, nickname precedes selection, renewal works with experiment off", async () => {
@@ -494,18 +596,26 @@ test("token setup crosses only metadata IPC, nickname precedes selection, renewa
   const nickname = await view.findByRole("textbox", { name: /Nickname/ });
   fireEvent.change(nickname, { target: { value: "Shared team" } });
   fireEvent.click(view.getByRole("button", { name: "Save nickname" }));
-  await view.findByRole("option", {
-    name: "Shared team — Expires in 365 days",
-  });
-  fireEvent.change(view.getByRole("combobox"), {
-    target: { value: "account-a" },
-  });
+  await waitFor(() => assert.equal(accounts[0].nickname, "Shared team"));
+  await chooseAccount(view, "Shared team — Expires in 365 days");
+  assert.equal(
+    calls.filter(([name]) => name === "switch_agent_subscription_account")
+      .length,
+    0,
+  );
+  await waitFor(() =>
+    assert.equal(
+      view.getByRole("button", { name: "Apply account change" }).disabled,
+      false,
+    ),
+  );
+  fireEvent.click(view.getByRole("button", { name: "Apply account change" }));
   await waitFor(() =>
     assert.ok(
       calls.some(
         ([name, args]) =>
-          name === "switch_agent_subscription_account" &&
-          args.accountId === "account-a",
+          name === "apply_claude_account_change" &&
+          args.request.destination === "account-a",
       ),
     ),
   );
@@ -546,9 +656,16 @@ test("expired token stays selected, cannot be selected anew and offers renewal w
       }),
     }),
   );
-  const option = await view.findByRole("option", { name: "Work — Expired" });
-  assert.equal(option.disabled, true);
-  assert.equal(view.getByRole("combobox").value, "account-a");
+  await openAccountMenu(view);
+  const option = await view.findByRole("menuitemradio", {
+    name: "Work — Expired",
+  });
+  assert.equal(option.getAttribute("aria-disabled"), "true");
+  closeAccountMenu(view);
+  assert.match(
+    view.getByRole("button", { name: "Subscription account" }).textContent,
+    /Work/,
+  );
   assert.match(view.container.textContent, /Renew in Settings/);
   assert.doesNotMatch(view.container.textContent, /Stop the agent/);
   assert.equal(
@@ -573,5 +690,163 @@ test("token card keeps a renewal notice without relying on notification permissi
   await refresh();
   await waitFor(() =>
     assert.match(notice.textContent, /has expired.*Choose Renew/),
+  );
+});
+
+test("Claude setup offers only tokens and retired login retains removal", async () => {
+  accounts = [
+    account({ harness: "claude", provider: "anthropic", kind: "login" }),
+  ];
+  const view = mount(React.createElement(SubscriptionAccountsSettingsCard));
+  await view.findByRole("button", { name: "Add Claude long-lived token" });
+  assert.equal(
+    view.queryByRole("button", { name: /Sign in with anthropic/ }),
+    null,
+  );
+  assert.equal(view.queryByRole("button", { name: "Reconnect" }), null);
+  assert.match(view.container.textContent, /sign-in method has been retired/);
+  fireEvent.click(view.getByRole("button", { name: "Remove" }));
+  await waitFor(() =>
+    assert.equal(
+      view.getByRole("button", { name: "Stop agents and remove" }).disabled,
+      false,
+    ),
+  );
+  fireEvent.click(view.getByRole("button", { name: "Stop agents and remove" }));
+  await waitFor(() => assert.equal(accounts.length, 0));
+});
+
+test("active Claude work can switch only after the native scoped confirmation", async () => {
+  accounts = [
+    account({
+      harness: "claude",
+      provider: "anthropic",
+      kind: "token",
+      expires_at: Math.floor(Date.now() / 1000) + 86400,
+    }),
+  ];
+  reportChannelBotTyping("other-channel", [pubkey]);
+  const view = mount(
+    React.createElement(SubscriptionAccountSelector, {
+      agent: agent({ subscriptionAccountHarness: "claude", status: "running" }),
+    }),
+  );
+  await chooseAccount(view, /Work/);
+  assert.equal(
+    calls.filter(([name]) => name === "apply_claude_account_change").length,
+    0,
+  );
+  assert.match(
+    (await view.findByRole("alertdialog")).textContent,
+    /Stopped agents stay stopped/,
+  );
+  fireEvent.click(view.getByRole("button", { name: "Cancel" }));
+  assert.equal(
+    calls.filter(([name]) => name === "apply_claude_account_change").length,
+    0,
+  );
+  await chooseAccount(view, /Work/);
+  await waitFor(() =>
+    assert.equal(
+      view.getByRole("button", { name: "Apply account change" }).disabled,
+      false,
+    ),
+  );
+  fireEvent.click(view.getByRole("button", { name: "Apply account change" }));
+  await waitFor(() =>
+    assert.equal(
+      calls.filter(([name]) => name === "apply_claude_account_change").length,
+      1,
+    ),
+  );
+});
+
+test("a persisted failed switch exposes retry and keeps the destination selectable", async () => {
+  accounts = [
+    account({
+      harness: "claude",
+      provider: "anthropic",
+      kind: "token",
+      expires_at: Math.floor(Date.now() / 1000) + 86400,
+    }),
+  ];
+  operationStatus = {
+    id: "op",
+    account_id: "account-a",
+    phase: "restarting",
+    error: "Selected account could not start",
+  };
+  const view = mount(
+    React.createElement(SubscriptionAccountSelector, {
+      agent: agent({
+        subscriptionAccountHarness: "claude",
+        subscriptionAccountId: "account-a",
+      }),
+    }),
+  );
+  await view.findByRole("button", { name: "Retry account switch" });
+  assert.equal(
+    view.getByRole("button", { name: "Subscription account" }).disabled,
+    false,
+  );
+  assert.match(view.container.textContent, /Selected account could not start/);
+  fireEvent.click(view.getByRole("button", { name: "Retry account switch" }));
+  await waitFor(() =>
+    assert.equal(
+      calls.filter(([name]) => name === "switch_agent_subscription_account")
+        .length,
+      1,
+    ),
+  );
+});
+
+test("a detached account is required, never displayed as selected Ambient", async () => {
+  operationStatus = {
+    id: "detached",
+    account_id: "removed",
+    phase: "paused",
+    error: "Account detached. Choose a named account to resume retained work.",
+  };
+  accounts = [
+    account({
+      harness: "claude",
+      provider: "anthropic",
+      kind: "token",
+      expires_at: Math.floor(Date.now() / 1000) + 86400,
+    }),
+  ];
+  const view = mount(
+    React.createElement(SubscriptionAccountSelector, {
+      agent: agent({ subscriptionAccountHarness: "claude", status: "stopped" }),
+    }),
+  );
+  await waitFor(() =>
+    assert.match(
+      view.getByRole("button", { name: "Subscription account" }).textContent,
+      /Account required/,
+    ),
+  );
+  await openAccountMenu(view);
+  assert.equal(
+    view
+      .getByRole("menuitemradio", {
+        name: "Account required — choose a named account",
+      })
+      .getAttribute("aria-checked"),
+    "true",
+  );
+  assert.equal(
+    view
+      .getByRole("menuitemradio", { name: "Ambient — harness’s current login" })
+      .getAttribute("aria-checked"),
+    "false",
+  );
+  assert.equal(
+    calls.filter(
+      ([command]) =>
+        command === "switch_agent_subscription_account" ||
+        command === "apply_claude_account_change",
+    ).length,
+    0,
   );
 });

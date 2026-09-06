@@ -128,6 +128,9 @@ pub fn stop_managed_agent_workspace_pair(
 ) -> Result<(), String> {
     use tauri::Manager;
     let state = app.state::<crate::app_state::AppState>();
+    if let Some(key) = super::workspace_pair_key(app, record) {
+        crate::managed_agents::account_switch::set_running(app, &key, false)?;
+    }
     match super::workspace_pair_key(app, record) {
         Some(pair_key) if runtimes.contains_key(&pair_key) => {
             stop_managed_agent_pair(app, record, runtimes, &pair_key)?;
