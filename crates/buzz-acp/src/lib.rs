@@ -6320,7 +6320,14 @@ fn handle_prompt_result(
                         tracing::error!(%error, "authentication recovery persistence failed; request remains held in memory")
                     }
                 }
-                let content = "⚠️ Authentication failed. The original request is retained and automatic retries are paused. Reconnect the account in Settings, then choose Resume retained work in the agent’s Account controls. Earlier partial work may already have run.".to_string();
+                let recovery = if std::env::var("BUZZ_ACP_SUBSCRIPTION_KIND").as_deref()
+                    == Ok("token")
+                {
+                    "Choose another account in this agent’s Account controls, or renew this token in Settings and choose Retry account switch."
+                } else {
+                    "Reconnect the account in Settings, then choose Resume retained work in the agent’s Account controls."
+                };
+                let content = format!("⚠️ Authentication failed. The original request is retained and automatic retries are paused. {recovery} Earlier partial work may already have run.");
                 spawn_failure_notice(rest_client, &notice_batch, content);
                 delivery_fate = "auth_held";
             } else if let Some(dead) = queue.requeue(batch) {

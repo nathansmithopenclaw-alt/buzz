@@ -57,6 +57,19 @@ export function SubscriptionAccountSelector({
     refetchInterval: 750,
     enabled: agent.subscriptionAccountHarness === "claude",
   });
+  const operationRevision = operation.data
+    ? JSON.stringify([
+        operation.data.id,
+        operation.data.phase,
+        operation.data.error,
+      ])
+    : null;
+  React.useEffect(() => {
+    // Startup recovery has no picker mutation to invalidate the cached stopped
+    // agent. Refresh once per durable transition, including the initial read.
+    if (operationRevision)
+      void client.invalidateQueries({ queryKey: ["managed-agents"] });
+  }, [client, operationRevision]);
   const [destination, setDestination] = React.useState<string | undefined>();
   const switching =
     useIsMutating({

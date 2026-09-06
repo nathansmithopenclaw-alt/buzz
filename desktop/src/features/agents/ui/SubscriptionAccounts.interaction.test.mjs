@@ -134,9 +134,8 @@ const React = await import("react");
 const { render, cleanup, fireEvent, waitFor } = await import(
   "@testing-library/react"
 );
-const { focusManager, QueryClient, QueryClientProvider } = await import(
-  "@tanstack/react-query"
-);
+const { focusManager, QueryClient, QueryClientProvider, useQuery } =
+  await import("@tanstack/react-query");
 const { SubscriptionAccountSelector } = await import(
   "./SubscriptionAccountSelector.tsx"
 );
@@ -219,6 +218,53 @@ afterEach(() => {
   reportChannelBotTyping("other-channel", []);
 });
 after(() => dom.window.close());
+
+test("startup switch recovery refreshes a cached stopped agent without a picker mutation", async () => {
+  accounts = [account({ harness: "claude", kind: "token" })];
+  operationStatus = {
+    id: "recovered-switch",
+    account_id: "account-a",
+    phase: "complete",
+    error: null,
+  };
+  const stopped = agent({
+    status: "stopped",
+    subscriptionAccountHarness: "claude",
+    subscriptionAccountId: "account-a",
+  });
+  let reads = 0;
+  function RestoredProfile() {
+    const result = useQuery({
+      queryKey: ["managed-agents"],
+      initialData: [stopped],
+      staleTime: Infinity,
+      queryFn: async () => {
+        reads += 1;
+        return [
+          {
+            ...stopped,
+            status: "running",
+            runningSubscriptionAccountId: "account-a",
+            runningSubscriptionAccountGeneration: 2,
+          },
+        ];
+      },
+    });
+    return React.createElement(SubscriptionAccountSelector, {
+      agent: result.data[0],
+    });
+  }
+  const view = mount(React.createElement(RestoredProfile));
+  await waitFor(() =>
+    assert.match(view.container.textContent, /Running: Work/),
+  );
+  assert.equal(reads, 1);
+  assert.equal(
+    calls.filter(([command]) => command === "switch_agent_subscription_account")
+      .length,
+    0,
+  );
+});
 
 test("browser verification updates the rendered card while Buzz remains unfocused", async () => {
   accounts = [account({ state: "connecting", nickname: null })];
