@@ -1,9 +1,9 @@
 //! Owner-facing persist for independently signed standing-delegation grants.
 //!
 //! Grant writes are independent of the Agent-defaults Save bar: they overlay
-//! the latest durable config under `managed_agents_store_lock`. The private
-//! audit channel is created-once with a deterministic uuid5 before signing;
-//! if create fails, nothing is signed.
+//! the latest durable config under `managed_agents_store_lock`. Existing audit
+//! channels are preserved; a new private channel uses a deterministic uuid5.
+//! If creation or ownership validation fails, nothing is signed.
 
 use tauri::{AppHandle, Manager};
 
@@ -82,13 +82,14 @@ fn resolve_audit_channel_id(
 }
 
 /// NIP-29 discovery is relay-signed, not creator-signed. Establish ownership
-/// from the relay's current admin roles for this exact private channel. The
+/// from the relay's current admin roles for this exact audit channel. The
 /// deterministic UUID alone is not authority: another user can pre-create it.
 fn require_owner_audit_metadata(
     metadata: &nostr::Event,
     admins: &nostr::Event,
     channel_id: &str,
     owner: &nostr::PublicKey,
+    allow_existing_public: bool,
 ) -> Result<(), String> {
     for (event, kind) in [(metadata, 39_000), (admins, 39_001)] {
         if event.kind != nostr::Kind::Custom(kind)
@@ -101,18 +102,24 @@ fn require_owner_audit_metadata(
     if metadata.pubkey != admins.pubkey {
         return Err("audit channel discovery signers disagree; grant was not signed".into());
     }
-    if !metadata
+    let private = metadata
         .tags
         .iter()
-        .any(|tag| tag.as_slice() == ["private"])
+        .any(|tag| tag.as_slice() == ["private"]);
+    let public = metadata.tags.iter().any(|tag| tag.as_slice() == ["public"]);
+    if private == public
         || metadata.tags.iter().any(|tag| {
             let values = tag.as_slice();
-            values.first().is_some_and(|name| name == "public")
-                || (values.first().is_some_and(|name| name == "archived")
-                    && values.get(1).is_some_and(|value| value == "true"))
+            values.first().is_some_and(|name| name == "archived")
+                && values.get(1).is_some_and(|value| value == "true")
         })
     {
-        return Err("audit channel must be private and active; grant was not signed".into());
+        return Err(
+            "audit channel must be active with valid visibility; grant was not signed".into(),
+        );
+    }
+    if public && !allow_existing_public {
+        return Err("new audit channel must be private; grant was not signed".into());
     }
     let owner_hex = owner.to_hex();
     if !admins.tags.iter().any(|tag| {
@@ -143,6 +150,10 @@ async fn ensure_agent_management_audit_channel(
     )?;
 
     let mut metadata = channel_metadata(state, &channel_id).await?;
+    // Existing owner-configured audit channels may be public. Keep their
+    // visibility and signed proofs intact; only newly created channels require
+    // the private default. Channel ownership is still checked in both cases.
+    let allow_existing_public = existing_id.is_some() && metadata.is_some();
     if metadata.is_none() {
         create_audit_channel(state, owner_keys, &owner_hex, &channel_id).await?;
         metadata = wait_for_audit_metadata(state, &channel_id).await?;
@@ -171,6 +182,7 @@ async fn ensure_agent_management_audit_channel(
         &admins,
         &channel_id,
         &owner,
+        allow_existing_public,
     )?;
 
     Ok(channel_id)
@@ -363,6 +375,7 @@ mod tests {
             &admin_event(&relay, AUDIT, &owner, "owner"),
             AUDIT,
             &owner.public_key(),
+            false,
         )
         .unwrap();
     }
@@ -381,38 +394,53 @@ mod tests {
             admin_event(&other, AUDIT, &owner, "owner"),
             metadata.clone(),
         ] {
-            assert!(
-                require_owner_audit_metadata(&metadata, &admins, AUDIT, &owner.public_key())
-                    .is_err()
-            );
+            assert!(require_owner_audit_metadata(
+                &metadata,
+                &admins,
+                AUDIT,
+                &owner.public_key(),
+                true
+            )
+            .is_err());
         }
         let mut tampered = admin_event(&relay, AUDIT, &other, "owner");
         tampered.tags = admin_event(&relay, AUDIT, &owner, "owner").tags;
-        assert!(
-            require_owner_audit_metadata(&metadata, &tampered, AUDIT, &owner.public_key()).is_err()
-        );
+        assert!(require_owner_audit_metadata(
+            &metadata,
+            &tampered,
+            AUDIT,
+            &owner.public_key(),
+            true
+        )
+        .is_err());
     }
 
     #[test]
-    fn audit_discovery_rejects_public_archived_and_mismatched_metadata() {
+    fn audit_discovery_rejects_archived_and_mismatched_metadata() {
         let relay = Keys::generate();
         let owner = Keys::generate();
         let admins = admin_event(&relay, AUDIT, &owner, "owner");
         for tags in [
             vec![vec!["d", AUDIT]],
-            vec![vec!["d", AUDIT], vec!["public"]],
             vec![vec!["d", AUDIT], vec!["private"], vec!["public"]],
             vec![vec!["d", AUDIT], vec!["private"], vec!["archived", "true"]],
+            vec![vec!["d", AUDIT], vec!["public"], vec!["archived", "true"]],
             vec![vec!["d", "different-channel"], vec!["private"]],
         ] {
             let metadata = EventBuilder::new(Kind::Custom(39_000), "")
                 .tags(tags.into_iter().map(|tag| Tag::parse(tag).unwrap()))
                 .sign_with_keys(&relay)
                 .unwrap();
-            assert!(
-                require_owner_audit_metadata(&metadata, &admins, AUDIT, &owner.public_key())
-                    .is_err()
-            );
+            for allow_public in [false, true] {
+                assert!(require_owner_audit_metadata(
+                    &metadata,
+                    &admins,
+                    AUDIT,
+                    &owner.public_key(),
+                    allow_public
+                )
+                .is_err());
+            }
         }
     }
 
@@ -422,10 +450,23 @@ mod tests {
     #[tokio::test]
     async fn ensure_audit_channel_uses_relay_roles_for_existing_and_new_channels() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        for (create, owns_channel) in [(false, true), (true, true), (false, false)] {
+        for (create, owns_channel, public) in [
+            (false, true, false),
+            (true, true, false),
+            (false, false, false),
+            (false, true, true),
+            (false, false, true),
+            (true, true, true),
+        ] {
             let relay = Keys::generate();
             let owner = Keys::generate();
-            let metadata = metadata_event(&relay, AUDIT);
+            let metadata = EventBuilder::new(Kind::Custom(39_000), "{}")
+                .tags([
+                    Tag::parse(["d", AUDIT]).unwrap(),
+                    Tag::parse([if public { "public" } else { "private" }]).unwrap(),
+                ])
+                .sign_with_keys(&relay)
+                .unwrap();
             let other = Keys::generate();
             let admins = admin_event(
                 &relay,
@@ -504,7 +545,11 @@ mod tests {
             )
             .await
             .unwrap();
-            if owns_channel {
+            if create && public {
+                assert!(result
+                    .unwrap_err()
+                    .contains("new audit channel must be private"));
+            } else if owns_channel {
                 assert_eq!(result.unwrap(), AUDIT);
             } else {
                 assert!(result

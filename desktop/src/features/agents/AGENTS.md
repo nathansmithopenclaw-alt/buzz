@@ -361,10 +361,12 @@ edits persist only on Confirm; cancellation makes no write. While saving,
 selection and dismissal are disabled. Errors from the normalized Tauri Error
 remain inside the active dialog with the draft intact for retry.
 
-The native grant setter checks the private audit channel using relay-signed
+The native grant setter checks the audit channel using relay-signed
 NIP-29 metadata and the current admin record's exact owner role. A metadata
 signer is the relay, not the channel creator. Missing ownership, another owner,
-public/archived channels, or mismatched discovery must not authorize a grant.
+archived channels, or mismatched discovery must not authorize a grant. Existing
+owner-configured public audit channels retain their visibility and grant proofs;
+new audit channels must be private.
 
 ## The tests that enforce this
 
