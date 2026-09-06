@@ -13,6 +13,7 @@ mod pool;
 mod pool_lifecycle;
 mod prompt_framing;
 mod prompt_project;
+mod publication_receipts;
 mod queue;
 mod relay;
 mod runtime_identity;
@@ -3338,7 +3339,7 @@ async fn tokio_main() -> Result<()> {
     };
     let relay_answered =
         load_answered_event_ids(&relay.rest_client(), &subscribed_ids, startup_watermark).await;
-    let answered_event_ids = merge_startup_answered_state(
+    let mut answered_event_ids = merge_startup_answered_state(
         answered_watermark_store.as_mut(),
         relay_answered,
         startup_watermark,
@@ -3382,6 +3383,9 @@ async fn tokio_main() -> Result<()> {
             &pubkey_hex,
             &config.relay_url,
         )?;
+        answered_event_ids
+            .exact
+            .extend(recovery.completed_since(startup_watermark));
         let completed = recovery
             .batches()
             .iter()
@@ -6142,6 +6146,7 @@ fn handle_prompt_result(
             PromptSource::Channel(scope) => queue.auth_recoverable_batch(scope),
             PromptSource::Heartbeat => None,
         });
+    let mut completion_persist_failed = false;
     if matches!(&result.outcome, PromptOutcome::Ok(_)) {
         if let PromptSource::Channel(scope) = &result.source {
             let id = result
@@ -6154,11 +6159,19 @@ fn handle_prompt_result(
                 tracing::error!(%error, "could not confirm completed account scope");
             }
         }
-        let retired = recovery_batch
-            .as_ref()
-            .map_or(Ok(()), |batch| queue.complete_auth_recovery(batch));
+        let retired = recovery_batch.as_ref().map_or(Ok(()), |batch| {
+            queue.complete_auth_recovery(
+                batch,
+                matches!(&result.outcome, PromptOutcome::Ok(acp::StopReason::EndTurn)).then(|| {
+                    nostr::Timestamp::now()
+                        .as_secs()
+                        .saturating_sub(config.startup_replay_lookback_secs)
+                }),
+            )
+        });
         if let Err(error) = retired {
-            tracing::error!(%error, "failed to retire completed authentication recovery receipt");
+            tracing::error!(%error, "failed to persist completed request; stopping the harness with recovery journal retained");
+            completion_persist_failed = true;
         } else if let PromptSource::Channel(scope) = &result.source {
             if let Err(error) = account_handoff::complete(scope) {
                 tracing::error!(%error, "could not retire account session handoff");
@@ -6616,7 +6629,11 @@ fn handle_prompt_result(
             }
         }
     }
-    LoopAction::Continue
+    if completion_persist_failed {
+        LoopAction::Exit
+    } else {
+        LoopAction::Continue
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -12688,6 +12705,9 @@ mod error_outcome_emission_tests {
         )
         .unwrap();
         assert!(reopened.batches().is_empty());
+        assert!(reopened
+            .completed_since(0)
+            .contains(&batch.events[0].event.id.to_hex()));
     }
 
     #[tokio::test]

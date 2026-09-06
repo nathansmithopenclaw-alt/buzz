@@ -3053,17 +3053,35 @@ fn self_authored_report_filter(
 async fn self_authored_answer_receipts(
     watch: &PublicationWatch,
     rest: &RestClient,
-) -> Option<Vec<(Uuid, String, u64)>> {
-    let filter = self_authored_report_filter(watch, rest.keys.public_key());
-    match timeout(
-        CONTEXT_FETCH_TIMEOUT,
-        rest.query(std::slice::from_ref(&filter)),
-    )
-    .await
-    {
+    evidence: &TurnDeliveryEvidence,
+) -> Option<(bool, Vec<(Uuid, String, u64)>)> {
+    let mut filters = vec![self_authored_report_filter(watch, rest.keys.public_key())];
+    if !evidence.published_event_ids.is_empty() {
+        filters.push(
+            nostr::Filter::new()
+                .ids(evidence.published_event_ids.iter().copied())
+                .author(rest.keys.public_key())
+                .limit(crate::publication_receipts::MAX_CANDIDATES),
+        );
+    }
+    match timeout(CONTEXT_FETCH_TIMEOUT, rest.query(&filters)).await {
         Ok(Ok(events)) => match events.as_array() {
             Some(events) => match answered_receipts_for_watch(watch, events.iter().cloned()) {
-                Ok(receipts) => Some(receipts),
+                Ok(receipts) => {
+                    let delivered = !receipts.is_empty()
+                        || events.iter().any(|raw| {
+                            serde_json::from_value::<nostr::Event>(raw.clone()).is_ok_and(|event| {
+                                crate::publication_receipts::verified_candidate(
+                                    &event,
+                                    &evidence.published_event_ids,
+                                    rest.keys.public_key(),
+                                    watch.channel_id,
+                                    watch.turn_started_at,
+                                )
+                            })
+                        });
+                    Some((delivered, receipts))
+                }
                 Err(error) => {
                     tracing::warn!(
                         channel = %watch.channel_id,
@@ -3209,7 +3227,9 @@ fn spawn_publication_silence_notice(
     let turn_id = turn_id.to_string();
     tokio::spawn(async move {
         if !publication_missing(&watch, &ctx.publication_tracker) {
-            if let Some(receipts) = self_authored_answer_receipts(&watch, &ctx.rest_client).await {
+            if let Some((_, receipts)) =
+                self_authored_answer_receipts(&watch, &ctx.rest_client, &evidence).await
+            {
                 persist_answered_receipts(&ctx, receipts);
             }
             return;
@@ -3219,14 +3239,16 @@ fn spawn_publication_silence_notice(
         // a successful report does not race its own failure notice.
         tokio::time::sleep(PUBLICATION_SETTLE_DELAY).await;
         if !publication_missing(&watch, &ctx.publication_tracker) {
-            if let Some(receipts) = self_authored_answer_receipts(&watch, &ctx.rest_client).await {
+            if let Some((_, receipts)) =
+                self_authored_answer_receipts(&watch, &ctx.rest_client, &evidence).await
+            {
                 persist_answered_receipts(&ctx, receipts);
             }
             return;
         }
-        match self_authored_answer_receipts(&watch, &ctx.rest_client).await {
-            Some(receipts) if receipts.is_empty() => {}
-            Some(receipts) => {
+        match self_authored_answer_receipts(&watch, &ctx.rest_client, &evidence).await {
+            Some((false, _)) => {}
+            Some((true, receipts)) => {
                 persist_answered_receipts(&ctx, receipts);
                 return;
             }
@@ -9132,6 +9154,62 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             now.saturating_sub(ctx.answered_watermark_retention_secs),
         );
         assert!(!merged.exact.contains(&silent_turn.id.to_hex()));
+    }
+
+    #[tokio::test]
+    async fn flat_dm_publish_is_pull_verified_without_a_reply_tag() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        let event = buzz_sdk::build_message(channel, "done", None, &[], false, &[])
+            .unwrap()
+            .sign_with_keys(&keys)
+            .unwrap();
+        let id = event.id;
+        let watch = PublicationWatch {
+            channel_id: channel,
+            trigger_event_id: "a".repeat(64),
+            answered_event_ids: vec!["a".repeat(64)],
+            is_dm: true,
+            observed_at_start: 0,
+            turn_started_at: event.created_at,
+            thread_tags: ThreadTags::default(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let body = serde_json::json!([event]).to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 16384];
+            let read = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..read]);
+            assert!(
+                request.contains(&id.to_hex()),
+                "the query must include the exact CLI receipt id"
+            );
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let rest = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys,
+            auth_tag_json: None,
+        };
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.published_event_ids.insert(id);
+        let (delivered, replies) = self_authored_answer_receipts(&watch, &rest, &evidence)
+            .await
+            .unwrap();
+        assert!(
+            delivered,
+            "flat DM publication must suppress the false silence warning"
+        );
+        assert!(
+            replies.is_empty(),
+            "delivery does not manufacture a thread reply"
+        );
+        server.await.unwrap();
     }
 
     #[test]

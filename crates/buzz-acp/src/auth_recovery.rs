@@ -15,6 +15,7 @@ use std::{
 
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_BATCHES: usize = 512;
+const MAX_COMPLETED: usize = 20_000;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct SavedBatch {
@@ -85,6 +86,9 @@ struct Journal {
     version: u32,
     identity: String,
     batches: Vec<SavedBatch>,
+    /// Locally completed turns, independent of public replies or thread layout.
+    #[serde(default)]
+    completed: std::collections::BTreeMap<nostr::EventId, u64>,
 }
 
 pub(crate) struct AuthRecovery {
@@ -121,10 +125,14 @@ impl AuthRecovery {
                 );
                 let parsed: Journal = serde_json::from_slice(&fs::read(&path)?)?;
                 anyhow::ensure!(
-                    parsed.version == 1
+                    matches!(parsed.version, 1 | 2)
                         && parsed.identity == identity
                         && parsed.batches.len() <= MAX_BATCHES,
                     "authentication recovery identity/version/size mismatch"
+                );
+                anyhow::ensure!(
+                    parsed.completed.len() <= MAX_COMPLETED,
+                    "completion journal full"
                 );
                 for batch in &parsed.batches {
                     for (event, _) in batch.events.iter().chain(&batch.cancelled) {
@@ -134,9 +142,10 @@ impl AuthRecovery {
                 parsed
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Journal {
-                version: 1,
+                version: 2,
                 identity,
                 batches: vec![],
+                completed: Default::default(),
             },
             Err(e) => return Err(e.into()),
         };
@@ -209,7 +218,45 @@ impl AuthRecovery {
         next.batches.retain(|b| !b.events.is_empty());
         self.persist(next)
     }
-    fn persist(&mut self, next: Journal) -> anyhow::Result<()> {
+    pub(crate) fn completed_since(&self, since: u64) -> std::collections::HashSet<String> {
+        self.journal
+            .completed
+            .iter()
+            .filter(|(_, timestamp)| **timestamp >= since)
+            .map(|(id, _)| id.to_hex())
+            .collect()
+    }
+
+    /// Retire retained work and record completion in one durable write. Also
+    /// records ordinary turns that were never held for an account switch.
+    pub(crate) fn finish(
+        &mut self,
+        ids: &std::collections::HashSet<nostr::EventId>,
+        retain_since: u64,
+    ) -> anyhow::Result<()> {
+        let mut next = self.journal.clone();
+        next.completed
+            .retain(|_, timestamp| *timestamp >= retain_since);
+        let now = nostr::Timestamp::now().as_secs();
+        for id in ids {
+            next.completed.insert(*id, now);
+        }
+        anyhow::ensure!(
+            next.completed.len() <= MAX_COMPLETED,
+            "completion journal full"
+        );
+        for batch in &mut next.batches {
+            batch.events.retain(|(event, _)| !ids.contains(&event.id));
+            batch
+                .cancelled
+                .retain(|(event, _)| !ids.contains(&event.id));
+        }
+        next.batches.retain(|batch| !batch.events.is_empty());
+        self.persist(next)
+    }
+    fn persist(&mut self, mut next: Journal) -> anyhow::Result<()> {
+        // Older brokers reject v2 rather than silently erasing completed ids.
+        next.version = 2;
         let bytes = serde_json::to_vec(&next)?;
         anyhow::ensure!(
             bytes.len() as u64 <= MAX_BYTES,
@@ -294,7 +341,7 @@ mod tests {
                 .len(),
             1
         );
-        queue.complete_auth_recovery(&retried).unwrap();
+        queue.complete_auth_recovery(&retried, Some(0)).unwrap();
         assert!(AuthRecovery::open(&root, "agent", "relay")
             .unwrap()
             .batches()
@@ -303,6 +350,70 @@ mod tests {
             .unwrap()
             .batches()
             .is_empty());
+    }
+
+    #[test]
+    fn ordinary_and_resumed_turn_completion_survives_restart_without_a_reply_tag() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let ordinary = batch();
+        let resumed = batch();
+        let mut queue = EventQueue::new(DedupMode::Queue)
+            .with_auth_recovery(AuthRecovery::open(&root, "agent", "relay").unwrap());
+        queue.complete_auth_recovery(&ordinary, Some(0)).unwrap();
+        queue.hold_for_auth(resumed.clone()).unwrap();
+        queue.complete_auth_recovery(&resumed, Some(0)).unwrap();
+        drop(queue);
+        let reopened = AuthRecovery::open(&root, "agent", "relay").unwrap();
+        assert!(reopened.batches().is_empty());
+        assert_eq!(
+            reopened.completed_since(0),
+            std::collections::HashSet::from([
+                ordinary.events[0].event.id.to_hex(),
+                resumed.events[0].event.id.to_hex(),
+            ])
+        );
+        assert!(reopened
+            .completed_since(nostr::Timestamp::now().as_secs() + 1)
+            .is_empty());
+    }
+
+    #[test]
+    fn progress_reply_pruning_is_not_a_completed_turn_receipt() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let original = batch();
+        let mut queue = EventQueue::new(DedupMode::Queue)
+            .with_auth_recovery(AuthRecovery::open(&root, "agent", "relay").unwrap());
+        queue.hold_for_auth(original.clone()).unwrap();
+        queue.complete_auth_recovery(&original, None).unwrap();
+        let reopened = AuthRecovery::open(&root, "agent", "relay").unwrap();
+        assert!(reopened.completed_since(0).is_empty());
+    }
+
+    #[test]
+    fn failed_completion_write_retains_work_and_retry_commits_both_states() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let original = batch();
+        let mut store = AuthRecovery::open(&root, "agent", "relay").unwrap();
+        store.hold(&original).unwrap();
+        let ids = std::collections::HashSet::from([original.events[0].event.id]);
+        let backup = store.path.with_extension("backup");
+        fs::rename(&store.path, &backup).unwrap();
+        fs::create_dir(&store.path).unwrap();
+        assert!(store.finish(&ids, 0).is_err());
+        assert_eq!(store.batches().len(), 1);
+        assert!(store.completed_since(0).is_empty());
+        fs::remove_dir(&store.path).unwrap();
+        fs::rename(backup, &store.path).unwrap();
+        store.finish(&ids, 0).unwrap();
+        let reopened = AuthRecovery::open(&root, "agent", "relay").unwrap();
+        assert!(reopened.batches().is_empty());
+        assert_eq!(
+            reopened.completed_since(0),
+            std::collections::HashSet::from([original.events[0].event.id.to_hex()])
+        );
     }
     #[test]
     fn cancelled_carryover_is_replay_fenced_before_and_after_restart() {
@@ -351,7 +462,7 @@ mod tests {
             original.cancelled_events[0].event.id
         );
         assert_eq!(resumed.cancel_reason, original.cancel_reason);
-        queue.complete_auth_recovery(&resumed).unwrap();
+        queue.complete_auth_recovery(&resumed, Some(0)).unwrap();
         assert!(AuthRecovery::open(&root, "agent", "relay")
             .unwrap()
             .batches()

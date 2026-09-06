@@ -134,6 +134,8 @@ pub(crate) struct TurnDeliveryEvidence {
     pub publish_attempt_count: usize,
     /// Number of those calls that emitted a failed/error update.
     pub publish_failure_count: usize,
+    /// Candidate CLI receipts, verified against signed relay events before use.
+    pub published_event_ids: HashSet<nostr::EventId>,
     publish_tool_ids: HashSet<String>,
     failed_publish_tool_ids: HashSet<String>,
 }
@@ -172,6 +174,9 @@ impl TurnDeliveryEvidence {
     }
 
     fn record_tool_call_update(&mut self, update: &serde_json::Value) {
+        // Claude supplies completed Bash input in an update, after the initial
+        // tool_call. Process either shape before interpreting the result.
+        self.record_tool_call(update);
         let Some(tool_id) = update.get("toolCallId").and_then(|value| value.as_str()) else {
             return;
         };
@@ -186,6 +191,14 @@ impl TurnDeliveryEvidence {
             || update.pointer("/rawOutput/error").is_some();
         if failed && self.failed_publish_tool_ids.insert(tool_id.to_owned()) {
             self.publish_failure_count += 1;
+        }
+        if !failed && update.get("status").and_then(|v| v.as_str()) == Some("completed") {
+            if let Some(output) = update.get("rawOutput") {
+                crate::publication_receipts::collect_candidates(
+                    output,
+                    &mut self.published_event_ids,
+                );
+            }
         }
     }
 }
@@ -5517,6 +5530,30 @@ printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
         let snippet = normalized_snippet(&text, FINAL_ANSWER_SNIPPET_CHARS).unwrap();
         assert_eq!(snippet.chars().count(), FINAL_ANSWER_SNIPPET_CHARS + 1);
         assert!(snippet.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn delivery_evidence_accepts_claude_late_bash_input_and_cli_receipt() {
+        let mut client = spawn_inert_client().await;
+        let event_id = "a".repeat(64);
+        for update in [
+            serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"bash-1", "title":"Bash"}),
+            serde_json::json!({"sessionUpdate":"tool_call_update", "toolCallId":"bash-1",
+                "rawInput":{"command":"buzz messages send --content result"}}),
+            serde_json::json!({"sessionUpdate":"tool_call_update", "toolCallId":"bash-1", "status":"completed",
+                "rawOutput":[{"type":"text", "text":serde_json::json!({"accepted":true,"event_id":event_id}).to_string()}]}),
+        ] {
+            let message = serde_json::json!({"params":{"update":update}});
+            let _ = client.handle_session_update(&message);
+            let _ = client.handle_session_update(&message);
+        }
+        let evidence = client.turn_delivery_evidence();
+        assert_eq!(evidence.publish_attempt_count, 1);
+        assert_eq!(evidence.publish_failure_count, 0);
+        assert_eq!(
+            evidence.published_event_ids,
+            HashSet::from([nostr::EventId::from_hex(&event_id).unwrap()])
+        );
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

@@ -22,10 +22,18 @@ Record the installed build, entry point, actions, actual result and evidence. So
 
 Account acceptance must cover Settings, an agent profile, the in-conversation editor and DM account control; mouse and keyboard; long account names; token expiry; invalid destination; individual and all-agent scope; multiple communities; stopped agents; active work; repeated switch requests; removal; and application restart during a switch. Retained work must be continued without replaying confirmed side effects. Unknown outcomes of external operations require reconciliation before repetition.
 
-## Current implementation boundary
+## Implementation milestones
+
+The single-agent lifecycle is implemented: an explicit Claude token change durably captures each community runtime's running intent, pauses and retains work, replaces the broker, and loads the provider session under the destination token. Failed switches retain Retry and account selection. Startup recovery and the native running-account label were exercised in the installed, locally signed MacBook Pro build at `789863d85`.
+
+The delivery follow-up distinguishes publication from completion. ACP recognizes late tool input and verifies accepted CLI event IDs against signed relay messages, including unthreaded DM replies. A separate local completion journal prevents normally finished requests from replaying on managed-account restarts. It records exact request IDs only after `EndTurn`; a progress reply is not a completed turn. The journal is scoped to the agent and relay, bounded to 20,000 receipts within the replay horizon, and atomically retires retained requests with completion. Version 2 rejects older brokers that would discard those records. The optional answered-watermark experiment remains independent. This does not provide exactly-once execution for arbitrary external tools or unknown crash outcomes.
+
+Default/override, all-old-account scope and integrated move-or-stop removal remain subsequent work. Source checks and installed workflow acceptance must be reported separately for each milestone.
+
+## Initial migration boundary
 
 The initial migration slice replaces the shared raw select with Buzz's radio menu and retires Claude login creation/reconnect. Existing login accounts remain readable and removable; existing consumers keep their guarded startup path until explicitly migrated. Token creation and renewal remain available. The account-store secret containment and OpenAI login behavior are preserved.
 
-The default/override model, fleet-scope dialog, durable pause/switch/resume transaction and integrated move-and-remove workflow are subsequent lifecycle work. The initial slice does not implement them and must not be described as the completed redesign.
+The initial migration slice did not implement the lifecycle transaction or the default/override, fleet-scope and removal flows. It must not be described as the completed redesign.
 
 An isolated real Claude adapter probe demonstrated process restart and session loading using the same token. A second probe canceled an active shell operation after its first file write, then loaded the session and completed the remaining write once. That is adapter-level evidence; it does not establish cross-account continuation, full Buzz integration, or exactly-once behavior for arbitrary external tools.

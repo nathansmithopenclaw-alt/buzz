@@ -448,7 +448,11 @@ impl EventQueue {
         self.in_flight_batches.get(scope).cloned()
     }
 
-    pub(crate) fn complete_auth_recovery(&mut self, batch: &FlushBatch) -> anyhow::Result<()> {
+    pub(crate) fn complete_auth_recovery(
+        &mut self,
+        batch: &FlushBatch,
+        completed_since: Option<u64>,
+    ) -> anyhow::Result<()> {
         if let Some(store) = &mut self.auth_recovery {
             let ids = batch
                 .events
@@ -456,7 +460,11 @@ impl EventQueue {
                 .chain(&batch.cancelled_events)
                 .map(|event| event.event.id)
                 .collect();
-            store.complete(&ids)?;
+            if let Some(since) = completed_since {
+                store.finish(&ids, since)?;
+            } else {
+                store.complete(&ids)?;
+            }
         }
         let ids: HashSet<_> = batch
             .events
@@ -2649,7 +2657,7 @@ mod tests {
         queue.hold_for_auth(batch.clone()).unwrap();
         queue.hold_for_auth(batch.clone()).unwrap();
         assert_eq!(queue.held_auth_batches().len(), 1);
-        queue.complete_auth_recovery(&batch).unwrap();
+        queue.complete_auth_recovery(&batch, Some(0)).unwrap();
         assert_eq!(queue.resume_after_auth().unwrap(), 0);
         assert!(queue.flush_next().is_none());
         let reopened = crate::auth_recovery::AuthRecovery::open(
