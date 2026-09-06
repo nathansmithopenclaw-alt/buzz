@@ -566,6 +566,7 @@ fn control(dir: &Path, nonce: &str, token: &str, action: &str) -> Result<(), Str
                         Some("quiesced") if action == "quiesce" => return Ok(()),
                         Some("released") if action == "release" => return Ok(()),
                         Some("resumed") if action == "resume_auth" => return Ok(()),
+                        Some("listening") if action == "probe" => return Ok(()),
                         Some("resume_failed") => {
                             return Err("Retained work could not be resumed; see agent error".into())
                         }
@@ -582,10 +583,46 @@ fn control(dir: &Path, nonce: &str, token: &str, action: &str) -> Result<(), Str
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+    if action == "probe" {
+        return Err("The agent started but has not confirmed its account binding yet. Restart to retry the check.".into());
+    }
     Err(
         "Agent has not confirmed the account handoff; work remains paused. Retry to check again."
             .into(),
     )
+}
+
+pub(crate) fn probe_runtime_binding(
+    runtime: &mut super::ManagedAgentPairRuntime,
+) -> Result<(), String> {
+    if runtime.lifecycle != ManagedAgentRuntimeLifecycle::Starting
+        || runtime.subscription_binding.is_none()
+    {
+        return Ok(());
+    }
+    let dir = runtime
+        .process
+        .account_control_dir
+        .as_deref()
+        .ok_or("Runtime account confirmation unavailable")?;
+    probe_and_confirm_lifecycle(dir, &runtime.start_nonce, &mut runtime.lifecycle)
+}
+
+fn probe_and_confirm_lifecycle(
+    dir: &Path,
+    nonce: &str,
+    lifecycle: &mut ManagedAgentRuntimeLifecycle,
+) -> Result<(), String> {
+    control(
+        dir,
+        nonce,
+        &uuid::Uuid::new_v4().simple().to_string(),
+        "probe",
+    )?;
+    if *lifecycle == ManagedAgentRuntimeLifecycle::Starting {
+        *lifecycle = ManagedAgentRuntimeLifecycle::Listening;
+    }
+    Ok(())
 }
 
 fn resume_and_confirm_lifecycle(

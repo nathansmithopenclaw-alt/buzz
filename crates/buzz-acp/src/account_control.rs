@@ -27,6 +27,7 @@ pub struct AccountControl {
     pause_requested: bool,
     last_token_action: Option<(String, String)>,
     last_request_id: String,
+    last_seen_request: Option<(String, String, String)>,
 }
 impl AccountControl {
     /// Construct only from trusted Desktop child environment, never relay payloads.
@@ -49,6 +50,7 @@ impl AccountControl {
             pause_requested: false,
             last_token_action: None,
             last_request_id: String::new(),
+            last_seen_request: None,
         }
     }
     /// Inspect only bounded non-secret IPC; avoids draining adapters on every tick.
@@ -63,8 +65,8 @@ impl AccountControl {
             return false;
         };
         request.nonce == self.nonce
-            && (self.last_token_action.as_ref() != Some(&(request.token, request.action))
-                || self.last_request_id != request.request_id)
+            && self.last_seen_request.as_ref()
+                != Some(&(request.token, request.action, request.request_id))
     }
 
     /// Read one bounded command. Call in the scheduling loop before admission;
@@ -86,12 +88,29 @@ impl AccountControl {
         {
             return Err("invalid subscription switch request generation".into());
         }
-        let key = (request.token.clone(), request.action.clone());
-        if self.last_token_action.as_ref() == Some(&key)
-            && self.last_request_id == request.request_id
-        {
+        let seen = (
+            request.token.clone(),
+            request.action.clone(),
+            request.request_id.clone(),
+        );
+        if self.last_seen_request.as_ref() == Some(&seen) {
             return Ok(());
         }
+        if request.action == "probe" {
+            // A probe cannot replace the correlation of a pause/resume that
+            // is still waiting for adapter cleanup or a durable queue commit.
+            let response = serde_json::to_vec(&Response {
+                nonce: &self.nonce,
+                token: &request.token,
+                status: "listening",
+                request_id: &request.request_id,
+            })
+            .map_err(|e| e.to_string())?;
+            write_response(dir, &response)?;
+            self.last_seen_request = Some(seen);
+            return Ok(());
+        }
+        let key = (request.token.clone(), request.action.clone());
         self.last_request_id = request.request_id;
         let status = match request.action.as_str() {
             "pause" if busy && self.held_by.as_ref().is_some_and(|v| v != &request.token) => "busy",
@@ -127,6 +146,7 @@ impl AccountControl {
         .map_err(|e| e.to_string())?;
         write_response(dir, &response)?;
         self.last_token_action = Some(key);
+        self.last_seen_request = Some(seen);
         Ok(())
     }
     /// Whether all dispatch and pool wake paths must remain paused.
@@ -229,6 +249,57 @@ fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn readiness_probe_is_generation_bound_and_preserves_a_busy_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut gate = AccountControl::new(Some(dir.path().into()), "generation".into());
+        gate.held_by = Some("a".repeat(32));
+        for nonce in ["stale", "generation"] {
+            std::fs::write(
+                dir.path().join("request.json"),
+                serde_json::json!({
+                    "nonce":nonce, "token":"b".repeat(32), "action":"probe", "request_id":"probe-1"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            if nonce == "stale" {
+                assert!(gate.poll(true).is_err());
+            } else {
+                gate.poll(true).unwrap();
+            }
+        }
+        let response: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("response.json")).unwrap())
+                .unwrap();
+        assert_eq!(response["status"], "listening");
+        assert_eq!(response["request_id"], "probe-1");
+        assert!(gate.is_quiesced());
+        assert!(!gate.take_resume_auth());
+        assert!(gate.take_pause().is_none());
+    }
+
+    #[test]
+    fn readiness_probe_cannot_replace_an_in_progress_pause_acknowledgment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut gate = AccountControl::new(Some(dir.path().into()), "generation".into());
+        for (action, request_id) in [("pause", "pause-1"), ("probe", "probe-1")] {
+            std::fs::write(dir.path().join("request.json"), serde_json::json!({
+                "nonce":"generation", "token":"a".repeat(32), "action":action, "request_id":request_id
+            }).to_string()).unwrap();
+            assert!(gate.has_pending_request());
+            gate.poll(true).unwrap();
+            assert!(!gate.has_pending_request());
+        }
+        assert_eq!(gate.take_pause(), Some("a".repeat(32)));
+        gate.finish_pause(true).unwrap();
+        let response: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("response.json")).unwrap())
+                .unwrap();
+        assert_eq!(response["status"], "paused");
+        assert_eq!(response["request_id"], "pause-1");
+        assert!(gate.is_quiesced());
+    }
     #[test]
     fn active_pause_requires_durable_ack_and_explicit_retry() {
         let dir = tempfile::tempdir().unwrap();

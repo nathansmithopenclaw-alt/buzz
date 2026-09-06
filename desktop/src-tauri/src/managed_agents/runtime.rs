@@ -1223,7 +1223,15 @@ pub fn start_managed_agent_process(
     record.last_error = None;
     record.last_error_code = None;
 
-    runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
+    let mut runtime = ManagedAgentPairRuntime::starting(process);
+    // The profile Start command runs this on its blocking worker. Its first
+    // lifecycle frame can precede the observer subscription; confirm the exact
+    // broker locally without releasing authentication holds.
+    if let Err(error) = super::subscription_binding::probe_runtime_binding(&mut runtime) {
+        record.last_error = Some(error.clone());
+        runtime.error = Some(error);
+    }
+    runtimes.insert(key, runtime);
     Ok(())
 }
 
