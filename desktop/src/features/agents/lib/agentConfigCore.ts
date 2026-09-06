@@ -249,7 +249,10 @@ export function deriveAgentConfigFieldModel({
       render: "control",
       value: valueFromEnv(config, runtime.thinkingEnvVar),
     });
-  } else if (runtime?.effortModelQualifier && scope === "instance") {
+  } else if (
+    runtime?.effortModelQualifier &&
+    (scope === "instance" || scope === "definition")
+  ) {
     fields.push({
       kind: "effort",
       optionSource: "harnessNative",

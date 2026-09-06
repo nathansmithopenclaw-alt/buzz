@@ -17,6 +17,7 @@ type SubmitProfilePersonaDialogOptions = {
   ) => Promise<CreateManagedAgentResponse>;
   createPersona: (input: CreatePersonaInput) => Promise<AgentPersona>;
   input: CreatePersonaInput | UpdatePersonaInput;
+  effortLevel?: string | null;
   managedAgent: ManagedAgent | undefined;
   onDone: () => void;
   previousPersona?: AgentPersona;
@@ -67,6 +68,7 @@ export async function submitProfilePersonaDialog({
   createManagedAgentForPersona,
   createPersona,
   input,
+  effortLevel,
   managedAgent,
   onDone,
   previousPersona,
@@ -88,12 +90,19 @@ export async function submitProfilePersonaDialog({
       }
 
       const persona = await updatePersona(input);
-      const agentUpdate = managedAgent
+      let agentUpdate = managedAgent
         ? personaManagedAgentUpdate(managedAgent, persona, {
             previousPersona,
             runtimes,
           })
         : null;
+      if (managedAgent && effortLevel !== undefined) {
+        agentUpdate = {
+          ...agentUpdate,
+          pubkey: managedAgent.pubkey,
+          effortLevel,
+        };
+      }
       const result = agentUpdate ? await updateManagedAgent(agentUpdate) : null;
       if (result?.profileSyncError) {
         toast.warning(

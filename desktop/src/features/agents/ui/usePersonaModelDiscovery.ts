@@ -416,6 +416,7 @@ export function usePersonaModelDiscovery({
     modelDiscoverySuccessfulEmpty,
     nativeEffortConfigId: activeModelDiscoveryData?.effortConfigId ?? null,
     nativeTuning: {
+      effortConfigId: activeModelDiscoveryData?.effortConfigId ?? null,
       effortOptions: nativeEffortOptions,
       inheritedModel: activeModelDiscoveryData?.agentDefaultModel ?? null,
       fastMode: {

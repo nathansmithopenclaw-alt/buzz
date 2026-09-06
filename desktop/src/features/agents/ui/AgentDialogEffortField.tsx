@@ -109,7 +109,7 @@ export function AgentDialogEffortField({
           htmlFor={`${scope}-agent-effort`}
           inheritedEffort={inheritedEffort}
           inheritFallbackLabel="Inherit (Codex default)"
-          label="Reasoning effort"
+          label="Thinking level"
           onChange={(effort) =>
             onModelChange(
               modelWithEffortQualifier({
@@ -124,8 +124,8 @@ export function AgentDialogEffortField({
           useCustomSelect
         />
         <p className="mt-1 text-xs text-muted-foreground">
-          Saved for this agent in its model ID. Applies on the next restart;
-          your global Codex config is unchanged.
+          Saved as this colleague’s default. Applies on the next restart. Change
+          a running conversation’s level in its activity panel.
         </p>
       </div>
     );
@@ -202,6 +202,7 @@ export function AgentDialogEffortSection({
   envVars: EnvVarsValue;
   instanceEffort?: ReturnType<typeof useInstanceEffort>;
   nativeTuning: {
+    effortConfigId?: string | null;
     effortOptions: ReadonlyArray<{ id: string; name?: string | null }> | null;
     inheritedModel: string | null;
     fastMode: {
@@ -220,6 +221,7 @@ export function AgentDialogEffortSection({
     runtime: fieldProps.runtime,
     disabled: fieldProps.disabled,
     effortOptions: nativeTuning.effortOptions,
+    effortConfigId: nativeTuning.effortConfigId,
   });
   const onEnvVarChange = (key: string, value: string) => {
     onBeforeChange?.();

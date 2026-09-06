@@ -31,7 +31,9 @@ export function EffortPickerField({
   onChange,
 }: {
   agent: ManagedAgent;
-  config: RuntimeConfigSurface | undefined;
+  config:
+    | Pick<RuntimeConfigSurface, "effortConfigId" | "effortOptions">
+    | undefined;
   disabled: boolean;
   /** The pending persisted effort form (`null` = adapter default). */
   value: string | null;
@@ -54,7 +56,7 @@ export function EffortPickerField({
         className="text-sm font-medium text-foreground"
         htmlFor="edit-agent-effort"
       >
-        Thinking effort
+        Thinking level
         <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
       </label>
       <PersonaDropdownField
@@ -68,8 +70,9 @@ export function EffortPickerField({
         value={selectValue}
       />
       <p className="text-xs text-muted-foreground">
-        Saved with this dialog and applied at the next session start. Clearing
-        restores existing defaults.
+        Saved with this dialog and applied on the next restart. Clearing
+        restores existing defaults. Change a running conversation’s level in its
+        activity panel.
       </p>
     </div>
   );

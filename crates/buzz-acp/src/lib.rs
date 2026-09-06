@@ -8,6 +8,7 @@ mod auth_recovery;
 mod config;
 mod engram_fetch;
 mod filter;
+mod live_effort;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -1734,6 +1735,9 @@ fn handle_relay_observer_control_event(
         }
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
+        }
+        Some("switch_effort") => {
+            pool.queue_live_effort(&payload, observer);
         }
         Some("publish_project_owner_announcements") => {
             handle_publish_project_owner_announcements_control(
@@ -3683,6 +3687,9 @@ async fn tokio_main() -> Result<()> {
     loop {
         let account_request_pending =
             account_control.has_pending_request() || pending_account_pause.is_some();
+        if !account_request_pending && !account_control.is_quiesced() {
+            pool.apply_pending_effort(observer.as_ref()).await;
+        }
         if account_request_pending {
             drain_idle_agent_notifications(&mut pool).await;
         }

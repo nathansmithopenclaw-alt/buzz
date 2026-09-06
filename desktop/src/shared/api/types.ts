@@ -468,7 +468,9 @@ export type SwitchManagedAgentModelStatus =
   | "failure";
 
 export type ControlResultFrame = {
-  type: "cancel_turn" | "switch_model";
+  type: "cancel_turn" | "switch_model" | "switch_effort";
+  sessionId?: string;
+  effort?: string;
   status: string;
   modelId?: string;
   /** Opaque per-pick id echoed from the request; correlates late frames. */

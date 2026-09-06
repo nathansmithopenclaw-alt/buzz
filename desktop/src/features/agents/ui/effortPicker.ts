@@ -10,6 +10,23 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  */
 export const EFFORT_DEFAULT_DROPDOWN_VALUE = "__effort_default__";
 
+/** A new pick or model change must be supported; unavailable discovery never
+ * rewrites or rejects an unchanged saved value during an unrelated edit. */
+export function validateSavedEffort(
+  value: string | null | undefined,
+  edited: boolean,
+  options: readonly { id: string }[] | null,
+): string | null {
+  if (
+    !value ||
+    !edited ||
+    options === null ||
+    options.some((option) => option.id === value)
+  )
+    return null;
+  return `Thinking level ${value} is not supported by this model. Choose an available level or inherit defaults.`;
+}
+
 /** Gate and options for the Save-gated local effort control. */
 export function effortPickerState({
   backend,

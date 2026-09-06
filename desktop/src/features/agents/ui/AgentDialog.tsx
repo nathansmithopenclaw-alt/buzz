@@ -62,6 +62,9 @@ type AgentDialogInstanceEditProps = {
 };
 
 type AgentDialogDefinitionEditProps = {
+  instanceEffort?: ReturnType<
+    typeof import("./useInstanceEffort").useInstanceEffort
+  >;
   mode: "definition-edit";
   open: boolean;
   title: string;

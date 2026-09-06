@@ -247,3 +247,20 @@ test("model selection clears the model-dependent Fast mode override", () => {
 
   assert.deepEqual(next.envVars, { KEEP: "x" });
 });
+
+test("capability-gated model changes preserve a legacy effort without overriding a new qualifier", () => {
+  const pick = (value, enabled) =>
+    selectionOnModelDropdownChange(
+      { ...base, model: "old-model[high]" },
+      {
+        nextValue: value,
+        effortModelQualifier: enabled,
+        clearKnownModelOnCustomEntry: false,
+        isModelCustom: false,
+      },
+    ).model;
+  assert.equal(pick("new-model", true), "new-model[high]");
+  assert.equal(pick("new-model[low]", true), "new-model[low]");
+  assert.equal(pick("new-model", false), "new-model");
+  assert.equal(pick("__auto_model__", true), "");
+});

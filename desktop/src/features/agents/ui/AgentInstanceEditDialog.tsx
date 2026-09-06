@@ -1,3 +1,4 @@
+import { AgentInstanceModelField } from "./AgentInstanceModelField";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -31,7 +32,7 @@ import {
 import { useFeatureEnabled } from "@/shared/features";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import { AgentDialogEffortSection } from "./AgentDialogEffortField";
-import { useInstanceEffort } from "./useInstanceEffort";
+import { useInstanceEffort, instanceEffortError } from "./useInstanceEffort";
 import {
   instanceModelDropdownOptions,
   instanceProviderDropdownOptions,
@@ -594,6 +595,10 @@ export function AgentInstanceEditDialog({
         nextValue,
         clearKnownModelOnCustomEntry: false,
         isModelCustom: false,
+        effortModelQualifier:
+          selectedRuntime?.effortModelQualifier &&
+          agent.effortLevel == null &&
+          instanceEffort.value == null,
       }),
     );
   }
@@ -644,6 +649,12 @@ export function AgentInstanceEditDialog({
       Number.isInteger(maxTurnsPerSessionNumber) &&
       maxTurnsPerSessionNumber >= 0 &&
       maxTurnsPerSessionNumber <= 10000);
+  const savedEffortError = instanceEffortError(
+    instanceEffort,
+    model,
+    selectedRuntime,
+    nativeTuning.effortOptions,
+  );
   const canSubmit =
     computeEditAgentFormValidity({
       name,
@@ -660,6 +671,7 @@ export function AgentInstanceEditDialog({
     providerValid &&
     !modelValidationError &&
     !effortValidationError &&
+    !savedEffortError &&
     sessionResidencyValid &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
@@ -1107,57 +1119,18 @@ export function AgentInstanceEditDialog({
               />
             ) : null}
 
-            {/* Model */}
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-model"
-              >
-                Model
-                {modelRequired ? (
-                  <span className="ml-1 text-destructive" aria-hidden="true">
-                    *
-                  </span>
-                ) : (
-                  <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-                )}
-              </label>
-              <PersonaDropdownField
-                disabled={updateMutation.isPending || modelDiscoveryLoading}
-                id="edit-agent-model"
-                onValueChange={handleModelDropdownChange}
-                options={modelDropdownOptions}
-                placeholder="Default model"
-                value={modelSelectValue}
-              />
-              {showCustomModelInput ? (
-                <div
-                  className={cn(
-                    "mt-2 flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    aria-label="Custom model ID"
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
-                    )}
-                    disabled={updateMutation.isPending}
-                    id="edit-agent-custom-model"
-                    onChange={(event) => setModel(event.target.value)}
-                    placeholder="Custom model ID"
-                    value={model}
-                  />
-                </div>
-              ) : null}
-              {modelStatusMessage ? (
-                <p className="text-xs text-muted-foreground">
-                  {modelStatusMessage}
-                </p>
-              ) : null}
-            </div>
+            <AgentInstanceModelField
+              disabled={updateMutation.isPending}
+              loading={modelDiscoveryLoading}
+              modelRequired={modelRequired}
+              model={model}
+              modelSelectValue={modelSelectValue}
+              modelDropdownOptions={modelDropdownOptions}
+              showCustomModelInput={showCustomModelInput}
+              modelStatusMessage={modelStatusMessage}
+              onModelChange={handleModelDropdownChange}
+              onCustomModelChange={setModel}
+            />
             <AgentDialogEffortSection
               disabled={updateMutation.isPending || modelDiscoveryLoading}
               envVars={envVars}
@@ -1169,7 +1142,11 @@ export function AgentInstanceEditDialog({
               runtime={selectedRuntime}
               scope="instance"
               setEnvVars={setEnvVars}
-              validationError={modelValidationError ?? effortValidationError}
+              validationError={
+                modelValidationError ??
+                effortValidationError ??
+                savedEffortError
+              }
               instanceEffort={instanceEffort}
             />
             <AgentAiDefaultsNotice

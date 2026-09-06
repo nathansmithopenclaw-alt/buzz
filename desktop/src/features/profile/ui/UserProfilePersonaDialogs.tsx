@@ -1,4 +1,7 @@
 import * as React from "react";
+import { useAgentConfigSurface } from "@/features/agents/hooks";
+import { useInstanceEffort } from "@/features/agents/ui/useInstanceEffort";
+import type { AgentDefinitionSubmitOptions } from "@/features/agents/ui/AgentDefinitionDialog";
 
 import type {
   AcpRuntimeCatalogEntry,
@@ -45,6 +48,7 @@ export function useCardMint(
 }
 
 export function UserProfilePersonaDialogs({
+  managedAgent,
   cardMintTarget,
   createError,
   instanceCount,
@@ -66,6 +70,7 @@ export function UserProfilePersonaDialogs({
   onExportSnapshot,
   onSubmit,
 }: {
+  managedAgent?: ManagedAgent;
   cardMintTarget: CardMintTarget | null;
   createError: Error | null;
   /** Number of managed-agent instances backed by the persona being deleted. */
@@ -86,8 +91,19 @@ export function UserProfilePersonaDialogs({
   onCloseExportSnapshot: () => void;
   onConfirmDelete: (persona: AgentPersona) => void;
   onExportSnapshot: (persona: AgentPersona) => void;
-  onSubmit: (input: CreatePersonaInput | UpdatePersonaInput) => Promise<void>;
+  onSubmit: (
+    input: CreatePersonaInput | UpdatePersonaInput,
+    options: AgentDefinitionSubmitOptions,
+  ) => Promise<void>;
 }) {
+  const { data: effortConfig } = useAgentConfigSurface(
+    managedAgent?.pubkey ?? null,
+  );
+  const instanceEffort = useInstanceEffort(
+    managedAgent,
+    personaDialogState !== null,
+    effortConfig,
+  );
   const runtimeCatalogStatus = runtimesLoading
     ? "loading"
     : runtimesError
@@ -96,6 +112,7 @@ export function UserProfilePersonaDialogs({
   return (
     <>
       <AgentDialog
+        instanceEffort={instanceEffort}
         description={personaDialogState?.description ?? ""}
         error={updateError ?? createError}
         initialValues={personaDialogState?.initialValues ?? null}

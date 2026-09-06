@@ -143,6 +143,7 @@ export type MockManagedAgentSeed = {
   restartDiff?: Array<{ field: string; change: unknown }>;
   autoRestartOnConfigChange?: boolean;
   model?: string | null;
+  effortLevel?: string | null;
   envVars?: Record<string, string>;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
@@ -431,11 +432,13 @@ type E2eConfig = {
     sendMessageErrors?: string[];
     /** Test-only observer control requests captured after mock publish. */
     observerControlResults?: Array<{
-      type: "cancel_turn" | "switch_model";
+      type: "cancel_turn" | "switch_model" | "switch_effort";
       status: string;
       channelId?: string | null;
       requestId?: string;
       modelId?: string;
+      sessionId?: string;
+      effort?: string;
     }>;
     /** Reject successive managed-agent starts, then resume. */
     startManagedAgentErrors?: string[];
@@ -716,6 +719,7 @@ type E2eConfig = {
      * returning a catalog.
      */
     discoverAgentModelsError?: string;
+    updateManagedAgentError?: string;
     // Backend provider mocks for the create-agent "Run on" section. See
     // tests/helpers/bridge.ts:MockBridgeOptions for semantics.
     backendProviders?: Array<{ id: string; binaryPath: string }>;
@@ -988,6 +992,7 @@ type RawRelayAgent = {
 };
 
 type RawManagedAgent = {
+  effort_level?: string | null;
   subscription_account_id?: string | null;
   subscription_account_inherit_default?: boolean;
   subscription_account_harness?: string | null;
@@ -1942,6 +1947,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     system_prompt: agent.system_prompt,
     avatar_url: agent.avatar_url ?? null,
     model: agent.model,
+    effort_level: agent.effort_level ?? null,
     provider: agent.provider ?? null,
     claude_account_id: agent.claude_account_id ?? null,
     claude_account_source: agent.claude_account_source ?? "credentials_file",
@@ -2515,7 +2521,8 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     parallelism: 1,
     system_prompt: null,
     avatar_url: seed.avatarUrl ?? null,
-    model: null,
+    model: seed.model ?? null,
+    effort_level: seed.effortLevel ?? null,
     claude_account_id:
       seed.claudeAccountId !== undefined
         ? seed.claudeAccountId
@@ -5076,23 +5083,29 @@ let mockObserverControlSeq = 0;
 function emitMockObserverControlResult(
   agentPubkey: string,
   request: {
-    type: "cancel_turn" | "switch_model";
+    type: "cancel_turn" | "switch_model" | "switch_effort";
     channelId?: string | null;
     requestId?: string;
     modelId?: string;
+    sessionId?: string;
+    effort?: string;
   },
   result: {
-    type: "cancel_turn" | "switch_model";
+    type: "cancel_turn" | "switch_model" | "switch_effort";
     status: string;
     channelId?: string | null;
     requestId?: string;
     modelId?: string;
+    sessionId?: string;
+    effort?: string;
   },
 ) {
   const channelId = result.channelId ?? request.channelId ?? null;
   const payload = {
     type: result.type,
     status: result.status,
+    sessionId: result.sessionId ?? request.sessionId,
+    effort: result.effort ?? request.effort,
     ...(result.requestId !== undefined
       ? { requestId: result.requestId }
       : request.requestId !== undefined
@@ -10030,6 +10043,7 @@ async function handleUpdateManagedAgent(args: {
     pubkey: string;
     name?: string;
     model?: string | null;
+    effortLevel?: string | null;
     provider?: string | null;
     systemPrompt?: string | null;
     envVars?: Record<string, string>;
@@ -10043,6 +10057,9 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.model !== undefined) {
     agent.model = args.input.model;
+  }
+  if (args.input.effortLevel !== undefined) {
+    agent.effort_level = args.input.effortLevel;
   }
   if (args.input.provider !== undefined) {
     agent.provider = args.input.provider;
@@ -11399,10 +11416,12 @@ function sendToMockSocket(args: {
       const frame = event.tags.find((tag) => tag[0] === "frame")?.[1];
       if (frame === "control") {
         let payload: {
-          type: "cancel_turn" | "switch_model";
+          type: "cancel_turn" | "switch_model" | "switch_effort";
           channelId?: string | null;
           requestId?: string;
           modelId?: string;
+          sessionId?: string;
+          effort?: string;
         };
         try {
           payload = JSON.parse(event.content);
@@ -14764,6 +14783,9 @@ export function maybeInstallE2eTauriMocks() {
       case "agent_access_owner_only":
         return config?.mock?.ownerOnlyAccessBuild ?? false;
       case "update_managed_agent":
+        if (activeConfig?.mock?.updateManagedAgentError) {
+          throw new Error(activeConfig.mock.updateManagedAgentError);
+        }
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],
         );

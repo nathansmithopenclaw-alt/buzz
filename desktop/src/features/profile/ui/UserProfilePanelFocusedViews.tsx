@@ -24,7 +24,9 @@ import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 export function ActivityFocusedView({
   activityAgent,
   channelId,
+  canChangeEffort = false,
 }: {
+  canChangeEffort?: boolean;
   activityAgent: ProfileActivityAgent | null;
   channelId: string | null;
 }) {
@@ -45,6 +47,7 @@ export function ActivityFocusedView({
       data-testid="user-profile-activity-view"
     >
       <ManagedAgentSessionPanel
+        canChangeEffort={canChangeEffort}
         agent={activityAgent}
         autoTail
         channelId={channelId}

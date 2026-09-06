@@ -100,6 +100,7 @@ type MockPersonaSeed = {
   runtime?: string | null;
   /** Model pinned on the persona (a custom model id for Customize mode). */
   model?: string | null;
+  effortLevel?: string | null;
   /** Provider pinned on the persona. Leave empty for Codex/Claude runtimes. */
   provider?: string | null;
   namePool?: string[];
@@ -324,11 +325,13 @@ type MockBridgeOptions = {
   sendMessageErrors?: string[];
   /** Test-only observer control results emitted after mock control publishes. */
   observerControlResults?: Array<{
-    type: "cancel_turn" | "switch_model";
+    type: "cancel_turn" | "switch_model" | "switch_effort";
     status: string;
     channelId?: string | null;
     requestId?: string;
     modelId?: string;
+    sessionId?: string;
+    effort?: string;
   }>;
   /** Reject successive managed-agent starts, then resume. */
   startManagedAgentErrors?: string[];
@@ -630,6 +633,7 @@ type MockBridgeOptions = {
    * returning a catalog. Exercises the discovery-failure UI path.
    */
   discoverAgentModelsError?: string;
+  updateManagedAgentError?: string;
   /**
    * Providers returned by `discover_backend_providers`. Defaults to `[]`
    * (the "Run on" section stays hidden). Setting this renders the remote

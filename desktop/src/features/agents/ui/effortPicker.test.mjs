@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   EFFORT_DEFAULT_DROPDOWN_VALUE,
   effortPickerState,
+  validateSavedEffort,
   effortSelectionToPersistedValue,
 } from "./effortPicker.ts";
 
@@ -112,4 +113,17 @@ test("the sentinel selection persists as null (clear to adapter default)", () =>
 
 test("a concrete selection persists as its explicit effort level", () => {
   assert.equal(effortSelectionToPersistedValue("high"), "high");
+});
+
+test("a model change rejects an unsupported effort without silently clearing it", () => {
+  assert.match(
+    validateSavedEffort("ultra", true, [{ id: "low" }]),
+    /not supported/,
+  );
+  assert.equal(validateSavedEffort("low", true, [{ id: "low" }]), null);
+  assert.equal(validateSavedEffort(null, true, [{ id: "low" }]), null);
+});
+test("unrelated edits and failed discovery preserve the saved effort", () => {
+  assert.equal(validateSavedEffort("ultra", false, []), null);
+  assert.equal(validateSavedEffort("ultra", true, null), null);
 });

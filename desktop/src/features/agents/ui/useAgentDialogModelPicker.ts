@@ -1,4 +1,5 @@
 import * as React from "react";
+import { modelEffortPresentation } from "./modelEffortPresentation";
 
 import type {
   PersonaDropdownOption,
@@ -54,13 +55,17 @@ export function useAgentDialogModelPicker(input: PickerInput) {
   } = input;
   const completeModelOptions = React.useMemo(
     () =>
-      mergeRuntimeModelCatalog({
-        currentModel: model,
-        discovered: discoveredOptions,
-        provider,
-        runtimeId,
-      }),
-    [discoveredOptions, model, provider, runtimeId],
+      modelEffortPresentation(
+        mergeRuntimeModelCatalog({
+          currentModel: model,
+          discovered: discoveredOptions,
+          provider,
+          runtimeId,
+        }),
+        model,
+        effortModelQualifier,
+      ),
+    [discoveredOptions, model, provider, runtimeId, effortModelQualifier],
   );
   return {
     ...relayMeshModelPickerState({

@@ -63,10 +63,11 @@ that frontend inventory.
    `GOOSE_THINKING_EFFORT`, and Claude persists
    `BUZZ_ACP_THINKING_EFFORT`, which buzz-acp validates and applies through the
    adapter's native `effort` config option after model selection.
-3. **Field absence has a named reason, not a boolean.** Codex instance edits
+3. **Field absence has a named reason, not a boolean.** Codex instance and definition edits
    expose effort through the runtime-declared `effortModelQualifier` capability:
    the control reads and writes the saved model ID's `[level]` suffix and uses
-   the adapter's live native values. Global/definition/onboarding surfaces keep Codex effort
+   the adapter's live native values. Local managed-instance profile edits use the
+   canonical `effortLevel` override when native discovery is available. Global/onboarding surfaces keep Codex effort
    `ownedByModelId`; unsupported harnesses are `unsupportedByHarness`. Claude's
    control uses the selected model's live native values verbatim (including
    `default`); when either adapter omits effort for that model, render an explicit
@@ -244,7 +245,7 @@ that frontend inventory.
    panel shell or return navigation, but must not filter or replace profile
    content.
 14. **Instance effort is Save-gated.** `EffortPickerField` is controlled by
-   `AgentInstanceEditDialog`; it writes `effortLevel` through the normal locked
+   the instance dialog or profile editor; it writes `effortLevel` through the normal locked
    `update_managed_agent` call. Cancel and failed Save keep persisted effort
    unchanged. The former standalone persistence command is removed.
    When discovered native options make this picker available, it replaces the
@@ -259,14 +260,20 @@ that frontend inventory.
    canonical instance override restores existing defaults, not an invented
    token budget. No static catalog or qualifier migration is implied here.
 
-   **Cut invariant — live mid-conversation effort machinery was deliberately
-   removed.** Effort is spawn-scoped only: the worker holds one `startup_effort`
-   read from `BUZZ_ACP_EFFORT_LEVEL` and applies it once at session creation
-   (`apply_startup_effort` in `buzz-acp/src/pool.rs`); there is no pool-level
-   effort authority, no live effort switching, and no effort-ack frame. Do not
-   reintroduce a live effort-switch RPC, a pool effort field, or a
-   mid-conversation effort control without a plan ruling. The archived live-effort
-   machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
+   **Live effort is a separate, session-only control.** Nathan's 2026-09-06
+   plan ruling extends the former startup-only cut to existing conversations.
+   Saved defaults still apply through `startup_effort` at session creation.
+   The owner-authenticated `switch_effort` command names an exact channel and
+   ACP session. Queue it until the current response finishes, fence the owning
+   worker's next claim, then call the native `session/set_config_option` on that
+   same session. Never cancel, rotate, replay a prompt, edit global config, or
+   mutate the saved default to implement an effort pick. Native supported
+   options and an advertised `liveEffortSwitching` capability gate the control.
+   Only a matching request/channel/session/value receipt with a confirmed
+   native currentValue is applied; queued, rejected and unconfirmed are distinct.
+   Bound pending requests and replay receipts, invalidate stale session targets,
+   and retire poisoned transport streams. Retain small configuration snapshots
+   independently of the activity window; session rotation supersedes the old target.
 
 15. **The persona `description` is public display metadata.** It is optional,
    capped at 280 characters, and validated through the shared visible-text

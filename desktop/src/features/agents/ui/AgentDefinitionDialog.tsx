@@ -77,6 +77,10 @@ import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 import { AgentDefinitionDialogFooter } from "./AgentDefinitionDialogFooter";
 import { AgentDialogEffortSection } from "./AgentDialogEffortField";
+import {
+  instanceEffortError,
+  type useInstanceEffort,
+} from "./useInstanceEffort";
 import { parseModelEffortQualifier } from "./agentModelCatalog";
 import {
   definitionProviderDropdownOptions,
@@ -92,6 +96,7 @@ import {
   usePendingHarnessSelection,
 } from "./addCustomHarness";
 type AgentDefinitionDialogProps = {
+  instanceEffort?: ReturnType<typeof useInstanceEffort>;
   open: boolean;
   embedded?: boolean;
   title: string;
@@ -117,9 +122,11 @@ type AgentDefinitionDialogProps = {
 
 export type AgentDefinitionSubmitOptions = {
   publishCatalogUpdates: boolean;
+  effortLevel?: string | null;
 };
 
 export function AgentDefinitionDialog({
+  instanceEffort,
   open,
   embedded = false,
   title,
@@ -383,6 +390,7 @@ export function AgentDefinitionDialog({
         },
         {
           publishCatalogUpdates: publishCatalogUpdatesOnSave && hasUserChanges,
+          effortLevel: instanceEffort?.value,
         },
       );
       return;
@@ -566,8 +574,17 @@ export function AgentDefinitionDialog({
     provider: effectiveProvider,
     runtimeId: runtime,
   });
+  const savedEffortError = instanceEffortError(
+    instanceEffort,
+    model,
+    selectedRuntime,
+    nativeTuning.effortOptions,
+  );
   const canSubmit =
-    baseCanSubmit && !modelValidationError && !effortValidationError;
+    baseCanSubmit &&
+    !modelValidationError &&
+    !effortValidationError &&
+    !savedEffortError;
   const hideProviderIds = useHiddenProviderIds(bakedEnvKeys);
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
@@ -715,6 +732,10 @@ export function AgentDefinitionDialog({
         nextValue,
         clearKnownModelOnCustomEntry: true,
         isModelCustom,
+        effortModelQualifier:
+          selectedRuntime?.effortModelQualifier &&
+          instanceEffort?.agent?.effortLevel == null &&
+          instanceEffort?.value == null,
       }),
     );
   }
@@ -901,8 +922,13 @@ export function AgentDefinitionDialog({
               provider={effectiveProvider}
               runtime={selectedRuntime}
               scope="definition"
+              instanceEffort={instanceEffort}
               setEnvVars={setEnvVars}
-              validationError={modelValidationError ?? effortValidationError}
+              validationError={
+                modelValidationError ??
+                effortValidationError ??
+                savedEffortError
+              }
             />
           ) : null}
 
