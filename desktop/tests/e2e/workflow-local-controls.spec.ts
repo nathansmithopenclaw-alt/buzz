@@ -183,6 +183,10 @@ test("inserts template variables with keyboard control and restores the caret", 
     )
     .toBe("Hello {{trigger.text}}".length);
 
+  // The closing popover restores focus asynchronously. Let that restoration
+  // settle before Playwright selects all text for the next fill operation.
+  await expect(listbox).toBeHidden();
+  await waitForAnimations(page);
   await textarea.fill("Keep {{auth");
   await expect(listbox).toBeVisible();
   await textarea.press("Escape");
@@ -190,6 +194,7 @@ test("inserts template variables with keyboard control and restores the caret", 
   await expect(textarea).toBeFocused();
   await expect(textarea).toHaveValue("Keep {{auth");
 
+  await waitForAnimations(page);
   await textarea.fill("By {{auth");
   await textarea.press("Tab");
   await expect(textarea).toHaveValue("By {{trigger.author}}");
