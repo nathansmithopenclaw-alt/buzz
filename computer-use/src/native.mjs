@@ -179,6 +179,18 @@ export class NativeService {
         );
         if (observations.has(original) && !result.isError) this.observed = true;
         if (inputs.has(original)) this.observed = false;
+        // Some ACP clients render only content, ignoring MCP structuredContent.
+        // Keep observation tokens available to those clients without flattening
+        // image blocks or removing the structured result for richer clients.
+        if (result.structuredContent) {
+          const text = JSON.stringify(result.structuredContent);
+          if (!result.content?.some((block) => block.type === "text" && block.text === text)) {
+            return {
+              ...result,
+              content: [{ type: "text", text }, ...(result.content ?? [])],
+            };
+          }
+        }
         return result;
       } catch (error) {
         this.uncertain = true;

@@ -7,6 +7,34 @@ import { join } from "node:path";
 import { NativeService } from "../src/native.mjs";
 
 const driver = process.env.BUZZ_TEST_NATIVE_DRIVER;
+test("content-only ACP clients receive native snapshot tokens alongside unchanged images", async (t) => {
+  const directory = await mkdtemp("/tmp/buzz-native-content-");
+  const native = new NativeService({ driver: "test", socket: "test", registry: directory });
+  t.after(async () => {
+    await native.shutdown();
+    await rm(directory, { recursive: true });
+  });
+  const structuredContent = {
+    snapshot_id: "snapshot-42",
+    elements: [{ element_index: 1, element_token: "snapshot-42:1" }],
+  };
+  const image = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
+  const markdown = { type: "text", text: "[1] AXTextArea" };
+  native.connect = async () => ({ callTool: async () => ({
+    structuredContent, content: [image, markdown],
+  }) });
+  await native.acquire();
+  const result = await native.call("native_get_window_state", {});
+  const rendered = result.content.filter((block) => block.type === "text").map((block) => block.text);
+  assert.deepEqual(JSON.parse(rendered[0]), structuredContent);
+  assert.equal(result.structuredContent, structuredContent);
+  assert.equal(result.content[1], image);
+  assert.equal(result.content[2], markdown);
+  // Clients that already got JSON text should not receive it twice.
+  native.connect = async () => ({ callTool: async () => result });
+  assert.equal((await native.call("native_get_window_state", {})).content.length, 3);
+});
+
 test("pinned native daemon discovers real tools, arbitrates proxies and exits on parent EOF", {
   skip: !driver,
 }, async (t) => {
