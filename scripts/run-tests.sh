@@ -128,8 +128,8 @@ run_unit_tests() {
 
   # Tracker SDK + triage dispatcher (Dispatch P2): pure unit suites, no infra.
   # Mirrors the nextest path in `just test-unit` — keep the lists in step.
-  run_test_step "buzz-sdk unit tests" \
-    cargo test -p buzz-sdk --lib -- --nocapture
+  run_test_step "buzz-sdk tests" \
+    cargo test -p buzz-sdk -- --nocapture
   run_test_step "buzz-dispatcher unit tests" \
     cargo test -p buzz-dispatcher --lib -- --nocapture
   # ACP author-gate and queue tests are pure unit tests. Keep this fallback in

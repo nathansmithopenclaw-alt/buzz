@@ -659,7 +659,7 @@ pub struct SendMessageParams {
 fn validate_message_payload(content: &str, files: &[String]) -> Result<(), CliError> {
     if content.trim().is_empty() && files.is_empty() {
         return Err(CliError::Usage(
-            "refusing to send an empty message (stdin may have closed before content was written)"
+            "message is empty or whitespace-only; provide text with --content, read stdin with --content -, or attach a file with --content \"\" --file PATH"
                 .into(),
         ));
     }
