@@ -324,10 +324,12 @@ test("detail keeps canonical activity visible when comments and profiles degrade
   await page.getByTestId("open-dispatch-view").click();
   await openPrimaryIssue(page);
   await expect(page.getByText(/Comments are unavailable/)).toBeVisible();
+  await expect(page.getByText("Needs owner review")).toBeVisible();
+  // Upstream #7188 gives cold profile batches three exponential-backoff
+  // retries (1s + 2s + 4s) before exposing their terminal error state.
   await expect(
     page.getByText(/Some profile names are unavailable/),
-  ).toBeVisible();
-  await expect(page.getByText("Needs owner review")).toBeVisible();
+  ).toBeVisible({ timeout: 12_000 });
   await expect(page.getByTestId("dispatch-comment")).toHaveCount(0);
 });
 
