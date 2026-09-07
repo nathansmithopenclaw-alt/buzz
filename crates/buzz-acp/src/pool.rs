@@ -26,7 +26,7 @@ use fast_mode::apply_fast_mode;
 use fast_mode::resolve_fast_mode_config_option;
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -54,6 +54,9 @@ use crate::relay::{ChannelInfo, RestClient};
 use crate::scope::SessionScope;
 
 const PUBLICATION_SETTLE_DELAY: Duration = Duration::from_secs(1);
+/// A close is advisory cleanup after Buzz has already invalidated the session.
+/// Bound the stdio write so a wedged adapter cannot hold the requeued turn.
+const SESSION_CLOSE_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Counts visible, self-authored channel reports observed on the harness relay
 /// subscription. Reactions and typing/presence frames deliberately do not
@@ -226,6 +229,9 @@ pub struct SessionState {
     pending_causes: HashMap<SessionScope, SessionCreationCause>,
     /// Same, for the heartbeat session.
     heartbeat_pending_cause: Option<SessionCreationCause>,
+    /// Provider session IDs removed from the live maps but not yet handed to
+    /// `session/close`. The main loop drains this before reclaiming the worker.
+    pending_session_closes: VecDeque<String>,
     /// Sessions this worker has created over its whole life. Distinguishes a
     /// fresh/respawned worker (`0` — nothing was cached anywhere) from a warm
     /// worker meeting a new scope. Never reset by invalidation: a respawn
@@ -245,7 +251,8 @@ impl SessionState {
                 self.invalidate_scope(scope, cause);
             }
             PromptSource::Heartbeat => {
-                if self.heartbeat_session.take().is_some() {
+                if let Some(session_id) = self.heartbeat_session.take() {
+                    self.pending_session_closes.push_back(session_id);
                     self.heartbeat_pending_cause = Some(cause);
                 }
                 self.heartbeat_cause = None;
@@ -264,11 +271,12 @@ impl SessionState {
         self.canvas_sections.remove(scope);
         self.deliveries.remove(scope);
         self.session_causes.remove(scope);
-        let had_session = self.sessions.remove(scope).is_some();
-        if had_session {
+        let removed_session = self.sessions.remove(scope);
+        if let Some(session_id) = removed_session.as_ref() {
+            self.pending_session_closes.push_back(session_id.clone());
             self.pending_causes.insert(scope.clone(), cause);
         }
-        had_session
+        removed_session.is_some()
     }
 
     /// Consume the pending teardown cause for a scope that is about to get a
@@ -355,6 +363,10 @@ impl SessionState {
         if self.heartbeat_session.is_some() {
             self.heartbeat_pending_cause = Some(cause);
         }
+        self.pending_session_closes
+            .extend(self.sessions.values().cloned());
+        self.pending_session_closes
+            .extend(self.heartbeat_session.iter().cloned());
         self.sessions.clear();
         self.configs.clear();
         self.turn_counts.clear();
@@ -366,6 +378,10 @@ impl SessionState {
         self.deliveries.clear();
         self.session_causes.clear();
         self.heartbeat_cause = None;
+    }
+
+    fn has_pending_session_closes(&self) -> bool {
+        !self.pending_session_closes.is_empty()
     }
 
     pub(crate) fn mark_scope_delivery_success(
@@ -507,6 +523,56 @@ impl OwnedAgent {
             &self.agent_name,
             self.goose_system_prompt_supported,
         )
+    }
+
+    /// Hand every invalidated provider session to the adapter's teardown path.
+    ///
+    /// The request is intentionally not awaited past its write. `try_claim`
+    /// keeps this worker from opening a replacement session until the bounded
+    /// attempt finishes. A write error or timeout drops the remaining cleanup
+    /// queue so a wedged adapter cannot block the requeued turn.
+    async fn flush_pending_session_closes(&mut self) -> usize {
+        let mut sent = 0;
+        while let Some(session_id) = self.state.pending_session_closes.pop_front() {
+            match timeout(
+                SESSION_CLOSE_WRITE_TIMEOUT,
+                self.acp.session_close_fire_and_forget(&session_id),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    sent += 1;
+                    tracing::info!(
+                        target: "pool::session",
+                        session_id,
+                        "sent session/close for invalidated provider session"
+                    );
+                }
+                Ok(Err(error)) => {
+                    let dropped = 1 + self.state.pending_session_closes.len();
+                    self.state.pending_session_closes.clear();
+                    tracing::warn!(
+                        target: "pool::session",
+                        %error,
+                        dropped,
+                        "session/close write failed; abandoning cleanup so dispatch can continue"
+                    );
+                    break;
+                }
+                Err(_) => {
+                    let dropped = 1 + self.state.pending_session_closes.len();
+                    self.state.pending_session_closes.clear();
+                    tracing::warn!(
+                        target: "pool::session",
+                        timeout_ms = SESSION_CLOSE_WRITE_TIMEOUT.as_millis(),
+                        dropped,
+                        "session/close write timed out; abandoning cleanup so dispatch can continue"
+                    );
+                    break;
+                }
+            }
+        }
+        sent
     }
 }
 
@@ -1192,12 +1258,12 @@ impl AgentPool {
         }
         // Hold the worker briefly at its response boundary until an exact-
         // session effort edit settles. Other workers remain available.
-        let effort_ready =
-            |agent: &OwnedAgent| {
-                !agent.state.sessions.iter().any(|(scope, session)| {
+        let effort_ready = |agent: &OwnedAgent| {
+            !agent.state.has_pending_session_closes()
+                && !agent.state.sessions.iter().any(|(scope, session)| {
                     self.live_effort.has_session(scope.channel_id(), session)
                 })
-            };
+        };
         // Pass 1: prefer agent with existing session for this scope.
         if let Some(scope) = scope {
             let idx = self.agents.iter().position(|slot| {
@@ -1242,6 +1308,17 @@ impl AgentPool {
     /// Whether any agent is currently idle (sitting in its slot).
     pub fn any_idle(&self) -> bool {
         !self.account_quiesced && self.agents.iter().any(|slot| slot.is_some())
+    }
+
+    /// Flush invalidated provider sessions on idle workers. Requeue state is
+    /// committed before callers invoke this; the bounded writes only gate reuse
+    /// of the same adapter process, never preservation of the interrupted batch.
+    pub async fn flush_pending_session_closes(&mut self) -> usize {
+        let mut sent = 0;
+        for agent in self.agents.iter_mut().flatten() {
+            sent += agent.flush_pending_session_closes().await;
+        }
+        sent
     }
 
     /// Whether any idle agent already has a session for `scope`.
@@ -9163,8 +9240,50 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         assert!(s.invalidate_scope(&ta, SessionCreationCause::OwnerRotate));
         assert!(!s.sessions.contains_key(&ta));
         assert!(!s.turn_counts.contains_key(&ta));
+        assert_eq!(
+            s.pending_session_closes.front().map(String::as_str),
+            Some("a")
+        );
         // Sibling thread's session survives.
         assert_eq!(s.sessions.get(&tb).map(String::as_str), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn invalidated_session_is_closed_before_worker_can_be_reclaimed() {
+        let script = r#"
+            read -t 2 CLOSE
+            echo '{"jsonrpc":"2.0","id":0,"result":{}}'
+            sleep 1
+        "#;
+        let acp = AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+            .await
+            .expect("spawn close proof ACP");
+        let scope = conv(Uuid::new_v4());
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "close-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        agent.state.sessions.insert(scope.clone(), "ses_old".into());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        pool.invalidate_scope_session(&scope);
+        assert!(pool.try_claim(Some(&scope)).is_none());
+        assert_eq!(pool.flush_pending_session_closes().await, 1);
+
+        let mut agent = pool
+            .try_claim(Some(&scope))
+            .expect("worker should be reclaimable after close is written");
+        agent.acp.shutdown().await;
     }
 
     fn batch_with_scope(scope: SessionScope, event: nostr::Event) -> FlushBatch {
@@ -10736,6 +10855,14 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
         s.invalidate_all(SessionCreationCause::AgentExited);
 
+        assert_eq!(
+            s.pending_session_closes
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>(),
+            HashSet::from(["s1".to_string(), "s2".to_string()])
+        );
+
         for source in [&a, &b] {
             s.sessions.insert(
                 SessionScope::Conversation {
@@ -10763,6 +10890,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             Some(SessionCreationCause::WorkerSpawn)
         );
         s.invalidate(&hb, SessionCreationCause::TurnTimeout);
+        assert_eq!(
+            s.pending_session_closes.front().map(String::as_str),
+            Some("hb-1")
+        );
         s.heartbeat_session = Some("hb-2".into());
         s.record_session_created(&hb);
         assert_eq!(
