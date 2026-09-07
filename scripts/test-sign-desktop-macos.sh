@@ -42,6 +42,13 @@ if env -u BUZZ_MACOS_SIGNING_IDENTITY BUZZ_MACOS_SIGNING_CONFIG="$ROOT/missing" 
 fi
 pass "missing configuration fails closed"
 
+printf 'export BUZZ_MACOS_SIGNING_IDENTITY=-\n' > "$ROOT/signing.env"
+env -u BUZZ_MACOS_SIGNING_IDENTITY BUZZ_MACOS_SIGNING_CONFIG="$ROOT/signing.env" \
+    BUZZ_MACOS_SIGNING_VERIFY_DELAY_SECONDS=0 \
+    "$REPO_ROOT/scripts/sign-desktop-macos.sh" aarch64-apple-darwin "$APP" >/dev/null
+pass "signer loads the selected local configuration"
+
+
 BUZZ_MACOS_SIGNING_IDENTITY=- BUZZ_MACOS_SIGNING_VERIFY_DELAY_SECONDS=0 \
     "$REPO_ROOT/scripts/sign-desktop-macos.sh" aarch64-apple-darwin "$APP" >/dev/null
 "$REPO_ROOT/scripts/verify-desktop-bundle.sh" aarch64-apple-darwin "$APP" >/dev/null
