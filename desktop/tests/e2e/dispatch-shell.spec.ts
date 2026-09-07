@@ -28,7 +28,7 @@ test("Dispatch experiment enables the sidebar route shell", async ({
   ).toBeVisible();
 });
 
-test("Dispatch shows a retrying state and recovers from a rate-limited history page", async ({
+test("Dispatch recovers from a rate-limited history page through shared retry", async ({
   page,
 }) => {
   const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -57,12 +57,31 @@ test("Dispatch shows a retrying state and recovers from a rate-limited history p
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-dispatch-view").click();
 
-  await expect(page.getByTestId("dispatch-rate-limit-retrying")).toBeVisible();
-  await expect(
-    page.getByTestId("dispatch-rate-limit-retrying-loading"),
-  ).toContainText("retrying Tracker history");
-  await expect(page.getByTestId("dispatch-rate-limit-retrying")).toHaveCount(0);
+  // Upstream #7188 retries a rate-limited history CLOSED inside the shared
+  // relay client, before Dispatch's outer retry state observes a rejection.
   await expect(page.getByTestId("dispatch-new-issue")).toBeEnabled();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ workspaceId }) => {
+          const trackerFilters =
+            window.__BUZZ_E2E_DISPATCH_HISTORY_FILTERS__?.filter(
+              (filter) =>
+                filter["#h"]?.includes(workspaceId) &&
+                filter.kinds?.includes(40020) &&
+                filter.kinds?.includes(40021),
+            ) ?? [];
+          const counts = new Map<string, number>();
+          for (const filter of trackerFilters) {
+            const key = JSON.stringify(filter);
+            counts.set(key, (counts.get(key) ?? 0) + 1);
+          }
+          return Math.max(0, ...counts.values());
+        },
+        { workspaceId },
+      ),
+    )
+    .toBeGreaterThan(1);
 });
 
 test("Dispatch merges a live revision without refetching cold history", async ({
