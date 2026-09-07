@@ -21,7 +21,9 @@ const MAX_NAME_LEN: usize = 128;
 const MAX_QNAME_LEN: usize = 64;
 const MAX_TOOLS_PER_SESSION: usize = 128;
 const MAX_DESCRIPTION_BYTES: usize = 1024;
-const MAX_SCHEMA_BYTES: usize = 4096;
+// Native computer-use schemas include exact-target and freshness constraints.
+// Keep those intact; 4 KiB excluded the pinned driver's 4,403-byte click schema.
+const MAX_SCHEMA_BYTES: usize = 16 * 1024;
 const MARKER_FIELD_MAX: usize = 256;
 pub const MAX_MCP_SERVERS: usize = 16;
 const MAX_HOOK_RESULT_BYTES: usize = 16 * 1024;
@@ -282,13 +284,18 @@ impl McpRegistry {
                 if reg.by_qname.contains_key(&qname) {
                     return Err(AgentError::Mcp(format!("duplicate tool: {qname}")));
                 }
+                let Some(input_schema) =
+                    cap_schema(&qname, Value::Object((*t.input_schema).clone()))
+                else {
+                    continue;
+                };
                 reg.defs.push(ToolDef {
                     name: qname.clone(),
                     description: clamp(
                         t.description.as_deref().unwrap_or("").to_owned(),
                         MAX_DESCRIPTION_BYTES,
                     ),
-                    input_schema: cap_schema(&qname, Value::Object((*t.input_schema).clone())),
+                    input_schema,
                 });
                 reg.by_qname.insert(qname, Entry { server_idx, bare });
             }
@@ -878,15 +885,44 @@ fn timeout_msg(stage: &str, name: &str, t: Duration) -> String {
     format!("{stage} {name}: timeout after {}s", t.as_secs())
 }
 
-fn cap_schema(qname: &str, schema: Value) -> Value {
+fn cap_schema(qname: &str, schema: Value) -> Option<Value> {
     let size = serde_json::to_vec(&schema).map(|b| b.len()).unwrap_or(0);
     if size <= MAX_SCHEMA_BYTES {
-        return schema;
+        return Some(schema);
     }
     tracing::warn!(
-        "tool {qname} schema is {size} bytes (>{MAX_SCHEMA_BYTES}); replacing with empty object"
+        "tool {qname} schema is {size} bytes (>{MAX_SCHEMA_BYTES}); omitting tool rather than discarding its argument contract"
     );
-    Value::Object(Map::new())
+    None
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn complete_native_click_schema_survives_discovery() {
+        // Captured from the pinned real driver's tools/list response.
+        let schema: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/native-click-cua-0.23.2.json"
+        ))
+        .unwrap();
+        assert!(serde_json::to_vec(&schema).unwrap().len() > 4096);
+        assert_eq!(
+            cap_schema("buzz-computer-use__native_click", schema.clone()),
+            Some(schema)
+        );
+    }
+
+    #[test]
+    fn excessive_schema_is_omitted_instead_of_advertised_without_constraints() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["target"],
+            "description": "x".repeat(MAX_SCHEMA_BYTES),
+        });
+        assert_eq!(cap_schema("oversized", schema), None);
+    }
 }
 
 #[cfg(unix)]
