@@ -36,6 +36,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+if env -u BUZZ_MACOS_SIGNING_IDENTITY BUZZ_MACOS_SIGNING_CONFIG="$ROOT/missing" \
+    "$REPO_ROOT/scripts/sign-desktop-macos.sh" aarch64-apple-darwin "$APP" >/dev/null 2>&1; then
+    fail "missing configuration silently fell back to ad hoc"
+fi
+pass "missing configuration fails closed"
+
 BUZZ_MACOS_SIGNING_IDENTITY=- BUZZ_MACOS_SIGNING_VERIFY_DELAY_SECONDS=0 \
     "$REPO_ROOT/scripts/sign-desktop-macos.sh" aarch64-apple-darwin "$APP" >/dev/null
 "$REPO_ROOT/scripts/verify-desktop-bundle.sh" aarch64-apple-darwin "$APP" >/dev/null

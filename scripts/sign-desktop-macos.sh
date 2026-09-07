@@ -7,8 +7,8 @@ set -euo pipefail
 #
 # Usage: ./scripts/sign-desktop-macos.sh [target-triple] [path-to-Buzz.app]
 #
-# Ad hoc development signing (default):
-#   ./scripts/sign-desktop-macos.sh
+# Explicit ad hoc development signing:
+#   BUZZ_MACOS_SIGNING_IDENTITY=- ./scripts/sign-desktop-macos.sh
 #
 # Developer ID rollout signing:
 #   BUZZ_MACOS_SIGNING_IDENTITY='<certificate SHA-1 or exact common name>' \
@@ -21,7 +21,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")"
 APP="${2:-$TARGET_DIR/$TARGET/release/bundle/macos/Buzz.app}"
 ENTITLEMENTS="$REPO_ROOT/desktop/src-tauri/Entitlements.plist"
-IDENTITY="${BUZZ_MACOS_SIGNING_IDENTITY:--}"
+source "$REPO_ROOT/scripts/macos-signing-config.sh"
+IDENTITY="${BUZZ_MACOS_SIGNING_IDENTITY:-}"
 KEYCHAIN="${BUZZ_MACOS_SIGNING_KEYCHAIN:-}"
 EXPECTED_TEAM_ID="${BUZZ_MACOS_EXPECTED_TEAM_ID:-}"
 VERIFY_DELAY="${BUZZ_MACOS_SIGNING_VERIFY_DELAY_SECONDS:-8}"
@@ -30,6 +31,8 @@ die() {
     echo "Error: $*" >&2
     exit 1
 }
+
+[[ -n "$IDENTITY" ]] || die "Configure ~/.config/buzz/macos-signing.env or select a signing identity; ad hoc requires explicit BUZZ_MACOS_SIGNING_IDENTITY=-"
 
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS code signing is only available on Darwin"
 [[ -d "$APP" ]] || die "app bundle not found: $APP"

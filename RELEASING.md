@@ -336,3 +336,15 @@ valid `latest.json`. The manifest covers all four platform keys
 (`darwin-aarch64`, `darwin-x86_64`, `linux-x86_64`,
 `windows-x86_64`); a missing entry usually means that platform's
 release job failed. Check the workflow run.
+
+### Local canonical macOS rollouts
+
+`sign-desktop-macos.sh` and `install-desktop-macos.sh` load the trusted local
+`~/.config/buzz/macos-signing.env` when no explicit signing identity is supplied.
+Set `BUZZ_MACOS_SIGNING_IDENTITY`, `BUZZ_MACOS_SIGNING_KEYCHAIN`,
+`BUZZ_MACOS_EXPECTED_TEAM_ID`, and `BUZZ_MACOS_EXPECTED_AUTHORITY` there.
+The identity must be a Developer ID Application certificate for canonical installs.
+Missing signing configuration fails closed; ad hoc development signing requires
+explicit `BUZZ_MACOS_SIGNING_IDENTITY=-` and cannot pass the canonical installer.
+Keep the bundle ID and signing requirement compatible across updates to preserve
+macOS privacy grants. Migrating an ad hoc installation may need a final grant.

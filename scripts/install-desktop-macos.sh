@@ -9,6 +9,13 @@ set -euo pipefail
 
 TARGET="${1:-aarch64-apple-darwin}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$REPO_ROOT/scripts/macos-signing-config.sh"
+[[ -n "${BUZZ_MACOS_EXPECTED_TEAM_ID:-}" && "${BUZZ_MACOS_EXPECTED_AUTHORITY:-}" == "Developer ID Application:"* ]] || {
+    echo "Error: canonical installation requires a configured Developer ID authority and Team ID." >&2
+    exit 1
+}
+export BUZZ_MACOS_EXPECTED_TEAM_ID BUZZ_MACOS_EXPECTED_AUTHORITY
+export BUZZ_MACOS_REQUIRE_TIMESTAMP=1 BUZZ_MACOS_REQUIRE_EMBEDDED_CHAIN=1
 TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")"
 BUILT_APP="$TARGET_DIR/$TARGET/release/bundle/macos/Buzz.app"
 DEST="/Applications/Buzz.app"
@@ -38,6 +45,24 @@ if [[ -n "$RUNNING_EVIDENCE" ]]; then
 fi
 
 "$REPO_ROOT/scripts/verify-desktop-bundle.sh" "$TARGET"
+
+# Preserve TCC identity across signed upgrades. The initial ad hoc-to-Developer
+# ID migration has no stable old requirement and can need one final grant.
+if [[ -d "$DEST" ]]; then
+    old_metadata="$(codesign --display --verbose=2 "$DEST" 2>&1)"
+    if grep -q '^Authority=Developer ID Application:' <<<"$old_metadata"; then
+        old_requirement="$(codesign -d -r- "$DEST" 2>&1 | sed -n 's/^designated => //p')"
+        new_requirement="$(codesign -d -r- "$BUILT_APP" 2>&1 | sed -n 's/^designated => //p')"
+        [[ -n "$old_requirement" && -n "$new_requirement" ]] || {
+            echo "Error: cannot establish signing identity continuity." >&2
+            exit 1
+        }
+        codesign --verify -R="$old_requirement" "$BUILT_APP"
+        codesign --verify -R="$new_requirement" "$DEST"
+    else
+        echo "Migrating to Developer ID signing; macOS may require a final permission grant."
+    fi
+fi
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="/Applications/.buzz-backups"
