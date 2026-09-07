@@ -3,7 +3,8 @@
     "source": "Verbatim `get_agent_usage_series` response, captured by the ignored `archive::agent_usage_live_evidence` harness running the production `open_archive_db` + `agent_usage_series` path over a copy of a real archive.db.",
     "anonymization": "Every identifier in the source archive was deterministically rewritten BEFORE the harness ran, so the accounting ladder produced this response from synthetic ids and even the agent ordering is the ladder's own rather than a hand edit. Agent N = sha256(\"fixture-agent-N\"); channel N = uuid(sha256(\"fixture-channel-N\")[:32]); owner = sha256(\"fixture-owner\"); relay = wss://relay.example/. N counts distinct ids in the source archive in ascending order. `agentNames` uses that same N, so a display name and its pubkey always share one index.",
     "preserved": "Token counts, session counts, per-channel and per-day distribution, and every completeness flag are unmodified. That fidelity is the point: a hand-written fixture would only ever assert what the panel already does. Only the identity columns were touched, and only in the archive copy.",
-    "regenerate": "Anonymize a copy of an archive.db as above, then run: BUZZ_LIVE_ARCHIVE=<copy> BUZZ_LIVE_IDENTITY=<synthetic owner> BUZZ_LIVE_RELAY=wss://relay.example/ BUZZ_LIVE_DAYS=2 cargo test --manifest-path desktop/src-tauri/Cargo.toml archive::agent_usage_live_evidence -- --ignored --nocapture"
+    "regenerate": "Anonymize a copy of an archive.db as above, then run: BUZZ_LIVE_ARCHIVE=<copy> BUZZ_LIVE_IDENTITY=<synthetic owner> BUZZ_LIVE_RELAY=wss://relay.example/ BUZZ_LIVE_DAYS=2 cargo test --manifest-path desktop/src-tauri/Cargo.toml archive::agent_usage_live_evidence -- --ignored --nocapture",
+    "basisTotals": "DERIVED, not captured: `basisTotals` was added to the response shape after this fixture was taken, so the block below was folded out of the fixture's own agent totals rather than re-captured. Sound because this window is single-basis (`bases: [\"unknown\"]`): one group covers every counted turn, so its total is the fold over all agents, which is the same set of rows the accounting ladder folds, in a different order. The spec re-derives it and asserts equality, and cross-checks the independent per-day partition, so the literal is machine-checked rather than trusted. `estimatedCostUsd` is compared within a tolerance only: f64 addition is not associative, so folding by agent, by day, or by event differ in the last bits (174.55410985 vs 174.55410985000003 here). Regenerating per `regenerate` replaces this with the captured value and the assertions continue to hold."
   },
   "series": {
     "collectionEnabled": true,
@@ -1422,7 +1423,44 @@
     },
     "hasArchivedEvidence": null,
     "bases": ["unknown"],
-    "basesMixed": false
+    "basesMixed": false,
+    "basisTotals": [
+      {
+        "basis": "unknown",
+        "usage": {
+          "inputTokens": {
+            "value": "208715676",
+            "incomplete": true
+          },
+          "outputTokens": {
+            "value": "899345",
+            "incomplete": true
+          },
+          "totalTokens": {
+            "value": "3749658",
+            "incomplete": true
+          },
+          "estimatedCostUsd": {
+            "value": 174.55410985,
+            "incomplete": true
+          },
+          "cacheReadTokens": {
+            "value": "205864269",
+            "incomplete": true
+          },
+          "cacheWriteTokens": {
+            "value": "2692394",
+            "incomplete": true
+          },
+          "freshInputTokens": {
+            "value": null,
+            "incomplete": true
+          }
+        },
+        "reportCount": 239,
+        "hasUnknownUsage": true
+      }
+    ]
   },
   "agentNames": [
     {

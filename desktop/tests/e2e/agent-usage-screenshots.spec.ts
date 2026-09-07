@@ -54,6 +54,151 @@ function grouped(raw: string): string {
   return BigInt(raw).toLocaleString("en-US");
 }
 
+type UsageField = { value: string | null; incomplete: boolean };
+type CostField = { value: number | null; incomplete: boolean };
+type ReportedUsage = Record<string, UsageField> & {
+  estimatedCostUsd: CostField;
+};
+
+const TOKEN_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "totalTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+] as const;
+
+/**
+ * Fold finished `ReportedUsage` values the way the Rust accumulator does:
+ * each counter is the sum of the known contributions, `incomplete` is OR-ed
+ * across them, and `freshInputTokens` is DERIVED from the folded input and
+ * cache figures rather than summed — summing per-contributor fresh-input
+ * values would be a different (and wrong) quantity.
+ *
+ * Written here from the accounting rules, not lifted from the backend, so it
+ * cross-checks the response instead of restating it.
+ */
+function foldUsage(usages: ReportedUsage[]) {
+  const folded: Record<string, UsageField> = {};
+  for (const field of TOKEN_FIELDS) {
+    let value: bigint | null = null;
+    let incomplete = false;
+    for (const usage of usages) {
+      const f = usage[field];
+      if (f.incomplete) incomplete = true;
+      if (f.value !== null) value = (value ?? 0n) + BigInt(f.value);
+    }
+    folded[field] = {
+      value: value === null ? null : String(value),
+      incomplete,
+    };
+  }
+
+  let cost: number | null = null;
+  let costIncomplete = false;
+  for (const usage of usages) {
+    const f = usage.estimatedCostUsd;
+    if (f.incomplete) costIncomplete = true;
+    if (f.value !== null) cost = (cost ?? 0) + f.value;
+  }
+
+  const input = folded.inputTokens;
+  const cacheRead = folded.cacheReadTokens;
+  const cacheWrite = folded.cacheWriteTokens;
+  let fresh: UsageField;
+  if (input.incomplete) {
+    fresh = { value: null, incomplete: true };
+  } else if (input.value === null) {
+    fresh = { value: null, incomplete: false };
+  } else if (cacheRead.incomplete || cacheWrite.incomplete) {
+    fresh = { value: null, incomplete: true };
+  } else {
+    const subsets =
+      BigInt(cacheRead.value ?? "0") + BigInt(cacheWrite.value ?? "0");
+    const total = BigInt(input.value);
+    fresh =
+      subsets <= total
+        ? { value: String(total - subsets), incomplete: false }
+        : { value: null, incomplete: true };
+  }
+
+  return {
+    usage: {
+      inputTokens: folded.inputTokens,
+      outputTokens: folded.outputTokens,
+      totalTokens: folded.totalTokens,
+      estimatedCostUsd: { value: cost, incomplete: costIncomplete },
+      cacheReadTokens: folded.cacheReadTokens,
+      cacheWriteTokens: folded.cacheWriteTokens,
+      freshInputTokens: fresh,
+    },
+    hasUnknownUsage:
+      TOKEN_FIELDS.some((f) => folded[f].incomplete) ||
+      costIncomplete ||
+      fresh.incomplete,
+  };
+}
+
+/** Every usage field reported as unknown — the shape the backend emits for a
+ * combined total it refuses to state. */
+function blankedUsage() {
+  const unknown = { value: null, incomplete: true };
+  return {
+    inputTokens: unknown,
+    outputTokens: unknown,
+    totalTokens: unknown,
+    estimatedCostUsd: { value: null, incomplete: true },
+    cacheReadTokens: unknown,
+    cacheWriteTokens: unknown,
+    freshInputTokens: unknown,
+  };
+}
+
+/**
+ * A mixed-basis response built out of the live fixture's own agents: half of
+ * them declare `per_turn_sum`, the rest `per_response`.
+ *
+ * The grouping is synthetic because no captured window in the tree mixes bases
+ * yet, but every figure inside it is a real archived number folded by the rules
+ * above, and the response shape is the one the backend emits for a mixed
+ * window: combined `buckets` blanked, `basisTotals` ordered by basis name, and
+ * `agents` ordered by identity rather than ranked by volume.
+ */
+function mixedBasisSeries() {
+  const agents = [...liveFixture.series.agents].sort((a, b) =>
+    a.agentPubkey.localeCompare(b.agentPubkey),
+  );
+  const split = Math.ceil(agents.length / 2);
+  // Ascending basis name, matching the backend's ordering.
+  const groups = [
+    { basis: "per_response", members: agents.slice(split) },
+    { basis: "per_turn_sum", members: agents.slice(0, split) },
+  ];
+  if (groups.some((g) => g.members.length === 0))
+    throw new Error("fixture has too few agents to split across two bases");
+
+  return {
+    ...liveFixture.series,
+    agents,
+    buckets: liveFixture.series.buckets.map((b) => ({
+      ...b,
+      usage: blankedUsage(),
+      hasUnknownUsage: true,
+    })),
+    bases: groups.map((g) => g.basis),
+    basesMixed: true,
+    basisTotals: groups.map((g) => {
+      const folded = foldUsage(g.members.map((a) => a.usage as ReportedUsage));
+      return {
+        basis: g.basis,
+        usage: folded.usage,
+        reportCount: g.members.reduce((sum, a) => sum + a.reportCount, 0),
+        hasUnknownUsage: folded.hasUnknownUsage,
+      };
+    }),
+  };
+}
+
 async function openAgentUsageSettings(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
@@ -127,6 +272,66 @@ test.describe("agent usage fixture hygiene", () => {
       ).toBeDefined();
       expect(entry.name).toBe(`Agent ${index}`);
     }
+  });
+
+  /**
+   * `basisTotals` is the one block in this fixture that was NOT captured: it
+   * was added to the response after the fixture was taken, and folded out of
+   * the fixture's own agent totals (see `_provenance.basisTotals`). So it gets
+   * checked rather than trusted.
+   *
+   * Two independent partitions of the same window are folded here — by agent
+   * and by day — and both must reproduce the committed block. A hand-edited
+   * figure fails, and so does a regeneration that emits an inconsistent one.
+   */
+  test("the committed basisTotals block is the fold of the fixture's own rows", async () => {
+    const series = liveFixture.series;
+
+    expect(series.basisTotals.map((g) => g.basis)).toEqual(series.bases);
+    expect(series.basisTotals.reduce((sum, g) => sum + g.reportCount, 0)).toBe(
+      series.coverage.reportCount,
+    );
+
+    // Beyond one basis the groups partition the rows and no single fold
+    // reproduces any one of them, so the equality below is scoped to the
+    // single-basis window this fixture actually holds.
+    expect(series.bases.length).toBe(1);
+    const group = series.basisTotals[0];
+    const byAgent = foldUsage(
+      series.agents.map((a) => a.usage as ReportedUsage),
+    );
+    const byDay = foldUsage(
+      series.buckets.map((b) => b.usage as ReportedUsage),
+    );
+
+    for (const field of TOKEN_FIELDS) {
+      expect(
+        group.usage[field],
+        `${field} must be the fold over agents`,
+      ).toEqual(byAgent.usage[field]);
+      expect(byDay.usage[field], `${field} must fold the same by day`).toEqual(
+        byAgent.usage[field],
+      );
+    }
+    expect(group.usage.freshInputTokens).toEqual(
+      byAgent.usage.freshInputTokens,
+    );
+    expect(group.hasUnknownUsage).toBe(byAgent.hasUnknownUsage);
+
+    // Cost is compared within a tolerance, not exactly: f64 addition is not
+    // associative, so folding by agent, by day and by event land on different
+    // last bits of the same number.
+    expect(group.usage.estimatedCostUsd.value).toBeCloseTo(
+      byAgent.usage.estimatedCostUsd.value as number,
+      6,
+    );
+    expect(byDay.usage.estimatedCostUsd.value).toBeCloseTo(
+      byAgent.usage.estimatedCostUsd.value as number,
+      6,
+    );
+    expect(group.usage.estimatedCostUsd.incomplete).toBe(
+      byAgent.usage.estimatedCostUsd.incomplete,
+    );
   });
 });
 
@@ -217,6 +422,29 @@ test.describe("agent usage panel", () => {
     );
     await expect(row).not.toContainText("None of the");
 
+    // The window total, labelled by how its turns were counted. One group
+    // here because this window is single-basis; the mixed case is below.
+    const basisSection = card.getByTestId("agent-usage-basis-totals");
+    await expect(basisSection).toBeVisible();
+    const groups = basisSection.getByTestId("agent-usage-basis-total");
+    await expect(groups).toHaveCount(liveFixture.series.bases.length);
+    const group = liveFixture.series.basisTotals[0];
+    const groupRow = basisSection.locator(`[data-basis="${group.basis}"]`);
+    // This fixture's turns declared no basis, so the panel must say the basis
+    // was not declared rather than implying the counts are missing.
+    await expect(groupRow).toContainText("Basis not declared");
+    await expect(groupRow).toContainText(
+      `${group.reportCount.toLocaleString("en-US")} turns`,
+    );
+    for (const field of [
+      group.usage.inputTokens,
+      group.usage.outputTokens,
+      group.usage.cacheReadTokens,
+    ]) {
+      if (field.value !== null)
+        await expect(groupRow).toContainText(grouped(field.value));
+    }
+
     await settleAnimations(card);
     // Viewport-scoped, not `card.screenshot()`: the card is taller than its
     // scroll container, and an element shot of it paints the clipped remainder
@@ -226,5 +454,77 @@ test.describe("agent usage panel", () => {
     await row.scrollIntoViewIfNeeded();
     await settleAnimations(card);
     await row.screenshot({ path: `${SHOTS}/02-agent-detail.png` });
+  });
+
+  /**
+   * A window whose publishers count a turn differently has no combined figure
+   * — NIP-AM forbids summing across bases, so the backend reports the combined
+   * series as unknown. The panel must answer that with one real total per
+   * basis, never with a blank where a number belongs.
+   */
+  test("a mixed-basis window shows a labelled total per basis, not a blank", async ({
+    page,
+  }) => {
+    const series = mixedBasisSeries();
+    await installMockBridge(
+      page,
+      {
+        agentUsageSeries: series,
+        managedAgents: liveFixture.agentNames.map((a) => ({
+          pubkey: a.pubkey,
+          name: a.name,
+        })),
+      },
+      { seedPreviewFeatures: true },
+    );
+
+    const card = await openAgentUsageSettings(page);
+    const basisSection = card.getByTestId("agent-usage-basis-totals");
+    await expect(basisSection).toBeVisible();
+    await expect(
+      basisSection.getByTestId("agent-usage-basis-total"),
+    ).toHaveCount(2);
+
+    // ...and it must say why there are two, rather than leaving the operator
+    // to guess that the panel is broken.
+    await expect(card.getByTestId("agent-usage-mixed-bases")).toContainText(
+      "no single combined figure",
+    );
+
+    const labels: Record<string, string> = {
+      per_turn_sum: "Whole turn (all model calls)",
+      per_response: "Single model response",
+    };
+    for (const group of series.basisTotals) {
+      const groupRow = basisSection.locator(`[data-basis="${group.basis}"]`);
+      await expect(groupRow).toContainText(labels[group.basis]);
+      await expect(groupRow).toContainText(
+        `${group.reportCount.toLocaleString("en-US")} turns`,
+      );
+      // Each group carries its own real figure. This is the positive claim the
+      // absence check below is anchored to: the subject is on screen with its
+      // own number before anything is asserted to be missing.
+      const input = group.usage.inputTokens.value;
+      expect(
+        input,
+        "each basis group must have a real input total",
+      ).not.toBeNull();
+      await expect(groupRow).toContainText(grouped(input as string));
+    }
+
+    // The cross-basis sum is the number the whole rule exists to suppress. It
+    // must appear nowhere, in any group or in the combined row.
+    const crossBasisSum = series.basisTotals.reduce(
+      (sum, g) => sum + BigInt(g.usage.inputTokens.value as string),
+      0n,
+    );
+    await expect(card).not.toContainText(grouped(String(crossBasisSum)));
+
+    await settleAnimations(card);
+    await basisSection.scrollIntoViewIfNeeded();
+    await settleAnimations(card);
+    await basisSection.screenshot({
+      path: `${SHOTS}/03-mixed-basis-totals.png`,
+    });
   });
 });
