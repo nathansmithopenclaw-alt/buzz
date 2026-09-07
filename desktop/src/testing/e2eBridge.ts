@@ -14534,6 +14534,15 @@ export function maybeInstallE2eTauriMocks() {
         ).finally(() => {
           window.__BUZZ_E2E_COMMANDS__?.push("start_managed_agent:settled");
         });
+      case "ensure_managed_agent_for_inbound": {
+        const { pubkey } = payload as { pubkey: string };
+        // The fork also checks the relay echo through inbound resurrection.
+        // Native deduplicates that check against the pair runtime started by
+        // the explicit wake; the mock has no child-process map, so return the
+        // corresponding idempotent outcome instead of treating the fork-only
+        // command as unsupported.
+        return { pubkey, spawned: false, reason: "SkipAlreadyRunning" };
+      }
       case "stop_managed_agent":
         return handleStopManagedAgent(
           payload as Parameters<typeof handleStopManagedAgent>[0],

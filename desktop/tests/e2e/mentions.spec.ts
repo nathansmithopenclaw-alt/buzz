@@ -3074,6 +3074,10 @@ test("a second mention while the first wake is in flight does not start the agen
     baselineCommands,
     "start_managed_agent",
   );
+  const baselineInboundEnsureCount = commandCount(
+    baselineCommands,
+    "ensure_managed_agent_for_inbound",
+  );
 
   await input.fill("Hey @fizz");
   await expect(dropdown.getByText("fizz")).toBeVisible();
@@ -3115,6 +3119,15 @@ test("a second mention while the first wake is in flight does not start the agen
   expect(commandCount(await readCommandLog(page), "start_managed_agent")).toBe(
     baselineStartCount + 1,
   );
+  // The fork checks both relay echoes through inbound resurrection. Those
+  // checks are expected; their native pair-runtime start is idempotent, while
+  // the outbound wake remains one in-flight operation across both sends.
+  expect(
+    commandCount(
+      await readCommandLog(page),
+      "ensure_managed_agent_for_inbound",
+    ),
+  ).toBe(baselineInboundEnsureCount + 2);
 });
 
 test("a detached agent start failure surfaces as a toast after the message sends", async ({
