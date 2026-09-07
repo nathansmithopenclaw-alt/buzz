@@ -213,6 +213,30 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
     Ok(())
 }
 
+/// Require text or an attachment reference for a newly created message.
+/// The relay separately validates attachment metadata and stored blob ownership.
+fn check_message_content(content: &str, media_tags: &[Vec<String>]) -> Result<(), SdkError> {
+    if !content.trim().is_empty() {
+        return Ok(());
+    }
+    let has_attachment = media_tags.iter().any(|tag| {
+        tag.first().is_some_and(|name| name == "imeta")
+            && tag.iter().skip(1).any(|part| {
+                part.strip_prefix("url ")
+                    .and_then(|value| nostr::Url::parse(value).ok())
+                    .is_some_and(|url| {
+                        matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+                    })
+            })
+    });
+    if !has_attachment {
+        return Err(SdkError::InvalidInput(
+            "message is empty or whitespace-only; provide text or an attachment".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Attach NIP-30 `["emoji", shortcode, url]` tags.
 ///
 /// Each element of `emoji_tags` must be a three-element vector whose first
@@ -231,7 +255,7 @@ fn nip30_emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(
 /// Build a stream message (kind 9).
 ///
 /// - `channel_id`: target channel UUID
-/// - `content`: message text (max 64 KiB)
+/// - `content`: message text (max 64 KiB); blank content requires an imeta attachment URL
 /// - `thread_ref`: optional NIP-10 reply context
 /// - `mentions`: pubkey hex strings to p-tag (deduped, max 50)
 /// - `broadcast`: if true, adds `["broadcast", "1"]` tag
@@ -247,6 +271,7 @@ pub fn build_message(
     emoji_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
+    check_message_content(content, media_tags)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
         thread_tags(tr, &mut tags)?;
@@ -300,6 +325,7 @@ pub fn build_agent_observer_frame(
 }
 
 /// Build a forum post thread root (kind 45001).
+/// Blank content requires an imeta attachment URL.
 pub fn build_forum_post(
     channel_id: Uuid,
     content: &str,
@@ -307,6 +333,7 @@ pub fn build_forum_post(
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
+    check_message_content(content, media_tags)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
@@ -316,6 +343,7 @@ pub fn build_forum_post(
 }
 
 /// Build a forum comment reply (kind 45003).
+/// Blank content requires an imeta attachment URL.
 pub fn build_forum_comment(
     channel_id: Uuid,
     content: &str,
@@ -324,6 +352,7 @@ pub fn build_forum_comment(
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
+    check_message_content(content, media_tags)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     thread_tags(thread_ref, &mut tags)?;
     mention_tags(mentions, &mut tags)?;

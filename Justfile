@@ -437,7 +437,8 @@ test-unit:
         # Tracker SDK + triage dispatcher (Dispatch P2): pure unit suites, no
         # infra. Enumerated for the same reason — workspace membership alone
         # buys clippy/check, not a single executed test.
-        cargo nextest run -p buzz-sdk --lib
+        # Include the public-builder payload contract in tests/message_payload.rs.
+        cargo nextest run -p buzz-sdk
         cargo nextest run -p buzz-dispatcher --lib
         # Admin API auth-boundary tests (api::admin in buzz-relay): the NIP-98
         # duplicate-tag rejections, the Host/Origin replay-ordering causal pair,
