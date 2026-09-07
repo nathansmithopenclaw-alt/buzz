@@ -126,7 +126,7 @@ export function BrowserPanel() {
             onClick={() => void toggle()}
           >
             {status?.enabled
-              ? "Disable for new sessions"
+              ? "Disable for new agent starts"
               : "Enable browser tools"}
           </Button>
         </div>
@@ -178,8 +178,8 @@ export function BrowserPanel() {
           />
         ) : (
           <div className="flex flex-1 items-center justify-center rounded-md border text-sm text-muted-foreground">
-            No active browser connections. Enabled tools appear when a new agent
-            session starts.
+            No active browser connections. Start or restart an agent after
+            enabling the tools.
           </div>
         )}
       </DialogContent>

@@ -15,8 +15,9 @@ blocks. Browser sessions belong to one connection; no relay signing keys are
 forwarded. Provider image delivery must be proven per adapter, separately from
 these service tests.
 
-The Browser panel enables tools for new agent sessions and displays private
-loopback viewers. Human takeover fences agent input; returning control is
+The Browser panel enables tools on the next managed-agent start and displays private
+loopback viewers. Restart existing agents after changing capability settings;
+opening another task in an already-running worker is insufficient. Human takeover fences agent input; returning control is
 explicit. Each page has an opaque session ID, control/navigation generation and
 observation-scoped element handles. The default context is ephemeral, with no
 personal Chrome state inherited. There are four pages per connection and eight

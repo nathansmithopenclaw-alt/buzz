@@ -76,7 +76,7 @@ pub(crate) fn computer_use_status(app: AppHandle) -> Result<ComputerStatus, Stri
     Ok(ComputerStatus { enabled, dependency_ready, native_enabled: config.native_enabled, native_ready: cfg!(target_os = "macos") && crate::computer_use_native::binary(&app).is_some(), detail: if !dependency_ready {
         "Browser runtime is missing. Install a Buzz build containing the computer-use service and Node runtime."
     } else if enabled {
-        "Browser tools are enabled for newly started agent sessions. Native app control has a separate opt-in and macOS permission check."
+        "Browser tools are enabled. Restart existing agents to discover them. Native app control has a separate opt-in and macOS permission check."
     } else {
         "Enable local browser tools for new agent sessions. Each session gets separate browser storage."
     }.to_string() })
