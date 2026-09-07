@@ -487,7 +487,7 @@ test.describe("edit agent dialog", () => {
 
     const dialog = page.getByTestId("edit-agent-dialog");
     const model = page.locator("#edit-agent-model");
-    const effort = page.getByTestId("instance-agent-effort-select");
+    const effort = page.locator("#edit-agent-effort");
     const fastMode = page.getByTestId("agent-fast-mode-field");
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await expect(model).toBeVisible({ timeout: 10_000 });

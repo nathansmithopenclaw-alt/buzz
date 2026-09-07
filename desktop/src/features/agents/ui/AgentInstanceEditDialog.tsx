@@ -653,7 +653,7 @@ export function AgentInstanceEditDialog({
     instanceEffort,
     model,
     selectedRuntime,
-    nativeTuning.effortOptions,
+    nativeTuning,
   );
   const canSubmit =
     computeEditAgentFormValidity({
