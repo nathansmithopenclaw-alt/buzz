@@ -6,6 +6,17 @@
     <string>Buzz</string>
     <key>CFBundleName</key>
     <string>Buzz</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>127.0.0.1</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+        </dict>
+    </dict>
     <key>NSScreenCaptureUsageDescription</key>
     <string>Buzz captures app windows and the screen when you enable native computer control for agents.</string>
     <key>NSAppleEventsUsageDescription</key>
