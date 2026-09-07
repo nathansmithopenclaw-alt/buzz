@@ -409,6 +409,8 @@ test-unit:
         #     crash recovery — infra-free via a stub OIDC provider and an
         #     injected browser opener, no network or Postgres.
         cargo nextest run -p buzz-agent
+        # Exercise the public SDK builders, including the new-message payload contract.
+        cargo nextest run -p buzz-sdk
         # Admin API auth-boundary tests (api::admin in buzz-relay): the NIP-98
         # duplicate-tag rejections, the Host/Origin replay-ordering causal pair,
         # the admin.localhost origin/advertisement/canonical-URL pins, and the

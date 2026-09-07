@@ -573,6 +573,15 @@ jobs:
         env:
           RELAY_URL: ws://localhost:3000
           GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr
+      - name: New-message payload contract
+        # This test starts its own authenticated HTTP/WS router and creates a
+        # unique community in the disposable CI database. MinIO is required to
+        # prove captionless media survives the same guard that rejects blanks.
+        run: cargo test -p buzz-relay --test message_payload -- --ignored --nocapture
+        env:
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:buzz_dev@localhost:5432/buzz
+          REDIS_URL: redis://localhost:6379
+          BUZZ_RELAY_PRIVATE_KEY: '0000000000000000000000000000000000000000000000000000000000000001'
       - name: Media read-auth e2e
         # Reads require kind:24242 `t=get` auth, so these binaries are the only
         # coverage that a real relay rejects bare reads and honours host- and

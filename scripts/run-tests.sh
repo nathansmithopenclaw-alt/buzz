@@ -126,6 +126,10 @@ run_unit_tests() {
   run_test_step "buzz-agent unit tests" \
     cargo test -p buzz-agent --lib -- --nocapture
 
+  # Public SDK builder contracts are infra-free and must run without nextest too.
+  run_test_step "buzz-sdk tests" \
+    cargo test -p buzz-sdk -- --nocapture
+
   # ACP author-gate and queue tests are pure unit tests. Keep this fallback in
   # step with `just test-unit`; ignored lifecycle tests run elsewhere.
   run_test_step "buzz-acp unit tests" \

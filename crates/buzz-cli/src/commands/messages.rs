@@ -608,6 +608,16 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+fn validate_message_payload(content: &str, files: &[String]) -> Result<(), CliError> {
+    if content.trim().is_empty() && files.is_empty() {
+        return Err(CliError::Usage(
+            "message is empty or whitespace-only; provide text with --content, read stdin with --content -, or attach a file with --content \"\" --file PATH"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -617,6 +627,7 @@ pub async fn cmd_send_message(
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
+    validate_message_payload(&p.content, &p.files)?;
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;

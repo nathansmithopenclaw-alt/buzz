@@ -2998,6 +2998,20 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    // Both HTTP and WebSocket producers reach this boundary. Only new message
+    // kinds require a payload; empty edits and other event kinds keep their
+    // existing semantics. Media only counts after metadata and blob validation.
+    if matches!(
+        kind_u32,
+        KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2 | KIND_FORUM_POST | KIND_FORUM_COMMENT
+    ) && event.content.trim().is_empty()
+        && imeta_tags.is_empty()
+    {
+        return Err(IngestError::Rejected(
+            "invalid: message is empty or whitespace-only; provide text or an attachment".into(),
+        ));
+    }
+
     let thread_meta = if requires_h_channel_scope(kind_u32) {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(tenant.community(), &event, ch_id, state)
