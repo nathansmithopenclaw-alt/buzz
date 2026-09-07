@@ -187,10 +187,10 @@
     },
     {
       "file": "tests/e2e/mentions.spec.ts",
-      "title": "selecting a persona mention creates a channel agent before sending",
-      "line": 1116,
+      "title": "selecting a persona mention creates a channel agent before sending and starts it detached",
+      "line": 1496,
       "class": "quarantined-flake",
-      "reason": "Red only in the scoped disposition run; green in both full-suite arms.",
+      "reason": "RETITLED 2026-09-07 at 61b9adcf7. Upstream 40220d561 (#7154, 2026-09-03, arrived in the fold) renamed this from \"selecting a persona mention creates a channel agent before sending\"; the old key matched nothing, so the entry suppressed nothing and the gate's never-occurred check flagged it. Class held at quarantined-flake per the retitle brief, but note the evidence behind it is STALE: the original disposition (red only in the scoped disposition run, green in both full-suite arms, 2026-08-29) was measured against a materially different test body. #7154 also rewrote the assertions — it injects startManagedAgentDelayMs: 45000 and now checks create_managed_agent/add_channel_members precede sign_event with the start detached, replacing the old start_managed_agent-before-send ordering. Re-disposition on the next observation rather than trusting the carried class.",
       "owner": "anvil",
       "issue": "D-6880b42e",
       "added": "2026-08-29",
