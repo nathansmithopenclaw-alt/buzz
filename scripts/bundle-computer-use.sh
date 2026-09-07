@@ -5,30 +5,18 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/buzz-computer-bundle.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
-pnpm --filter @buzz/computer-use deploy --prod --legacy "$STAGE/runtime"
-# pnpm 11 legacy deploy changes the source workspace's dependency-state marker.
-# Restore the development workspace explicitly before invoking its build tools.
-pnpm install --ignore-scripts
-# Legacy deploy adds a self-reference to the source package. It is unused by this
-# service and must not escape the bundle or introduce a recursive resource link.
-SELF_LINK="$STAGE/runtime/node_modules/.pnpm/node_modules/@buzz/computer-use"
-if [[ -L "$SELF_LINK" ]]; then rm "$SELF_LINK"; fi
-node --input-type=module - "$STAGE/runtime" <<'NODE'
-import { readdir, realpath } from 'node:fs/promises';
-import { join, relative } from 'node:path';
-const root = await realpath(process.argv[2]);
-async function check(directory) {
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isSymbolicLink()) {
-      const target = await realpath(path);
-      if (relative(root, target).startsWith('..')) throw new Error(`Bundle link escapes runtime: ${path}`);
-    } else if (entry.isDirectory()) await check(path);
-  }
-}
-await check(root);
-NODE
-PLAYWRIGHT_BROWSERS_PATH="$STAGE/runtime/browsers" node "$STAGE/runtime/node_modules/playwright/cli.js" install chromium
+# Tauri's resource copier omits symlinks. Modern deploy preserves the workspace
+# lockfile while the hoisted linker produces real package directories. The
+# injected-workspace option is local to this command, not a workspace mutation.
+pnpm --filter @buzz/computer-use --config.node-linker=hoisted \
+  --config.injectWorkspacePackages=true deploy --prod "$STAGE/runtime"
+# Runtime uses explicit JS entry points, never package-manager shims or patches.
+rm -rf "$STAGE/runtime/node_modules/.bin"
+rm -f "$STAGE/runtime/pnpm-workspace.yaml"
+
+# Headless shell is the controlled engine; shipping the unused full Chrome app
+# also introduces framework symlinks that Tauri cannot preserve.
+PLAYWRIGHT_BROWSERS_PATH="$STAGE/runtime/browsers" node "$STAGE/runtime/node_modules/playwright/cli.js" install --only-shell chromium
 # macOS native backend is optional on other targets; this pinned package is prerelease.
 if [[ "${1:-$(uname -m)}" == "aarch64-apple-darwin" || "${1:-$(uname -m)}" == "arm64" ]]; then
     ARCHIVE="$STAGE/cua-driver.tar.gz"
@@ -44,6 +32,20 @@ if [[ "${1:-$(uname -m)}" == "aarch64-apple-darwin" || "${1:-$(uname -m)}" == "a
     cp "$STAGE/cua-driver-rs-0.23.2-darwin-arm64/cua-cursor-theme" "$STAGE/runtime/native/"
     curl --fail --location https://raw.githubusercontent.com/trycua/cua/cua-driver-rs-v0.23.2/LICENSE.md --output "$STAGE/runtime/native/LICENSE.md"
 fi
+node --input-type=module - "$STAGE/runtime" <<'NODE'
+import { readdir, realpath } from 'node:fs/promises';
+import { join } from 'node:path';
+const root = await realpath(process.argv[2]);
+async function check(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`Tauri would omit this runtime symlink: ${path}`);
+    } else if (entry.isDirectory()) await check(path);
+  }
+}
+await check(root);
+NODE
 mkdir -p .cache/computer-use
 rm -rf .cache/computer-use/runtime
 mv "$STAGE/runtime" .cache/computer-use/runtime

@@ -198,7 +198,7 @@ test("standard MCP stdio discovers tools, returns real image blocks, and cleans 
       BUZZ_COMPUTER_REGISTRY: registry,
       BUZZ_COMPUTER_OWNER: "test-agent",
     },
-    stderr: "pipe",
+    stderr: "inherit",
   });
   t.after(() => client.close());
   await client.connect(transport);
@@ -259,7 +259,7 @@ test("killing an owned MCP process leaves no Chromium descendants running", asyn
       BUZZ_COMPUTER_REGISTRY: registry,
       BUZZ_COMPUTER_OWNER: "crash-test",
     },
-    stderr: "pipe",
+    stderr: "inherit",
   });
   t.after(() => client.close());
   await client.connect(transport);

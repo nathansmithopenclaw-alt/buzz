@@ -288,6 +288,7 @@ desktop-release-build target="aarch64-apple-darwin":
     (cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}} --bundles app)
     APP=$(cargo metadata --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")/$TARGET/release/bundle/macos/Buzz.app
     ./scripts/sign-desktop-macos.sh "$TARGET" "$APP"
+    bash ./scripts/verify-computer-use-bundle.sh "$APP"
 
 # Install a local desktop-release-build to a single canonical /Applications/Buzz.app,
 # replacing any prior copy instead of leaving numbered duplicates behind.

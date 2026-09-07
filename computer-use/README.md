@@ -51,8 +51,12 @@ Activate the repository Hermit environment before running pnpm or Cargo.
   also checks the real native MCP surface, contention and parent EOF lifecycle.
   It makes no native UI mutations and does not establish installed Buzz TCC attribution.
 - `scripts/bundle-computer-use.sh aarch64-apple-darwin` stages production JS
-  dependencies, Chromium and checksum-pinned CuaDriver 0.23.2 (upstream prerelease).
-- `just desktop-release-build` includes this staging step. Use the repository's
+  dependencies from the workspace lockfile, Chromium headless shell and
+  checksum-pinned CuaDriver 0.23.2 (upstream prerelease). Dependencies are ordinary
+  directories because Tauri omits pnpm symlinks when copying resources.
+- `just desktop-release-build` includes staging and a packaged-runtime relocation
+  test through the bundled CLI, including real image delivery and crash cleanup.
+  Use the repository's
   canonical installer for installed acceptance; never launch a target-directory app.
 
 ## Remaining acceptance and scope

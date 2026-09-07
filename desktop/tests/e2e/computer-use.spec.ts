@@ -43,6 +43,7 @@ test("Buzz panel displays and hands back the agent's actual isolated browser", a
             {
               id: "test-connection",
               owner: "Acceptance agent",
+              label: "Acceptance agent",
               viewerUrl,
               created: new Date().toISOString(),
             },
