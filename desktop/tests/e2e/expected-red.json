@@ -2,7 +2,7 @@
   "version": 1,
   "_about": [
     "Expected-red set for the canonical-main smoke gate (D-0b14e7d3).",
-    "This file IS the quarantine list (D-6880b42e) — there is deliberately only one artifact.",
+    "This file is ONE of TWO surfaces that suppress a gate alert; check both before concluding\na red is untracked. (1) This file: the in-repo quarantine list (D-6880b42e), reviewed in\nPRs and carried with the checkout. (2) The confirmed-red ledger at\n<state_dir>/confirmed-red-ledger.json, added by main-gate 55c1208b8 after D-afa5b09b3111\nre-alerted on every tick: a runner-side, MACHINE-LOCAL record that also suppresses. Its\ninvariant is that it may only ever suppress noise, never create truth; alerting is a\none-way ratchet, so a red alerts once and a ledgered test never alerts again while it\nstays there. It has its own exit rule (N consecutive passes drops the entry), so it holds\ntemporary suppressions this file should not. It is NOT in this repo: a fresh checkout on\nanother machine has this file and no ledger, and will alert on everything the ledger is\nholding. The alert footer prints the ledger depth as \"Main is carrying N unfixed confirmed\nred(s)\" - a non-zero N means suppressed reds exist that are NOT listed below.",
     "The gate runs the full smoke project on darwin at workers:1 / retries:0 and alerts only on",
     "reds NOT listed here, after confirming them by re-running the affected spec files.",
     "",
