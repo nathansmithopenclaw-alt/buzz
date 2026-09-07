@@ -216,3 +216,93 @@ test("Claude discovery failure falls back to the Anthropic table, not all seven 
     null,
   );
 });
+
+// D-913b7643: null and [] are DIFFERENT facts on the discovery result. null means
+// the probe said nothing about effort (the OpenAI, Anthropic, mesh and OpenRouter
+// paths all return an empty effort list); [] means it advertised an effort control
+// with zero valid values. Collapsing the first into the second made both
+// validators reject values they have no basis to reject.
+test("an unknown effort catalog does not invalidate a saved Claude effort", () => {
+  // null = unknown: fall back to the static provider config, which knows "high".
+  assert.equal(
+    validateEffortSelection({
+      effort: "high",
+      model: "claude-opus-4-5",
+      nativeEffortOptions: null,
+      provider: "anthropic",
+      runtimeId: "claude",
+    }),
+    null,
+  );
+  // [] = the adapter really advertised zero valid levels: reject.
+  assert.match(
+    validateEffortSelection({
+      effort: "high",
+      model: "claude-opus-4-5",
+      nativeEffortOptions: [],
+      provider: "anthropic",
+      runtimeId: "claude",
+    }),
+    /Reasoning effort high is not valid/,
+  );
+  // A populated discovered catalog still governs.
+  assert.equal(
+    validateEffortSelection({
+      effort: "high",
+      model: "claude-opus-4-5",
+      nativeEffortOptions: [{ id: "high" }],
+      provider: "anthropic",
+      runtimeId: "claude",
+    }),
+    null,
+  );
+});
+
+test("an unknown effort catalog does not invalidate a changed model qualifier", () => {
+  const qualified = "gpt-5.6-sol[medium]";
+  // null = unknown: accept, we have no basis to reject.
+  assert.equal(
+    validateModelSelection(qualified, "codex", {
+      enabled: true,
+      effortOptions: null,
+      persistedModel: "gpt-5.6-sol[low]",
+    }),
+    null,
+  );
+  // [] = advertised zero valid levels: reject.
+  assert.match(
+    validateModelSelection(qualified, "codex", {
+      enabled: true,
+      effortOptions: [],
+      persistedModel: "gpt-5.6-sol[low]",
+    }),
+    /Reasoning effort medium is not advertised/,
+  );
+  // A populated catalog still governs, both ways.
+  assert.equal(
+    validateModelSelection(qualified, "codex", {
+      enabled: true,
+      effortOptions: [{ id: "medium" }],
+      persistedModel: "gpt-5.6-sol[low]",
+    }),
+    null,
+  );
+  assert.match(
+    validateModelSelection(qualified, "codex", {
+      enabled: true,
+      effortOptions: [{ id: "low" }],
+      persistedModel: "gpt-5.6-sol[low]",
+    }),
+    /Reasoning effort medium is not advertised/,
+  );
+  // The persisted-model guard still short-circuits before any catalog check,
+  // which is why an UNCHANGED stored qualifier never reached this bug.
+  assert.equal(
+    validateModelSelection(qualified, "codex", {
+      enabled: true,
+      effortOptions: [],
+      persistedModel: qualified,
+    }),
+    null,
+  );
+});
