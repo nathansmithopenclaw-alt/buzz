@@ -65,6 +65,13 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // Desktop-owned pool lifetime policy: user env must not disable or reset
     // the idle worker-reclamation window while the desktop launcher sets it.
     "BUZZ_ACP_IDLE_POOL_SLEEP",
+    "BUZZ_COMPUTER_NODE",
+    "BUZZ_COMPUTER_SCRIPT",
+    "BUZZ_COMPUTER_REGISTRY",
+    "BUZZ_COMPUTER_OWNER",
+    "BUZZ_COMPUTER_LABEL",
+    "BUZZ_NATIVE_DRIVER",
+    "BUZZ_NATIVE_SOCKET",
     "BUZZ_ACP_MAX_TURNS_PER_SESSION",
     "BUZZ_ACP_SLEEP_WITH_SUMMARY",
     "BUZZ_ACP_SLEEP_SUMMARY_DIR",

@@ -284,6 +284,7 @@ desktop-release-build target="aarch64-apple-darwin":
     fi
     ./scripts/bundle-sidecars.sh "$TARGET"
     pnpm install
+    ./scripts/bundle-computer-use.sh "$TARGET"
     (cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}} --bundles app)
     APP=$(cargo metadata --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")/$TARGET/release/bundle/macos/Buzz.app
     ./scripts/sign-desktop-macos.sh "$TARGET" "$APP"
@@ -354,8 +355,13 @@ desktop-e2e-pre-push: _ensure-migrations
     git fetch origin main
     cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
+# Real browser isolation and MCP transport tests for the optional host capability.
+computer-use-test:
+    pnpm --filter @buzz/computer-use install:browser
+    pnpm --filter @buzz/computer-use test
+
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check commitment-watchdog-test desktop-signing-test test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
+ci: check computer-use-test commitment-watchdog-test desktop-signing-test test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 

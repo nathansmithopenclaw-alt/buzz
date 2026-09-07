@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Buzz Browser</title><link rel="stylesheet" href="/viewer.css"></head>
+<body>
+<header><strong>Buzz Browser</strong><span>Local, isolated sessions</span><button type="button" id="new">New session</button></header>
+<nav id="sessions" aria-label="Browser sessions"></nav>
+<form id="navigation"><button type="button" id="back" aria-label="Back">←</button><button type="button" id="reload" aria-label="Reload">↻</button><input id="url" aria-label="Page address" placeholder="https://example.com" autocomplete="off"><button type="submit" id="go">Go</button><button type="button" id="control">Take control</button><button type="button" id="close">Close session</button></form>
+<p id="status" role="status">Connecting…</p>
+<main><img id="page" tabindex="0" alt="Live browser page. Take control to interact." draggable="false"><div id="empty">Open a session or wait for an agent to begin browsing.</div></main>
+<form id="typing"><input id="text" aria-label="Text to enter in the focused page field" placeholder="Text for the focused field"><button type="submit">Type text</button></form>
+<p class="hint">This live view shows the agent’s Chromium page. During human control, click the page to focus a field, type, or scroll. Return control explicitly when finished.</p>
+<script src="/viewer.js"></script>
+</body></html>

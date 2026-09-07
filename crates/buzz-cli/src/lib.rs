@@ -1,6 +1,7 @@
 pub mod agent_management;
 mod client;
 mod commands;
+mod computer_use;
 mod error;
 mod links;
 mod validate;
@@ -176,6 +177,9 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Discover and serve host-local browser and native computer capabilities
+    #[command(subcommand)]
+    Computer(computer_use::ComputerCmd),
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
@@ -2883,6 +2887,10 @@ fn normalize_auth_tag_input(input: &str) -> String {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
+    if let Cmd::Computer(ref command) = cli.command {
+        return computer_use::dispatch(command);
+    }
+
     // Pack commands are local-only — no relay connection needed.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
@@ -2929,6 +2937,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
+        Cmd::Computer(command) => computer_use::dispatch(&command),
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Teams(sub) => commands::teams::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
@@ -3203,6 +3212,7 @@ mod tests {
             "briefs",
             "canvas",
             "channels",
+            "computer",
             "dms",
             "emoji",
             "feed",

@@ -1,0 +1,23 @@
+{
+  "name": "@buzz/computer-use",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "buzz-computer-use": "src/main.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/main.mjs && node --check src/browser.mjs && node --check src/viewer.mjs",
+    "install:browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "playwright": "1.60.0"
+  },
+  "files": [
+    "src",
+    "viewer",
+    "README.md"
+  ]
+}

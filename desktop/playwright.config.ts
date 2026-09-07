@@ -22,6 +22,7 @@ export default defineConfig({
       name: "smoke",
       testMatch: [
         "**/codex-thinking-level.spec.ts",
+        "**/computer-use.spec.ts",
         "**/smoke.spec.ts",
         "**/owned-agent-discovery.spec.ts",
         "**/thread-head-stale-edit.spec.ts",

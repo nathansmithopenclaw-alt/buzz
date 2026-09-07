@@ -1,4 +1,5 @@
 packages:
+  - "computer-use"
   - "desktop"
   - "web"
   - "admin-web"

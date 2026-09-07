@@ -1,0 +1,111 @@
+:root {
+  color-scheme: dark;
+  font:
+    0.875rem system-ui,
+    sans-serif;
+  background: #151617;
+  color: #eee;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+header,
+nav,
+form,
+#status,
+.hint {
+  flex: none;
+}
+header,
+nav,
+form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.65rem 0.85rem;
+}
+header {
+  border-bottom: 1px solid #383a3c;
+}
+header span {
+  color: #b0b3b6;
+  flex: 1;
+}
+button,
+input {
+  font: inherit;
+  color: inherit;
+  border: 1px solid #505357;
+  border-radius: 0.4rem;
+  background: #282a2d;
+  padding: 0.45rem 0.65rem;
+}
+button {
+  cursor: pointer;
+}
+button:hover {
+  background: #414448;
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+button[aria-current="true"] {
+  border-color: #f5de4a;
+  color: #f5de4a;
+}
+input {
+  min-width: 0;
+  flex: 1;
+}
+#sessions {
+  overflow: auto;
+}
+#status,
+.hint {
+  margin: 0.3rem 0.85rem 0.6rem;
+  color: #bbb;
+}
+#status.error {
+  color: #ffb6a8;
+}
+main {
+  position: relative;
+  min-height: 0;
+  flex: 1;
+  background: #08090a;
+  display: flex;
+  justify-content: center;
+}
+#page {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: none;
+  outline-offset: -3px;
+  align-self: center;
+}
+#empty {
+  padding: 4rem 1rem;
+  color: #a7aaad;
+}
+#typing {
+  border-top: 1px solid #383a3c;
+}
+.hint {
+  font-size: 0.75rem;
+}
+button:focus-visible,
+input:focus-visible,
+#page:focus-visible {
+  outline: 2px solid #f5de4a;
+}

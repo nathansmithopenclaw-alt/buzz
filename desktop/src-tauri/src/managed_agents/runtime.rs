@@ -968,6 +968,12 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
+    crate::computer_use::configure_runtime(
+        app,
+        &mut command,
+        &format!("{} | {}", effective_relay_url, record.pubkey),
+        &record.name,
+    )?;
     let mut child = spawn_with_effort_proof(&mut command, effort).map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",

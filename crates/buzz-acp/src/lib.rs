@@ -5,6 +5,7 @@ mod account_handoff;
 mod acp;
 mod answered_watermark;
 mod auth_recovery;
+mod computer_use_mcp;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -7714,6 +7715,14 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+    let mut servers = build_existing_mcp_servers(config);
+    if let Some(server) = computer_use_mcp::from_environment() {
+        servers.push(server);
+    }
+    servers
+}
+
+fn build_existing_mcp_servers(config: &Config) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
     }

@@ -6,6 +6,10 @@
     <string>Buzz</string>
     <key>CFBundleName</key>
     <string>Buzz</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Buzz captures app windows and the screen when you enable native computer control for agents.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Buzz uses Automation when an authorized agent action needs to communicate with another app.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Buzz needs microphone access for voice huddles and voice notes.</string>
     <key>NSCameraUsageDescription</key>

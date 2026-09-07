@@ -82,10 +82,13 @@ fn parse_mcp_servers(table: &toml::Table) -> Vec<ExtensionEntry> {
 
     servers
         .iter()
-        .map(|(name, _config)| ExtensionEntry {
+        .map(|(name, config)| ExtensionEntry {
             name: name.clone(),
             kind: "mcp".to_string(),
-            enabled: true,
+            enabled: config
+                .get("enabled")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(true),
         })
         .collect()
 }
@@ -140,6 +143,30 @@ pub(crate) fn codex_config_path() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_mcp_server_stays_disabled() {
+        let config = parse_codex_config(
+            "[mcp_servers.off]\nenabled = false\n[mcp_servers.on]\ncommand = 'node'\n",
+        )
+        .expect("valid config");
+        assert!(
+            !config
+                .extensions
+                .iter()
+                .find(|e| e.name == "off")
+                .expect("off entry")
+                .enabled
+        );
+        assert!(
+            config
+                .extensions
+                .iter()
+                .find(|e| e.name == "on")
+                .expect("on entry")
+                .enabled
+        );
+    }
 
     #[test]
     fn parse_basic_config() {

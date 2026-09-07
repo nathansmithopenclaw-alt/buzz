@@ -18,6 +18,13 @@ pub(crate) fn shut_down_app(app: &tauri::AppHandle, shutdown_done: &std::sync::a
         .shutdown_started
         .store(true, Ordering::SeqCst);
     if !shutdown_done.swap(true, Ordering::SeqCst) {
+        if let Err(error) = app
+            .state::<crate::computer_use_native::NativeDriver>()
+            .stop()
+        {
+            eprintln!("buzz-desktop: native driver shutdown failed: {error}");
+        }
+
         prevent_sleep::release(&app.state::<AppState>().prevent_sleep);
         crate::observed_unread::flush(app);
         crate::channel_head_cache::flush(app);

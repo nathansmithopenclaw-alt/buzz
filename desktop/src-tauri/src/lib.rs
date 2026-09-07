@@ -6,6 +6,8 @@ mod build_identity;
 mod builderlab;
 mod channel_head_cache;
 mod commands;
+mod computer_use;
+mod computer_use_native;
 mod deep_link;
 mod egress_guard;
 mod event_sync;
@@ -227,6 +229,7 @@ pub fn run() {
             });
         })
         .manage(build_app_state())
+        .manage(computer_use_native::NativeDriver::default())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
         .manage(PendingNavigationDeepLinks::default())
@@ -522,6 +525,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            computer_use::computer_use_status,
+            computer_use::set_computer_native_enabled,
+            computer_use::set_computer_use_enabled,
+            computer_use::list_computer_browser_sessions,
             terminal_runtime::terminal_attach,
             terminal_runtime::terminal_detach,
             terminal_runtime::terminal_close,
