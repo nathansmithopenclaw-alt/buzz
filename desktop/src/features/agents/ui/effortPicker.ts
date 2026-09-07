@@ -39,10 +39,10 @@ export function validateSavedEffort(
  * the empty probe list would reject every level the user can see offered and
  * wedge Save with no reachable selection.
  */
-export function discoveredEffortCatalog(
+export function discoveredEffortCatalog<T extends { id: string }>(
   effortConfigId: string | null | undefined,
-  effortOptions: readonly { id: string }[] | null | undefined,
-): readonly { id: string }[] | null {
+  effortOptions: readonly T[] | null | undefined,
+): readonly T[] | null {
   return effortConfigId ? (effortOptions ?? null) : null;
 }
 

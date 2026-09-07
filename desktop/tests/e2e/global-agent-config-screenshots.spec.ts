@@ -930,6 +930,70 @@ test.describe("global agent config screenshots", () => {
   // provider picker hidden, Save enabled, and no submit-block reason. Create
   // and Save share this rendering path, but the defect was Save-specific, so
   // this exercises Save directly.
+  // A discovery that advertises NO effort control must not be read as "no effort
+  // value is valid". The OpenAI, Anthropic, mesh and OpenRouter model-discovery
+  // paths all return `effort_options: Vec::new()`, and collapsing that to an
+  // empty catalog made validateEffortSelection reject the agent's own saved
+  // BUZZ_ACP_THINKING_EFFORT and gate Save on it. claude declares that env var
+  // with effort_model_qualifier=false, so this is the live path. D-913b7643.
+  test("claude thinking effort survives a discovery that advertises no effort control", async ({
+    page,
+  }) => {
+    const PERSONA_ID = "persona-claude-no-effort-catalog";
+    await installMockBridge(page, {
+      acpRuntimesCatalog: CATALOG_WITH_CLAUDE,
+      discoverAgentModels: {
+        models: [{ id: "claude-opus-4-5", name: "Claude Opus 4.5" }],
+        supportsSwitching: true,
+        // No effortConfigId and no effortOptions: the probe is silent on effort.
+      },
+      managedAgents: [
+        {
+          pubkey: TEST_IDENTITIES.tyler.pubkey,
+          name: "Claude NoEffort",
+          personaId: PERSONA_ID,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+      personas: [
+        {
+          id: PERSONA_ID,
+          displayName: "Claude NoEffort",
+          systemPrompt: "You are the Claude no-effort-catalog e2e persona.",
+          runtime: "claude",
+          model: "claude-opus-4-5",
+          provider: null,
+          envVars: { BUZZ_ACP_THINKING_EFFORT: "high" },
+        },
+      ],
+    });
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    const agentButton = page.getByRole("button", {
+      name: "Claude NoEffort agent profile",
+    });
+    await expect(agentButton).toBeVisible({ timeout: 10_000 });
+    await agentButton.click();
+    await expect(page.getByTestId("user-profile-panel")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(page.getByTestId("persona-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // The saved effort must not be reported invalid against a catalog the probe
+    // never supplied, and Save must not be gated on it.
+    await expect(
+      page.getByText(/Reasoning effort high is not valid/),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
+      timeout: 10_000,
+    });
+  });
+
   test("10-edit-codex-effort-qualified-model-does-not-wedge-save", async ({
     page,
   }) => {
