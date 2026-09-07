@@ -313,9 +313,11 @@ fn canonical_effort_wins_over_legacy_record_env() {
     assert_eq!(effort.value.as_deref(), Some("low"));
     assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
     assert_eq!(
-        effort.overridden_value, None,
-        "suppressed legacy effort is not a running value"
+        effort.overridden_value.as_deref(),
+        Some("high"),
+        "the lower configured tier remains visible as override context"
     );
+    assert_eq!(effort.overridden_origin, Some(ConfigOrigin::BuzzExplicit));
 }
 
 /// B4: None effort_level does not introduce a spurious tier.

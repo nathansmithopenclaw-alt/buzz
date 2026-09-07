@@ -203,7 +203,7 @@ test.describe("agent error state screenshots", () => {
       ).toHaveCount(0);
     }
     await waitForAnimations(page);
-    await page.getByTestId("agents-library-personas").screenshot({
+    await page.getByTestId("agents-fleet").screenshot({
       path: `${SHOTS}/04-positive-presence-supersedes-stopped-errors.png`,
     });
   });

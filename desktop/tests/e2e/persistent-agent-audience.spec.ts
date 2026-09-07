@@ -462,6 +462,7 @@ test("disabling automatic mentions leaves the composer empty after send", async 
     channelComposer(page).getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toHaveCount(0);
 
+  await openThread(page);
   await input.fill("@Mor");
   await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
   await input.press("Tab");

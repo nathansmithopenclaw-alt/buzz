@@ -58,11 +58,12 @@ that frontend inventory.
    in a component. Components ask the field model what exists
    (`hasRenderableAgentConfigField`, `getRenderableEffortField`).
 2. **Effort reads/writes go through the descriptor.** Use the effort
-   descriptor's `currentPersistence` key — never a raw effort env literal in
-   UI code. Buzz Agent persists `BUZZ_AGENT_THINKING_EFFORT`, Goose persists
-   `GOOSE_THINKING_EFFORT`, and Claude persists
-   `BUZZ_ACP_THINKING_EFFORT`, which buzz-acp validates and applies through the
-   adapter's native `effort` config option after model selection.
+   descriptor's `currentPersistence` key, never a raw effort env literal in
+   UI code. Native keys and normalization come from the runtime catalog.
+   Managed-instance overrides persist the canonical `effortLevel` when native
+   discovery is available; definition and global scopes use their declared
+   persistence policy. Previously saved generic ACP defaults remain a fallback
+   only when no canonical effort resolves, and cannot shadow a concrete pin.
 3. **Field absence has a named reason, not a boolean.** Codex instance and definition edits
    expose effort through the runtime-declared `effortModelQualifier` capability:
    the control reads and writes the saved model ID's `[level]` suffix and uses
