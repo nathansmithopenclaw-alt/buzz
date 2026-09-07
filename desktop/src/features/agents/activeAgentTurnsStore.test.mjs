@@ -1792,6 +1792,9 @@ describe("observer → active-turns bridge sync", () => {
     ]);
     unsubscribeManagement();
     unsubscribeObserver();
+    // This test exercises synchronous envelope ordering without a browser.
+    // Dispose its app-level relay start before its rejected IPC can retry.
+    resetAgentObserverStore();
 
     assert.deepEqual(
       visibleSeqs,

@@ -1,4 +1,6 @@
 import * as React from "react";
+import { startObserverSubscription } from "./observerSubscription";
+import { relayClient } from "@/shared/api/relayClient";
 import { retainSessionConfigs } from "./lib/conversationEffort";
 
 import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
@@ -230,8 +232,8 @@ function unregisterKnownAgents(subscriptionId: string) {
 
 let connectionState: ConnectionState = "idle";
 let errorMessage: string | null = null;
-let unsubscribeRelay: (() => Promise<void>) | null = null;
-let startPromise: Promise<void> | null = null;
+let relaySubscription: ReturnType<typeof startObserverSubscription> | null =
+  null;
 let eventProcessingQueue: Promise<void> = Promise.resolve();
 let generation = 0;
 
@@ -602,59 +604,36 @@ async function handleRelayObserverEvent(
 }
 
 export function ensureRelayObserverSubscription() {
-  if (unsubscribeRelay) {
-    return Promise.resolve();
-  }
-  if (startPromise) {
-    return startPromise;
-  }
-
+  if (relaySubscription) return relaySubscription.ready;
   const activeGeneration = generation;
-  setConnectionState("connecting", null);
-  startPromise = (async () => {
-    const identity = await getIdentity();
-    const unsubscribe = await subscribeToAgentObserverFrames(
-      identity.pubkey,
-      (event) => {
-        eventProcessingQueue = eventProcessingQueue
-          .then(() => handleRelayObserverEvent(event, activeGeneration))
-          .catch((error) => {
-            if (activeGeneration !== generation) {
-              return;
-            }
-            setConnectionState(
-              "error",
-              error instanceof Error
-                ? `Observer event handling failed: ${error.message}`
-                : "Observer event handling failed.",
-            );
-          });
-      },
-    );
-    if (activeGeneration !== generation) {
-      await unsubscribe();
-      return;
-    }
-    unsubscribeRelay = unsubscribe;
-    setConnectionState("open", null);
-  })()
-    .catch((error) => {
-      if (activeGeneration === generation) {
-        setConnectionState(
-          "error",
-          error instanceof Error
-            ? error.message
-            : "Observer relay subscription failed.",
-        );
-      }
-    })
-    .finally(() => {
-      if (activeGeneration === generation) {
-        startPromise = null;
-      }
-    });
-
-  return startPromise;
+  relaySubscription = startObserverSubscription({
+    subscribe: async (onEvent, onTerminalClosed) => {
+      const identity = await getIdentity();
+      return subscribeToAgentObserverFrames(
+        identity.pubkey,
+        onEvent,
+        onTerminalClosed,
+      );
+    },
+    onReconnect: (listener) => relayClient.subscribeToReconnects(listener),
+    onState: (state, error) => {
+      if (activeGeneration === generation) setConnectionState(state, error);
+    },
+    onEvent: (event) => {
+      eventProcessingQueue = eventProcessingQueue
+        .then(() => handleRelayObserverEvent(event, activeGeneration))
+        .catch((error) => {
+          if (activeGeneration !== generation) return;
+          setConnectionState(
+            "error",
+            error instanceof Error
+              ? `Observer event handling failed: ${error.message}`
+              : "Observer event handling failed.",
+          );
+        });
+    },
+  });
+  return relaySubscription.ready;
 }
 
 export function subscribeAgentObserverStore(
@@ -973,9 +952,8 @@ export function syncAgentObserverEvents(
 
 export function resetAgentObserverStore() {
   generation += 1;
-  const unsubscribe = unsubscribeRelay;
-  unsubscribeRelay = null;
-  startPromise = null;
+  relaySubscription?.stop();
+  relaySubscription = null;
   eventProcessingQueue = Promise.resolve();
   eventsByAgent.clear();
   sessionConfigsByAgent.clear();
@@ -995,7 +973,6 @@ export function resetAgentObserverStore() {
   connectionState = "idle";
   errorMessage = null;
   notifyListeners();
-  void unsubscribe?.();
 }
 
 /**

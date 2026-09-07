@@ -14,6 +14,7 @@ const OBSERVER_LIVE_LOOKBACK_SECS = 300;
 export function subscribeToAgentObserverFrames(
   ownerPubkey: string,
   onEvent: (event: RelayEvent) => void,
+  onTerminalClosed?: (message: string) => void,
 ) {
   return relayClient.subscribeLive(
     {
@@ -29,6 +30,7 @@ export function subscribeToAgentObserverFrames(
       since: Math.floor(Date.now() / 1_000) - OBSERVER_LIVE_LOOKBACK_SECS,
     },
     onEvent,
+    { onTerminalClosed },
   );
 }
 
