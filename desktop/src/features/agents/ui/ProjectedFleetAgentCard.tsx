@@ -1,3 +1,4 @@
+import { AgentManagementMarker } from "./OtherSetupAgentMarker";
 import { Activity, EllipsisVertical, MessageSquare } from "lucide-react";
 
 import {
@@ -82,6 +83,7 @@ export function ProjectedFleetAgentCard({
         status.state === "host-unreachable" ? "opacity-60 grayscale" : undefined
       }
       dataTestId={`fleet-agent-${agent.agentPubkey}`}
+      footerAccessory={<AgentManagementMarker pubkey={agent.agentPubkey} />}
       label={agent.displayName}
       modelLabel={`${runtimeLabel} · ${modelLabel}`}
       subtitle={agent.personaDescription}

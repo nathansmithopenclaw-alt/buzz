@@ -91,9 +91,9 @@ export function effortPickerState({
 }
 
 /**
- * Map a dropdown selection back to the value persisted via
- * `persistAgentEffortLevel`: the sentinel clears effort (null → adapter
- * default), any other value is the explicit effort level.
+ * Map a dropdown selection back to the persisted value sent as
+ * `effortLevel` in the locked update payload: the sentinel clears effort
+ * (null → adapter default), any other value is the explicit effort level.
  */
 export function effortSelectionToPersistedValue(value: string): string | null {
   return value === EFFORT_DEFAULT_DROPDOWN_VALUE ? null : value;

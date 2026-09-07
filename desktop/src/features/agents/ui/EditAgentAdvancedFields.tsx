@@ -168,6 +168,7 @@ export function EditAgentAdvancedFields({
           >
             <input
               checked={inheritHarness}
+              disabled={disabled}
               id="edit-agent-inherit-harness"
               onChange={(event) => onInheritHarnessChange(event.target.checked)}
               type="checkbox"
@@ -192,6 +193,7 @@ export function EditAgentAdvancedFields({
         >
           <input
             checked={autoRestartOnConfigChange}
+            disabled={disabled}
             id="edit-agent-auto-restart"
             onChange={(event) => onAutoRestartChange(event.target.checked)}
             type="checkbox"
@@ -407,6 +409,7 @@ export function EditAgentAdvancedFields({
       {numericDescriptors.length > 0 ? (
         <NumericTuningFields
           descriptors={numericDescriptors}
+          disabled={disabled}
           envVars={envVars}
           inheritedEnvVars={inheritedEnvVars}
           onEnvVarChange={(key, value) => {
@@ -424,6 +427,7 @@ export function EditAgentAdvancedFields({
       {/* Effort-tuning knob — only shown for buzz-agent. */}
       {isBuzzAgentRuntime(modelTuningRuntimeId) ? (
         <BuzzAgentModelTuningFields
+          disabled={disabled}
           envVars={envVars}
           inheritedEnvVars={inheritedEnvVars}
           model={model}

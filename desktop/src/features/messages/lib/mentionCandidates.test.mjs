@@ -155,7 +155,7 @@ test("persona creation blocks teams unless every member resolves to an identity"
   );
 });
 
-test("teams with duplicate identity display names are not suggested", () => {
+test("teams with duplicate identity display names remain selectable with their exact keys", () => {
   const personas = [
     persona("builder-one", "First"),
     persona("builder-two", "Second"),
@@ -165,13 +165,14 @@ test("teams with duplicate identity display names are not suggested", () => {
     identity("builder-two", "Builder", { pubkey: "2".repeat(64) }),
   ];
 
+  const suggestions = buildTeamMentionCandidates(
+    [team("duplicate-identities", ["builder-one", "builder-two"])],
+    personas,
+    candidates,
+  );
   assert.deepEqual(
-    buildTeamMentionCandidates(
-      [team("duplicate-identities", ["builder-one", "builder-two"])],
-      personas,
-      candidates,
-    ),
-    [],
+    suggestions[0].teamMembers.map((member) => member.pubkey),
+    ["1".repeat(64), "2".repeat(64)],
   );
 });
 

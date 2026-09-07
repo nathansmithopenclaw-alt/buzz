@@ -463,7 +463,7 @@ pub struct CliArgs {
     pub no_memory: bool,
 
     /// Disable the `<base>` platform-context section prepended to every prompt.
-    /// When set, agents receive only the persona `<system>` prompt with no Buzz orientation.
+    /// When set, agents receive only the persona `<agent-instructions>` prompt with no Buzz orientation.
     #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
     pub no_base_prompt: bool,
 
@@ -553,7 +553,7 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
     pub allowed_respond_to: Option<Vec<String>>,
 
-    /// Team-owned instructions layered after `<system>` and before agent memory.
+    /// Team-owned instructions layered after `<agent-instructions>` and before agent memory.
     #[arg(long, env = "BUZZ_ACP_TEAM_INSTRUCTIONS")]
     pub team_instructions: Option<String>,
 
@@ -609,6 +609,14 @@ pub struct CliArgs {
         default_value_t = 200 * 1024
     )]
     pub prefix_total_warning_bytes: u64,
+    /// Unix-seconds replay floor for the startup watermark. A publish-first
+    /// mention send publishes the triggering message and then spawns this
+    /// harness, passing the send timestamp here so the first REQ replays past
+    /// that message however long the spawn takes. Floors older than 15 minutes
+    /// are clamped to 15 minutes before startup; floors in the future are
+    /// ignored (the watermark stays at startup time).
+    #[arg(long, env = "BUZZ_ACP_REPLAY_FLOOR")]
+    pub replay_floor: Option<u64>,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -719,6 +727,12 @@ pub struct Config {
     pub prefix_core_warning_bytes: u64,
     /// Rendered standing prompt plus MCP-config warning threshold in UTF-8 bytes.
     pub prefix_total_warning_bytes: u64,
+    /// Optional unix-seconds replay floor for the startup watermark
+    /// (`--replay-floor` / `BUZZ_ACP_REPLAY_FLOOR`), set by a publish-first
+    /// mention send so the first REQ replays past the already-published
+    /// triggering message. Clamped where consumed — see
+    /// `startup_watermark_with_floor`.
+    pub replay_floor_unix: Option<u64>,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1415,6 +1429,7 @@ impl Config {
             prefix_budget_warnings: args.prefix_budget_warnings,
             prefix_core_warning_bytes: args.prefix_core_warning_bytes,
             prefix_total_warning_bytes: args.prefix_total_warning_bytes,
+            replay_floor_unix: args.replay_floor,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1811,6 +1826,7 @@ mod tests {
             prefix_budget_warnings: false,
             prefix_core_warning_bytes: 12 * 1024,
             prefix_total_warning_bytes: 200 * 1024,
+            replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,

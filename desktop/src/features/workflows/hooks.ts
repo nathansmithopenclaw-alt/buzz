@@ -183,7 +183,10 @@ export function useApprovalResolutionQuery(
   approverPubkey: string | null,
 ) {
   return useQuery({
-    queryKey: approvalResolutionQueryKey(approvalRef ?? "", approverPubkey ?? ""),
+    queryKey: approvalResolutionQueryKey(
+      approvalRef ?? "",
+      approverPubkey ?? "",
+    ),
     queryFn: ({ queryKey: [, resolvedApprovalRef, resolvedApproverPubkey] }) =>
       getApprovalResolution(resolvedApprovalRef, resolvedApproverPubkey),
     enabled: approvalRef !== null && approverPubkey !== null,

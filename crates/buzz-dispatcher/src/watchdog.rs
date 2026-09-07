@@ -302,6 +302,7 @@ async fn notify_stale(
         &mentions,
         false,
         &[],
+        &[],
     )?;
     let event = builder
         .sign_with_keys(relay.keys())

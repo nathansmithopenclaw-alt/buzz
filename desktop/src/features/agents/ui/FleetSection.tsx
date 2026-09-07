@@ -15,7 +15,15 @@ import { fleetAgentHost } from "@/features/agents/fleetProjection/selectors";
 import type { FleetProjectionOwnerPresentation } from "@/features/agents/fleetProjection/useFleetProjectionPresentation";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
-import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
+import {
+  agentPresenceStartBlockReason,
+  type AgentAvailabilityReader,
+} from "@/features/agents/lib/useAgentAvailability";
+import {
+  ProtectedBestieCardBadge,
+  useProtectedBestiePubkey,
+} from "@protected-feature-components";
+import { AgentManagementMarker } from "./OtherSetupAgentMarker";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
@@ -50,6 +58,7 @@ import type { FleetProjectionPersona } from "@/features/agents/fleetProjection/t
 
 type HostFleetSectionProps = {
   mode: "host";
+  getAvailability: AgentAvailabilityReader;
   agents: ManagedAgent[];
   defaultModel: string;
   error: Error | null;
@@ -107,6 +116,7 @@ export function FleetSection(props: FleetSectionProps) {
 function HostFleetSection(props: HostFleetSectionProps) {
   const {
     agents,
+    getAvailability,
     defaultModel,
     error,
     isActionPending,
@@ -133,25 +143,13 @@ function HostFleetSection(props: HostFleetSectionProps) {
     onStopAgent,
   } = props;
   const isArchived = useIsArchivedPredicate();
+  const bestiePubkey = useProtectedBestiePubkey(agents)?.toLowerCase() ?? null;
   const visibleAgents = agents.filter((agent) => {
     const persona = agent.personaId
       ? personasById.get(agent.personaId)
       : undefined;
     return persona !== undefined || !isArchived(agent.pubkey);
   });
-  const profileTargetByPersonaId = new Map<string, ManagedAgent | undefined>();
-  for (const agent of agents) {
-    if (!agent.personaId || profileTargetByPersonaId.has(agent.personaId)) {
-      continue;
-    }
-    profileTargetByPersonaId.set(
-      agent.personaId,
-      pickProfileAgent(
-        agents.filter((candidate) => candidate.personaId === agent.personaId),
-        isArchived,
-      ),
-    );
-  }
   const hasCards = visibleAgents.length > 0 || undeployedPersonas.length > 0;
   return (
     <section className="relative space-y-4" data-testid="agents-fleet">
@@ -174,6 +172,8 @@ function HostFleetSection(props: HostFleetSectionProps) {
           {visibleAgents.map((agent) => (
             <FleetAgentCard
               agent={agent}
+              getAvailability={getAvailability}
+              isBestie={agent.pubkey.toLowerCase() === bestiePubkey}
               defaultModel={defaultModel}
               isActionPending={isActionPending}
               isMessagePending={isMessagePending}
@@ -189,18 +189,12 @@ function HostFleetSection(props: HostFleetSectionProps) {
               onEditPersona={onEditPersona}
               onMessageAgent={onMessageAgent}
               onOpenAgentProfile={onOpenAgentProfile}
-              onOpenPersonaProfile={onOpenPersonaProfile}
               onRestartAgent={onRestartAgent}
               onSharePersona={onSharePersona}
               onSnapshotPersona={onSnapshotPersona}
               onStartAgent={onStartAgent}
               onStopAgent={onStopAgent}
               isPersonaPending={isPersonaPending}
-              profileTargetPubkey={
-                agent.personaId
-                  ? profileTargetByPersonaId.get(agent.personaId)?.pubkey
-                  : agent.pubkey
-              }
             />
           ))}
           {undeployedPersonas.map((persona) => (
@@ -350,6 +344,8 @@ function ObserverFleetSection({
 
 function FleetAgentCard({
   agent,
+  getAvailability,
+  isBestie,
   defaultModel,
   isActionPending,
   isMessagePending,
@@ -363,8 +359,6 @@ function FleetAgentCard({
   onEditPersona,
   onMessageAgent,
   onOpenAgentProfile,
-  onOpenPersonaProfile,
-  profileTargetPubkey,
   onRestartAgent,
   onSharePersona,
   onSnapshotPersona,
@@ -372,6 +366,8 @@ function FleetAgentCard({
   onStopAgent,
 }: {
   agent: ManagedAgent;
+  getAvailability: AgentAvailabilityReader;
+  isBestie: boolean;
   defaultModel: string;
   isActionPending: boolean;
   isMessagePending: boolean;
@@ -388,8 +384,6 @@ function FleetAgentCard({
     pubkey: string,
     options?: ProfilePanelOpenOptions,
   ) => void;
-  onOpenPersonaProfile: (persona: AgentPersona) => void;
-  profileTargetPubkey?: string;
   onRestartAgent: (pubkey: string) => void;
   onSharePersona: (persona: AgentPersona) => void;
   onSnapshotPersona: (persona: AgentPersona) => void;
@@ -407,6 +401,11 @@ function FleetAgentCard({
     agent.lastErrorCode,
   )?.copy;
   const isActive = isManagedAgentActive(agent);
+  const availability = getAvailability(agent.pubkey);
+  const startBlockReason = agentPresenceStartBlockReason(
+    isActive,
+    availability,
+  );
   const isRestarting = restartingAgentPubkey === agent.pubkey;
   const isStarting = startingAgentPubkey === agent.pubkey;
   const opensRuntimeTab = Boolean(friendlyError && !isActive);
@@ -483,7 +482,7 @@ function FleetAgentCard({
                   Restart
                 </DropdownMenuItem>
               </>
-            ) : (
+            ) : !startBlockReason ? (
               <DropdownMenuItem
                 disabled={isActionPending}
                 onSelect={() =>
@@ -499,7 +498,7 @@ function FleetAgentCard({
                 )}
                 {agent.needsRestart ? "Restart" : "Start"}
               </DropdownMenuItem>
-            )}
+            ) : null}
             {persona ? (
               <>
                 <DropdownMenuSeparator />
@@ -527,6 +526,7 @@ function FleetAgentCard({
           errorLabel={friendlyError}
           errorTestId={`agent-runtime-error-${agent.pubkey}`}
           isActive={isActive}
+          availability={availability}
           isRestarting={isRestarting}
           isStarting={isStarting}
           label={identity.displayName}
@@ -544,16 +544,18 @@ function FleetAgentCard({
       }
       avatarUrl={identity.avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
+      footerAccessory={
+        <>
+          <AgentManagementMarker pubkey={agent.pubkey} />
+          <ProtectedBestieCardBadge agent={agent} isBestie={isBestie} />
+        </>
+      }
       label={identity.displayName}
       modelLabel={`${runtimeLabel} · ${modelLabel}`}
       subtitle={persona ? effectiveAgentDescription(persona) : null}
       onClick={() => {
         if (opensRuntimeTab) {
           onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
-        } else if (profileTargetPubkey) {
-          onOpenAgentProfile(profileTargetPubkey);
-        } else if (persona) {
-          onOpenPersonaProfile(persona);
         } else {
           onOpenAgentProfile(agent.pubkey);
         }

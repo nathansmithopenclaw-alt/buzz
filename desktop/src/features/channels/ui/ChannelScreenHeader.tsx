@@ -16,7 +16,9 @@ import {
   ProfileAvatarWithStatus,
   scaleProfileAvatarStatusGeometry,
 } from "@/features/profile/ui/ProfileAvatarWithStatus";
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
+import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
 import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -213,9 +215,24 @@ export function ChannelScreenHeader({
           {!isGroupDm && activeDmManagedAgent ? (
             <SubscriptionAccountSelector agent={activeDmManagedAgent} compact />
           ) : null}
+          {!isGroupDm && activeDmParticipant ? (
+            <AgentManagementMarker
+              pubkey={activeDmParticipant.pubkey}
+              testId="chat-header-agent-provenance"
+            />
+          ) : null}
         </div>
       }
       title={activeChannelTitle}
+      titleAdornment={
+        activeChannel?.channelType === "dm" && !isGroupDm ? (
+          <UserNameIndicators
+            className="ml-1"
+            pubkey={activeDmParticipant?.pubkey}
+            size="dm"
+          />
+        ) : null
+      }
       transparentChrome={transparentChrome}
       visibility={activeChannel?.visibility}
     />

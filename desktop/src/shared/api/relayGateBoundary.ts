@@ -82,10 +82,13 @@ export async function requestHistoryMultiGated(
 
     subscriptions.set(subId, {
       mode: "history",
+      filter: filters[0],
+      filters,
       events: [],
       resolve,
       reject,
       timeout,
+      timeoutMs: historyTimeoutMs,
     });
 
     void sendRaw(["REQ", subId, ...filters]).catch((error) => {

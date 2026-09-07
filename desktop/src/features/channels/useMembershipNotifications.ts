@@ -19,7 +19,7 @@ export function useMembershipNotifications(currentPubkey?: string) {
         void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
       },
       isChannelsFetching: () =>
-        queryClient.isFetching({ queryKey: channelsQueryKey }),
+        queryClient.isFetching({ queryKey: channelsQueryKey, exact: true }),
       invalidateChannelMembership: (channelId) => {
         void queryClient.invalidateQueries({
           queryKey: ["channels", channelId, "detail"],

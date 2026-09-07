@@ -26,6 +26,7 @@ import {
   useProfileActivityFeedScope,
 } from "@/features/profile/lib/profileActivityFeedScope";
 import { UserProfileAgentManagementRows } from "@/features/profile/ui/UserProfileAgentManagementRows";
+import { ProtectedAgentBestieAction } from "@protected-feature-components";
 import { ProfileInstancesSection } from "@/features/profile/ui/ProfileInstancesSection";
 import {
   type ProfileField,
@@ -318,6 +319,11 @@ export function ProfileInfoTabContent({
         onDeleteAgent={onDeleteAgent}
         onDuplicateAgent={onDuplicateAgent}
         onExportAgent={onExportAgent}
+        supplementalAction={
+          managedAgent ? (
+            <ProtectedAgentBestieAction agent={managedAgent} />
+          ) : null
+        }
       />
     </div>
   );

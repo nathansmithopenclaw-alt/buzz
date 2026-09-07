@@ -195,7 +195,7 @@ impl<'a> Emitter<'a> {
                         "New triage issue needs a human: **{}** — {}",
                         issue.identifier, issue.title
                     );
-                    let builder = build_message(*channel_id, &content, None, &[], false, &[])?;
+                    let builder = build_message(*channel_id, &content, None, &[], false, &[], &[])?;
                     self.publish_recorded(store, *request_id, vec![builder])
                         .await?;
                 }
@@ -241,7 +241,7 @@ impl<'a> Emitter<'a> {
                                 issue.identifier, issue.title
                             );
                             let message =
-                                build_message(*channel_id, &content, None, &[], false, &[])?;
+                                build_message(*channel_id, &content, None, &[], false, &[], &[])?;
                             let record = escalation_action_builder(
                                 self.config.stream_id,
                                 issue,
@@ -262,7 +262,7 @@ impl<'a> Emitter<'a> {
         for (channel_id, lines) in digest_lines {
             let fires = digest_fires.remove(&channel_id).unwrap_or_default();
             let content = format!("Dispatcher digest:\n{}", lines.join("\n"));
-            let builder = build_message(channel_id, &content, None, &[], false, &[])?;
+            let builder = build_message(channel_id, &content, None, &[], false, &[], &[])?;
             if let Err(error) = self.sign_and_submit(builder).await {
                 // Leave this channel's fires un-marked: the epoch
                 // re-qualifies next tick and re-joins the digest.

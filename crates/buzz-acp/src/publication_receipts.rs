@@ -87,7 +87,7 @@ mod tests {
     fn flat_dm_receipt_requires_exact_signed_author_channel_and_time() {
         let keys = nostr::Keys::generate();
         let channel = uuid::Uuid::new_v4();
-        let event = buzz_sdk::build_message(channel, "completed", None, &[], false, &[])
+        let event = buzz_sdk::build_message(channel, "completed", None, &[], false, &[], &[])
             .unwrap()
             .sign_with_keys(&keys)
             .unwrap();

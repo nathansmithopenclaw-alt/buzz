@@ -30,6 +30,21 @@ LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS $$
         'community_deletion_executor_heartbeats',
         'product_feedback',
         'rate_limit_violations',
+        'community_hosts'
+    ]::TEXT[])
+$$
+"#;
+const COMMUNITY_HOSTS_LEDGER_DELETION_TAXONOMY_SQL: &str = r#"
+CREATE OR REPLACE FUNCTION community_write_fence_excluded_table(target NAME) RETURNS BOOLEAN
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS $$
+    SELECT target::TEXT = ANY (ARRAY[
+        'community_deletion_requests',
+        'community_deletion_approvals',
+        'community_deletion_checkpoints',
+        'community_serving_write_leases',
+        'community_deletion_executor_heartbeats',
+        'product_feedback',
+        'rate_limit_violations',
         'community_hosts',
         'authorization_operation_receipts', 'identity_enrollment_policies',
         'identity_bindings', 'identity_lifecycle_history',
@@ -334,9 +349,16 @@ async fn ensure_community_hosts_deletion_taxonomy(conn: &mut PgConnection) -> Re
             .fetch_one(&mut *conn)
             .await?;
     if !excluded {
-        sqlx::query(COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL)
-            .execute(&mut *conn)
-            .await?;
+        let ledger_exists: bool =
+            sqlx::query_scalar("SELECT to_regclass('identity_bindings') IS NOT NULL")
+                .fetch_one(&mut *conn)
+                .await?;
+        let taxonomy = if ledger_exists {
+            COMMUNITY_HOSTS_LEDGER_DELETION_TAXONOMY_SQL
+        } else {
+            COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL
+        };
+        sqlx::query(taxonomy).execute(&mut *conn).await?;
     }
     Ok(())
 }
@@ -361,9 +383,12 @@ where
     F: FnOnce(PgConnection) -> Fut,
     Fut: Future<Output = (PgConnection, Result<T>)>,
 {
-    let mut lock_conn = crate::observability::acquire(pool, crate::observability::PoolRole::Writer)
-        .await?
-        .detach();
+    let mut lock_conn = crate::observability::acquire_writer_with_legacy_metrics(
+        pool,
+        crate::observability::WriterOperation::Bootstrap,
+    )
+    .await?
+    .detach();
     // This dedicated connection intentionally waits for the current migration
     // or schema-destruction owner and may then run long DDL. Exempt those two
     // phases from runtime lock/statement budgets. Keep the idle-in-transaction
@@ -979,7 +1004,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 49);
+        assert_eq!(migrations.len(), 50);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1615,6 +1640,25 @@ mod postgres_tests {
         assert!(workflow_approval_binding.contains("ADD COLUMN definition_hash"));
         assert!(workflow_approval_binding.contains("pending_expiry"));
         assert!(desired_schema.contains("idx_workflow_approvals_pending_expiry"));
+        // Drop the Phase-A NIP-FI relay-side authority ledger (0041 + 0042).
+        // OSS Buzz is stateless for identity (spec v2, PR #7214); the durable
+        // ledger tables are dead code. Restores community_write_fence_excluded_table
+        // to its pre-0041 body so the deletion catalog no longer includes the
+        // removed relations.
+        assert_eq!(migrations[49].version, 50);
+        let ledger_removal = migrations[49].sql.as_str();
+        assert!(ledger_removal.contains("DROP TABLE authorization_operation_receipts"));
+        assert!(ledger_removal.contains("DROP TABLE identity_bindings"));
+        assert!(ledger_removal.contains("DROP TABLE authorization_events"));
+        assert!(ledger_removal
+            .contains("CREATE OR REPLACE FUNCTION community_write_fence_excluded_table"));
+        // The restored exclusion function must NOT list any NIP-FI relation.
+        assert!(!ledger_removal.contains("'authorization_operation_receipts'"));
+        assert!(!ledger_removal.contains("'identity_bindings'"));
+        assert_eq!(
+            extract_excluded_table_array(COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL),
+            extract_excluded_table_array(desired_schema),
+        );
     }
 
     #[test]
@@ -3100,7 +3144,7 @@ mod postgres_tests {
             .await
             .expect("apply canonical migrations through ledger 44");
 
-        run_migrations(&pool)
+        run_migrations_through(&pool, 49)
             .await
             .expect("upgrade ledger 44 through folded migrations");
 
@@ -3501,6 +3545,111 @@ mod postgres_tests {
             .expect("move community hosts to 32 and apply upstream 27-31");
         assert_eq!(applied_versions(&pool).await, embedded_migration_versions());
         assert_t6_fold_objects(&pool).await;
+    }
+
+    /// Verify migration 0050 applies cleanly against a DB that has rows in
+    /// the NIP-FI 0045+0046 tables. The immutability guards (no_delete,
+    /// no_truncate) are enforced via triggers; DROP TABLE bypasses them and
+    /// must succeed even when rows are present.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0050_drops_populated_nip_fi_ledger_cleanly() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 49)
+            .await
+            .expect("apply installed migrations 1-49");
+
+        let before = applied_versions(&pool).await;
+        assert_eq!(before.last(), Some(&49));
+
+        // Seed a community and minimal rows in a selection of 0045+0046 tables.
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("drop-test-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("seed community");
+
+        // Seed a receipt (used as FK anchor for several 0042 tables).
+        let operation_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 12, $4, 1, $5)",
+        )
+        .bind(community_id)
+        .bind(operation_id)
+        .bind(vec![0xAA_u8; 32])
+        .bind(vec![0xBB_u8; 32])
+        .bind(vec![0xCC_u8; 32])
+        .execute(&pool)
+        .await
+        .expect("seed operation receipt");
+
+        // Seed an invalidation domain (0042 table with no FK to receipts).
+        sqlx::query(
+            "INSERT INTO authorization_invalidation_domains \
+             (community_id, current_generation) VALUES ($1, 0)",
+        )
+        .bind(community_id)
+        .execute(&pool)
+        .await
+        .expect("seed invalidation domain");
+
+        // Apply only the appended ledger-removal migration.
+        run_migrations(&pool)
+            .await
+            .expect("migration 0050 must apply cleanly against a populated NIP-FI DB");
+
+        // All NIP-FI tables must be gone.
+        assert_eq!(applied_versions(&pool).await, embedded_migration_versions());
+        assert_t6_fold_objects(&pool).await;
+        let retained: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1)")
+                .bind(community_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read surviving community");
+        assert!(retained);
+
+        let nip_fi_tables = [
+            "authorization_admission_results",
+            "authorization_authentication_denial_attempts",
+            "authorization_authority_epochs",
+            "authorization_event_capacity",
+            "authorization_events",
+            "authorization_invalidation_domains",
+            "authorization_invalidation_floors",
+            "authorization_operation_receipts",
+            "authorization_operation_version_delta_manifests",
+            "authorization_operation_version_deltas",
+            "identity_bindings",
+            "identity_enrollment_policies",
+            "identity_lifecycle_history",
+            "identity_lifecycle_selectors",
+            "protected_object_authority",
+        ];
+        let present: Vec<String> = sqlx::query_scalar(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_name = ANY($1)",
+        )
+        .bind(&nip_fi_tables[..])
+        .fetch_all(&pool)
+        .await
+        .expect("catalog check after ledger removal");
+        assert!(
+            present.is_empty(),
+            "all NIP-FI tables must be absent after migration 0050: {present:?}"
+        );
+
+        // The deletion catalog must validate with ledger relations gone.
+        crate::deletion::DeletionStore::new(pool.clone())
+            .validate_catalog()
+            .await
+            .expect("deletion catalog validates after migration 0050");
     }
 
     /// NIP-FI intermediate state: migration 0045 (identity + base lifecycle)

@@ -223,7 +223,7 @@ test("required-model harnesses always keep the control", () => {
 test("definition and instance dialogs place model tuning directly below model", async () => {
   for (const [filename, modelMarker] of [
     ["AgentDefinitionDialog.tsx", "<PersonaModelField"],
-    ["AgentInstanceEditDialog.tsx", "<AgentInstanceModelField"],
+    ["AgentInstanceEditDialog.tsx", "<EditAgentProviderModelFields"],
   ]) {
     const source = await readFile(
       new URL(`./${filename}`, import.meta.url),

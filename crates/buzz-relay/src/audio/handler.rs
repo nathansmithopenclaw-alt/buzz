@@ -393,6 +393,11 @@ async fn handle_active_audio_connection(
         }
     }
 
+    let lifecycle_generation = pending_remote
+        .as_ref()
+        .map(|outcome| outcome.generation().to_string())
+        .unwrap_or_else(|| state.huddle_liveness_generation.to_string());
+
     let room = state
         .audio_rooms
         .get_or_create(tenant.community(), channel_id);
@@ -719,6 +724,7 @@ async fn handle_active_audio_connection(
             participant_pubkey: &pubkey_hex,
             roster_revision: Some(lifecycle_revision),
             admission_id: Some(peer_id),
+            generation: &lifecycle_generation,
         },
     )
     .await;
@@ -924,6 +930,7 @@ async fn handle_active_audio_connection(
             participant_pubkey: &pubkey_hex,
             roster_revision: removal_revision,
             admission_id: Some(peer_id),
+            generation: &lifecycle_generation,
         },
     )
     .await;
@@ -957,6 +964,7 @@ async fn handle_active_audio_connection(
                         participant_pubkey: &pubkey_hex,
                         roster_revision: None,
                         admission_id: None,
+                        generation: &lifecycle_generation,
                     },
                 )
                 .await;
@@ -1359,6 +1367,7 @@ struct ParticipantLifecycle<'a> {
     participant_pubkey: &'a str,
     roster_revision: Option<u64>,
     admission_id: Option<Uuid>,
+    generation: &'a str,
 }
 
 async fn emit_participant_event(
@@ -1373,22 +1382,29 @@ async fn emit_participant_event(
         participant_pubkey,
         roster_revision,
         admission_id,
+        generation,
     } = lifecycle;
     let content = match (roster_revision, admission_id) {
         (Some(revision), Some(admission_id)) => serde_json::json!({
             "ephemeral_channel_id": channel_id.to_string(),
             "roster_revision": revision,
             "admission_id": admission_id.to_string(),
+            "generation": generation,
         }),
         (Some(revision), None) => serde_json::json!({
             "ephemeral_channel_id": channel_id.to_string(),
             "roster_revision": revision,
+            "generation": generation,
         }),
         (None, Some(admission_id)) => serde_json::json!({
             "ephemeral_channel_id": channel_id.to_string(),
             "admission_id": admission_id.to_string(),
+            "generation": generation,
         }),
-        (None, None) => serde_json::json!({"ephemeral_channel_id": channel_id.to_string()}),
+        (None, None) => serde_json::json!({
+            "ephemeral_channel_id": channel_id.to_string(),
+            "generation": generation,
+        }),
     }
     .to_string();
 

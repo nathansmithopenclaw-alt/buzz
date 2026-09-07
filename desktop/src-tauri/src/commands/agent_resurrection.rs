@@ -114,7 +114,9 @@ pub async fn ensure_managed_agent_for_inbound(
 
     match decision {
         InboundRespawnDecision::Spawn => {
-            match start_managed_agent_inner(spawn_pubkey.clone(), None, None, app, state).await {
+            match start_managed_agent_inner(spawn_pubkey.clone(), None, None, None, app, state)
+                .await
+            {
                 Ok(_) => {
                     note_automatic_spawn(&spawn_pubkey);
                     Ok(InboundRespawnResult {
@@ -197,8 +199,15 @@ pub async fn resurrect_stopped_active_instances(
     let mut failed = Vec::new();
     for candidate in candidates {
         let spawn_state = app.state::<AppState>();
-        match start_managed_agent_inner(candidate.clone(), None, None, app.clone(), spawn_state)
-            .await
+        match start_managed_agent_inner(
+            candidate.clone(),
+            None,
+            None,
+            None,
+            app.clone(),
+            spawn_state,
+        )
+        .await
         {
             Ok(_) => {
                 note_automatic_spawn(&candidate);

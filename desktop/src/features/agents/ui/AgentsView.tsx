@@ -416,6 +416,7 @@ function UnifiedAgentsView({
                   isMessagePending={openDmMutation.isPending}
                   isPersonaPending={personas.isPending}
                   mode="host"
+                  getAvailability={agents.getAvailability}
                   personasById={personasById}
                   restartingAgentPubkey={agents.restartingAgentPubkey}
                   startingAgentPubkey={agents.startingAgentPubkey}

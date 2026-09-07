@@ -38,7 +38,7 @@ import {
 } from "@/features/agents/ui/personaDialogState";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useIdentityArchive } from "@/features/identity-archive/hooks";
-import { usePresenceQuery } from "@/features/presence/hooks";
+import { useAgentAvailabilityLookup } from "@/features/agents/lib/useAgentAvailability";
 import {
   useContactListQuery,
   useFollowMutation,
@@ -194,21 +194,20 @@ export function UserProfilePanel({
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
   const { instanceBuckets, managedAgent, resolvedPersonaFromSource } =
     useProfileManagedSource({
-      currentPubkey,
       isRelayOnly,
       managedAgents: managedAgentsQuery.data,
       persona,
       personas: personasQuery.data,
-      preserveRequestedInstance,
       pubkey,
     });
   const profileIdentityKey =
-    managedAgent?.pubkey ?? pubkey ?? `persona:${persona?.id ?? "unknown"}`;
-  const resolvedPersona = useRetainedPersona(
+    pubkey ?? managedAgent?.pubkey ?? `persona:${persona?.id ?? "unknown"}`;
+  const retainedPersona = useRetainedPersona(
     resolvedPersonaFromSource,
     profileIdentityKey,
   );
-  const effectivePubkey = managedAgent?.pubkey ?? pubkey ?? null;
+  const resolvedPersona = pubkey && !managedAgent ? undefined : retainedPersona;
+  const effectivePubkey = pubkey ?? managedAgent?.pubkey ?? null;
   const pubkeyLower = effectivePubkey?.toLowerCase() ?? "";
 
   const profileQuery = useUserProfileQuery(effectivePubkey ?? undefined);
@@ -236,9 +235,10 @@ export function UserProfilePanel({
     effectivePubkey ? [effectivePubkey] : [],
   );
   const channelsQuery = useChannelsQuery();
-  const presenceQuery = usePresenceQuery(
+  const { getAvailability } = useAgentAvailabilityLookup(
     effectivePubkey ? [effectivePubkey] : [],
   );
+  const presenceStatus = getAvailability(effectivePubkey);
   const userStatusQuery = useUserStatusQuery(
     effectivePubkey ? [effectivePubkey] : [],
   );
@@ -253,9 +253,6 @@ export function UserProfilePanel({
   });
   const ownerPubkey = profile?.ownerPubkey ?? null;
   const ownerProfileQuery = useUserProfileQuery(ownerPubkey ?? undefined);
-  const presenceStatus = pubkeyLower
-    ? presenceQuery.data?.[pubkeyLower]
-    : undefined;
   const userStatus = pubkeyLower
     ? userStatusQuery.data?.[pubkeyLower]
     : undefined;
@@ -305,6 +302,7 @@ export function UserProfilePanel({
   const canOpenAgentLogs =
     isOwner === true && managedAgent?.backend.type === "local";
   const canInstantiateAgent =
+    !pubkey &&
     isOwner === true &&
     resolvedPersona !== undefined &&
     managedAgent === undefined;
@@ -411,7 +409,7 @@ export function UserProfilePanel({
       deleteManagedAgent: deleteAgentMutation.mutateAsync,
       managedAgent,
       managedAgents: managedAgentsQuery.data,
-      presenceLookup: presenceQuery.data,
+      getAvailability,
       relayAgents: relayAgentsQuery.data,
     });
 
@@ -449,6 +447,7 @@ export function UserProfilePanel({
 
   const { handleAgentPrimaryAction, handleAgentRestart } =
     useAgentLifecycleActions({
+      availability: presenceStatus,
       channels: channelsQuery.data,
       managedAgent,
       relayAgents: relayAgentsQuery.data,
@@ -755,6 +754,7 @@ export function UserProfilePanel({
     {
       agentSettingsMenu,
       effectivePubkey,
+      ownerPubkey: profile?.ownerPubkey,
       logCopyValue: isDiagnosticsLikeView ? managedAgentLogContent : null,
       logSubtitle: logHeaderSubtitle,
       onBack: () => setView("summary"),

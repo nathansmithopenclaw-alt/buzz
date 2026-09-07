@@ -1029,8 +1029,14 @@ pub(crate) fn switch_account_scoped(
                 runtimes.remove(key);
                 super::terminate_untracked_pair_runtime(&app, key)?;
             }
-            match super::spawn_agent_child(&app, &snapshot, &key.relay_url, true, owner.as_deref())
-            {
+            match super::spawn_agent_child(
+                &app,
+                &snapshot,
+                &key.relay_url,
+                true,
+                owner.as_deref(),
+                None,
+            ) {
                 Ok(mut process) => {
                     let receipt = super::ManagedAgentRuntimeReceipt {
                         subscription_account_id: process

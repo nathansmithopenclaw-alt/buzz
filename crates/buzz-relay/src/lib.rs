@@ -27,6 +27,8 @@ pub mod handlers;
 pub mod invite_token;
 /// Relay-key signing for transport-neutral journal checkpoints.
 pub mod journal_checkpoint;
+/// Fixed-schema evidence for the relay's earliest startup steps.
+pub mod lifecycle;
 /// Inter-relay mesh startup wiring (`BUZZ_MESH` seam).
 pub mod mesh_boot;
 /// Prometheus metrics: recorder, upkeep, HTTP middleware.
@@ -39,6 +41,7 @@ pub mod protocol;
 pub mod proxy;
 /// Durable NIP-PL matcher and delivery worker.
 pub mod push_runtime;
+mod readiness;
 /// Axum router construction.
 pub mod router;
 /// Shared application state.

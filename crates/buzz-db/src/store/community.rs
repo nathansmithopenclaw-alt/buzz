@@ -122,6 +122,11 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::TenantResolution,
+        )
+        .await?;
         let row = sqlx::query(
             r#"
             SELECT c.id, ch.host
@@ -134,7 +139,7 @@ impl Db {
             "#,
         )
         .bind(normalized_host)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
 
         row.map(|row| {
@@ -152,11 +157,37 @@ impl Db {
     /// Returns whether a community id still exists in the active lifecycle state.
     #[datastore_span(name = "is_community_active", system = "postgresql")]
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        self.is_community_active_with_operation(
+            community_id,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await
+    }
+
+    /// Background lifecycle revalidation variant of [`Self::is_community_active`].
+    #[datastore_span(name = "is_community_active_for_maintenance", system = "postgresql")]
+    pub async fn is_community_active_for_maintenance(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<bool> {
+        self.is_community_active_with_operation(
+            community_id,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await
+    }
+
+    async fn is_community_active_with_operation(
+        &self,
+        community_id: CommunityId,
+        operation: crate::observability::WriterOperation,
+    ) -> Result<bool> {
+        let mut connection = crate::observability::acquire_writer(&self.pool, operation).await?;
         let active = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
         .bind(community_id.as_uuid())
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *connection)
         .await?;
         Ok(active)
     }
@@ -170,6 +201,11 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
         let row = sqlx::query(
             r#"
             SELECT c.id, c.host
@@ -179,7 +215,7 @@ impl Db {
             "#,
         )
         .bind(normalized_host)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
         row.map(|row| {
             Ok(CommunityRecord {
@@ -200,6 +236,11 @@ impl Db {
         owner_pubkey: &str,
     ) -> Result<Vec<OwnedCommunityRecord>> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
         let rows = sqlx::query(
             r#"
             SELECT c.id, c.host, c.created_at, c.archived_at
@@ -211,7 +252,7 @@ impl Db {
             "#,
         )
         .bind(owner_pubkey)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?;
 
         rows.into_iter()
@@ -242,6 +283,11 @@ impl Db {
     /// is never used to re-derive the community.
     #[datastore_span(name = "lookup_community_host", system = "postgresql")]
     pub async fn lookup_community_host(&self, community_id: CommunityId) -> Result<Option<String>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::TenantResolution,
+        )
+        .await?;
         let row = sqlx::query(
             r#"
             SELECT host
@@ -253,7 +299,7 @@ impl Db {
             "#,
         )
         .bind(community_id.as_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
 
         row.map(|row| {
@@ -392,6 +438,11 @@ impl Db {
         community_id: CommunityId,
         icon: Option<&str>,
     ) -> Result<()> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
         sqlx::query(
             r#"
             UPDATE communities
@@ -401,7 +452,7 @@ impl Db {
         )
         .bind(community_id.as_uuid())
         .bind(icon)
-        .execute(&self.pool)
+        .execute(&mut *connection)
         .await?;
         Ok(())
     }
@@ -416,7 +467,36 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<EnsuredCommunityRecord> {
-        let mut tx = self.pool.begin().await?;
+        self.ensure_configured_community_with_operation(
+            normalized_host,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await
+    }
+
+    /// Ensure the deployment-configured community during process bootstrap.
+    #[datastore_span(
+        name = "ensure_configured_community_for_bootstrap",
+        system = "postgresql"
+    )]
+    pub async fn ensure_configured_community_for_bootstrap(
+        &self,
+        normalized_host: &str,
+    ) -> Result<EnsuredCommunityRecord> {
+        self.ensure_configured_community_with_operation(
+            normalized_host,
+            crate::observability::WriterOperation::Bootstrap,
+        )
+        .await
+    }
+
+    async fn ensure_configured_community_with_operation(
+        &self,
+        normalized_host: &str,
+        operation: crate::observability::WriterOperation,
+    ) -> Result<EnsuredCommunityRecord> {
+        let connection = crate::observability::acquire_writer(&self.pool, operation).await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(lower($1), 0))")
             .bind(normalized_host)
             .execute(&mut *tx)
@@ -476,7 +556,12 @@ impl Db {
         owner_pubkey: &str,
     ) -> Result<CreateCommunityWithOwnerResult> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
-        let mut tx = self.pool.begin().await?;
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
         // Serialize on the owner pubkey so concurrent creates to the same
         // owner cannot both pass the ownership count check.
@@ -576,6 +661,11 @@ impl Db {
         owner_pubkey: &str,
         protected_deployment_host: &str,
     ) -> Result<Option<ArchivedCommunityRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = COALESCE(c.archived_at, now())
@@ -593,7 +683,7 @@ impl Db {
         .bind(normalized_host)
         .bind(owner_pubkey)
         .bind(protected_deployment_host)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
         row.map(|row| {
             Ok(ArchivedCommunityRecord {
@@ -612,6 +702,11 @@ impl Db {
         normalized_host: &str,
         owner_pubkey: &str,
     ) -> Result<Option<UnarchivedCommunityRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = NULL
@@ -627,7 +722,7 @@ impl Db {
         )
         .bind(normalized_host)
         .bind(owner_pubkey)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
         row.map(|row| {
             Ok(UnarchivedCommunityRecord {
@@ -644,6 +739,11 @@ impl Db {
     /// they are acting on, rather than falling back to an implicit default.
     #[datastore_span(name = "community_of_channel", system = "postgresql")]
     pub async fn community_of_channel(&self, channel_id: Uuid) -> Result<Option<CommunityId>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::TenantResolution,
+        )
+        .await?;
         let row = sqlx::query(
             r#"
             SELECT community_id
@@ -653,7 +753,7 @@ impl Db {
             "#,
         )
         .bind(channel_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
 
         row.map(|row| {
@@ -689,6 +789,11 @@ impl Db {
         if channel_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::SubscriptionHistory,
+        )
+        .await?;
         let rows = sqlx::query(
             r#"
             SELECT id, community_id
@@ -698,7 +803,7 @@ impl Db {
             "#,
         )
         .bind(channel_ids)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?;
 
         let mut out = std::collections::HashMap::with_capacity(rows.len());
