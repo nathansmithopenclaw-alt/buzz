@@ -687,7 +687,7 @@ fn direct_model_edit_trips_restart_snapshot() {
 #[test]
 fn effort_env_edit_trips_restart_snapshot() {
     let mut rec = record();
-    rec.agent_command = "goose".to_string();
+    rec.agent_command_override = Some("goose".to_string());
     rec.env_vars
         .insert("GOOSE_THINKING_EFFORT".to_string(), "high".to_string());
     let mut edited = rec.clone();

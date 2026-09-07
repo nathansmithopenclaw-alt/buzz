@@ -43,6 +43,8 @@ pub(super) fn record() -> ManagedAgentRecord {
         turn_timeout_seconds: 300,
         idle_timeout_seconds: None,
         max_turn_duration_seconds: None,
+        idle_pool_sleep_seconds: None,
+        max_turns_per_session: None,
         parallelism: 1,
         system_prompt: None,
         model: None,
@@ -85,6 +87,10 @@ pub(super) fn record() -> ManagedAgentRecord {
         agent_command_override: None,
         persona_source_version: None,
         provider: None,
+        claude_account_id: None,
+        subscription_account_id: None,
+        subscription_account_inherit_default: false,
+        subscription_account_generation: 0,
     }
 }
 
@@ -105,6 +111,7 @@ fn persona(id: &str, env_vars: BTreeMap<String, String>) -> AgentDefinition {
         runtime: None,
         model: None,
         provider: None,
+        claude_account_id: None,
         name_pool: vec![],
         is_builtin: false,
         is_active: true,

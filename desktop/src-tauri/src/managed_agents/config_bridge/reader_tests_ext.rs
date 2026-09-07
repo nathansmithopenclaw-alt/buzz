@@ -303,7 +303,8 @@ fn canonical_effort_wins_over_legacy_record_env() {
     record
         .env_vars
         .insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "high".to_string());
-    let runtime = buzz_agent_runtime();
+    let runtime = crate::managed_agents::discovery::known_acp_runtime_exact("goose")
+        .expect("Goose catalog entry: BUZZ_AGENT_THINKING_EFFORT is a legacy alias");
     let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
     let effort = surface
         .normalized
@@ -397,9 +398,6 @@ fn claude_config_dir_none_falls_back_to_home_claude_json() {
 fn effort_option_selected_by_category_drives_all_facts() {
     let mut record = test_record();
     record.effort_level = Some("high".to_string());
-    record
-        .env_vars
-        .insert("BUZZ_AGENT_THINKING_EFFORT".into(), "low".into());
     let runtime = buzz_agent_rt();
     let cache = SessionConfigCache {
         config_options: vec![AcpConfigOptionEntry {

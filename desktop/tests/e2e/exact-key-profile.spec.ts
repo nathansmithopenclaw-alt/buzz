@@ -65,7 +65,15 @@ for (const hasSibling of [false, true]) {
 
     // Persona-only navigation remains legitimate and intentionally different.
     await page.getByTestId("auxiliary-panel-close").click();
-    await page.getByTestId(`persona-agent-row-${PERSONA}`).click();
+    if (hasSibling) {
+      await page.getByTestId(`managed-agent-${LOCAL}`).click();
+      await expect(page.getByTestId("user-profile-name-row")).toContainText(
+        "Local sibling B",
+      );
+      await page.goto(`/#/agents?profilePersona=${PERSONA}`);
+    } else {
+      await page.getByTestId(`persona-agent-row-${PERSONA}`).click();
+    }
     await expect(
       page.getByTestId(
         hasSibling
@@ -121,9 +129,15 @@ for (const allArchived of [false, true]) {
     await expect(page.getByTestId("user-profile-name-row")).toContainText(
       "Archived A",
     );
-    // Persona navigation still excludes archived representatives.
+    // Fleet cards target the exact key, including an archived sibling.
     await page.getByTestId("auxiliary-panel-close").click();
-    await page.getByTestId(`persona-agent-row-${PERSONA}`).click();
+    await page.getByTestId(`managed-agent-${REMOTE}`).click();
+    await expect(page.getByTestId("user-profile-name-row")).toContainText(
+      "Archived A",
+    );
+    await expect(page.getByTestId("user-profile-archived-flair")).toBeVisible();
+    // The separate persona route still excludes archived representatives.
+    await page.goto(`/#/agents?profilePersona=${PERSONA}`);
     if (allArchived) {
       await expect(page.getByTestId("user-profile-start-agent")).toBeVisible();
       await expect(
