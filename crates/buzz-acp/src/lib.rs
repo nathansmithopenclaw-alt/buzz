@@ -3804,6 +3804,10 @@ async fn tokio_main() -> Result<()> {
     account_control_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        // Invalidation captures the provider session ID before clearing Buzz's
+        // scope map. Write bounded, fire-and-forget `session/close` requests
+        // before any idle worker can open a replacement provider session.
+        pool.flush_pending_session_closes().await;
         let account_request_pending =
             account_control.has_pending_request() || pending_account_pause.is_some();
         if !account_request_pending && !account_control.is_quiesced() {
@@ -4785,6 +4789,10 @@ async fn tokio_main() -> Result<()> {
                     exit_cause = Some(ShutdownCause::AllAgentsDead);
                     break;
                 }
+                // handle_prompt_result has already committed any cancel+merge
+                // requeue. Close the invalidated provider session before the
+                // immediate dispatch below can reuse this adapter process.
+                pool.flush_pending_session_closes().await;
                 if drain_ready_join_results(
                     &mut pool,
                     &mut queue,

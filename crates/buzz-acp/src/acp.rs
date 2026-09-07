@@ -7,6 +7,7 @@
 //! 3. [`AcpClient::session_new`] — create session with MCP server config
 //! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
+//! 6. [`AcpClient::session_close_fire_and_forget`] — release an invalidated provider session
 
 use futures_util::{FutureExt, StreamExt};
 use std::collections::{HashMap, HashSet};
@@ -1579,6 +1580,30 @@ impl AcpClient {
             "sessionId": session_id,
         });
         self.send_notification("session/cancel", params).await
+    }
+
+    /// Send `session/close` as a JSON-RPC request without waiting for its response.
+    ///
+    /// Session invalidation is a local state transition: callers must be able to
+    /// requeue the interrupted Buzz turn even if the adapter is wedged. The pool
+    /// therefore bounds only this request's write and treats the eventual response
+    /// as stale. [`read_until_response`](Self::read_until_response) already ignores
+    /// responses whose IDs do not match the next awaited request.
+    pub(crate) async fn session_close_fire_and_forget(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(), AcpError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/close",
+            "params": { "sessionId": session_id },
+        });
+
+        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        self.write_ndjson(&msg).await
     }
 
     /// Returns `true` if a `session/prompt` request is currently in flight.
@@ -4677,6 +4702,32 @@ mod tests {
             Some("Custom system prompt"),
             "systemPrompt should be included in params when Some"
         );
+    }
+
+    #[tokio::test]
+    async fn session_close_fire_and_forget_writes_request_and_stale_ack_is_ignored() {
+        let script = r#"
+            read -t 2 CLOSE
+            echo '{"jsonrpc":"2.0","id":0,"result":{}}'
+            read -t 2 NEXT
+            echo '{"jsonrpc":"2.0","id":1,"result":{"close":'"$CLOSE"',"next":'"$NEXT"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+
+        client
+            .session_close_fire_and_forget("ses_old")
+            .await
+            .expect("close request write should succeed");
+        let response = client
+            .send_request("test/next", serde_json::json!({ "value": 7 }))
+            .await
+            .expect("the next request should ignore the stale close response");
+
+        assert_eq!(response["close"]["method"], "session/close");
+        assert_eq!(response["close"]["params"]["sessionId"], "ses_old");
+        assert_eq!(response["next"]["method"], "test/next");
+        assert_eq!(response["next"]["params"]["value"], 7);
     }
 
     #[tokio::test]
