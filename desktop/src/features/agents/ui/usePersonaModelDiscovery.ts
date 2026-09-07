@@ -6,6 +6,7 @@ import type {
   AgentModelsResponse,
 } from "@/shared/api/types";
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import { discoveredEffortCatalog } from "./effortPicker";
 import {
   formatModelDiscoveryErrorStatus,
   type PersonaModelDiscoveryStatus,
@@ -402,8 +403,20 @@ export function usePersonaModelDiscovery({
     discoveredModelOptions,
     modelDiscoveryPending,
   });
+  // Two different absences reach us on one field, and every downstream consumer
+  // treats an empty list as "no level is valid". Split them ONCE, here:
+  //   null = discovery told us nothing about effort (it did not run, or the
+  //          runtime advertises no effort control at all -- the OpenAI,
+  //          Anthropic, mesh and OpenRouter paths all return an empty list)
+  //   []   = discovery advertised an effort control with zero valid values
+  // Collapsing the first case to [] made validateEffortSelection reject every
+  // Claude effort, validateModelSelection reject every Codex model qualifier,
+  // and the Thinking level picker wedge Save (D-6d5e0b90, D-913b7643).
   const nativeEffortOptions = activeModelDiscoveryData
-    ? (activeModelDiscoveryData.effortOptions ?? [])
+    ? discoveredEffortCatalog(
+        activeModelDiscoveryData.effortConfigId,
+        activeModelDiscoveryData.effortOptions ?? [],
+      )
     : null;
 
   return {
