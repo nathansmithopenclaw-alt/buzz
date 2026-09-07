@@ -200,6 +200,16 @@ impl TurnDeliveryEvidence {
                     &mut self.published_event_ids,
                 );
             }
+            // ACP adapters may put the actual result in content and use
+            // rawOutput only for metadata (buzz-agent emits isError there).
+            // These remain candidates; the relay must verify the exact signed
+            // event before this turn is credited with delivery.
+            if let Some(content) = update.get("content") {
+                crate::publication_receipts::collect_candidates(
+                    content,
+                    &mut self.published_event_ids,
+                );
+            }
         }
     }
 }
@@ -5621,6 +5631,40 @@ printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
             evidence.published_event_ids,
             HashSet::from([nostr::EventId::from_hex(&event_id).unwrap()])
         );
+    }
+
+    #[tokio::test]
+    async fn delivery_evidence_reads_buzz_agent_content_receipt_only_for_completed_publish() {
+        for (publish, status, is_error, expected) in [
+            (true, "completed", false, true),
+            (false, "completed", false, false),
+            (true, "in_progress", false, false),
+            (true, "failed", false, false),
+            (true, "completed", true, false),
+        ] {
+            let mut client = spawn_inert_client().await;
+            let id = "b".repeat(64);
+            let call = serde_json::json!({"params":{"update":{
+                "sessionUpdate":"tool_call", "toolCallId":"shell-1",
+                "rawInput":{"command":if publish {"buzz messages send --channel test --content done"} else {"cat unrelated.json"}}
+            }}});
+            let _ = client.handle_session_update(&call);
+            // Exact emit_completed shape: receipt in ACP text, metadata in rawOutput.
+            let update = serde_json::json!({"params":{"update":{
+                "sessionUpdate":"tool_call_update", "toolCallId":"shell-1", "status":status,
+                "rawOutput":{"isError":is_error},
+                "content":[{"type":"content","content":{"type":"text","text":
+                    serde_json::json!({"accepted":true,"event_id":id}).to_string()}}]
+            }}});
+            let _ = client.handle_session_update(&update);
+            assert_eq!(
+                client
+                    .turn_delivery_evidence()
+                    .published_event_ids
+                    .contains(&nostr::EventId::from_hex(&id).unwrap()),
+                expected
+            );
+        }
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

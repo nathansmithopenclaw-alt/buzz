@@ -318,7 +318,13 @@ pub fn try_record_agent_command(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        // Goose replaces configured extensions when session MCP servers are supplied.
+        // Keep its developer tools explicitly so agents can publish through buzz.
+        "goose" => Some(vec![
+            "acp".into(),
+            "--with-builtin".into(),
+            "developer".into(),
+        ]),
         "prime-agent" | "primeagent" => Some(vec!["--mode".to_string(), "acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
@@ -341,8 +347,7 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return default_args;
     }
 
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
+    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") {
         return default_args;
     }
 

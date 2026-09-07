@@ -902,7 +902,13 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        // Goose replaces configured extensions when session MCP servers are supplied.
+        // Keep its developer tools explicitly so agents can publish through buzz.
+        "goose" => Some(vec![
+            "acp".into(),
+            "--with-builtin".into(),
+            "developer".into(),
+        ]),
         "prime-agent" | "primeagent" => Some(vec!["--mode".to_string(), "acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
@@ -1893,9 +1899,15 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_goose_args_to_acp() {
-        assert_eq!(normalize_agent_args("goose", Vec::new()), vec!["acp"]);
-        assert_eq!(normalize_agent_args("goose", vec!["".into()]), vec!["acp"]);
+    fn normalizes_goose_args_to_acp_with_publishing_tools() {
+        for args in [Vec::new(), vec!["".into()], vec!["acp".into()]] {
+            assert_eq!(
+                normalize_agent_args("goose", args),
+                vec!["acp", "--with-builtin", "developer"]
+            );
+        }
+        let explicit = vec!["acp".into(), "--with-builtin".into(), "custom".into()];
+        assert_eq!(normalize_agent_args("goose", explicit.clone()), explicit);
     }
 
     #[test]
@@ -2141,7 +2153,7 @@ mod tests {
         ]);
         assert_eq!(
             normalize_agent_args(&goose.agent_command, goose.agent_args),
-            vec!["acp".to_string()]
+            vec!["acp", "--with-builtin", "developer"]
         );
     }
 

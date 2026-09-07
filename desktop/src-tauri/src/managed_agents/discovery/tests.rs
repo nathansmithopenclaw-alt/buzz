@@ -114,6 +114,20 @@ fn bundled_buzz_sidecar_wins_only_for_buzz_owned_binaries() {
 }
 
 #[test]
+fn goose_keeps_developer_tools_with_injected_mcp_servers() {
+    for command in ["goose", "/usr/local/bin/goose", "C:\\tools\\goose.exe"] {
+        for args in [vec![], vec!["acp".into()]] {
+            assert_eq!(
+                normalize_agent_args(command, args),
+                vec!["acp", "--with-builtin", "developer"]
+            );
+        }
+        let explicit = vec!["acp".into(), "--with-builtin".into(), "custom".into()];
+        assert_eq!(normalize_agent_args(command, explicit.clone()), explicit);
+    }
+}
+
+#[test]
 fn normalizes_claude_and_codex_args_to_empty() {
     assert_eq!(
         normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
