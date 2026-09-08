@@ -63,6 +63,7 @@ pub(crate) fn configure(
     let expected = match harness {
         "claude" => "anthropic",
         "codex" => "openai",
+        "grok" => "xai",
         _ => {
             return Err("This subscription adapter is not verified for managed runtime use".into())
         }
@@ -142,7 +143,7 @@ const AUTH_ENV: &[&str] = &[
     "CODEX_API_KEY",
     "CODEX_API_KEY_FILE_DESCRIPTOR",
 ];
-fn command_env(command: &Command, key: &str) -> Option<std::ffi::OsString> {
+pub(super) fn command_env(command: &Command, key: &str) -> Option<std::ffi::OsString> {
     command
         .get_envs()
         .find(|(k, _)| *k == key)
@@ -183,6 +184,7 @@ fn apply_subscription_env(command: &mut Command, harness: &str, home: &Path) -> 
             compose_codex_config(&source, home, command)?;
             command.env("CODEX_HOME", home);
         }
+        "grok" => super::grok_subscription::configure(command, home)?,
         _ => return Err("Unsupported subscription harness".into()),
     }
     for name in AUTH_ENV {
@@ -854,7 +856,8 @@ pub(crate) fn switch_account_scoped(
     let previous = super::account_switch::read(&app, &pubkey)?;
     let durable = account_id.as_deref().is_some_and(|id| {
         subscription_accounts::load_account(&app, id).is_ok_and(|a| {
-            (harness == Some("claude") && a.kind == "token") || harness == Some("codex")
+            (harness == Some("claude") && a.kind == "token")
+                || matches!(harness, Some("codex" | "grok"))
         })
     });
     if previous.is_some() && !durable {

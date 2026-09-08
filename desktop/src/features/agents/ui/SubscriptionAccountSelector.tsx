@@ -59,7 +59,8 @@ export function SubscriptionAccountSelector({
     refetchInterval: 750,
     enabled:
       agent.subscriptionAccountHarness === "claude" ||
-      agent.subscriptionAccountHarness === "codex",
+      agent.subscriptionAccountHarness === "codex" ||
+      agent.subscriptionAccountHarness === "grok",
   });
   const operationRevision = operation.data
     ? JSON.stringify([
@@ -150,7 +151,9 @@ export function SubscriptionAccountSelector({
       !operation.data.error,
   );
   const canPause =
-    ["claude", "codex"].includes(agent.subscriptionAccountHarness ?? "") &&
+    ["claude", "codex", "grok"].includes(
+      agent.subscriptionAccountHarness ?? "",
+    ) &&
     accounts.data?.some(
       (account) =>
         account.harness === agent.subscriptionAccountHarness &&
@@ -178,6 +181,7 @@ export function SubscriptionAccountSelector({
     const account = accounts.data?.find((item) => item.id === target);
     if (
       account?.harness === "codex" ||
+      account?.harness === "grok" ||
       (account?.harness === "claude" && account.kind === "token")
     )
       setDestination({
@@ -330,7 +334,8 @@ export function SubscriptionAccountSelector({
       {(error || authHeld) &&
       !groupPending &&
       (selectedAccount?.kind === "token" ||
-        selectedAccount?.harness === "codex") ? (
+        selectedAccount?.harness === "codex" ||
+        selectedAccount?.harness === "grok") ? (
         <div className="space-y-1.5 text-xs">
           <p>
             Work is retained. Retry this account or choose another account

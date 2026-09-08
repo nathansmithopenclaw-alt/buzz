@@ -29,6 +29,7 @@ pub(super) fn registry() -> (tempfile::TempDir, PathBuf, String) {
             accounts: vec![account],
             claude_default_account_id: None,
             codex_default_account_id: None,
+            grok_default_account_id: None,
         },
     )
     .unwrap();
@@ -494,5 +495,23 @@ fn provider_defaults_round_trip_independently_and_reject_cross_provider_binding(
     assert!(store::save(&root, &value).is_err());
     value.schema_version = 4;
     value.codex_default_account_id = Some(claude_id);
+    assert!(store::save(&root, &value).is_err());
+}
+
+#[test]
+fn grok_default_requires_its_own_provider_and_new_schema() {
+    let (_temp, root, id) = registry();
+    let mut value = store::load(&root).unwrap();
+    value.accounts[0].harness = "grok".into();
+    value.accounts[0].provider = "xai".into();
+    value.grok_default_account_id = Some(id.clone());
+    assert!(store::save(&root, &value).is_err());
+    value.schema_version = 5;
+    store::save(&root, &value).unwrap();
+    assert_eq!(
+        store::load(&root).unwrap().grok_default_account_id,
+        Some(id)
+    );
+    value.accounts[0].provider = "openai".into();
     assert!(store::save(&root, &value).is_err());
 }

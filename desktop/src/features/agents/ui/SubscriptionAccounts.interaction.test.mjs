@@ -109,7 +109,7 @@ globalThis.__TAURI_INTERNALS__ = dom.window.__TAURI_INTERNALS__ = {
               harness:
                 command === "begin_subscription_account_token"
                   ? "claude"
-                  : "codex",
+                  : args.harness,
               state: "connecting",
               attempt_id: "attempt-new",
             }),
@@ -919,4 +919,54 @@ test("provider sections isolate account cards and default menu options", async (
         name === "get_subscription_default_account" && args.harness === "codex",
     ),
   );
+});
+
+test("Grok capability enables login and isolates its default choices", async () => {
+  capabilities[2].supported = true;
+  try {
+    accounts = [
+      account({
+        id: "xai-a",
+        provider: "xai",
+        harness: "grok",
+        nickname: "Grok A",
+      }),
+      account({
+        id: "xai-b",
+        provider: "xai",
+        harness: "grok",
+        nickname: "Grok B",
+      }),
+      account({
+        id: "openai-a",
+        provider: "openai",
+        harness: "codex",
+        nickname: "OpenAI A",
+      }),
+    ];
+    const view = mount(React.createElement(SubscriptionAccountsSettingsCard));
+    const signIn = await view.findByRole("button", {
+      name: /Sign in with Grok/,
+    });
+    assert.equal(signIn.disabled, false);
+    const region = view.getByRole("region", { name: "Default Grok account" });
+    await openAccountMenu(view, region.querySelector("button"));
+    await view.findByRole("menuitemradio", { name: "Grok A" });
+    assert.ok(view.getByRole("menuitemradio", { name: "Grok B" }));
+    assert.equal(view.queryByRole("menuitemradio", { name: "OpenAI A" }), null);
+    closeAccountMenu(view);
+    await waitFor(() => assert.equal(view.queryByRole("menu"), null));
+    fireEvent.click(signIn);
+    await waitFor(() =>
+      assert.ok(
+        calls.some(
+          ([name, args]) =>
+            name === "begin_subscription_account_login" &&
+            args.harness === "grok",
+        ),
+      ),
+    );
+  } finally {
+    capabilities[2].supported = false;
+  }
 });

@@ -745,6 +745,7 @@ fn enforce_subscription_child_env(
             "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode"
         ),
         "codex" => matches!(identity.as_str(), "codex" | "codex-acp"),
+        "grok" => identity == "grok",
         _ => false,
     };
     if !matches {
@@ -763,6 +764,7 @@ fn enforce_subscription_child_env(
             "--config",
             "-c",
             "--api-key",
+            "--leader-socket",
         ]
         .iter()
         .any(|blocked| arg == blocked || arg.starts_with(&format!("{blocked}=")))
@@ -834,6 +836,7 @@ fn enforce_subscription_child_env(
             map.insert("forced_login_method".into(), "chatgpt".into());
             child.env("CODEX_CONFIG", config.to_string());
         }
+        "grok" => subscription_grok::configure(child, std::path::Path::new(&home))?,
         _ => {}
     }
     Ok(())
@@ -892,6 +895,8 @@ fn validate_subscription_codex_config(config: &serde_json::Value) -> Result<(), 
     Ok(())
 }
 
+#[path = "subscription_grok.rs"]
+mod subscription_grok;
 #[path = "subscription_project.rs"]
 mod subscription_project;
 use subscription_project::validate_subscription_project_context;

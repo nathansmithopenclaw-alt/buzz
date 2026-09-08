@@ -518,9 +518,7 @@ test("provider sections distinguish defaults from saved account cards", async ({
     anthropic.getByRole("article", { name: "Studio Claude" }),
   ).toBeVisible();
   await expect(openai.getByRole("article")).toHaveCount(0);
-  await expect(
-    grok.getByRole("button", { name: "Not available yet" }),
-  ).toBeDisabled();
+  await expect(grok.getByRole("button", { name: /Ambient/ })).toBeDisabled();
   for (const [name, section] of [
     ["anthropic", anthropic],
     ["openai", openai],
@@ -532,4 +530,27 @@ test("provider sections distinguish defaults from saved account cards", async ({
       path: testInfo.outputPath(`${name}-section.png`),
     });
   }
+});
+
+test("Grok sign-in stays in its provider section and cancellation keeps recovery", async ({
+  page,
+}) => {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await openSettings(page, "experimental");
+  await page.getByRole("switch", { name: "Subscription Accounts" }).click();
+  await page.getByTestId("settings-nav-agents").click();
+  const card = page.getByTestId("settings-subscription-accounts");
+  const grok = card.getByRole("region", { name: "Grok accounts", exact: true });
+  await grok.getByRole("button", { name: /Sign in with Grok/ }).click();
+  const row = grok.getByRole("article");
+  await expect(row).toContainText("connecting");
+  await expect(row.getByRole("textbox")).toHaveCount(0);
+  await expect(
+    card
+      .getByRole("region", { name: "OpenAI accounts", exact: true })
+      .getByRole("article"),
+  ).toHaveCount(0);
+  await row.getByRole("button", { name: "Cancel login" }).click();
+  await expect(row).toContainText("Login cancelled");
+  await expect(row.getByRole("button", { name: "Reconnect" })).toBeVisible();
 });

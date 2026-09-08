@@ -36,7 +36,7 @@ const providers = [
     harness: "grok",
     title: "Grok",
     label: "Grok",
-    description: "Grok subscriptions. Account support is still in progress.",
+    description: "xAI subscriptions for Grok agents.",
   },
 ] as const;
 
@@ -134,7 +134,9 @@ export function SubscriptionAccountsSettingsCard() {
             <ClaudeDefaultAccountControl
               harness={harness}
               label={label}
-              available={harness !== "grok"}
+              available={Boolean(
+                capability?.supported || capability?.token_supported,
+              )}
             />
             <fieldset
               className="space-y-3"

@@ -104,7 +104,7 @@ export type ClaudeAccountChangeRequest =
   | { kind: "default"; destination: string }
   | { kind: "remove"; account_id: string; replacement: string | null };
 export type ClaudeAccountChangeStatus = {
-  harness?: "claude" | "codex";
+  harness?: "claude" | "codex" | "grok";
   id: string;
   phase: "applying" | "paused" | "removing" | "complete";
   error: string | null;

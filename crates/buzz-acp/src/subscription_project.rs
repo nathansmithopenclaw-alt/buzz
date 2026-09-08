@@ -4,6 +4,9 @@ pub(super) fn validate_subscription_project_context(
     harness: &str,
     cwd: &std::path::Path,
 ) -> Result<(), AcpError> {
+    if harness == "grok" {
+        return super::subscription_grok::project(cwd);
+    }
     for parent in cwd.ancestors() {
         let names: &[&str] = if harness == "claude" {
             &[".claude/settings.json", ".claude/settings.local.json"]

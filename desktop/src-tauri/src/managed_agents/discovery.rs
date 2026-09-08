@@ -325,6 +325,11 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
             "--with-builtin".into(),
             "developer".into(),
         ]),
+        "grok" => Some(vec![
+            "agent".into(),
+            "--always-approve".into(),
+            "stdio".into(),
+        ]),
         "prime-agent" | "primeagent" => Some(vec!["--mode".to_string(), "acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),

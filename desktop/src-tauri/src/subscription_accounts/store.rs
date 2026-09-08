@@ -20,6 +20,8 @@ pub(super) struct Registry {
     pub claude_default_account_id: Option<String>,
     #[serde(default)]
     pub codex_default_account_id: Option<String>,
+    #[serde(default)]
+    pub grok_default_account_id: Option<String>,
 }
 
 pub(super) fn root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -117,7 +119,7 @@ pub(super) fn save(root: &Path, registry: &Registry) -> Result<(), String> {
 }
 
 fn validate(registry: &Registry) -> Result<(), String> {
-    if !matches!(registry.schema_version, 1..=4) {
+    if !matches!(registry.schema_version, 1..=5) {
         return Err("Unsupported account registry version".into());
     }
     if registry.accounts.len() > 100 {
@@ -139,6 +141,16 @@ fn validate(registry: &Registry) -> Result<(), String> {
             })
         {
             return Err("Invalid default OpenAI account".into());
+        }
+    }
+    if let Some(id) = &registry.grok_default_account_id {
+        if registry.schema_version < 5
+            || !registry
+                .accounts
+                .iter()
+                .any(|a| &a.id == id && a.harness == "grok" && a.provider == "xai")
+        {
+            return Err("Invalid default xAI account".into());
         }
     }
     let mut ids = HashSet::new();

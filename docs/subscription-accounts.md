@@ -28,7 +28,7 @@ migration requires a fresh provider login and rebind before deleting the old ent
 | --- | --- | --- |
 | Claude Code | macOS credential-only Keychain namespace; configuration remains in its existing context | Fresh browser login, status, selected managed turn, expiry and logout |
 | Codex | Isolated home; explicitly selected file credential backend; non-secret configuration composed from the existing context | Fresh browser login and managed turn; unchanged ambient control; provider refresh/logout behavior |
-| Grok | Displayed as unavailable | Establish subscription-specific status and safe configuration composition |
+| Grok | Provider OAuth in an isolated Grok home; ACP account/access checks; independent default and agent overrides | Two-account installed login, managed turn, switching, reconnect and removal |
 
 Buzz neither reads nor copies provider credentials. The harness owns login,
 refresh, status and logout. Codex can support other credential backends; this
@@ -81,3 +81,29 @@ login through Desktop, nickname, selection, and a real managed turn. Check the
 ambient control, authentication override refusal, idle/busy switching, feature
 off, expiry/reconnect/resume, cancel/crash cleanup and removal. Use a fresh Codex
 profile; never test against or copy the shared Codex authentication home.
+
+## Grok subscription accounts
+
+Grok Build provides native ACP authentication metadata. Buzz launches
+`grok login --oauth` in a new owned `GROK_HOME`, then checks cached authentication,
+account information and subscription access through ACP. It never exports a
+bearer token or reads `auth.json`. A successful CLI exit alone is insufficient;
+API-key authentication, missing identity/tier metadata and a provider access gate
+are rejected. The supported contract was exercised with Grok 1.0.13; incompatible
+versions fail the account check with a reconnect/version error.
+
+Before authorizing a second login, choose the intended account in xAI's browser
+page. The browser website session is shared even though Buzz credential profiles
+are separate. Name the accounts distinctly after login.
+
+Selected Grok launches compose the existing non-secret TOML settings and preserve
+skills, agents and plugins. Competing credentials, OIDC providers, proxy endpoints
+and environment config overlays are rejected or removed. OAuth-only policy is
+applied inside the owned profile, and the broker revalidates it at the actual
+adapter spawn and project-session boundaries. The selected profile also gets its
+own leader socket. Native session history and credentials are never copied from
+another account; Buzz's durable switching flow retains unfinished work. One live
+consumer per profile remains enforced until concurrent refresh is proven.
+
+Account metadata indicates provider authentication/access, not a receipt for
+billing. Provider usage attribution remains part of installed acceptance.

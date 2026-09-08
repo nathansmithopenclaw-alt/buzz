@@ -1,6 +1,7 @@
 //! Local subscription accounts. The harness owns all provider credentials.
 mod adapters;
 pub(crate) mod defaults;
+mod grok;
 mod process;
 pub(crate) mod reminders;
 mod reservation;
@@ -385,13 +386,12 @@ fn begin_account_login(
         if account.state == "removal_pending" {
             return Err("Account removal is pending; retry removal".into());
         }
-        if account
-            .attempt_started_at
-            .is_some_and(|started| chrono::Utc::now().timestamp() < started.saturating_add(302))
-        {
+        if account.attempt_started_at.is_some_and(|started| {
+            chrono::Utc::now().timestamp()
+                < started.saturating_add(if account.harness == "grok" { 362 } else { 302 })
+        }) {
             return Err(
-                "Interrupted login is still being contained; retry after its five minute deadline"
-                    .into(),
+                "Interrupted login is still being contained; retry after its login deadline".into(),
             );
         }
         store::home_at(&root, &id)?
@@ -589,6 +589,7 @@ pub(crate) fn remove_account_scoped(
         let mut registry = store::load(&root)?;
         if registry.claude_default_account_id.as_deref() == Some(id)
             || registry.codex_default_account_id.as_deref() == Some(id)
+            || registry.grok_default_account_id.as_deref() == Some(id)
         {
             return Err("Choose another default account before removal".into());
         }
@@ -601,13 +602,12 @@ pub(crate) fn remove_account_scoped(
         {
             return Err("Finish or cancel browser login before removal".into());
         }
-        if account
-            .attempt_started_at
-            .is_some_and(|started| chrono::Utc::now().timestamp() < started.saturating_add(302))
-        {
+        if account.attempt_started_at.is_some_and(|started| {
+            chrono::Utc::now().timestamp()
+                < started.saturating_add(if account.harness == "grok" { 362 } else { 302 })
+        }) {
             return Err(
-                "Interrupted login is still being contained; retry after its five minute deadline"
-                    .into(),
+                "Interrupted login is still being contained; retry after its login deadline".into(),
             );
         }
         let harness = account.harness.clone();
@@ -676,13 +676,11 @@ fn finish_removal(
 }
 
 fn start_removal(account: &mut SubscriptionAccount) -> Result<(), String> {
-    if account
-        .attempt_started_at
-        .is_some_and(|started| chrono::Utc::now().timestamp() < started.saturating_add(302))
-    {
-        return Err(
-            "Account cleanup is still running; retry after its five minute deadline".into(),
-        );
+    if account.attempt_started_at.is_some_and(|started| {
+        chrono::Utc::now().timestamp()
+            < started.saturating_add(if account.harness == "grok" { 362 } else { 302 })
+    }) {
+        return Err("Account cleanup is still running; retry after its login deadline".into());
     }
     account.state = "removal_pending".into();
     account.last_error = None;

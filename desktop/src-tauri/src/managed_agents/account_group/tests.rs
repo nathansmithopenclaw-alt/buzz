@@ -197,5 +197,7 @@ fn provider_journal_versions_preserve_legacy_and_fence_codex_from_old_readers() 
     validate(&operation).unwrap();
     assert_ne!(claude_fingerprint, plan::fingerprint(&operation).unwrap());
     operation.harness = "grok".into();
+    validate(&operation).unwrap();
+    operation.harness = "unknown".into();
     assert!(validate(&operation).is_err());
 }

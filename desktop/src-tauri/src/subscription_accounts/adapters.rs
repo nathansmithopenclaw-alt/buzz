@@ -21,9 +21,35 @@ pub(crate) struct SubscriptionAccountCapability {
 
 pub(super) fn capabilities() -> Vec<SubscriptionAccountCapability> {
     vec![
-        SubscriptionAccountCapability { provider: "anthropic", harness: "claude", supported: false, token_supported: cfg!(unix), reason: Some("Claude accounts use long-lived tokens") },
-        SubscriptionAccountCapability { provider: "openai", harness: "codex", supported: cfg!(unix), token_supported: false, reason: if cfg!(unix) { None } else { Some("Login process containment is not implemented on this platform") } },
-        SubscriptionAccountCapability { provider: "xai", harness: "grok", supported: false, token_supported: false, reason: Some("Grok 1.0.13 exposes login/logout but no documented subscription status check; configuration preservation also needs validation") },
+        SubscriptionAccountCapability {
+            provider: "anthropic",
+            harness: "claude",
+            supported: false,
+            token_supported: cfg!(unix),
+            reason: Some("Claude accounts use long-lived tokens"),
+        },
+        SubscriptionAccountCapability {
+            provider: "openai",
+            harness: "codex",
+            supported: cfg!(unix),
+            token_supported: false,
+            reason: if cfg!(unix) {
+                None
+            } else {
+                Some("Login process containment is not implemented on this platform")
+            },
+        },
+        SubscriptionAccountCapability {
+            provider: "xai",
+            harness: "grok",
+            supported: cfg!(unix),
+            token_supported: false,
+            reason: if cfg!(unix) {
+                None
+            } else {
+                Some("Login process containment is not implemented on this platform")
+            },
+        },
     ]
 }
 
@@ -91,6 +117,9 @@ pub(super) fn isolated_command(
         "codex" => {
             command.env("CODEX_HOME", home);
         }
+        "grok" => {
+            command.env("GROK_HOME", home);
+        }
         _ => {}
     }
     command
@@ -107,6 +136,8 @@ fn args<'a>(harness: &str, action: &'a str) -> Result<Vec<&'a str>, String> {
             "status",
         ]),
         ("codex", "logout") => Ok(vec!["-c", "cli_auth_credentials_store=\"file\"", "logout"]),
+        ("grok", "login") => Ok(vec!["login", "--oauth"]),
+        ("grok", "logout") => Ok(vec!["logout"]),
         _ => Err("Unsupported account operation".into()),
     }
 }
@@ -118,6 +149,9 @@ pub(super) fn operation(
     action: &str,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<(), String> {
+    if harness == "grok" && action == "status" {
+        return super::grok::status(executable, home, cancelled);
+    }
     let timeout = Duration::from_secs(if action == "login" { 300 } else { 20 });
     let args = args(harness, action)?;
     let command = isolated_command(executable, harness, home, &args, timeout);

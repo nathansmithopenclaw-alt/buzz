@@ -169,8 +169,8 @@ fn read(app: &AppHandle) -> Result<Option<Operation>, String> {
 }
 
 fn validate(operation: &Operation) -> Result<(), String> {
-    if !matches!(operation.harness.as_str(), "claude" | "codex")
-        || operation.version != if operation.harness == "codex" { 2 } else { 1 }
+    if !matches!(operation.harness.as_str(), "claude" | "codex" | "grok")
+        || operation.version != if operation.harness != "claude" { 2 } else { 1 }
         || operation.id.len() != 32
         || !operation.id.bytes().all(|c| c.is_ascii_hexdigit())
         || !["applying", "paused", "removing", "complete"].contains(&operation.phase.as_str())

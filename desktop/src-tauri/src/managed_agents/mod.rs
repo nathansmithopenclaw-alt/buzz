@@ -29,6 +29,7 @@ mod env_vars;
 pub(crate) mod fleet_visibility;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
+mod grok_subscription;
 mod managed_node_paths;
 pub(crate) mod name_uniqueness;
 mod nest;

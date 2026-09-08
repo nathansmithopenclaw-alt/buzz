@@ -71,7 +71,7 @@ pub(super) fn capture(
         ChangeRequest::Remove { account_id, .. } => account_id,
     };
     let harness = subscription_accounts::load_account(app, target)?.harness;
-    if !matches!(harness.as_str(), "claude" | "codex") {
+    if !matches!(harness.as_str(), "claude" | "codex" | "grok") {
         return Err("This provider does not support account defaults yet".into());
     }
     let prior_default = subscription_accounts::defaults::selected_for(app, &harness)?;
@@ -199,7 +199,7 @@ pub(super) fn capture(
     }
     members.sort_by(|left, right| left.child.pubkey.cmp(&right.child.pubkey));
     let operation = Operation {
-        version: if harness == "codex" { 2 } else { 1 },
+        version: if harness != "claude" { 2 } else { 1 },
         harness,
         id: uuid::Uuid::new_v4().simple().to_string(),
         request,

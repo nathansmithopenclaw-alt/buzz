@@ -10,7 +10,7 @@ pub(crate) fn selected_for(app: &AppHandle, harness: &str) -> Result<Option<Stri
     match harness {
         "claude" => Ok(registry.claude_default_account_id),
         "codex" => Ok(registry.codex_default_account_id),
-        "grok" => Ok(None),
+        "grok" => Ok(registry.grok_default_account_id),
         _ => Err("This harness does not support subscription defaults".into()),
     }
 }
@@ -25,20 +25,20 @@ pub(crate) fn get_subscription_default_account(
 
 pub(crate) fn validate_for(app: &AppHandle, id: &str, harness: &str) -> Result<(), String> {
     let account = super::load_account(app, id)?;
-    if account.harness != harness || !matches!(harness, "claude" | "codex") {
+    if account.harness != harness || !matches!(harness, "claude" | "codex" | "grok") {
         return Err("Choose an account for this provider".into());
     }
     if harness == "claude" {
         return validate_destination(app, id);
     }
-    if account.provider != "openai"
+    if account.provider != if harness == "grok" { "xai" } else { "openai" }
         || account.state != "ready"
         || account
             .nickname
             .as_deref()
             .is_none_or(|name| name.trim().is_empty())
     {
-        return Err("Choose a ready, named OpenAI account".into());
+        return Err("Choose a ready, named account for this provider".into());
     }
     super::account_home(app, id)?;
     Ok(())
@@ -90,6 +90,7 @@ pub(crate) fn commit(
     let current = match harness {
         "claude" => &mut registry.claude_default_account_id,
         "codex" => &mut registry.codex_default_account_id,
+        "grok" => &mut registry.grok_default_account_id,
         _ => return Err("This provider does not support account defaults yet".into()),
     };
     if current.as_deref() != expected && current.as_deref() != destination {
@@ -99,9 +100,13 @@ pub(crate) fn commit(
         validate_for(app, id, harness)?;
     }
     *current = destination.map(str::to_owned);
-    registry.schema_version = registry
-        .schema_version
-        .max(if harness == "codex" { 4 } else { 3 });
+    registry.schema_version = registry.schema_version.max(if harness == "grok" {
+        5
+    } else if harness == "codex" {
+        4
+    } else {
+        3
+    });
     super::store::save(&root, &registry)
 }
 
@@ -116,7 +121,7 @@ pub(crate) fn initialize_agent(
     }
     let command = crate::managed_agents::record_agent_command(record, personas);
     let harness = crate::managed_agents::known_acp_runtime(&command).map(|runtime| runtime.id);
-    let Some(harness) = harness.filter(|id| matches!(*id, "claude" | "codex")) else {
+    let Some(harness) = harness.filter(|id| matches!(*id, "claude" | "codex" | "grok")) else {
         return Ok(());
     };
     let Some(id) = selected_for(app, harness)? else {

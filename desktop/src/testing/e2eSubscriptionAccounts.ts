@@ -73,7 +73,7 @@ export function mockSubscriptionAccountCommand(
     );
     const operation: ClaudeAccountChangeStatus = {
       id: "synthetic-group",
-      harness: harness as "claude" | "codex",
+      harness: harness as "claude" | "codex" | "grok",
       phase: "applying",
       error: null,
       destination,
@@ -188,9 +188,8 @@ export function mockSubscriptionAccountCommand(
         {
           provider: "xai",
           harness: "grok",
-          supported: false,
-          reason:
-            "Grok subscription status, logout and configuration preservation are not yet validated",
+          supported: true,
+          reason: null,
         },
       ];
     case "list_subscription_accounts":
@@ -203,7 +202,10 @@ export function mockSubscriptionAccountCommand(
       const existing = accounts.find((row) => row.id === payload.accountId);
       if (!existing && !enabled)
         throw new Error("Enable Subscription Accounts first");
-      if (!token && payload.harness !== "claude" && payload.harness !== "codex")
+      if (
+        !token &&
+        !["claude", "codex", "grok"].includes(String(payload.harness))
+      )
         throw new Error("Unsupported subscription account harness");
       if (existing) {
         existing.state = "connecting";
@@ -213,8 +215,14 @@ export function mockSubscriptionAccountCommand(
       const row: SubscriptionAccount = {
         id: `mock-subscription-${++sequence}`,
         provider:
-          token || payload.harness === "claude" ? "anthropic" : "openai",
-        harness: token ? "claude" : (payload.harness as "claude" | "codex"),
+          token || payload.harness === "claude"
+            ? "anthropic"
+            : payload.harness === "grok"
+              ? "xai"
+              : "openai",
+        harness: token
+          ? "claude"
+          : (payload.harness as "claude" | "codex" | "grok" | "grok"),
         kind: token ? "token" : "login",
         minted_at: null,
         expires_at: null,
