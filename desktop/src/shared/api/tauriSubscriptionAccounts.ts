@@ -104,6 +104,7 @@ export type ClaudeAccountChangeRequest =
   | { kind: "default"; destination: string }
   | { kind: "remove"; account_id: string; replacement: string | null };
 export type ClaudeAccountChangeStatus = {
+  harness?: "claude" | "codex";
   id: string;
   phase: "applying" | "paused" | "removing" | "complete";
   error: string | null;
@@ -123,6 +124,9 @@ export type ClaudeAccountChangePreview = {
   fingerprint: string;
   operation: ClaudeAccountChangeStatus;
 };
+export const getSubscriptionDefaultAccount = (harness: string) =>
+  invokeTauri<string | null>("get_subscription_default_account", { harness });
+
 export const getClaudeDefaultAccount = () =>
   invokeTauri<string | null>("get_claude_default_account");
 export const previewClaudeAccountChange = (

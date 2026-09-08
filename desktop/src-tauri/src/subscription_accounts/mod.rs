@@ -587,8 +587,10 @@ pub(crate) fn remove_account_scoped(
         }
         let root = store::root(app)?;
         let mut registry = store::load(&root)?;
-        if registry.claude_default_account_id.as_deref() == Some(id) {
-            return Err("Move or clear the default Claude account before removal".into());
+        if registry.claude_default_account_id.as_deref() == Some(id)
+            || registry.codex_default_account_id.as_deref() == Some(id)
+        {
+            return Err("Choose another default account before removal".into());
         }
         let account = store::account_mut(&mut registry, id)?;
         if account.attempt_id.is_some()

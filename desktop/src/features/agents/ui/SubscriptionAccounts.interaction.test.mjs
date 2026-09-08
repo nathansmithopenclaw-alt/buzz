@@ -54,6 +54,7 @@ globalThis.__TAURI_INTERNALS__ = dom.window.__TAURI_INTERNALS__ = {
   invoke: async (command, args) => {
     calls.push([command, args]);
     switch (command) {
+      case "get_subscription_default_account":
       case "get_claude_default_account":
         return null;
       case "get_claude_account_change_status":
@@ -72,6 +73,7 @@ globalThis.__TAURI_INTERNALS__ = dom.window.__TAURI_INTERNALS__ = {
           },
         };
       case "apply_claude_account_change":
+        if (failSwitch) throw new Error("runtime restart failed");
         if (args.request.kind === "remove")
           accounts = accounts.filter(
             (account) => account.id !== args.request.account_id,
@@ -325,14 +327,14 @@ test("provider login precedes verification and nickname; Settings refresh reache
     }),
   );
   const signIn = await view.findByRole("button", {
-    name: /Sign in with openai/,
+    name: /Sign in with OpenAI/,
   });
   fireEvent.click(
     view.getByRole("button", { name: "Change subscription account" }),
   );
   assert.equal(view.queryByRole("textbox"), null);
   assert.equal(
-    view.getByRole("button", { name: /Sign in with xai/ }).disabled,
+    view.getByRole("button", { name: /Sign in with Grok/ }).disabled,
     true,
   );
   fireEvent.click(signIn);
@@ -435,7 +437,7 @@ test("experiment off preserves selected account, reconnect and explicit ambient 
     }),
   );
   const signIn = await view.findByRole("button", {
-    name: /Sign in with openai/,
+    name: /Sign in with OpenAI/,
   });
   assert.equal(signIn.disabled, true);
   assert.equal(view.getByRole("button", { name: "Reconnect" }).disabled, false);
@@ -453,7 +455,7 @@ test("experiment off preserves selected account, reconnect and explicit ambient 
   );
 });
 
-test("active work in another channel blocks switching without queuing", async () => {
+test("active Codex work requires scoped confirmation before switching", async () => {
   accounts = [account()];
   reportChannelBotTyping("other-channel", [pubkey]);
   const view = mount(
@@ -462,9 +464,18 @@ test("active work in another channel blocks switching without queuing", async ()
   const picker = await view.findByRole("button", {
     name: "Subscription account",
   });
-  assert.equal(picker.disabled, true);
-  assert.match(view.container.textContent, /Finish the active turn/);
-  assert.equal(calls.filter(([name]) => name.includes("switch")).length, 0);
+  await waitFor(() => assert.equal(picker.disabled, false));
+  await chooseAccount(view, "Work");
+  await view.findByRole("alertdialog");
+  assert.equal(
+    calls.filter(([name]) => name === "apply_claude_account_change").length,
+    0,
+  );
+  assert.equal(
+    calls.filter(([name]) => name === "switch_agent_subscription_account")
+      .length,
+    0,
+  );
 });
 
 test("restart failure stays visible and does not claim selected account is running", async () => {
@@ -476,8 +487,13 @@ test("restart failure stays visible and does not claim selected account is runni
     }),
   );
   await chooseAccount(view, "Work");
+  const applyButton = await view.findByRole("button", {
+    name: "Apply account change",
+  });
+  await waitFor(() => assert.equal(applyButton.disabled, false));
+  fireEvent.click(applyButton);
   await view.findByRole("alert");
-  assert.match(view.container.textContent, /runtime restart failed/);
+  assert.match(view.getByRole("alert").textContent, /runtime restart failed/);
   assert.match(view.container.textContent, /Running: Ambient/);
   assert.doesNotMatch(view.container.textContent, /Running: Work/);
 });
@@ -485,7 +501,10 @@ test("restart failure stays visible and does not claim selected account is runni
 test("legacy and missing selections cannot be mistaken for ambient", async () => {
   const view = mount(
     React.createElement(SubscriptionAccountSelector, {
-      agent: agent({ claudeAccountId: "old-id" }),
+      agent: agent({
+        claudeAccountId: "old-id",
+        subscriptionAccountHarness: "claude",
+      }),
     }),
     React.createElement(SubscriptionAccountSelector, {
       agent: agent({
@@ -848,5 +867,56 @@ test("a detached account is required, never displayed as selected Ambient", asyn
         command === "apply_claude_account_change",
     ).length,
     0,
+  );
+});
+
+test("provider sections isolate account cards and default menu options", async () => {
+  accounts = [
+    account({
+      id: "anthropic-work",
+      provider: "anthropic",
+      harness: "claude",
+      kind: "token",
+      nickname: "Claude Work",
+      expires_at: Date.now() / 1000 + 86400,
+    }),
+    account({
+      id: "openai-work",
+      provider: "openai",
+      harness: "codex",
+      nickname: "OpenAI Work",
+    }),
+  ];
+  const view = mount(React.createElement(SubscriptionAccountsSettingsCard));
+  await view.findByRole("article", { name: "OpenAI Work" });
+  for (const name of [
+    "Anthropic accounts",
+    "OpenAI accounts",
+    "Grok accounts",
+  ]) {
+    assert.ok(view.getByRole("region", { name, exact: true }));
+  }
+  const claude = view.getByRole("region", { name: "Default Claude account" });
+  const openai = view.getByRole("region", { name: "Default OpenAI account" });
+  assert.ok(claude && openai);
+  const openaiButton = openai.querySelector("button");
+  await waitFor(() => assert.equal(openaiButton.disabled, false));
+  await openAccountMenu(view, openaiButton);
+  await view.findByRole("menuitemradio", { name: "OpenAI Work" });
+  assert.equal(
+    view.queryByRole("menuitemradio", { name: "Claude Work" }),
+    null,
+  );
+  closeAccountMenu(view);
+  await waitFor(() => assert.equal(view.queryByRole("menu"), null));
+  assert.equal(
+    view.getByRole("button", { name: "Not available yet" }).disabled,
+    true,
+  );
+  assert.ok(
+    calls.some(
+      ([name, args]) =>
+        name === "get_subscription_default_account" && args.harness === "codex",
+    ),
   );
 });

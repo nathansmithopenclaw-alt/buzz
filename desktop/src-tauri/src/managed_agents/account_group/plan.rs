@@ -18,7 +18,7 @@ pub(super) fn fingerprint(operation: &Operation) -> Result<String, String> {
             })
         })
         .collect();
-    let value = serde_json::json!({"request":operation.request, "source":operation.source,
+    let value = serde_json::json!({"harness":operation.harness, "request":operation.request, "source":operation.source,
         "destination":operation.destination, "mint":operation.destination_minted_at,
         "default":operation.prior_default, "change_default":operation.change_default,
         "members":members});
@@ -27,13 +27,14 @@ pub(super) fn fingerprint(operation: &Operation) -> Result<String, String> {
     )))
 }
 
-fn ready_local_claude(
+fn ready_local_account(
     record: &super::super::ManagedAgentRecord,
     personas: &[super::super::AgentDefinition],
+    harness: &str,
 ) -> bool {
     let command = super::super::record_agent_command(record, personas);
     record.backend == super::super::BackendKind::Local
-        && super::super::known_acp_runtime(&command).is_some_and(|runtime| runtime.id == "claude")
+        && super::super::known_acp_runtime(&command).is_some_and(|runtime| runtime.id == harness)
 }
 
 pub(super) fn capture(
@@ -63,7 +64,17 @@ pub(super) fn capture(
     let _accounts = subscription_accounts::lifecycle_lock()
         .lock()
         .map_err(|e| e.to_string())?;
-    let prior_default = subscription_accounts::defaults::selected(app)?;
+    let target = match &request {
+        ChangeRequest::Agent { destination, .. } | ChangeRequest::Default { destination } => {
+            destination
+        }
+        ChangeRequest::Remove { account_id, .. } => account_id,
+    };
+    let harness = subscription_accounts::load_account(app, target)?.harness;
+    if !matches!(harness.as_str(), "claude" | "codex") {
+        return Err("This provider does not support account defaults yet".into());
+    }
+    let prior_default = subscription_accounts::defaults::selected_for(app, &harness)?;
     let (source, destination, change_default, remove) = match &request {
         ChangeRequest::Agent {
             pubkey,
@@ -75,8 +86,8 @@ pub(super) fn capture(
                 .iter()
                 .find(|record| &record.pubkey == pubkey)
                 .ok_or("Agent not found")?;
-            if !ready_local_claude(record, &personas) {
-                return Err("Choose a local Claude agent".into());
+            if !ready_local_account(record, &personas, &harness) {
+                return Err("Choose a local agent for this account provider".into());
             }
             if *inherit_default && prior_default.as_deref() != Some(destination) {
                 return Err("The default account changed. Choose Use default again.".into());
@@ -117,7 +128,7 @@ pub(super) fn capture(
         }
     };
     let destination_minted_at = if let Some(id) = &destination {
-        subscription_accounts::defaults::validate_destination(app, id)?;
+        subscription_accounts::defaults::validate_for(app, id, &harness)?;
         if !subscription_accounts::accounts_enabled(app)? {
             return Err("Enable Subscription Accounts to select a new account".into());
         }
@@ -136,7 +147,10 @@ pub(super) fn capture(
                 &record.pubkey == pubkey
                     || (*all_on_current && record.subscription_account_id == source)
             }
-            ChangeRequest::Default { .. } => record.subscription_account_inherit_default,
+            ChangeRequest::Default { .. } => {
+                record.subscription_account_inherit_default
+                    && ready_local_account(record, &personas, &harness)
+            }
             ChangeRequest::Remove { account_id, .. } => {
                 record.subscription_account_id.as_deref() == Some(account_id)
             }
@@ -144,7 +158,7 @@ pub(super) fn capture(
         if !included {
             continue;
         }
-        if !ready_local_claude(record, &personas) {
+        if !ready_local_account(record, &personas, &harness) {
             return Err(format!(
                 "{} has an incompatible account binding; repair it before this change",
                 record.name
@@ -185,7 +199,8 @@ pub(super) fn capture(
     }
     members.sort_by(|left, right| left.child.pubkey.cmp(&right.child.pubkey));
     let operation = Operation {
-        version: 1,
+        version: if harness == "codex" { 2 } else { 1 },
+        harness,
         id: uuid::Uuid::new_v4().simple().to_string(),
         request,
         source,
@@ -232,13 +247,14 @@ pub(super) fn retarget(
     let _accounts = subscription_accounts::lifecycle_lock()
         .lock()
         .map_err(|e| e.to_string())?;
-    subscription_accounts::defaults::validate_destination(app, destination)?;
+    subscription_accounts::defaults::validate_for(app, destination, &operation.harness)?;
     if operation.remove && operation.source.as_deref() == Some(destination) {
         return Err("Choose a different replacement account".into());
     }
     operation.destination = Some(destination.into());
     if operation.change_default {
-        operation.prior_default = subscription_accounts::defaults::selected(app)?;
+        operation.prior_default =
+            subscription_accounts::defaults::selected_for(app, &operation.harness)?;
     }
     operation.destination_minted_at =
         subscription_accounts::load_account(app, destination)?.minted_at;

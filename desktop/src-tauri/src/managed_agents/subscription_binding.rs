@@ -47,7 +47,8 @@ pub(crate) fn configure(
     }
     if record.subscription_account_inherit_default
         && (record.subscription_account_id.is_none()
-            || (subscription_accounts::defaults::selected(app)? != record.subscription_account_id
+            || (subscription_accounts::defaults::selected_for(app, harness.unwrap_or(""))?
+                != record.subscription_account_id
                 && !super::account_group::allows_staged_default(app, record)?))
     {
         return Err("The default account change is incomplete; retry it in Settings".into());
@@ -851,12 +852,13 @@ pub(crate) fn switch_account_scoped(
         subscription_accounts::account_home(&app, id)?;
     }
     let previous = super::account_switch::read(&app, &pubkey)?;
-    let durable = harness == Some("claude")
-        && account_id.as_deref().is_some_and(|id| {
-            subscription_accounts::load_account(&app, id).is_ok_and(|a| a.kind == "token")
-        });
+    let durable = account_id.as_deref().is_some_and(|id| {
+        subscription_accounts::load_account(&app, id).is_ok_and(|a| {
+            (harness == Some("claude") && a.kind == "token") || harness == Some("codex")
+        })
+    });
     if previous.is_some() && !durable {
-        return Err("Choose a named Claude token account to recover this switch".into());
+        return Err("Choose a ready named account to recover this switch".into());
     }
     let mut operation = if durable {
         Some(capture_operation(

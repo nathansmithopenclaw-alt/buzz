@@ -1,250 +1,44 @@
-import { ClaudeDefaultAccountControl } from "@/features/agents/ui/ClaudeDefaultAccountControl";
-import { ClaudeAccountChangeDialog } from "@/features/agents/ui/ClaudeAccountChangeDialog";
-import { ClaudeAccountChangeProgress } from "@/features/agents/ui/ClaudeAccountChangeProgress";
-import { useClaudeAccountChange } from "@/features/agents/accountChanges";
-import {
-  subscriptionAccountExpiry,
-  subscriptionAccountNeedsRenewal,
-} from "@/features/agents/subscriptionAccountExpiry";
-import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { ClaudeDefaultAccountControl } from "@/features/agents/ui/ClaudeDefaultAccountControl";
+import { ClaudeAccountChangeProgress } from "@/features/agents/ui/ClaudeAccountChangeProgress";
 import {
   subscriptionAccountsQueryKey,
-  useSubscriptionAccountCapabilitiesQuery,
-  useSubscriptionAccountsEnabledQuery,
   useSubscriptionAccountsQuery,
+  useSubscriptionAccountsEnabledQuery,
+  useSubscriptionAccountCapabilitiesQuery,
   useSubscriptionAccountClock,
 } from "@/features/agents/subscriptionAccounts";
 import {
-  beginSubscriptionAccountLogin,
   beginSubscriptionAccountToken,
-  cancelSubscriptionAccountLogin,
-  removeSubscriptionAccount,
-  renameSubscriptionAccount,
-  type SubscriptionAccount,
+  beginSubscriptionAccountLogin,
 } from "@/shared/api/tauriSubscriptionAccounts";
 import { Button } from "@/shared/ui/button";
-import { Input } from "@/shared/ui/input";
 import { SectionHeader } from "@/shared/ui/PageHeader";
+import { SubscriptionAccountRow } from "./SubscriptionAccountRow";
 
-const stateLabels: Record<SubscriptionAccount["state"], string> = {
-  connecting: "Waiting for browser login and verification…",
-  ready: "Subscription login checked",
-  needs_login: "Needs login",
-  removal_pending: "Removal incomplete — retry cleanup",
-  unavailable: "Unavailable",
-};
-
-function AccountRow({
-  account,
-  now,
-  loginAvailable,
-}: {
-  loginAvailable: boolean | undefined;
-  account: SubscriptionAccount;
-  now: number;
-}) {
-  const token = account.kind === "token";
-  const accounts = useSubscriptionAccountsQuery();
-  const group = useClaudeAccountChange();
-  const groupPending = Boolean(group.data && group.data.phase !== "complete");
-  const replacement = accounts.data?.find(
-    (other) =>
-      other.id !== account.id &&
-      other.harness === "claude" &&
-      other.kind === "token" &&
-      other.state === "ready" &&
-      other.nickname &&
-      !subscriptionAccountExpiry(other, now)?.expired,
-  );
-  const expiry = subscriptionAccountExpiry(account, now);
-  const client = useQueryClient();
-  const [nickname, setNickname] = React.useState(account.nickname ?? "");
-  const [confirmRemove, setConfirmRemove] = React.useState(false);
-  const mutation = useMutation({
-    mutationFn: (action: "reconnect" | "cancel" | "rename" | "remove") => {
-      if (action === "remove") return removeSubscriptionAccount(account.id);
-      if (action === "rename")
-        return renameSubscriptionAccount(account.id, nickname).then(() => {});
-      if (action === "cancel")
-        return cancelSubscriptionAccountLogin(account.id).then(() => {});
-      if (token)
-        return beginSubscriptionAccountToken(account.id).then(() => {});
-      return beginSubscriptionAccountLogin(account.harness, account.id).then(
-        () => {},
-      );
-    },
-    onSuccess: async () => {
-      setConfirmRemove(false);
-      await client.invalidateQueries({
-        queryKey: subscriptionAccountsQueryKey,
-      });
-    },
-  });
-  const label = account.nickname ?? `${account.provider} account`;
-  return (
-    <article
-      className="space-y-3 rounded-lg border border-border/60 p-3"
-      aria-label={label}
-    >
-      <div>
-        <p className="font-medium">{label}</p>
-        <p className="text-xs text-muted-foreground">
-          {account.provider} · {token ? "Long-lived token" : account.harness}
-        </p>
-        <p role="status" className="text-sm">
-          {token && account.state === "ready"
-            ? expiry?.expired
-              ? "Renewal needed"
-              : "Token ready"
-            : token && account.state === "connecting"
-              ? "Waiting for browser approval…"
-              : token && account.state === "needs_login"
-                ? "Renewal needed"
-                : stateLabels[account.state]}
-        </p>
-        {expiry ? (
-          <p data-testid={`token-expiry-${account.id}`} className="text-sm">
-            {expiry.label}
-            {account.expires_at != null
-              ? ` · ${new Date(account.expires_at * 1000).toLocaleString()}`
-              : ""}
-          </p>
-        ) : null}
-        {account.last_checked_at ? (
-          <p className="text-xs text-muted-foreground">
-            Checked {new Date(account.last_checked_at).toLocaleString()}
-          </p>
-        ) : null}
-        {account.last_error ? (
-          <p className="text-sm text-destructive">{account.last_error}</p>
-        ) : null}
-      </div>
-      {account.state === "ready" ? (
-        <form
-          className="flex items-center gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            mutation.mutate("rename");
-          }}
-        >
-          <Input
-            aria-label={`Nickname for ${label}`}
-            placeholder="Choose a nickname"
-            value={nickname}
-            onChange={(event) => setNickname(event.target.value)}
-            maxLength={80}
-            disabled={mutation.isPending}
-          />
-          <Button
-            type="submit"
-            variant="outline"
-            disabled={
-              mutation.isPending ||
-              !nickname.trim() ||
-              nickname.trim() === account.nickname
-            }
-          >
-            Save nickname
-          </Button>
-        </form>
-      ) : null}
-      <div className="flex flex-wrap gap-2">
-        {account.state === "connecting" ? (
-          <Button
-            variant="outline"
-            disabled={mutation.isPending}
-            onClick={() => mutation.mutate("cancel")}
-          >
-            {token ? "Cancel token setup" : "Cancel login"}
-          </Button>
-        ) : account.state !== "removal_pending" &&
-          (token || loginAvailable !== false) ? (
-          <Button
-            variant="outline"
-            disabled={mutation.isPending}
-            onClick={() => mutation.mutate("reconnect")}
-          >
-            {token ? "Renew" : "Reconnect"}
-          </Button>
-        ) : null}
-        {account.state !== "connecting" ? (
-          <Button
-            variant="ghost"
-            disabled={mutation.isPending || groupPending}
-            onClick={() => setConfirmRemove(true)}
-          >
-            {account.state === "removal_pending" ? "Retry removal" : "Remove"}
-          </Button>
-        ) : null}
-      </div>
-      {subscriptionAccountNeedsRenewal(account, now) ? (
-        <p
-          role="note"
-          data-testid={`token-renewal-notice-${account.id}`}
-          className="text-sm text-destructive"
-        >
-          {expiry?.expired
-            ? "This token has expired."
-            : "This token expires within 30 days."}{" "}
-          {account.state === "connecting"
-            ? "Complete renewal in your browser to keep its agents running."
-            : "Choose Renew to keep its agents running."}
-        </p>
-      ) : null}
-      {!token && loginAvailable === false ? (
-        <p className="text-sm text-muted-foreground">
-          This sign-in method has been retired. Move its agents to a long-lived
-          token, then remove this account.
-        </p>
-      ) : null}
-      {token ? (
-        <p className="text-xs text-muted-foreground">
-          Renew in your browser. After approval, only this account’s agents
-          restart. Buzz can show local OS notifications at 30, 14, 7 and 1 days,
-          and at expiry, while Desktop is running. Notification permission is
-          requested when the first reminder is due.
-        </p>
-      ) : null}
-      {confirmRemove && account.harness === "claude" ? (
-        <ClaudeAccountChangeDialog
-          request={{
-            kind: "remove",
-            account_id: account.id,
-            replacement: replacement?.id ?? null,
-          }}
-          onClose={() => setConfirmRemove(false)}
-        />
-      ) : confirmRemove ? (
-        <div className="space-y-2">
-          <p className="text-sm">
-            {token ? "Remove" : "Sign out and remove"} {label} from this
-            machine? Accounts still selected or running cannot be removed.
-          </p>
-          <Button
-            variant="destructive"
-            disabled={mutation.isPending}
-            onClick={() => mutation.mutate("remove")}
-          >
-            {token ? "Remove token" : "Sign out and remove"}
-          </Button>{" "}
-          <Button
-            variant="ghost"
-            disabled={mutation.isPending}
-            onClick={() => setConfirmRemove(false)}
-          >
-            Keep account
-          </Button>
-        </div>
-      ) : null}
-      {mutation.isError ? (
-        <p role="alert" className="text-sm text-destructive">
-          {String(mutation.error)}
-        </p>
-      ) : null}
-    </article>
-  );
-}
+const providers = [
+  {
+    provider: "anthropic",
+    harness: "claude",
+    title: "Anthropic",
+    label: "Claude",
+    description: "Claude subscriptions and long-lived tokens.",
+  },
+  {
+    provider: "openai",
+    harness: "codex",
+    title: "OpenAI",
+    label: "OpenAI",
+    description: "ChatGPT subscriptions for Codex agents.",
+  },
+  {
+    provider: "xai",
+    harness: "grok",
+    title: "Grok",
+    label: "Grok",
+    description: "Grok subscriptions. Account support is still in progress.",
+  },
+] as const;
 
 export function SubscriptionAccountsSettingsCard() {
   const client = useQueryClient();
@@ -262,21 +56,21 @@ export function SubscriptionAccountsSettingsCard() {
     onSuccess: async () =>
       client.invalidateQueries({ queryKey: subscriptionAccountsQueryKey }),
   });
+  const addingDisabled =
+    !enabled.data ||
+    connecting ||
+    add.isPending ||
+    accounts.isError ||
+    accounts.isPending;
   return (
     <section
-      className="min-w-0 space-y-4"
+      className="min-w-0 space-y-6"
       data-testid="settings-subscription-accounts"
     >
       <SectionHeader
         title="Subscription Accounts"
-        description="Sign in through your provider or approve a Claude long-lived token in your browser, then choose a nickname. Credentials stay on this machine."
+        description="Manage your accounts by provider. Choose a default for new agents, or select a different account for an individual agent."
       />
-      <p className="text-xs text-muted-foreground">
-        Login checks confirm a local subscription login. Tokens are stored
-        securely by Buzz and expire after 365 days. These checks do not verify a
-        model turn, available quota, or billing. Browser login expires
-        automatically if it is not completed.
-      </p>
       {enabled.isError ? (
         <p role="alert" className="text-sm text-destructive">
           Could not load the experiment setting. {String(enabled.error)}
@@ -287,7 +81,6 @@ export function SubscriptionAccountsSettingsCard() {
           Existing selections remain enforced; recovery stays available.
         </p>
       ) : null}
-      <ClaudeDefaultAccountControl />
       <ClaudeAccountChangeProgress />
       {accounts.isPending ? (
         <p role="status">Loading accounts…</p>
@@ -298,98 +91,125 @@ export function SubscriptionAccountsSettingsCard() {
             Retry loading accounts
           </Button>
         </div>
-      ) : accounts.data.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No subscription accounts saved.
-        </p>
-      ) : (
-        accounts.data.map((account) => (
-          <AccountRow
-            key={account.id}
-            account={account}
-            now={now}
-            loginAvailable={capabilities.data?.some(
-              (capability) =>
-                capability.harness === account.harness && capability.supported,
-            )}
-          />
-        ))
-      )}
-      <div className="space-y-2">
-        <p className="text-sm font-medium">Add account</p>
-        <p className="text-xs text-muted-foreground">
-          Your browser may already be signed into a provider account. To add a
-          different Claude account, sign into that account on claude.ai first,
-          then add a long-lived token here. Check the account shown before
-          authorizing.
-        </p>
-        {capabilities.isPending ? (
-          <p role="status">Checking providers…</p>
-        ) : capabilities.isError ? (
-          <div role="alert">
-            <p>Could not check provider support.</p>
-            <Button
-              variant="outline"
-              onClick={() => void capabilities.refetch()}
-            >
-              Retry providers
-            </Button>
-          </div>
-        ) : (
-          capabilities.data.map((capability) => (
-            <div key={capability.harness} className="space-y-1">
-              {!capability.token_supported || capability.supported ? (
-                <Button
-                  variant="outline"
-                  disabled={
-                    !enabled.data ||
-                    !capability.supported ||
-                    connecting ||
-                    add.isPending ||
-                    accounts.isError ||
-                    accounts.isPending
-                  }
-                  onClick={() => add.mutate({ harness: capability.harness })}
+      ) : null}
+      {capabilities.isPending ? (
+        <p role="status">Checking providers…</p>
+      ) : capabilities.isError ? (
+        <div role="alert">
+          <p>Could not check provider support.</p>
+          <Button variant="outline" onClick={() => void capabilities.refetch()}>
+            Retry providers
+          </Button>
+        </div>
+      ) : null}
+      {providers.map(({ provider, harness, title, label, description }) => {
+        const saved =
+          accounts.data?.filter((account) => account.provider === provider) ??
+          [];
+        const capability = capabilities.data?.find(
+          (item) => item.harness === harness,
+        );
+        return (
+          <section
+            key={provider}
+            aria-labelledby={`subscription-provider-${provider}`}
+            className="space-y-4 border-t border-border/60 pt-6"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1">
+                <h3
+                  id={`subscription-provider-${provider}`}
+                  className="text-base font-semibold"
                 >
-                  Sign in with {capability.provider} ({capability.harness})
-                </Button>
-              ) : null}
-              {capability.token_supported ? (
-                <Button
-                  variant="outline"
-                  disabled={
-                    !enabled.data ||
-                    connecting ||
-                    add.isPending ||
-                    accounts.isError ||
-                    accounts.isPending
-                  }
-                  onClick={() =>
-                    add.mutate({ harness: capability.harness, token: true })
-                  }
-                >
-                  Add Claude long-lived token
-                </Button>
-              ) : null}
-              {!capability.supported ? (
-                <p className="text-xs text-muted-foreground">
-                  {capability.reason ?? "This provider is not available yet."}
-                </p>
+                  {title} accounts
+                </h3>
+                <p className="text-sm text-muted-foreground">{description}</p>
+              </div>
+              {!accounts.isPending && !accounts.isError ? (
+                <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground">
+                  {saved.length} saved
+                </span>
               ) : null}
             </div>
-          ))
-        )}
-        {connecting ? (
-          <p className="text-xs text-muted-foreground">
-            Complete or cancel the current login before starting another.
-          </p>
-        ) : null}
-        {add.isError ? (
-          <p role="alert" className="text-sm text-destructive">
-            {String(add.error)}
-          </p>
-        ) : null}
-      </div>
+            <ClaudeDefaultAccountControl
+              harness={harness}
+              label={label}
+              available={harness !== "grok"}
+            />
+            <fieldset
+              className="space-y-3"
+              aria-label={`${title} saved accounts`}
+            >
+              {saved.map((account) => (
+                <SubscriptionAccountRow
+                  key={account.id}
+                  account={account}
+                  now={now}
+                  loginAvailable={capability?.supported}
+                />
+              ))}
+              {!accounts.isPending &&
+              !accounts.isError &&
+              saved.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-border/60 p-4 text-sm text-muted-foreground">
+                  No {title} accounts saved.
+                </p>
+              ) : null}
+            </fieldset>
+            {capability ? (
+              <div className="space-y-2">
+                <div className="flex flex-wrap gap-2">
+                  {capability.token_supported ? (
+                    <Button
+                      variant="outline"
+                      disabled={addingDisabled}
+                      onClick={() => add.mutate({ harness, token: true })}
+                    >
+                      Add Claude long-lived token
+                    </Button>
+                  ) : null}
+                  {!capability.token_supported || capability.supported ? (
+                    <Button
+                      variant="outline"
+                      disabled={addingDisabled || !capability.supported}
+                      onClick={() => add.mutate({ harness })}
+                    >
+                      Sign in with {title}
+                      {harness === "codex" ? " (Codex)" : ""}
+                    </Button>
+                  ) : null}
+                </div>
+                {harness === "claude" ? (
+                  <p className="text-xs text-muted-foreground">
+                    To add a different Claude account, sign into that account on
+                    claude.ai first. Check the account shown before authorizing.
+                  </p>
+                ) : null}
+                {!capability.supported && capability.reason ? (
+                  <p className="text-xs text-muted-foreground">
+                    {capability.reason}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+        );
+      })}
+      {connecting ? (
+        <p role="status" className="text-xs text-muted-foreground">
+          Complete or cancel the current login before starting another.
+        </p>
+      ) : null}
+      {add.isError ? (
+        <p role="alert" className="text-sm text-destructive">
+          {String(add.error)}
+        </p>
+      ) : null}
+      <p className="text-xs text-muted-foreground">
+        Credentials stay on this machine. Login checks confirm a local
+        subscription login, not available quota or billing. Long-lived tokens
+        expire after 365 days.
+      </p>
     </section>
   );
 }

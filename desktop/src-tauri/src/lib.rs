@@ -762,6 +762,7 @@ pub fn run() {
             subscription_accounts::rename_subscription_account,
             subscription_accounts::remove_subscription_account,
             subscription_accounts::defaults::get_claude_default_account,
+            subscription_accounts::defaults::get_subscription_default_account,
             managed_agents::account_group::preview_claude_account_change,
             managed_agents::account_group::apply_claude_account_change,
             managed_agents::account_group::retry_claude_account_change,

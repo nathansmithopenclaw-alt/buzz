@@ -3,15 +3,25 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getClaudeAccountChangeStatus,
   getClaudeDefaultAccount,
+  getSubscriptionDefaultAccount,
 } from "@/shared/api/tauriSubscriptionAccounts";
 import { subscriptionAccountsQueryKey } from "./subscriptionAccounts";
 
 export const claudeDefaultAccountQueryKey = ["claude-default-account"] as const;
 export const claudeAccountChangeQueryKey = ["claude-account-change"] as const;
 export function useClaudeDefaultAccount() {
+  return useProviderDefaultAccount("claude");
+}
+export function useProviderDefaultAccount(harness: string) {
   return useQuery({
-    queryKey: claudeDefaultAccountQueryKey,
-    queryFn: getClaudeDefaultAccount,
+    queryKey:
+      harness === "claude"
+        ? claudeDefaultAccountQueryKey
+        : ["subscription-default-account", harness],
+    queryFn:
+      harness === "claude"
+        ? getClaudeDefaultAccount
+        : () => getSubscriptionDefaultAccount(harness),
   });
 }
 export function useClaudeAccountChange() {
@@ -26,6 +36,9 @@ export function useClaudeAccountChange() {
     if (revision && revision !== "null") {
       void client.invalidateQueries({ queryKey: ["managed-agents"] });
       void client.invalidateQueries({ queryKey: claudeDefaultAccountQueryKey });
+      void client.invalidateQueries({
+        queryKey: ["subscription-default-account"],
+      });
       void client.invalidateQueries({ queryKey: subscriptionAccountsQueryKey });
     }
   }, [client, revision]);

@@ -28,6 +28,7 @@ pub(super) fn registry() -> (tempfile::TempDir, PathBuf, String) {
             enabled: true,
             accounts: vec![account],
             claude_default_account_id: None,
+            codex_default_account_id: None,
         },
     )
     .unwrap();
@@ -466,5 +467,32 @@ fn default_registry_upgrade_retains_token_metadata_and_rejects_old_writer() {
     assert!(store::save(&root, &value).is_err());
     value.claude_default_account_id = Some(id);
     value.accounts[0].kind = "login".into();
+    assert!(store::save(&root, &value).is_err());
+}
+
+#[test]
+fn provider_defaults_round_trip_independently_and_reject_cross_provider_binding() {
+    let (_temp, root, claude_id) = registry();
+    let mut value = store::load(&root).unwrap();
+    assert!(value.codex_default_account_id.is_none());
+    value.schema_version = 4;
+    value.accounts[0].kind = "token".into();
+    let mut codex = value.accounts[0].clone();
+    codex.id = uuid::Uuid::new_v4().to_string();
+    codex.harness = "codex".into();
+    codex.provider = "openai".into();
+    codex.kind = "login".into();
+    let codex_id = codex.id.clone();
+    value.accounts.push(codex);
+    value.claude_default_account_id = Some(claude_id.clone());
+    value.codex_default_account_id = Some(codex_id.clone());
+    store::save(&root, &value).unwrap();
+    let restored = store::load(&root).unwrap();
+    assert_eq!(restored.claude_default_account_id, Some(claude_id.clone()));
+    assert_eq!(restored.codex_default_account_id, Some(codex_id));
+    value.schema_version = 3;
+    assert!(store::save(&root, &value).is_err());
+    value.schema_version = 4;
+    value.codex_default_account_id = Some(claude_id);
     assert!(store::save(&root, &value).is_err());
 }

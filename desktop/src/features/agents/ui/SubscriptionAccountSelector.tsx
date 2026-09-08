@@ -28,7 +28,7 @@ import {
 } from "@/shared/api/tauriSubscriptionAccounts";
 import type { ManagedAgent } from "@/shared/api/types";
 import {
-  useClaudeDefaultAccount,
+  useProviderDefaultAccount,
   useClaudeAccountChange,
 } from "../accountChanges";
 import { ClaudeAccountChangeDialog } from "./ClaudeAccountChangeDialog";
@@ -49,13 +49,17 @@ export function SubscriptionAccountSelector({
   const now = useSubscriptionAccountClock();
   const enabled = useSubscriptionAccountsEnabledQuery();
   const client = useQueryClient();
-  const defaultAccount = useClaudeDefaultAccount();
+  const defaultAccount = useProviderDefaultAccount(
+    agent.subscriptionAccountHarness ?? "claude",
+  );
   const group = useClaudeAccountChange();
   const operation = useQuery({
     queryKey: ["account-switch", agent.pubkey],
     queryFn: () => agentAccountSwitchStatus(agent.pubkey),
     refetchInterval: 750,
-    enabled: agent.subscriptionAccountHarness === "claude",
+    enabled:
+      agent.subscriptionAccountHarness === "claude" ||
+      agent.subscriptionAccountHarness === "codex",
   });
   const operationRevision = operation.data
     ? JSON.stringify([
@@ -90,7 +94,10 @@ export function SubscriptionAccountSelector({
   const selected = agent.subscriptionAccountId ?? null;
   const accountRequired = selected === null && Boolean(operation.data);
   const legacy =
-    selected === null && !accountRequired && agent.claudeAccountId !== null;
+    agent.subscriptionAccountHarness === "claude" &&
+    selected === null &&
+    !accountRequired &&
+    agent.claudeAccountId !== null;
   const selectedAccount = accounts.data?.find(
     (account) => account.id === selected,
   );
@@ -143,11 +150,11 @@ export function SubscriptionAccountSelector({
       !operation.data.error,
   );
   const canPause =
-    agent.subscriptionAccountHarness === "claude" &&
+    ["claude", "codex"].includes(agent.subscriptionAccountHarness ?? "") &&
     accounts.data?.some(
       (account) =>
-        account.harness === "claude" &&
-        account.kind === "token" &&
+        account.harness === agent.subscriptionAccountHarness &&
+        (account.harness !== "claude" || account.kind === "token") &&
         account.state === "ready",
     );
   const groupPending = Boolean(group.data && group.data.phase !== "complete");
@@ -169,7 +176,10 @@ export function SubscriptionAccountSelector({
     )
       return;
     const account = accounts.data?.find((item) => item.id === target);
-    if (account?.harness === "claude" && account.kind === "token")
+    if (
+      account?.harness === "codex" ||
+      (account?.harness === "claude" && account.kind === "token")
+    )
       setDestination({
         kind: "agent",
         pubkey: agent.pubkey,
@@ -319,7 +329,8 @@ export function SubscriptionAccountSelector({
       <ClaudeAccountChangeProgress pubkey={agent.pubkey} />
       {(error || authHeld) &&
       !groupPending &&
-      selectedAccount?.kind === "token" ? (
+      (selectedAccount?.kind === "token" ||
+        selectedAccount?.harness === "codex") ? (
         <div className="space-y-1.5 text-xs">
           <p>
             Work is retained. Retry this account or choose another account

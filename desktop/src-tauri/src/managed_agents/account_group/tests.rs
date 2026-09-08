@@ -4,6 +4,7 @@ fn fixture() -> Operation {
     let source = uuid::Uuid::new_v4().to_string();
     let destination = uuid::Uuid::new_v4().to_string();
     Operation {
+        harness: "claude".into(),
         version: 1,
         id: "d".repeat(32),
         request: ChangeRequest::Default {
@@ -180,4 +181,21 @@ fn retry_and_renewal_preserve_default_enrollment_but_explicit_switch_leaves_it()
         Some("default")
     ));
     assert!(!binding_mode(None, true, None, None));
+}
+
+#[test]
+fn provider_journal_versions_preserve_legacy_and_fence_codex_from_old_readers() {
+    let mut legacy = serde_json::to_value(fixture()).unwrap();
+    legacy.as_object_mut().unwrap().remove("harness");
+    let mut operation: Operation = serde_json::from_value(legacy).unwrap();
+    assert_eq!(operation.harness, "claude");
+    validate(&operation).unwrap();
+    let claude_fingerprint = plan::fingerprint(&operation).unwrap();
+    operation.harness = "codex".into();
+    assert!(validate(&operation).is_err());
+    operation.version = 2;
+    validate(&operation).unwrap();
+    assert_ne!(claude_fingerprint, plan::fingerprint(&operation).unwrap());
+    operation.harness = "grok".into();
+    assert!(validate(&operation).is_err());
 }

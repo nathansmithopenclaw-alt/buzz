@@ -12,6 +12,10 @@ use tauri::{AppHandle, Manager};
 
 const MAX_MEMBERS: usize = 512;
 
+fn claude_harness() -> String {
+    "claude".into()
+}
+
 /// Retry and token renewal preserve enrollment. A different explicit account
 /// leaves the default unless the group operation explicitly enrolls it.
 pub(crate) fn binding_mode(
@@ -57,6 +61,8 @@ struct Member {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Operation {
+    #[serde(default = "claude_harness")]
+    harness: String,
     version: u32,
     id: String,
     request: ChangeRequest,
@@ -83,6 +89,7 @@ pub(crate) struct MemberStatus {
 
 #[derive(Serialize)]
 pub(crate) struct Status {
+    harness: String,
     id: String,
     phase: String,
     error: Option<String>,
@@ -94,6 +101,7 @@ pub(crate) struct Status {
 impl Operation {
     fn status(&self) -> Status {
         Status {
+            harness: self.harness.clone(),
             id: self.id.clone(),
             phase: self.phase.clone(),
             error: self.error.clone(),
@@ -161,7 +169,8 @@ fn read(app: &AppHandle) -> Result<Option<Operation>, String> {
 }
 
 fn validate(operation: &Operation) -> Result<(), String> {
-    if operation.version != 1
+    if !matches!(operation.harness.as_str(), "claude" | "codex")
+        || operation.version != if operation.harness == "codex" { 2 } else { 1 }
         || operation.id.len() != 32
         || !operation.id.bytes().all(|c| c.is_ascii_hexdigit())
         || !["applying", "paused", "removing", "complete"].contains(&operation.phase.as_str())

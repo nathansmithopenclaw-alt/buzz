@@ -98,8 +98,9 @@ export function ClaudeAccountChangeProgress({ pubkey }: { pubkey?: string }) {
               {accounts.data
                 ?.filter(
                   (account) =>
-                    account.harness === "claude" &&
-                    account.kind === "token" &&
+                    account.harness === (data.harness ?? "claude") &&
+                    (account.harness !== "claude" ||
+                      account.kind === "token") &&
                     account.state === "ready" &&
                     account.nickname &&
                     !subscriptionAccountExpiry(account, now)?.expired,

@@ -14934,6 +14934,7 @@ export function maybeInstallE2eTauriMocks() {
       case "cancel_subscription_account_login":
       case "rename_subscription_account":
       case "remove_subscription_account":
+      case "get_subscription_default_account":
       case "get_claude_default_account":
       case "get_claude_account_change_status":
       case "preview_claude_account_change":

@@ -76,7 +76,7 @@ export function ClaudeAccountChangeDialog({
     request.kind === "remove"
       ? "Remove this account?"
       : request.kind === "default"
-        ? "Change the default Claude account?"
+        ? `Change the default ${accounts.data?.find((account) => account.id === destination)?.harness === "codex" ? "OpenAI" : "Claude"} account?`
         : "Change subscription account?";
   const operation = preview.data?.operation;
   const running =

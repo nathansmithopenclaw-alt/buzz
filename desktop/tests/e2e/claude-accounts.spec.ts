@@ -77,12 +77,12 @@ test("Subscription Accounts explains migration without token entry or fabricated
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await openSettings(page, "agents");
   const card = page.getByTestId("settings-subscription-accounts");
-  await expect(card).toContainText("No subscription accounts saved");
+  await expect(card).toContainText("No Anthropic accounts saved.");
   await expect(
-    card.getByRole("button", { name: /Sign in with openai/ }),
+    card.getByRole("button", { name: /Sign in with OpenAI/ }),
   ).toBeDisabled();
   await expect(
-    card.getByRole("button", { name: /Sign in with xai/ }),
+    card.getByRole("button", { name: /Sign in with Grok/ }),
   ).toBeDisabled();
   const legacy = page.getByTestId("settings-claude-accounts");
   await expect(legacy).toContainText("Account A");
@@ -102,7 +102,7 @@ test("browser login remains pending until provider verification and cancellation
   // Navigate between Settings sections through their normal UI.
   await page.getByTestId("settings-nav-agents").click();
   const card = page.getByTestId("settings-subscription-accounts");
-  await card.getByRole("button", { name: /Sign in with openai/ }).click();
+  await card.getByRole("button", { name: /Sign in with OpenAI/ }).click();
   await expect(card).toContainText(
     "Waiting for browser login and verification",
   );
@@ -475,7 +475,7 @@ test("default followers, explicit overrides, all-account scope and integrated re
     .getByRole("alertdialog")
     .getByRole("button", { name: "Stop agents and remove" })
     .click();
-  await expect(card).toContainText("No subscription accounts saved");
+  await expect(card).toContainText("No Anthropic accounts saved.");
   await expect(defaultControl).toContainText("Choose default account");
   await closeSurface();
   selector = await profile("Helm", CLAUDE_AGENT);
@@ -483,4 +483,53 @@ test("default followers, explicit overrides, all-account scope and integrated re
   await expect(
     selector.getByRole("button", { name: "Subscription account" }),
   ).toHaveText("Account required — choose a named account");
+});
+
+test("provider sections distinguish defaults from saved account cards", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await openSettings(page, "experimental");
+  await page.getByRole("switch", { name: "Subscription Accounts" }).click();
+  await page.getByTestId("settings-nav-agents").click();
+  const card = page.getByTestId("settings-subscription-accounts");
+  await card
+    .getByRole("button", { name: "Add Claude long-lived token" })
+    .click();
+  await page.evaluate(() =>
+    window.__BUZZ_E2E_COMPLETE_SUBSCRIPTION_TOKEN__?.(
+      "mock-subscription-1",
+      Math.floor(Date.now() / 1000),
+    ),
+  );
+  const row = card.getByRole("article");
+  await row.getByRole("textbox", { name: /Nickname/ }).fill("Studio Claude");
+  await row.getByRole("button", { name: "Save nickname" }).click();
+  const anthropic = card.getByRole("region", {
+    name: "Anthropic accounts",
+    exact: true,
+  });
+  const openai = card.getByRole("region", {
+    name: "OpenAI accounts",
+    exact: true,
+  });
+  const grok = card.getByRole("region", { name: "Grok accounts", exact: true });
+  await expect(
+    anthropic.getByRole("article", { name: "Studio Claude" }),
+  ).toBeVisible();
+  await expect(openai.getByRole("article")).toHaveCount(0);
+  await expect(
+    grok.getByRole("button", { name: "Not available yet" }),
+  ).toBeDisabled();
+  for (const [name, section] of [
+    ["anthropic", anthropic],
+    ["openai", openai],
+    ["grok", grok],
+  ] as const) {
+    await section.scrollIntoViewIfNeeded();
+    await waitForAnimations(page);
+    await section.screenshot({
+      path: testInfo.outputPath(`${name}-section.png`),
+    });
+  }
 });

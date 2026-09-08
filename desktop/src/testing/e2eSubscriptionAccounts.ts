@@ -8,14 +8,14 @@ import type {
 let enabled = false;
 let accounts: SubscriptionAccount[] = [];
 let sequence = 0;
-let defaultAccount: string | null = null;
+let defaults: Record<string, string | null> = {};
 let group: ClaudeAccountChangeStatus | null = null;
 const detached = new Set<string>();
 export function resetMockSubscriptionAccounts() {
   enabled = false;
   accounts = [];
   sequence = 0;
-  defaultAccount = null;
+  defaults = {};
   group = null;
   detached.clear();
 }
@@ -45,6 +45,15 @@ export function mockSubscriptionAccountCommand(
       request.kind === "agent"
         ? agents.find((agent) => agent.pubkey === request.pubkey)
         : null;
+    const destination =
+      request.kind === "remove" ? request.replacement : request.destination;
+    const harness =
+      accounts.find(
+        (account) =>
+          account.id ===
+          (request.kind === "remove" ? request.account_id : destination),
+      )?.harness ?? "claude";
+    const defaultAccount = defaults[harness] ?? null;
     const source =
       request.kind === "remove"
         ? request.account_id
@@ -53,7 +62,8 @@ export function mockSubscriptionAccountCommand(
           : origin?.subscription_account_id;
     const members = agents.filter((agent) =>
       request.kind === "default"
-        ? agent.subscription_account_inherit_default
+        ? agent.subscription_account_inherit_default &&
+          agent.subscription_account_harness === harness
         : request.kind === "remove"
           ? agent.subscription_account_id === source
           : agent.pubkey === request.pubkey ||
@@ -61,10 +71,9 @@ export function mockSubscriptionAccountCommand(
               source &&
               agent.subscription_account_id === source),
     );
-    const destination =
-      request.kind === "remove" ? request.replacement : request.destination;
     const operation: ClaudeAccountChangeStatus = {
       id: "synthetic-group",
+      harness: harness as "claude" | "codex",
       phase: "applying",
       error: null,
       destination,
@@ -99,7 +108,9 @@ export function mockSubscriptionAccountCommand(
   };
   switch (command) {
     case "get_claude_default_account":
-      return defaultAccount;
+      return defaults.claude ?? null;
+    case "get_subscription_default_account":
+      return defaults[String(payload.harness)] ?? null;
     case "get_claude_account_change_status":
       return structuredClone(group);
     case "preview_claude_account_change":
@@ -138,7 +149,8 @@ export function mockSubscriptionAccountCommand(
         }
         member.done = true;
       }
-      if (group.change_default) defaultAccount = group.destination;
+      if (group.change_default)
+        defaults[group.harness ?? "claude"] = group.destination;
       if (request.kind === "remove")
         accounts = accounts.filter(
           (account) => account.id !== request.account_id,

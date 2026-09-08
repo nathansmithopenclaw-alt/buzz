@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, SlidersHorizontal } from "lucide-react";
 import {
-  useClaudeDefaultAccount,
+  useProviderDefaultAccount,
   useClaudeAccountChange,
 } from "../accountChanges";
 import {
@@ -20,30 +20,54 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { ClaudeAccountChangeDialog } from "./ClaudeAccountChangeDialog";
 
-export function ClaudeDefaultAccountControl() {
-  const selected = useClaudeDefaultAccount();
+export function ClaudeDefaultAccountControl({
+  harness = "claude",
+  label = "Claude",
+  available = true,
+}: {
+  harness?: string;
+  label?: string;
+  available?: boolean;
+}) {
+  const selected = useProviderDefaultAccount(harness);
   const accounts = useSubscriptionAccountsQuery();
   const enabled = useSubscriptionAccountsEnabledQuery();
   const change = useClaudeAccountChange();
   const now = useSubscriptionAccountClock();
   const [destination, setDestination] = useState<string>();
+  const eligible =
+    accounts.data?.filter(
+      (account) =>
+        account.harness === harness &&
+        (harness !== "claude" || account.kind === "token") &&
+        account.state === "ready" &&
+        account.nickname &&
+        !subscriptionAccountExpiry(account, now)?.expired,
+    ) ?? [];
   return (
     <section
-      className="space-y-2 rounded-lg border p-3"
-      aria-label="Default Claude account"
+      className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-4"
+      aria-label={`Default ${label} account`}
     >
-      <p className="text-sm font-medium">Default Claude account</p>
-      <p className="text-xs text-muted-foreground">
-        New Claude agents use this account. Existing agents keep their choices
-        until you select Use default. Changing the default updates only agents
-        that follow it.
-      </p>
+      <div className="flex items-center gap-2 text-sm font-medium">
+        <SlidersHorizontal className="size-4 text-primary" aria-hidden="true" />
+        <p>Default {label} account</p>
+      </div>
+      {available ? (
+        <p className="text-xs text-muted-foreground">
+          New {label === "OpenAI" ? "Codex" : label} agents use this account.
+          Existing agents keep their choices until you select Use default.
+          Changing the default updates only agents that follow it.
+        </p>
+      ) : null}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
             variant="outline"
             className="w-full justify-between"
             disabled={
+              !available ||
+              eligible.length === 0 ||
               !enabled.data ||
               selected.isPending ||
               selected.isError ||
@@ -52,11 +76,13 @@ export function ClaudeDefaultAccountControl() {
               Boolean(change.data && change.data.phase !== "complete")
             }
           >
-            {accounts.data?.find((account) => account.id === selected.data)
-              ?.nickname ??
-              (selected.data
-                ? "Default account unavailable"
-                : "Choose default account")}
+            {!available
+              ? "Not available yet"
+              : (accounts.data?.find((account) => account.id === selected.data)
+                  ?.nickname ??
+                (selected.data
+                  ? "Default account unavailable"
+                  : "Choose default account"))}
             <ChevronDown className="size-4" />
           </Button>
         </DropdownMenuTrigger>
@@ -67,23 +93,27 @@ export function ClaudeDefaultAccountControl() {
               if (value !== selected.data) setDestination(value);
             }}
           >
-            {accounts.data
-              ?.filter(
-                (account) =>
-                  account.harness === "claude" &&
-                  account.kind === "token" &&
-                  account.state === "ready" &&
-                  account.nickname &&
-                  !subscriptionAccountExpiry(account, now)?.expired,
-              )
-              .map((account) => (
-                <DropdownMenuRadioItem key={account.id} value={account.id}>
-                  {account.nickname}
-                </DropdownMenuRadioItem>
-              ))}
+            {eligible.map((account) => (
+              <DropdownMenuRadioItem key={account.id} value={account.id}>
+                {account.nickname}
+              </DropdownMenuRadioItem>
+            ))}
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
       </DropdownMenu>
+      {available &&
+      !accounts.isPending &&
+      !accounts.isError &&
+      eligible.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Add and name a ready account to choose a default.
+        </p>
+      ) : null}
+      {!available ? (
+        <p className="text-xs text-muted-foreground">
+          Grok account defaults will be available when account support is ready.
+        </p>
+      ) : null}
       {selected.isError ? (
         <p role="alert" className="text-sm text-destructive">
           Could not load the default account.{" "}

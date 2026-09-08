@@ -82,6 +82,7 @@ pub(super) fn run(app: &AppHandle, mut operation: Operation) -> Result<Status, S
                 .map_err(|e| e.to_string())?;
             subscription_accounts::defaults::commit(
                 app,
+                &operation.harness,
                 operation.prior_default.as_deref(),
                 operation.destination.as_deref(),
             )?;
