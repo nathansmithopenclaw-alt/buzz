@@ -1,3 +1,4 @@
+import { EditAgentCommandField } from "./EditAgentCommandField";
 import { ProviderEndpointField } from "./ProviderEndpointField";
 import {
   AgentInstanceAvatarField,
@@ -30,7 +31,6 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
-import { Input } from "@/shared/ui/input";
 import {
   setManagedAgentAutoRestart,
   setManagedAgentSessionResidencyPolicy,
@@ -55,8 +55,6 @@ import {
   getPersonaProviderOptions,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
-  PERSONA_FIELD_CONTROL_CLASS,
-  PERSONA_FIELD_SHELL_CLASS,
   runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
@@ -1033,33 +1031,11 @@ export function AgentInstanceEditDialog({
               />
             </div>
             {selectedRuntimeId === "custom" && !inheritHarness ? (
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="edit-agent-command"
-                >
-                  Agent command
-                </label>
-                <div
-                  className={cn(
-                    "flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
-                    )}
-                    disabled={isSaving}
-                    id="edit-agent-command"
-                    onChange={(event) => setAgentCommand(event.target.value)}
-                    placeholder="Full path or shell command"
-                    value={agentCommand}
-                  />
-                </div>
-              </div>
+              <EditAgentCommandField
+                disabled={isSaving}
+                value={agentCommand}
+                onChange={setAgentCommand}
+              />
             ) : null}
             {/* LLM provider + provider API key + model */}
             {llmProviderFieldVisible ? (
