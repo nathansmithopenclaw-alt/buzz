@@ -140,6 +140,7 @@ export class NativeService {
     return result;
   }
 
+  /** Report this connection's lease and recovery state without acquiring input. */
   status() {
     return {
       acquired: Boolean(this.release),
