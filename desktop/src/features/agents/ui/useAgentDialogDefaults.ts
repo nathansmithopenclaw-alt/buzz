@@ -5,8 +5,11 @@ import { useGlobalAgentConfig } from "../useGlobalAgentConfig";
 import { BUZZ_AGENT_THINKING_EFFORT } from "./buzzAgentConfig";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
+// Keep omitted overrides stable so downstream discovery effects retain in-flight work.
+const EMPTY_INHERITED_ENV: Record<string, string> = Object.freeze({});
+
 export function useAgentDialogDefaults({
-  inheritedEnvVars = {},
+  inheritedEnvVars = EMPTY_INHERITED_ENV,
   open,
   runtimeId,
 }: {

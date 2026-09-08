@@ -322,3 +322,99 @@ test("Nectar seeds the saved harness and model and discovers native tuning throu
     window.__TAURI_INTERNALS__.invoke = previous;
   }
 });
+
+test("Nectar keeps delayed discovery active across unrelated parent renders", async () => {
+  const { SummaryRuntimeFields } = await import("./SummaryRuntimeFields.tsx");
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, staleTime: Infinity, gcTime: Infinity },
+    },
+  });
+  clients.push(client);
+  client.setQueryData(["globalAgentConfig"], {
+    env_vars: {},
+    preferred_runtime: "claude",
+    model: "claude-opus-4-8",
+    provider: null,
+  });
+  client.setQueryData(
+    ["acp-runtimes"],
+    [
+      {
+        id: "claude",
+        label: "Claude Code",
+        availability: "available",
+        command: "claude",
+        binaryPath: "/usr/local/bin/claude",
+        defaultArgs: [],
+        modelEnvVar: "ANTHROPIC_MODEL",
+        providerEnvVar: null,
+      },
+    ],
+  );
+  const previous = window.__TAURI_INTERNALS__.invoke;
+  const pending = [];
+  window.__TAURI_INTERNALS__.invoke = async (command, payload) => {
+    if (command === "discover_agent_models") {
+      return new Promise((resolve) =>
+        pending.push({ resolve, input: payload.input }),
+      );
+    }
+    if (
+      command === "get_baked_build_env" ||
+      command === "get_baked_build_env_keys"
+    )
+      return [];
+    return previous(command, payload);
+  };
+  let draft;
+  const changed = (value) => {
+    draft = value;
+  };
+  function Parent() {
+    const [tick, setTick] = React.useState(0);
+    return React.createElement(
+      React.Fragment,
+      null,
+      React.createElement(
+        "button",
+        { onClick: () => setTick(tick + 1) },
+        `Unrelated ${tick}`,
+      ),
+      React.createElement(SummaryRuntimeFields, {
+        disabled: false,
+        onChange: changed,
+      }),
+    );
+  }
+  const response = {
+    supportsSwitching: true,
+    models: [{ id: "claude-opus-4-8", name: "Opus" }],
+  };
+  try {
+    render(
+      React.createElement(
+        QueryClientProvider,
+        { client },
+        React.createElement(ThemeProvider, null, React.createElement(Parent)),
+      ),
+    );
+    await waitFor(() => assert.ok(pending.length > 0));
+    fireEvent.click(screen.getByRole("button", { name: "Unrelated 0" }));
+    fireEvent.click(screen.getByRole("button", { name: "Unrelated 1" }));
+    assert.equal(
+      pending.length,
+      1,
+      "unchanged discovery must not be restarted by loading or parent renders",
+    );
+    assert.equal(draft, null);
+    pending[0].resolve(response);
+    await waitFor(() => assert.equal(draft?.model, "claude-opus-4-8"));
+    assert.equal(pending.length, 1);
+    assert.equal(draft.runtime.id, "claude");
+  } finally {
+    cleanup();
+    for (const request of pending) request.resolve(response);
+    window.__TAURI_INTERNALS__.invoke = previous;
+  }
+});
