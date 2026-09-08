@@ -1,3 +1,6 @@
+import { openDm } from "@/shared/api/tauriChannels";
+import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   addChannelMembers,
@@ -19,6 +22,7 @@ export const BRIEF_CONFIG_D_TAG = "summary";
 
 export type BriefConfigPayload = {
   v: 1;
+  read_delegation?: boolean;
   reporter_pubkey: string | null;
   hour: number;
   minute: number;
@@ -52,6 +56,8 @@ function tagValue(event: RelayEvent, name: string): string | undefined {
 
 export function conversationsFromChannels(
   channels: Channel[],
+  currentPubkey?: string,
+  profiles?: UserProfileLookup,
 ): SummaryConversation[] {
   return channels
     .filter((channel) => channel.isMember)
@@ -59,7 +65,10 @@ export function conversationsFromChannels(
       id: channel.id,
       name:
         channel.channelType === "dm"
-          ? channel.name || "Direct message"
+          ? buildDirectMessageIntro({ channel, currentPubkey, profiles })
+              ?.displayName ||
+            channel.participants.join(", ") ||
+            "Direct message"
           : channel.name,
       kind: channel.channelType === "dm" ? "dm" : "channel",
       archived: Boolean(channel.archivedAt),
@@ -188,17 +197,18 @@ export async function publishBriefConfig(input: {
   previousWorkflowId?: string | null;
 }): Promise<void> {
   const lists = listsFromChecked(input.conversations, input.sourceConfig);
-  if (input.reporterPubkey) {
-    await reconcileReporterMembership({
-      reporterPubkey: input.reporterPubkey,
-      previousChannels: input.previousChannelIds ?? [],
-      nextChannels: lists.channels,
-    });
-  }
+  if (!input.reporterPubkey) throw new Error("Choose a Summary agent.");
+  const host =
+    lists.channels.length + lists.dms.length > 0
+      ? await openDm({
+          pubkeys: [input.reporterPubkey],
+          expectedSignerPubkey: input.ownerPubkey,
+        })
+      : null;
   const workflowId = await syncSummarySchedule({
     ownerPubkey: input.ownerPubkey,
     previousWorkflowId: input.previousWorkflowId ?? null,
-    hostChannelId: lists.channels[0] ?? null,
+    hostChannelId: host?.id ?? null,
     hour: input.hour,
     minute: input.minute,
     timezone: input.timezone,
@@ -206,6 +216,7 @@ export async function publishBriefConfig(input: {
   });
   const payload: BriefConfigPayload = {
     v: 1,
+    read_delegation: true,
     reporter_pubkey: input.reporterPubkey,
     hour: input.hour,
     minute: input.minute,
@@ -236,6 +247,7 @@ export async function publishBriefConfig(input: {
   for (const id of lists.exclude) tags.push(["exclude", id]);
 
   const event = await signRelayEvent({
+    allowSelfTagging: true,
     kind: KIND_BRIEF_CONFIG,
     content: JSON.stringify(payload),
     tags,

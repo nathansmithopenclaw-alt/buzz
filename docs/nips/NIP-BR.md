@@ -86,6 +86,11 @@ Rules:
 - Direct messages MAY appear in `dms`. Adding the reporter as a visible
   third DM participant is the wrong shape; DMs ride a read-scope grant
   (native) or are omitted from bot-membership (v1).
+- `read_delegation` (optional, default false) explicitly permits the selected
+  reporter to request bounded read-only transcript snapshots from the owner's
+  selected conversations. It never confers membership or write permission.
+  See [Summary read delegation](../summary-read-delegation.md) for the current
+  HTTP bridge extension, revocation, and rollout boundary.
 - Unknown fields are invalid. Duplicate singleton tags are invalid.
 
 Matching tags:
@@ -162,12 +167,10 @@ channel in the community. That is the upstream-correct shape for a
 workspace that contains many human teammates who do not share every
 room.
 
-v1 access: the owner adds the reporter as a `bot`-role member on
-included *channels*. Direct messages are not granted by inserting the
-reporter as a participant.
-
-Native target: one signed read-scope grant covering the owner's member
-conversations.
+Legacy v1 setup added the reporter as a `bot`-role member on included
+channels. Current setup uses the explicit `read_delegation` grant for both
+channels and DMs and does not change source memberships. Older memberships
+remain ordinary memberships until separately removed.
 
 ## Scheduling
 
@@ -178,7 +181,7 @@ behavior (`0 9 * * *` is 09:00 UTC).
 
 The briefing config is the user-facing source of truth for "09:00
 where I am." Saving the config MUST create or update a companion
-scheduled workflow with the same hour, minute, and timezone. Clearing
+scheduled workflow in the owner/reporter DM with the same hour, minute, and timezone. Clearing
 the include set or disabling Summary MUST delete that workflow.
 
 On-demand: mentioning the reporter is sufficient to request a run.

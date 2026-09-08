@@ -1,4 +1,4 @@
-import { AlertCircle, Loader, Search, UsersRound } from "lucide-react";
+import { AlertCircle, Loader, UsersRound } from "lucide-react";
 import * as React from "react";
 
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
@@ -12,7 +12,6 @@ import {
   subjectIsOn,
   subjectSummary,
   subjectsAreEmpty,
-  toggleGrantedAgent,
   type DelegationCapability,
 } from "@/features/agents/delegationGrant";
 import { setAgentManagementDelegation } from "@/shared/api/tauriGlobalAgentConfig";
@@ -24,15 +23,7 @@ import type {
 } from "@/shared/api/types";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
-import { Checkbox } from "@/shared/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/dialog";
+import { ManagedAgentPickerDialog } from "./ManagedAgentPickerDialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -43,10 +34,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/shared/ui/alert-dialog";
-import {
-  MODAL_SEARCH_INPUT_CLASS,
-  MODAL_SEARCH_SHELL_CLASS,
-} from "@/shared/ui/modalSearchStyles";
 import { Switch } from "@/shared/ui/switch";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -89,7 +76,6 @@ export function AgentManagementDelegationCard({
     [roster, subjects],
   );
   const [picker, setPicker] = React.useState<PickerState | null>(null);
-  const [search, setSearch] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [grantAllOpen, setGrantAllOpen] = React.useState(false);
@@ -121,7 +107,6 @@ export function AgentManagementDelegationCard({
 
   function openPicker(capability: DelegationCapability, label: string) {
     setError(null);
-    setSearch("");
     setPicker({
       capability,
       label,
@@ -181,12 +166,6 @@ export function AgentManagementDelegationCard({
       // Error is already on the card.
     }
   }
-
-  const filteredAgents = React.useMemo(() => {
-    const query = search.trim().toLowerCase();
-    if (!query) return agents;
-    return agents.filter((agent) => agent.name.toLowerCase().includes(query));
-  }, [agents, search]);
 
   const saveError = error ? (
     <p
@@ -337,153 +316,26 @@ export function AgentManagementDelegationCard({
 
       {!picker && !grantAllOpen ? saveError : null}
 
-      <Dialog
-        onOpenChange={(open) => {
-          if (!open && !saving) setPicker(null);
-        }}
+      <ManagedAgentPickerDialog
         open={picker !== null}
-      >
-        <DialogContent
-          className="max-w-md"
-          data-testid="agent-management-picker"
-        >
-          <DialogHeader>
-            <DialogTitle>{picker?.label ?? "Choose agents"}</DialogTitle>
-            <DialogDescription>
-              Choose which managed colleagues receive this permission.
-            </DialogDescription>
-            <label
-              className={MODAL_SEARCH_SHELL_CLASS}
-              htmlFor="agent-management-picker-search"
-            >
-              <Search className="h-4 w-4 shrink-0 text-muted-foreground/55" />
-              <input
-                autoCapitalize="none"
-                autoCorrect="off"
-                className={MODAL_SEARCH_INPUT_CLASS}
-                data-testid="agent-management-picker-search"
-                disabled={saving}
-                id="agent-management-picker-search"
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search agents"
-                spellCheck={false}
-                type="text"
-                value={search}
-              />
-            </label>
-          </DialogHeader>
-
-          <div className="rounded-xl border border-border/70">
-            <div className="flex items-center justify-between gap-3 border-b border-border/60 px-3 py-2.5">
-              <label
-                className="flex-1 cursor-pointer text-sm font-medium"
-                htmlFor="agent-management-picker-all"
-              >
-                All current agents
-              </label>
-              <Checkbox
-                checked={
-                  picker !== null &&
-                  roster.length > 0 &&
-                  roster.every((pubkey) => agentIsGranted(picker.draft, pubkey))
-                }
-                data-testid="agent-management-picker-all"
-                disabled={saving}
-                id="agent-management-picker-all"
-                onCheckedChange={(checked) => {
-                  if (!picker) return;
-                  if (checked === true) {
-                    setPicker({
-                      ...picker,
-                      draft: { scope: "set", grantees: [...roster] },
-                    });
-                    return;
-                  }
-                  setPicker({
-                    ...picker,
-                    draft: noneSubject(),
-                  });
-                }}
-              />
-            </div>
-            <div className="max-h-[min(50vh,24rem)] overflow-y-auto">
-              {filteredAgents.length === 0 ? (
-                <p className="px-3 py-3 text-sm text-muted-foreground">
-                  {agentsQuery.isLoading
-                    ? "Loading agents…"
-                    : search.trim()
-                      ? "No matching agents."
-                      : "No managed agents yet."}
-                </p>
-              ) : (
-                filteredAgents.map((agent) => {
-                  const checked = picker
-                    ? agentIsGranted(picker.draft, agent.pubkey)
-                    : false;
-                  const rowId = `agent-management-picker-agent-${agent.pubkey}`;
-                  return (
-                    <div
-                      className="flex items-center justify-between gap-3 px-3 py-2 hover:bg-muted/40"
-                      data-testid={rowId}
-                      key={agent.pubkey}
-                    >
-                      <label
-                        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2"
-                        htmlFor={rowId}
-                      >
-                        <UserAvatar
-                          avatarUrl={agent.avatarUrl}
-                          displayName={agent.name}
-                          size="sm"
-                        />
-                        <span className="truncate text-sm">{agent.name}</span>
-                      </label>
-                      <Checkbox
-                        checked={checked}
-                        disabled={saving}
-                        id={rowId}
-                        onCheckedChange={() => {
-                          if (!picker) return;
-                          const result = toggleGrantedAgent(
-                            picker.draft,
-                            agent.pubkey,
-                            roster,
-                          );
-                          setPicker({
-                            ...picker,
-                            draft: result.subject,
-                          });
-                        }}
-                      />
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-
-          {saveError}
-          <DialogFooter>
-            <Button
-              disabled={saving}
-              onClick={() => setPicker(null)}
-              type="button"
-              variant="outline"
-            >
-              Cancel
-            </Button>
-            <Button
-              data-testid="agent-management-picker-confirm"
-              disabled={saving || agentsQuery.isLoading}
-              onClick={() => void confirmPicker()}
-              type="button"
-            >
-              {saving ? <Loader className="size-3.5 animate-spin" /> : null}
-              Confirm
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        onOpenChange={(open) => {
+          if (!open) setPicker(null);
+        }}
+        title={picker?.label ?? "Choose agents"}
+        description="Choose which managed agents receive this permission."
+        selected={
+          picker
+            ? roster.filter((key) => agentIsGranted(picker.draft, key))
+            : []
+        }
+        onSelectionChange={(grantees) => {
+          if (picker)
+            setPicker({ ...picker, draft: { scope: "set", grantees } });
+        }}
+        onConfirm={() => void confirmPicker()}
+        saving={saving}
+        error={saveError}
+      />
 
       <AlertDialog
         onOpenChange={(open) => {

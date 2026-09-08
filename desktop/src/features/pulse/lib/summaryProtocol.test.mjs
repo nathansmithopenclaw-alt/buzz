@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   briefConfigFilter,
+  conversationsFromChannels,
   briefReportsFilter,
   membershipDiff,
   reportFromEvent,
@@ -69,5 +70,32 @@ test("workflowIdFromEvent reads the companion workflow tag", () => {
       ],
     }),
     "wf-1",
+  );
+});
+
+test("Summary DM labels resolve participants and omit the owner", () => {
+  const owner = "11".repeat(32),
+    first = "22".repeat(32),
+    second = "33".repeat(32);
+  const room = {
+    id: "dm",
+    name: "DM",
+    channelType: "dm",
+    isMember: true,
+    archivedAt: null,
+    participants: ["Nathan", "Old first", "Old second"],
+    participantPubkeys: [owner, first, second],
+  };
+  const profiles = {
+    [first]: { pubkey: first, displayName: "Grok" },
+    [second]: { pubkey: second, displayName: "Nectar" },
+  };
+  assert.equal(
+    conversationsFromChannels([room], owner, profiles)[0].name,
+    "Grok, Nectar",
+  );
+  assert.equal(
+    conversationsFromChannels([room], owner)[0].name,
+    "Old first, Old second",
   );
 });

@@ -95,6 +95,9 @@ pub struct BriefConfig {
     pub timezone: String,
     /// Newly joined member conversations are included until opted out.
     pub auto_include: bool,
+    /// Explicit consent for snapshot-only transcript reads by the selected reporter.
+    #[serde(default)]
+    pub read_delegation: bool,
     /// Included live channel UUIDs.
     #[serde(default)]
     pub channels: Vec<String>,
@@ -401,10 +404,26 @@ mod tests {
             minute: 0,
             timezone: "America/New_York".into(),
             auto_include: true,
+            read_delegation: false,
             channels: vec![CHANNEL.to_string()],
             dms: vec![],
             exclude: vec![],
         }
+    }
+
+    #[test]
+    fn legacy_config_does_not_grant_transcript_reads() {
+        let mut json = serde_json::to_value(sample_config()).unwrap();
+        json.as_object_mut().unwrap().remove("read_delegation");
+        assert!(
+            !serde_json::from_value::<BriefConfig>(json)
+                .unwrap()
+                .read_delegation
+        );
+        let mut config = sample_config();
+        config.read_delegation = true;
+        let event = sign(build_brief_config(OWNER, &config).unwrap());
+        assert!(parse_brief_config(&event).unwrap().read_delegation);
     }
 
     #[test]

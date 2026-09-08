@@ -1126,6 +1126,12 @@ async fn query_events_authed(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if raw_filters
+        .iter()
+        .any(|filter| filter.get("summary_owner").is_some())
+    {
+        return super::summary_read::read(state, tenant, &pubkey.to_hex(), &raw_filters).await;
+    }
     let filters: Vec<nostr::Filter> = raw_filters
         .iter()
         .map(|v| serde_json::from_value(v.clone()))
@@ -3991,7 +3997,7 @@ mod postgres_tests {
     /// - Redis pool points at the local dev instance for the admission check.
     ///
     /// Returns `None` when local Postgres is not reachable.
-    async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+    pub(super) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.
@@ -4391,3 +4397,7 @@ mod postgres_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "summary_read_tests.rs"]
+mod summary_read_tests;
