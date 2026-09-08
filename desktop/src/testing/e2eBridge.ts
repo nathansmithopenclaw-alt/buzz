@@ -14823,6 +14823,9 @@ export function maybeInstallE2eTauriMocks() {
         if (error) throw new Error(error);
         const capabilities = (payload as { capabilities: unknown })
           .capabilities;
+        const editScopes =
+          (payload as { editScopes?: Record<string, unknown> }).editScopes ??
+          {};
         lastAgentManagementDelegationPayload = capabilities;
         const previousGrant =
           mockGlobalAgentConfig?.agent_management_delegation ?? null;
@@ -14876,7 +14879,9 @@ export function maybeInstallE2eTauriMocks() {
           };
           const desiredBits = desired.get(legacy.granteePubkey.toLowerCase());
           if (
-            JSON.stringify(desiredBits) === JSON.stringify(legacy.capabilities)
+            JSON.stringify(desiredBits) ===
+              JSON.stringify(legacy.capabilities) &&
+            !editScopes[legacy.granteePubkey]
           ) {
             desired.delete(legacy.granteePubkey.toLowerCase());
           } else {
@@ -14888,11 +14893,24 @@ export function maybeInstallE2eTauriMocks() {
         const grants = Object.fromEntries(
           [...desired.entries()].map(([pubkey, bits]) => {
             const old = previousGrants[pubkey] as
-              | { capabilities?: Record<string, boolean>; signedEvent?: string }
+              | {
+                  capabilities?: Record<string, boolean>;
+                  signedEvent?: string;
+                  version?: number;
+                  agentEdit?: unknown;
+                  relayScope?: string;
+                }
               | undefined;
             return [
               pubkey,
               {
+                ...(editScopes[pubkey] || old?.version === 4
+                  ? {
+                      version: 4,
+                      relayScope: "wss://relay.example.test",
+                      agentEdit: editScopes[pubkey] ?? old?.agentEdit,
+                    }
+                  : {}),
                 granteePubkey: pubkey,
                 auditChannelId: "7c07e659-3610-42f4-9a5e-1e9973c09da9",
                 capabilities: bits,

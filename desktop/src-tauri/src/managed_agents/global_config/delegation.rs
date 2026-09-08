@@ -144,6 +144,7 @@ pub struct AgentManagementDelegationPayloadV2 {
 pub enum AgentManagementDelegationPayload {
     V1(AgentManagementDelegationPayloadV1),
     V2(AgentManagementDelegationPayloadV2),
+    V4(super::delegation_scope::ScopedDelegationPayload),
 }
 
 impl AgentManagementDelegationPayload {
@@ -160,6 +161,7 @@ impl AgentManagementDelegationPayload {
         match self {
             Self::V1(payload) => payload.audit_channel_id.as_str(),
             Self::V2(payload) => payload.audit_channel_id.as_str(),
+            Self::V4(payload) => &payload.grant.audit_channel_id,
         }
     }
 
@@ -170,6 +172,11 @@ impl AgentManagementDelegationPayload {
         request_has_env_vars: bool,
     ) -> bool {
         match self {
+            Self::V4(payload) => {
+                payload.grant.grantee_pubkey == source_pubkey
+                    && v1_capability_bit(&payload.grant.capabilities, capability)
+                    && (!request_has_env_vars || payload.grant.capabilities.env_vars)
+            }
             Self::V1(payload) => {
                 payload.grantee_pubkey == source_pubkey
                     && v1_capability_bit(&payload.capabilities, capability)
@@ -185,6 +192,7 @@ impl AgentManagementDelegationPayload {
 
     pub fn canonicalize(&mut self) -> Result<(), String> {
         match self {
+            Self::V4(payload) => payload.canonicalize(),
             Self::V1(payload) => {
                 let grantee = PublicKey::parse(payload.grantee_pubkey.trim())
                     .map_err(|error| format!("invalid delegation grantee pubkey: {error}"))?;
@@ -246,6 +254,7 @@ impl Serialize for AgentManagementDelegationPayload {
         match self {
             Self::V1(payload) => payload.serialize(serializer),
             Self::V2(payload) => payload.serialize(serializer),
+            Self::V4(payload) => payload.serialize(serializer),
         }
     }
 }
@@ -260,6 +269,11 @@ impl<'de> Deserialize<'de> for AgentManagementDelegationPayload {
             Some(serde_json::Value::Number(number)) if number.as_u64() == Some(2) => {
                 serde_json::from_value(value)
                     .map(Self::V2)
+                    .map_err(serde::de::Error::custom)
+            }
+            Some(serde_json::Value::Number(number)) if number.as_u64() == Some(4) => {
+                serde_json::from_value(value)
+                    .map(Self::V4)
                     .map_err(serde::de::Error::custom)
             }
             Some(other) => Err(serde::de::Error::custom(format!(
@@ -316,6 +330,7 @@ impl AgentManagementDelegationGrant {
         match &self.payload {
             AgentManagementDelegationPayload::V1(payload) => Some(payload.grantee_pubkey.as_str()),
             AgentManagementDelegationPayload::V2(_) => None,
+            AgentManagementDelegationPayload::V4(payload) => Some(&payload.grant.grantee_pubkey),
         }
     }
 
@@ -338,6 +353,13 @@ impl AgentManagementDelegationGrant {
 
     pub fn validate(&self, owner: &PublicKey) -> Result<(), String> {
         match &self.payload {
+            AgentManagementDelegationPayload::V4(payload) => {
+                let mut canonical = payload.clone();
+                canonical.canonicalize()?;
+                if &canonical != payload {
+                    return Err("delegation scope is not canonical".into());
+                }
+            }
             AgentManagementDelegationPayload::V1(payload) => {
                 let grantee = PublicKey::parse(payload.grantee_pubkey.trim())
                     .map_err(|error| format!("invalid delegation grantee pubkey: {error}"))?;
@@ -431,7 +453,7 @@ mod tests {
                 assert!(v1.capabilities.agent_creation);
                 assert!(!v1.capabilities.agent_config);
             }
-            AgentManagementDelegationPayload::V2(_) => panic!("expected v1"),
+            _ => panic!("expected v1"),
         }
         let encoded = serde_json::to_value(&payload).unwrap();
         assert!(encoded.get("version").is_none());
@@ -502,7 +524,7 @@ mod tests {
                 ));
                 assert!(matches!(v2.capabilities.env_vars, CapabilitySubject::All));
             }
-            AgentManagementDelegationPayload::V1(_) => panic!("expected v2"),
+            _ => panic!("expected v2"),
         }
     }
 
@@ -558,7 +580,7 @@ mod tests {
                 }
                 assert!(matches!(v2.capabilities.env_vars, CapabilitySubject::None));
             }
-            AgentManagementDelegationPayload::V1(_) => panic!("expected v2"),
+            _ => panic!("expected v2"),
         }
     }
 }

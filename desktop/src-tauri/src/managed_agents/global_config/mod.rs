@@ -29,6 +29,7 @@ use tauri::AppHandle;
 
 mod audit;
 mod delegation;
+pub mod delegation_scope;
 pub use audit::{agent_management_audit_channel_uuid, canonical_relay_scope};
 #[cfg(test)]
 pub use delegation::AgentManagementDelegationPayloadV2;
