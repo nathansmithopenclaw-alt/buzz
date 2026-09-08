@@ -56,7 +56,17 @@ type AgentManagementDelegationCardProps = {
   onPersisted: (config: GlobalAgentConfig) => void;
 };
 
+import type { AgentEditScope } from "@/shared/api/agentManagementDelegation";
+
 type PickerState = {
+  step: "recipients" | "targets";
+  recipients: string[];
+  index: number;
+  scopes: Record<string, AgentEditScope>;
+  targetDraft: CapabilitySubject;
+  fields: AgentEditScope["allowedFields"];
+  allowSelfEdit: boolean;
+  allPermissions?: boolean;
   capability: DelegationCapability;
   label: string;
   draft: CapabilitySubject;
@@ -95,12 +105,16 @@ export function AgentManagementDelegationCard({
   const [grantAllOpen, setGrantAllOpen] = React.useState(false);
 
   const persist = React.useCallback(
-    async (next: AgentManagementDelegationSubjects) => {
+    async (
+      next: AgentManagementDelegationSubjects,
+      editScopes?: Record<string, AgentEditScope>,
+    ) => {
       setSaving(true);
       setError(null);
       try {
         const result = await setAgentManagementDelegation(
           subjectsAreEmpty(next) ? null : next,
+          editScopes,
         );
         onPersisted(result.config);
       } catch (err) {
@@ -125,6 +139,13 @@ export function AgentManagementDelegationCard({
     setPicker({
       capability,
       label,
+      step: "recipients",
+      recipients: [],
+      index: 0,
+      scopes: {},
+      targetDraft: noneSubject(),
+      fields: ["displayName"],
+      allowSelfEdit: false,
       draft: subjects[capability],
     });
   }
@@ -145,34 +166,122 @@ export function AgentManagementDelegationCard({
     }
   }
 
+  function targetStep(
+    current: PickerState,
+    recipients: string[],
+    index: number,
+  ): PickerState {
+    const pubkey = recipients[index];
+    const existing = grants[pubkey];
+    const scope =
+      current.scopes[pubkey] ??
+      (existing?.version === 4 ? existing.agentEdit : undefined);
+    return {
+      ...current,
+      step: "targets",
+      recipients,
+      index,
+      targetDraft: scope
+        ? { scope: "set", grantees: scope.targetPubkeys }
+        : noneSubject(),
+      fields: scope?.allowedFields ?? ["displayName"],
+      allowSelfEdit: scope?.allowSelfEdit ?? false,
+    };
+  }
+
   async function confirmPicker() {
     if (!picker) return;
+    if (picker.capability === "agent_config" && picker.step === "recipients") {
+      const recipients = roster.filter((key) =>
+        agentIsGranted(picker.draft, key),
+      );
+      if (recipients.length) {
+        setSearch("");
+        setPicker(targetStep(picker, recipients, 0));
+        return;
+      }
+    }
+    const scopes = { ...picker.scopes };
+    if (picker.step === "targets") {
+      scopes[picker.recipients[picker.index]] = {
+        targetPubkeys: roster.filter((key) =>
+          agentIsGranted(picker.targetDraft, key),
+        ),
+        allowedFields: picker.fields,
+        allowSelfEdit: picker.allowSelfEdit,
+      };
+      if (picker.index + 1 < picker.recipients.length) {
+        setSearch("");
+        setPicker(
+          targetStep(
+            { ...picker, scopes },
+            picker.recipients,
+            picker.index + 1,
+          ),
+        );
+        return;
+      }
+    }
     try {
-      await persist({ ...subjects, [picker.capability]: picker.draft });
+      const next = picker.allPermissions
+        ? (Object.fromEntries(
+            DELEGATION_CAPABILITIES.map(([key]) => [key, picker.draft]),
+          ) as AgentManagementDelegationSubjects)
+        : { ...subjects, [picker.capability]: picker.draft };
+      const selectedScopes = Object.fromEntries(
+        Object.entries(scopes).filter(([key]) =>
+          agentIsGranted(picker.draft, key),
+        ),
+      );
+      await persist(
+        next,
+        Object.keys(selectedScopes).length ? selectedScopes : undefined,
+      );
       setPicker(null);
     } catch {
-      // Keep the picker open so the user can retry.
+      // Keep the complete draft open for retry.
     }
   }
 
-  async function confirmGrantAll() {
-    try {
-      const allCurrent = {
-        scope: "set" as const,
-        grantees: [...roster],
-      };
-      await persist({
-        agent_config: allCurrent,
-        agent_creation: allCurrent,
-        env_vars: allCurrent,
-        global_config: allCurrent,
-        teams: allCurrent,
-      });
-      setGrantAllOpen(false);
-    } catch {
-      // Error is already on the card.
-    }
+  function confirmGrantAll() {
+    setGrantAllOpen(false);
+    setSearch("");
+    const recipients = [...roster];
+    setPicker(
+      targetStep(
+        {
+          capability: "agent_config",
+          label: "Update existing agents",
+          draft: { scope: "set", grantees: recipients },
+          step: "recipients",
+          recipients,
+          index: 0,
+          scopes: {},
+          targetDraft: noneSubject(),
+          fields: ["displayName"],
+          allowSelfEdit: false,
+          allPermissions: true,
+        },
+        recipients,
+        0,
+      ),
+    );
   }
+
+  const targetMode = picker?.step === "targets";
+  const pickerSelection = targetMode
+    ? picker.targetDraft
+    : (picker?.draft ?? noneSubject());
+  function setPickerSelection(selection: CapabilitySubject) {
+    if (!picker) return;
+    setPicker({
+      ...picker,
+      ...(targetMode ? { targetDraft: selection } : { draft: selection }),
+    });
+  }
+  const recipientName = picker
+    ? agents.find((a) => a.pubkey === picker.recipients[picker.index])?.name
+    : undefined;
 
   async function revokeGrantee(pubkey: string) {
     try {
@@ -348,9 +457,15 @@ export function AgentManagementDelegationCard({
           data-testid="agent-management-picker"
         >
           <DialogHeader>
-            <DialogTitle>{picker?.label ?? "Choose agents"}</DialogTitle>
+            <DialogTitle>
+              {targetMode
+                ? `Which agents can ${recipientName ?? "this colleague"} modify?`
+                : (picker?.label ?? "Choose agents")}
+            </DialogTitle>
             <DialogDescription>
-              Choose which managed colleagues receive this permission.
+              {targetMode
+                ? "Choose targets and allowed fields. All selects current agents only; future agents require a new selection."
+                : "Choose which managed colleagues receive this permission."}
             </DialogDescription>
             <label
               className={MODAL_SEARCH_SHELL_CLASS}
@@ -375,34 +490,45 @@ export function AgentManagementDelegationCard({
 
           <div className="rounded-xl border border-border/70">
             <div className="flex items-center justify-between gap-3 border-b border-border/60 px-3 py-2.5">
-              <label
-                className="flex-1 cursor-pointer text-sm font-medium"
-                htmlFor="agent-management-picker-all"
-              >
-                All current agents
-              </label>
+              {targetMode ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={saving}
+                  onClick={() =>
+                    setPickerSelection({ scope: "set", grantees: [...roster] })
+                  }
+                >
+                  Select all agents
+                </Button>
+              ) : (
+                <label
+                  className="flex-1 cursor-pointer text-sm font-medium"
+                  htmlFor="agent-management-picker-all"
+                >
+                  All current agents
+                </label>
+              )}
               <Checkbox
                 checked={
                   picker !== null &&
                   roster.length > 0 &&
-                  roster.every((pubkey) => agentIsGranted(picker.draft, pubkey))
+                  roster.every((pubkey) =>
+                    agentIsGranted(pickerSelection, pubkey),
+                  )
                 }
+                aria-label="All current agents"
                 data-testid="agent-management-picker-all"
                 disabled={saving}
                 id="agent-management-picker-all"
                 onCheckedChange={(checked) => {
                   if (!picker) return;
-                  if (checked === true) {
-                    setPicker({
-                      ...picker,
-                      draft: { scope: "set", grantees: [...roster] },
-                    });
-                    return;
-                  }
-                  setPicker({
-                    ...picker,
-                    draft: noneSubject(),
-                  });
+                  setPickerSelection(
+                    checked === true
+                      ? { scope: "set", grantees: [...roster] }
+                      : noneSubject(),
+                  );
                 }}
               />
             </div>
@@ -418,7 +544,7 @@ export function AgentManagementDelegationCard({
               ) : (
                 filteredAgents.map((agent) => {
                   const checked = picker
-                    ? agentIsGranted(picker.draft, agent.pubkey)
+                    ? agentIsGranted(pickerSelection, agent.pubkey)
                     : false;
                   const rowId = `agent-management-picker-agent-${agent.pubkey}`;
                   return (
@@ -445,14 +571,11 @@ export function AgentManagementDelegationCard({
                         onCheckedChange={() => {
                           if (!picker) return;
                           const result = toggleGrantedAgent(
-                            picker.draft,
+                            pickerSelection,
                             agent.pubkey,
                             roster,
                           );
-                          setPicker({
-                            ...picker,
-                            draft: result.subject,
-                          });
+                          setPickerSelection(result.subject);
                         }}
                       />
                     </div>
@@ -462,8 +585,82 @@ export function AgentManagementDelegationCard({
             </div>
           </div>
 
+          {targetMode && picker ? (
+            <fieldset className="space-y-2" disabled={saving}>
+              <legend className="text-sm font-medium">Allowed fields</legend>
+              {(
+                [
+                  ["displayName", "Display name"],
+                  ["systemPrompt", "Instructions (changes agent behavior)"],
+                ] as const
+              ).map(([field, label]) => (
+                <label
+                  key={field}
+                  htmlFor={`agent-management-field-${field}`}
+                  className="flex items-center gap-2 text-sm"
+                >
+                  <Checkbox
+                    id={`agent-management-field-${field}`}
+                    checked={picker.fields.includes(field)}
+                    data-testid={`agent-management-field-${field}`}
+                    onCheckedChange={(checked) =>
+                      setPicker({
+                        ...picker,
+                        fields: checked
+                          ? [...picker.fields, field]
+                          : picker.fields.filter((f) => f !== field),
+                      })
+                    }
+                  />
+                  {label}
+                </label>
+              ))}
+              <label
+                htmlFor="agent-management-self-edit"
+                className="flex items-center gap-2 text-sm"
+              >
+                <Checkbox
+                  id="agent-management-self-edit"
+                  checked={picker.allowSelfEdit}
+                  data-testid="agent-management-self-edit"
+                  onCheckedChange={(checked) =>
+                    setPicker({ ...picker, allowSelfEdit: checked === true })
+                  }
+                />
+                Allow this colleague to edit itself when selected
+              </label>
+            </fieldset>
+          ) : null}
           {saveError}
           <DialogFooter>
+            {targetMode && picker ? (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={saving}
+                onClick={() => {
+                  setSearch("");
+                  const scopes = {
+                    ...picker.scopes,
+                    [picker.recipients[picker.index]]: {
+                      targetPubkeys: roster.filter((key) =>
+                        agentIsGranted(picker.targetDraft, key),
+                      ),
+                      allowedFields: picker.fields,
+                      allowSelfEdit: picker.allowSelfEdit,
+                    },
+                  };
+                  const current = { ...picker, scopes };
+                  setPicker(
+                    picker.index > 0
+                      ? targetStep(current, picker.recipients, picker.index - 1)
+                      : { ...current, step: "recipients" },
+                  );
+                }}
+              >
+                Back
+              </Button>
+            ) : null}
             <Button
               disabled={saving}
               onClick={() => setPicker(null)}
@@ -474,12 +671,23 @@ export function AgentManagementDelegationCard({
             </Button>
             <Button
               data-testid="agent-management-picker-confirm"
-              disabled={saving || agentsQuery.isLoading}
+              disabled={
+                saving ||
+                agentsQuery.isLoading ||
+                (picker?.capability === "agent_config" &&
+                  !roster.some((key) =>
+                    agentIsGranted(pickerSelection, key),
+                  )) ||
+                (targetMode && picker?.fields.length === 0)
+              }
               onClick={() => void confirmPicker()}
               type="button"
             >
               {saving ? <Loader className="size-3.5 animate-spin" /> : null}
-              Confirm
+              {picker?.capability === "agent_config" &&
+              (!targetMode || picker.index + 1 < picker.recipients.length)
+                ? "Next"
+                : "Confirm"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -498,9 +706,9 @@ export function AgentManagementDelegationCard({
             </AlertDialogTitle>
             <AlertDialogDescription>
               Every currently managed colleague will be able to create agents,
-              update configuration, set environment variables, change global
-              defaults, and manage teams. Future agents remain ungranted until
-              you add them.
+              set environment variables, change global defaults, and manage
+              teams. Future agents remain ungranted until you add them. Next,
+              choose targets and allowed fields for agent edits.
             </AlertDialogDescription>
           </AlertDialogHeader>
           {saveError}

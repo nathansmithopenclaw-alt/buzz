@@ -34,7 +34,11 @@ export function AgentManagementDialogs() {
       {management.request?.action === "update" ? (
         <AgentDialog
           description=""
-          error={management.editError ? new Error(management.editError) : null}
+          error={
+            management.error || management.editError
+              ? new Error(management.error ?? management.editError ?? "")
+              : null
+          }
           initialValues={management.editInitialValues}
           isPending={management.isPending}
           key={requestId}

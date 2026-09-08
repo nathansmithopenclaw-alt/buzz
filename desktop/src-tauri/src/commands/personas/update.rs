@@ -562,13 +562,65 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
     app: AppHandle,
     retain: impl FnOnce(&AppHandle, &AppState, &AgentDefinition) -> Result<R, String> + Send + 'static,
 ) -> Result<(AgentDefinition, R), String> {
-    use tauri::Manager;
+    update_persona_from(Some(input), None, app, retain).await
+}
 
+/// Outcome of a delegated edit; a review transition is not a successful mutation.
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ScopedAgentUpdateResult {
+    Applied,
+    NeedsReview { reason: String },
+}
+
+/// Apply one durable delegated edit with current authorization under the store lock.
+#[tauri::command]
+pub async fn apply_scoped_agent_update(
+    request_id: String,
+    app: AppHandle,
+) -> Result<ScopedAgentUpdateResult, String> {
+    crate::managed_agents::require_fleet_host(&app.state::<AppState>())?;
+    let applied = update_persona_from(None, Some(request_id), app, |app, state, persona| {
+        retain_persona_pending(app, state, persona);
+        crate::commands::refresh_team_catalog_heads_for_persona(app, state, &persona.id);
+        Ok(())
+    })
+    .await;
+    match applied {
+        Ok((_persona, ())) => Ok(ScopedAgentUpdateResult::Applied),
+        Err(error) if error.starts_with("needs_owner_review:") => {
+            Ok(ScopedAgentUpdateResult::NeedsReview {
+                reason: error.trim_start_matches("needs_owner_review:").to_string(),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn update_persona_from<R: Send + 'static>(
+    input: Option<UpdatePersonaRequest>,
+    management_request_id: Option<String>,
+    app: AppHandle,
+    retain: impl FnOnce(&AppHandle, &AppState, &AgentDefinition) -> Result<R, String> + Send + 'static,
+) -> Result<(AgentDefinition, R), String> {
     // Phase 1: synchronous save (persona record + linked agent avatar updates)
     let (result, retained, profile_sync_params) = tokio::task::spawn_blocking({
         let app = app.clone();
         move || -> Result<(AgentDefinition, R, ProfileSyncParams), String> {
             let state = app.state::<AppState>();
+            let _store_guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|error| error.to_string())?;
+            let input = if let Some(request_id) = management_request_id {
+                crate::commands::agent_management_delegation::begin_scoped_update(
+                    &app,
+                    &state,
+                    &request_id,
+                )?
+            } else {
+                input.ok_or("missing persona update")?
+            };
             let display_name = trim_required(&input.display_name, "Display name")?;
             let system_prompt = input.system_prompt.clone();
             validate_agent_definition_text(&display_name, &system_prompt)?;
@@ -581,10 +633,6 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let provider = trim_optional(input.provider);
             let linked_instance_behavior_patch = input.linked_instance_behavior_patch;
 
-            let _store_guard = state
-                .managed_agents_store_lock
-                .lock()
-                .map_err(|error| error.to_string())?;
             let mut records = load_managed_agents(&app)?;
             let mut personas = load_personas(&app)?;
             pending::project_active_persona_sharing(&app, &state, &mut personas);

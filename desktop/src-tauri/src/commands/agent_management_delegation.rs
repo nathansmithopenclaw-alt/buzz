@@ -48,6 +48,14 @@ enum RequestStatus {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RequestLedgerEntry {
+    #[serde(default)]
+    owner_scope: Option<String>,
+    #[serde(default)]
+    relay_scope: Option<String>,
+    #[serde(default)]
+    target_persona_id: Option<String>,
+    #[serde(default)]
+    execution_started: bool,
     source_pubkey: String,
     capability: DelegatedCapability,
     payload_sha256: String,
@@ -251,6 +259,10 @@ fn register_in_ledger(
     ledger.requests.insert(
         request_id,
         RequestLedgerEntry {
+            owner_scope: None,
+            relay_scope: None,
+            target_persona_id: None,
+            execution_started: false,
             source_pubkey: request.source_pubkey,
             capability: request.capability,
             payload_sha256: request.payload_sha256,
@@ -281,6 +293,10 @@ fn register_in_ledger(
         result: rejection_result,
     })
 }
+
+#[path = "agent_management_scoped_update.rs"]
+mod scoped_update;
+pub(super) use scoped_update::begin_scoped_update;
 
 fn request_env_vars(payload: &Value) -> Result<Option<BTreeMap<String, String>>, String> {
     let Some(value) = payload
@@ -329,6 +345,26 @@ pub fn register_agent_management_request(
     if intent != "apply" && intent != "draft" {
         return Err("management intent must be apply or draft".into());
     }
+    if payload.get("type").and_then(Value::as_str) == Some("agent_management_request")
+        && payload.get("action").and_then(Value::as_str) == Some("update")
+    {
+        let request = payload
+            .get("request")
+            .and_then(Value::as_object)
+            .ok_or("Invalid update request")?;
+        let env_only = request.contains_key("envVars")
+            && request
+                .keys()
+                .all(|key| matches!(key.as_str(), "agentName" | "channelId" | "envVars"));
+        let required = if env_only {
+            DelegatedCapability::EnvVars
+        } else {
+            DelegatedCapability::AgentConfig
+        };
+        if capability != required {
+            return Err("Management capability does not match the requested edit".into());
+        }
+    }
     let digest = payload_sha256(&payload)?;
     let state_handle = app.state::<AppState>();
     let owner = state_handle.signing_keys()?.public_key();
@@ -359,10 +395,34 @@ pub fn register_agent_management_request(
                 .map(|grant| grant.payload.audit_channel_id().to_string())
         });
     let env_vars = request_env_vars(&payload)?;
-    let authorized = intent == "apply"
+    let mut authorized = intent == "apply"
         && grant.is_some_and(|grant| {
             grant_authorizes_request(grant, &source, capability, env_vars.is_some())
         });
+    let relay_scope = crate::managed_agents::global_config::canonical_relay_scope(
+        &crate::relay::relay_ws_url_with_override(&state_handle),
+    );
+    let target_persona_id = if capability == DelegatedCapability::AgentConfig {
+        scoped_update::authorize_payload(
+            &scoped_update::EditAuthority {
+                config: &config,
+                owner: &owner,
+                relay: &relay_scope,
+            },
+            &source,
+            &payload,
+            &crate::managed_agents::load_managed_agents(&app)?,
+            &crate::managed_agents::load_personas(&app)?,
+            None,
+        )
+        .ok()
+        .map(|input| input.id)
+    } else {
+        None
+    };
+    if capability == DelegatedCapability::AgentConfig {
+        authorized &= target_persona_id.is_some();
+    }
     let rejection = if authorized {
         env_vars
             .as_ref()
@@ -372,9 +432,10 @@ pub fn register_agent_management_request(
     };
 
     let mut ledger = load_state(&app)?;
+    let is_new = !ledger.requests.contains_key(&request_id);
     let result = register_in_ledger(
         &mut ledger,
-        request_id,
+        request_id.clone(),
         NewLedgerRequest {
             source_pubkey: source,
             capability,
@@ -385,6 +446,13 @@ pub fn register_agent_management_request(
             rejection,
         },
     )?;
+    if is_new {
+        if let Some(entry) = ledger.requests.get_mut(&request_id) {
+            entry.owner_scope = Some(owner.to_hex());
+            entry.relay_scope = Some(relay_scope);
+            entry.target_persona_id = target_persona_id;
+        }
+    }
     save_state(&app, &ledger)?;
     Ok(result)
 }

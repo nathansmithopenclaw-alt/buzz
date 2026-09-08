@@ -816,6 +816,7 @@ pub fn run() {
             create_persona,
             update_persona,
             apply_delegated_persona_env_vars,
+            apply_scoped_agent_update,
             update_persona_and_publish,
             delete_persona,
             set_persona_active,

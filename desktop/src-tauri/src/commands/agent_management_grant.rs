@@ -25,6 +25,12 @@ const AUDIT_CHANNEL_ABOUT: &str = "Audit log for delegated agent-management acti
 #[tauri::command]
 pub async fn set_agent_management_delegation(
     capabilities: Option<AgentManagementDelegationSubjects>,
+    edit_scopes: Option<
+        std::collections::BTreeMap<
+            String,
+            crate::managed_agents::global_config::delegation_scope::AgentEditScope,
+        >,
+    >,
     app: AppHandle,
 ) -> Result<GlobalAgentConfigSaveResult, String> {
     let state = app.state::<AppState>();
@@ -51,7 +57,13 @@ pub async fn set_agent_management_delegation(
         None
     };
 
-    write_agent_management_delegation(capabilities, audit_channel_id, app).await
+    write_agent_management_delegation(
+        edit_scopes.unwrap_or_default(),
+        capabilities,
+        audit_channel_id,
+        app,
+    )
+    .await
 }
 
 fn existing_audit_channel_id(config: &GlobalAgentConfig) -> Option<String> {

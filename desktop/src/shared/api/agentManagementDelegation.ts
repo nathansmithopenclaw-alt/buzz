@@ -34,6 +34,22 @@ export type AgentManagementDelegationGrantV2 = {
   signedEvent?: string | null;
 };
 
+export type AgentEditScope = {
+  targetPubkeys: string[];
+  allowedFields: ("displayName" | "systemPrompt")[];
+  allowSelfEdit: boolean;
+};
+
+export type AgentManagementDelegationGrantV4 = Omit<
+  AgentManagementDelegationGrantV1,
+  "version"
+> & {
+  version: 4;
+  relayScope: string;
+  agentEdit: AgentEditScope;
+};
+
 export type AgentManagementDelegationGrant =
   | AgentManagementDelegationGrantV1
-  | AgentManagementDelegationGrantV2;
+  | AgentManagementDelegationGrantV2
+  | AgentManagementDelegationGrantV4;
