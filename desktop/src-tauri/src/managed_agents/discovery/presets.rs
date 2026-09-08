@@ -66,6 +66,7 @@ pub(super) fn preset_catalog_entry(
         _ => def.install_instructions_url,
     };
 
+    let meta = super::known_acp_runtime(def.command);
     AcpRuntimeCatalogEntry {
         id: def.id.to_string(),
         label: def.label.to_string(),
@@ -79,13 +80,16 @@ pub(super) fn preset_catalog_entry(
             def.args.iter().map(|arg| arg.to_string()).collect(),
         ),
         mcp_command: None,
-        model_env_var: None,
-        provider_env_var: None,
+        model_env_var: meta.and_then(|m| m.model_env_var).map(str::to_string),
+        provider_env_var: meta.and_then(|m| m.provider_env_var).map(str::to_string),
+        provider_options: meta.and_then(|m| m.provider_options()),
         thinking_env_var: None,
         effort_model_qualifier: false,
         effort_canonical_values: None,
         max_tokens_env_var: None,
-        context_limit_env_var: None,
+        context_limit_env_var: meta
+            .and_then(|m| m.context_limit_env_var)
+            .map(str::to_string),
         max_rounds_env_var: None,
         install_hint,
         install_instructions_url: install_instructions_url.to_string(),
@@ -267,12 +271,10 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             dsh scrubs credential-shaped env vars out of model shells, so publishing \
             goes through that tool rather than raw CLI calls). Set `DSH_HOME` to \
             override the provisioned home; publish credentials flow only through \
-            the harness process environment — nothing is written to disk. To override \
-            the model or provider per deployment, pass a Cordis patch (`dsh --patch \
-            <file>`): each patch row REPLACES that plugin's entire config block, so \
-            repeat every field you want to keep.\n\n\
-            Set DSH_LLM_BASE_URL and DSH_MODEL explicitly; DSH_CONTEXT_WINDOW defaults \
-            to 32768, with 4096 maximum output tokens. The retired local-v4 router is \
+            the harness process environment. Choose DeepSeek API or a local compatible \
+            endpoint in Buzz, then select a model from that endpoint's catalog.\n\n\
+            DSH_CONTEXT_WINDOW defaults to 32768, with 4096 maximum output tokens. \
+            The retired local-v4 router is \
             not a default. Multiple scoped ACP sessions are supported; capped at 3 workers.",
         underlying_cli: None,
         underlying_cli_install_hint: None,
@@ -429,6 +431,9 @@ mod tests {
         });
         assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
         assert_eq!(entry.default_args, vec!["--profile", "buzz-acp"]);
+        assert_eq!(entry.model_env_var.as_deref(), Some("DSH_MODEL"));
+        assert_eq!(entry.provider_env_var.as_deref(), Some("DSH_PROVIDER"));
+        assert_eq!(entry.provider_options.as_ref().map(Vec::len), Some(2));
         assert_eq!(entry.source, HarnessSource::Preset);
         assert_eq!(
             entry.max_parallelism,

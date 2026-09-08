@@ -1,3 +1,4 @@
+import { ProviderEndpointField } from "./ProviderEndpointField";
 import {
   AgentInstanceAvatarField,
   AgentInstanceNameField,
@@ -283,7 +284,7 @@ export function AgentInstanceEditDialog({
     const matched =
       runtimes.find((r) => r.command?.trim() === originalCommand) ??
       runtimes.find((r) => r.id === originalCommand);
-    return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
+    return runtimeSupportsLlmProviderSelection(matched?.id ?? "", matched);
   }, [runtimes, originalAgentCommand]);
 
   // The runtime id active after submit — the single prospective id feeding BOTH
@@ -318,8 +319,10 @@ export function AgentInstanceEditDialog({
     selectedRuntimeId,
   ]);
 
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(prospectiveRuntimeId);
+  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+    runtimes.find((r) => r.id === prospectiveRuntimeId),
+  );
 
   const prospectiveRuntime = runtimes.find(
     (r) => r.id === prospectiveRuntimeId,
@@ -402,6 +405,7 @@ export function AgentInstanceEditDialog({
   // globalProvider/globalEnvVars: fallback for empty per-agent provider; keys satisfied globally don't block Save.
   const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
     useRequiredCredentialState({
+      runtime: prospectiveRuntime,
       open,
       prospectiveRuntimeId,
       provider: inheritedSubmission.provider ?? "",
@@ -560,6 +564,7 @@ export function AgentInstanceEditDialog({
         nextRuntime: nextRuntime?.id ?? nextRuntimeId,
         nextRuntimeCanChooseProvider: runtimeSupportsLlmProviderSelection(
           nextRuntime?.id ?? nextRuntimeId,
+          nextRuntime,
         ),
         lockedRuntimeReset: "full",
       }),
@@ -730,7 +735,10 @@ export function AgentInstanceEditDialog({
       // always agree on which runtime is being saved.
       const providerRuntimeCapability = resolveRuntimeProviderCapability(
         prospectiveRuntimeId,
-        runtimeSupportsLlmProviderSelection(prospectiveRuntimeId),
+        runtimeSupportsLlmProviderSelection(
+          prospectiveRuntimeId,
+          runtimes.find((r) => r.id === prospectiveRuntimeId),
+        ),
       );
 
       // Provider + env to persist — the shared inherited-submission snapshot
@@ -903,6 +911,7 @@ export function AgentInstanceEditDialog({
       ? inheritedProviderDefault.value
       : "",
     hideProviderIds,
+    selectedRuntime,
   );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -1043,6 +1052,20 @@ export function AgentInstanceEditDialog({
               </div>
             ) : null}
             {/* LLM provider + provider API key + model */}
+            {llmProviderFieldVisible ? (
+              <ProviderEndpointField
+                provider={effectiveProvider}
+                envVars={envVars}
+                onChange={(next, endpointChanged) => {
+                  setEnvVars(next);
+                  if (endpointChanged) {
+                    setModel("");
+                    setIsCustomModelEditing(false);
+                  }
+                }}
+                disabled={isSaving}
+              />
+            ) : null}
             <EditAgentProviderModelFields
               disabled={isSaving}
               llmProviderFieldVisible={llmProviderFieldVisible}

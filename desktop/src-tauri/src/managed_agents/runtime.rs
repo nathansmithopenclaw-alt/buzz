@@ -811,6 +811,34 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    // dsh's adapter requires a token even for servers with no authentication.
+    // Supply a non-secret placeholder only on the explicitly compatible route.
+    if runtime_meta.is_some_and(|meta| meta.id == "deepseek") {
+        let value = |key: &str| {
+            descriptor
+                .env
+                .get(key)
+                .cloned()
+                .or_else(|| std::env::var(key).ok())
+                .map(|value| value.trim().to_string())
+        };
+        for key in [
+            "DSH_PROVIDER",
+            "DSH_LLM_BASE_URL",
+            "DSH_API_KEY",
+            "DEEPSEEK_API_KEY",
+        ] {
+            if let Some(value) = value(key) {
+                command.env(key, value);
+            }
+        }
+        if value("DSH_PROVIDER").as_deref() == Some("deepseek-compatible")
+            && value("DSH_API_KEY").is_none_or(|v| v.trim().is_empty())
+        {
+            command.env("DSH_API_KEY", "local-no-auth");
+        }
+    }
+
     // Strip all known effort keys and emit exactly one projected key. Command
     // inherits the parent env — the returned EffortApplied token is consumed
     // by spawn_with_effort_proof below; deleting this call is a compile error.

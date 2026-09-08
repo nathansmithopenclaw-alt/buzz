@@ -43,6 +43,8 @@ export const CUSTOM_PROVIDER_DROPDOWN_VALUE = "__custom_provider__";
 export const NO_RUNTIME_DROPDOWN_VALUE = "__no_runtime__";
 
 const KNOWN_LLM_PROVIDER_IDS = [
+  "deepseek-hosted",
+  "deepseek-compatible",
   "anthropic",
   "databricks",
   "databricks_v2",
@@ -106,6 +108,12 @@ export type ProviderCredentialConfig =
 const PROVIDER_CREDENTIAL_CONFIG: Partial<
   Record<string, ProviderCredentialConfig>
 > = {
+  "deepseek-hosted": {
+    requiredEnvKeys: ["DEEPSEEK_API_KEY"],
+    secretEnvVar: "DEEPSEEK_API_KEY",
+    apiKeyLabel: "DeepSeek API key",
+  },
+  "deepseek-compatible": { requiredEnvKeys: ["DSH_LLM_BASE_URL"] },
   anthropic: {
     requiredEnvKeys: ["ANTHROPIC_API_KEY"],
     secretEnvVar: "ANTHROPIC_API_KEY",
@@ -191,7 +199,11 @@ export function requiredCredentialEnvKeys(
   provider: string,
 ): readonly string[] {
   const normalizedRuntime = runtimeId.trim();
-  if (normalizedRuntime !== "buzz-agent" && normalizedRuntime !== "goose") {
+  if (
+    normalizedRuntime !== "buzz-agent" &&
+    normalizedRuntime !== "goose" &&
+    !provider.startsWith("deepseek-")
+  ) {
     return [];
   }
   const config = PROVIDER_CREDENTIAL_CONFIG[provider.trim().toLowerCase()];
@@ -205,8 +217,13 @@ export function isMissingRequiredDropdownField(
   return field?.isRequired === true && value.trim().length === 0;
 }
 
-export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
-  return runtimeId === "buzz-agent" || runtimeId === "goose";
+export function runtimeSupportsLlmProviderSelection(
+  runtimeId: string,
+  runtime?: AcpRuntimeCatalogEntry,
+) {
+  return runtime
+    ? Boolean(runtime.providerEnvVar)
+    : runtimeId === "buzz-agent" || runtimeId === "goose";
 }
 
 /** Clears values whose meaning or support changes with the selected harness. */
@@ -309,6 +326,8 @@ export function providerRequiresExplicitModel(
 ) {
   const trimmedProvider = providerId?.trim() ?? "";
   return (
+    trimmedProvider === "deepseek-hosted" ||
+    trimmedProvider === "deepseek-compatible" ||
     trimmedProvider === "anthropic" ||
     trimmedProvider === "openai" ||
     trimmedProvider === "openai-compat" ||
@@ -398,14 +417,18 @@ export function getPersonaProviderOptions(
   runtimeId: string,
   globalProvider?: string,
   hideProviderIds?: ReadonlySet<string>,
+  runtime?: AcpRuntimeCatalogEntry,
 ): readonly PersonaModelOption[] {
   const trimmedProvider = currentProvider.trim();
   const defaultProviderOptions = [
     { id: "", label: getDefaultLlmProviderLabel(runtimeId, globalProvider) },
   ];
+  const providerOptions =
+    runtime?.providerOptions?.map(([id, label]) => ({ id, label })) ??
+    PERSONA_LLM_PROVIDER_OPTIONS;
   const filteredOptions = hideProviderIds?.size
-    ? PERSONA_LLM_PROVIDER_OPTIONS.filter((o) => !hideProviderIds.has(o.id))
-    : PERSONA_LLM_PROVIDER_OPTIONS;
+    ? providerOptions.filter((o) => !hideProviderIds.has(o.id))
+    : providerOptions;
   const options = [...defaultProviderOptions, ...filteredOptions];
   if (
     trimmedProvider.length === 0 ||
@@ -668,6 +691,7 @@ export function computeLocalModeGate({
   model,
   provider,
   runtimeId,
+  runtime,
   runtimeFileConfig,
 }: {
   /** Optional baked build env key names (Block-internal builds only).
@@ -695,6 +719,7 @@ export function computeLocalModeGate({
   model: string;
   provider: string;
   runtimeId: string;
+  runtime?: AcpRuntimeCatalogEntry;
   /** Optional file-layer config for the runtime (e.g. goose config.yaml).
    *  When provided, requirements already satisfied there are silenced. */
   runtimeFileConfig?: RuntimeFileConfigSubset | null;
@@ -732,7 +757,10 @@ export function computeLocalModeGate({
     };
   }
 
-  const needsProviderSelection = runtimeSupportsLlmProviderSelection(runtimeId);
+  const needsProviderSelection = runtimeSupportsLlmProviderSelection(
+    runtimeId,
+    runtime,
+  );
 
   // File-layer values for goose-style runtimes. These silence requirements
   // when the runtime config file provides the value — the file layer is the

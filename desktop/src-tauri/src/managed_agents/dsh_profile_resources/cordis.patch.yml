@@ -15,8 +15,8 @@
   config:
     thinking: disabled
     maxTokens: 4096
-    apiKeyEnv: DSH_API_KEY
-    baseURL: !!js "(() => { if (!process.env.DSH_LLM_BASE_URL) throw new Error('DSH_LLM_BASE_URL is required'); return process.env.DSH_LLM_BASE_URL; })()"
+    apiKeyEnv: !!js "process.env.DSH_PROVIDER === 'deepseek-hosted' ? 'DEEPSEEK_API_KEY' : 'DSH_API_KEY'"
+    baseURL: !!js "(() => { if (process.env.DSH_PROVIDER === 'deepseek-hosted') return 'https://api.deepseek.com'; if (process.env.DSH_PROVIDER && process.env.DSH_PROVIDER !== 'deepseek-compatible') throw new Error('Unsupported DSH_PROVIDER'); if (!process.env.DSH_LLM_BASE_URL) throw new Error('DSH_LLM_BASE_URL is required'); return process.env.DSH_LLM_BASE_URL; })()"
     models:
       - id: !!js "(() => { if (!process.env.DSH_MODEL) throw new Error('DSH_MODEL is required'); return process.env.DSH_MODEL; })()"
         name: !!js process.env.DSH_MODEL

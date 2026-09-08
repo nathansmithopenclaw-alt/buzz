@@ -9,8 +9,10 @@ packages. Startup checks the tested engine package versions.
 
 ## Route configuration
 
-Set `DSH_LLM_BASE_URL`, `DSH_MODEL`, and `DSH_API_KEY` in the managed process
-configuration. The first two have no fallback. Credentials are read by the
+Select the provider and model in Buzz (see [model selection](deepseek-model-selection.md)).
+The hosted route uses `DSH_PROVIDER=deepseek-hosted` and `DEEPSEEK_API_KEY`;
+the compatible route uses `DSH_PROVIDER=deepseek-compatible`, `DSH_LLM_BASE_URL`
+and optional `DSH_API_KEY`. `DSH_MODEL` has no fallback. Credentials are read by the
 provider at its normal request boundary; there is no credential-file materialization
 in this package. The adapter remains the pinned DeepSeek-compatible adapter, so
 an arbitrary OpenAI-compatible server is not automatically qualified.
