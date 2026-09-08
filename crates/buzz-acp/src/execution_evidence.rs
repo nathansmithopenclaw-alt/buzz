@@ -29,6 +29,8 @@ pub(crate) struct Turn {
     pub event_ids: Vec<String>,
     pub previous_turns: Vec<String>,
     pub recovery: bool,
+    #[serde(default)]
+    pub report_only: bool,
     pub active: bool,
 }
 
@@ -298,6 +300,7 @@ pub(crate) fn begin(
         event_ids: events,
         previous_turns,
         recovery,
+        report_only: false,
         active: true,
     };
     private_dir(&turns.join(turn_id).join("calls"))?;
@@ -380,10 +383,10 @@ pub(crate) fn summary(root: &Path, turn: &Turn) -> anyhow::Result<serde_json::Va
         }
     }
     Ok(
-        serde_json::json!({"turn_id":turn.turn_id,"recovery":turn.recovery,"tools":groups,
+        serde_json::json!({"turn_id":turn.turn_id,"recovery":turn.recovery,"report_only":turn.report_only,"tools":groups,
         "unknown_mutation_outcomes":pending_mutations,"reports":reports,
         "coverage":"Host computer-use calls only. Succeeded means a tool returned success, not independent external acceptance. Started or unknown actions may have taken effect. Provider built-in tools are not covered.",
-        "mutation_policy":if turn.recovery {"Recovery turn: inspect, close/release and report; new mutations are fenced to prevent replay. A new explicit user task is required to resume mutations."} else {"normal"}}),
+        "mutation_policy":if turn.report_only {"Report completion only: new mutations are fenced; publish the existing result without repeating work."} else if turn.recovery {"Recovery turn: inspect, close/release and report; new mutations are fenced to prevent replay. A new explicit user task is required to resume mutations."} else {"normal"}}),
     )
 }
 

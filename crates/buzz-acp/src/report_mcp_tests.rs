@@ -31,6 +31,7 @@ async fn fixture() -> Fixture {
         event_ids: vec![],
         previous_turns: vec![],
         recovery: false,
+        report_only: false,
         active: true,
     };
     evidence::write(&root.join("session.json"), &session, false).unwrap();

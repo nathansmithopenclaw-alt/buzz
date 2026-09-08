@@ -4406,22 +4406,16 @@ pub async fn run_prompt_task(
             // Heartbeat / non-cancellable path.
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
-                    &session_id,
-                    &prompt_blocks,
-                    ctx.idle_timeout,
-                    ctx.max_turn_duration,
+                result = crate::report_completion::prompt(
+                    &mut agent.acp, &session_id, &prompt_blocks, execution_turn.as_ref(), &ctx,
                 ) => result,
             }
         }
         Some(rx) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
-                    &session_id,
-                    &prompt_blocks,
-                    ctx.idle_timeout,
-                    ctx.max_turn_duration,
+                result = crate::report_completion::prompt(
+                    &mut agent.acp, &session_id, &prompt_blocks, execution_turn.as_ref(), &ctx,
                 ) => result,
                 mode = rx => {
                     if let Some(turn) = &execution_turn {

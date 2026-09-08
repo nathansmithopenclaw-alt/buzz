@@ -1524,7 +1524,32 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
-        self.turn_delivery_evidence = TurnDeliveryEvidence::default();
+        self.prompt_blocks(session_id, prompt_blocks, idle_timeout, max_duration, true)
+            .await
+    }
+
+    /// Continue the same host turn without losing its delivery or usage evidence.
+    pub(crate) async fn session_report_completion(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        budget: std::time::Duration,
+    ) -> Result<StopReason, AcpError> {
+        self.prompt_blocks(session_id, &[text], budget, budget, false)
+            .await
+    }
+
+    async fn prompt_blocks(
+        &mut self,
+        session_id: &str,
+        prompt_blocks: &[&str],
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+        new_turn: bool,
+    ) -> Result<StopReason, AcpError> {
+        if new_turn {
+            self.turn_delivery_evidence = TurnDeliveryEvidence::default();
+        }
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1532,8 +1557,10 @@ impl AcpClient {
         // Mark the usage tracker as in-flight for this turn BEFORE sending the
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
-        self.goose_usage.begin_turn(session_id);
-        self.standard_usage.begin_turn(session_id);
+        if new_turn {
+            self.goose_usage.begin_turn(session_id);
+            self.standard_usage.begin_turn(session_id);
+        }
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;

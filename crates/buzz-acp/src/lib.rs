@@ -20,6 +20,7 @@ mod prompt_project;
 mod publication_receipts;
 mod queue;
 mod relay;
+mod report_completion;
 mod report_mcp;
 mod runtime_identity;
 mod scope;

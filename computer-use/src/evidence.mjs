@@ -111,9 +111,9 @@ export class ExecutionEvidence {
       )
         throw new Error("Unknown execution tool");
       const mutation = !readOnly.has(tool);
-      if (turn.recovery && mutation)
+      if ((turn.recovery || turn.report_only) && mutation)
         throw new Error(
-          "Cancelled-turn recovery fences new mutations to prevent duplicate effects. Inspect host execution evidence, close/release resources and report. A new explicit user task is required to resume input; no tool dispatched.",
+          "Recovery/report-completion mode fences new mutations to prevent duplicate effects. Inspect host execution evidence, close/release resources and report. A new explicit user task is required to resume input; no tool dispatched.",
         );
       const directory = join(this.root, "turns", turn.turn_id, "calls");
       for (let p = directory; ; p = dirname(p)) {

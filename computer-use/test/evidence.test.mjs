@@ -51,6 +51,29 @@ const request = (name = "browser_action") => ({
 });
 const success = { content: [{ type: "text", text: "done" }] };
 
+test("report completion fences native and browser input independently of cancellation", async (t) => {
+  const f = await fixture(t);
+  f.turn.report_only = true;
+  await f.save();
+  let effects = 0;
+  for (const name of ["browser_open", "browser_action", "native_set_value"]) {
+    assert.equal(
+      (
+        await f.evidence.run(request(name), async () => {
+          effects++;
+          return success;
+        })
+      ).isError,
+      true,
+    );
+  }
+  assert.equal(effects, 0);
+  assert.deepEqual(
+    await f.evidence.run(request("native_release"), async () => success),
+    success,
+  );
+});
+
 test("diagnostic text cannot turn an uncertain input into a safe refusal", async (t) => {
   const f = await fixture(t);
   await f.evidence.run(request(), async () => ({

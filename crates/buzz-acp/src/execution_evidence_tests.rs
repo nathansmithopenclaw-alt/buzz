@@ -142,3 +142,215 @@ fn incomplete_or_symlinked_evidence_fails_closed() {
         assert!(evidence::read::<serde_json::Value>(&calls.join("link/fact.json")).is_err());
     }
 }
+
+async fn completion_fixture(
+    mode: &str,
+    harness: &str,
+) -> (
+    tempfile::TempDir,
+    PromptContext,
+    evidence::ActiveTurn,
+    crate::acp::AcpClient,
+) {
+    let (dir, mut ctx) = fixture();
+    ctx.harness_name = harness.into();
+    ctx.max_turn_duration = Duration::from_secs(10);
+    let scope = conv(Uuid::new_v4());
+    grant(&ctx, &scope);
+    let batch = batch_with_scope(scope, signed_event_with_tags(vec![]));
+    let active = evidence::begin(&ctx, Some(&batch), &Uuid::new_v4().to_string())
+        .unwrap()
+        .unwrap();
+    let thread = buzz_sdk::ThreadRef {
+        root_event_id: nostr::EventId::from_hex(&active.turn.root_event_id).unwrap(),
+        parent_event_id: nostr::EventId::from_hex(&active.turn.reply_event_id).unwrap(),
+    };
+    let event = buzz_sdk::build_message(
+        active.turn.channel_id,
+        "literal report",
+        Some(&thread),
+        &[],
+        false,
+        &[],
+        &[],
+    )
+    .unwrap()
+    .sign_with_keys(&ctx.rest_client.keys)
+    .unwrap();
+    evidence::write(
+        &active.root.join("fixture-report.json"),
+        &json!({"content_hash":"fixture", "event":event}),
+        true,
+    )
+    .unwrap();
+    evidence::write(
+        &active.root.join("fixture-receipt.json"),
+        &json!({"event_id":event.id,"readback_verified":true}),
+        true,
+    )
+    .unwrap();
+    let script = dir.path().join("provider.py");
+    std::fs::write(&script, r#"
+import sys,json,pathlib,shutil
+root=pathlib.Path(sys.argv[1]);mode=sys.argv[2];count=0;last=None
+for line in sys.stdin:
+ r=json.loads(line)
+ if r.get('method')=='session/prompt':
+  count+=1;last=r['id'];active=json.loads((root/'active.json').read_text())
+  with (root/'prompts.jsonl').open('a') as f:f.write(json.dumps({'count':count,'report_only':active.get('report_only',False)})+'\n')
+  if count==2 and mode=='hang':continue
+  if count==2 and mode=='publish':
+   target=root/'turns'/active['turn_id']
+   shutil.copyfile(root/'fixture-report.json',target/'report.json')
+   shutil.copyfile(root/'fixture-receipt.json',target/'report-receipt.json')
+  text='initial unpublished output' if count==1 else 'completion output'
+  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':text}}}}),flush=True)
+  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'stopReason':'end_turn'}}),flush=True)
+ elif r.get('method')=='session/cancel':
+  print(json.dumps({'jsonrpc':'2.0','id':last,'result':{'stopReason':'cancelled'}}),flush=True)
+"#).unwrap();
+    let client = crate::acp::AcpClient::spawn(
+        "python3",
+        &[
+            script.to_string_lossy().into(),
+            active.root.to_string_lossy().into(),
+            mode.into(),
+        ],
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    (dir, ctx, active, client)
+}
+
+fn completion_calls(active: &evidence::ActiveTurn) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(active.root.join("prompts.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn completion_publishes_once_with_input_fenced_and_delivery_evidence_preserved() {
+    let (_dir, ctx, active, mut client) = completion_fixture("publish", "opencode").await;
+    assert_eq!(
+        crate::report_completion::prompt(&mut client, "session", &["work"], Some(&active), &ctx)
+            .await
+            .unwrap(),
+        StopReason::EndTurn
+    );
+    let calls = completion_calls(&active);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["report_only"], false);
+    assert_eq!(calls[1]["report_only"], true);
+    let delivery = client.turn_delivery_evidence();
+    let snippet = delivery.final_answer_snippet.unwrap();
+    assert!(
+        snippet.contains("initial unpublished output") && snippet.contains("completion output")
+    );
+    assert!(
+        active
+            .root
+            .join("turns")
+            .join(&active.turn.turn_id)
+            .join("report-receipt.json")
+            .exists()
+    );
+    client.shutdown_for_account_switch().await.unwrap();
+}
+
+#[tokio::test]
+async fn completion_is_bounded_and_missing_receipt_still_requires_a_loud_failure() {
+    let (_dir, ctx, active, mut client) = completion_fixture("ignore", "opencode").await;
+    crate::report_completion::prompt(&mut client, "session", &["work"], Some(&active), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(completion_calls(&active).len(), 2);
+    assert!(matches!(
+        publication_silence_disposition(
+            "turn",
+            &client.turn_delivery_evidence(),
+            true,
+            Some(&StopReason::EndTurn)
+        ),
+        PublicationSilenceDisposition::LoudFailure(_)
+    ));
+    assert!(
+        !active
+            .root
+            .join("turns")
+            .join(&active.turn.turn_id)
+            .join("report.json")
+            .exists()
+    );
+    client.shutdown_for_account_switch().await.unwrap();
+}
+
+#[tokio::test]
+async fn completion_preserves_existing_delivery_other_adapters_and_turn_budget() {
+    for mode in ["already_published", "other_adapter", "short_budget"] {
+        let (_dir, mut ctx, active, mut client) = completion_fixture(
+            "ignore",
+            if mode == "other_adapter" {
+                "goose"
+            } else {
+                "opencode"
+            },
+        )
+        .await;
+        if mode == "already_published" {
+            let target = active.root.join("turns").join(&active.turn.turn_id);
+            std::fs::copy(
+                active.root.join("fixture-report.json"),
+                target.join("report.json"),
+            )
+            .unwrap();
+            std::fs::copy(
+                active.root.join("fixture-receipt.json"),
+                target.join("report-receipt.json"),
+            )
+            .unwrap();
+        }
+        if mode == "short_budget" {
+            ctx.max_turn_duration = Duration::from_secs(4);
+        }
+        crate::report_completion::prompt(&mut client, "session", &["work"], Some(&active), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(completion_calls(&active).len(), 1, "{mode}");
+        assert!(
+            !evidence::active(&active.root, &active.turn.session)
+                .unwrap()
+                .report_only
+        );
+        client.shutdown_for_account_switch().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_report_completion_retains_the_input_fence_and_uses_existing_cancel() {
+    let (_dir, ctx, active, mut client) = completion_fixture("hang", "opencode").await;
+    tokio::select! {
+        _ = crate::report_completion::prompt(&mut client, "session", &["work"], Some(&active), &ctx) => panic!("completion should remain pending"),
+        _ = async {
+            loop {
+                if std::fs::read_to_string(active.root.join("prompts.jsonl")).is_ok_and(|s| s.lines().count()==2) { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        } => {}
+    }
+    active.revoke().unwrap();
+    assert!(client.has_in_flight_prompt());
+    assert_eq!(
+        client
+            .cancel_with_cleanup_grace("session", Duration::from_secs(1))
+            .await
+            .unwrap(),
+        StopReason::Cancelled
+    );
+    assert!(evidence::active(&active.root, &active.turn.session).is_err());
+    assert_eq!(completion_calls(&active).len(), 2);
+    client.shutdown_for_account_switch().await.unwrap();
+}

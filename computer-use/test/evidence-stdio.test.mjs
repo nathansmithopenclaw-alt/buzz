@@ -126,7 +126,7 @@ test("real MCP process cancellation preserves a pending Chromium POST and fences
     arguments: { url },
   });
   assert.equal(retry.isError, true);
-  assert.match(retry.content[0].text, /recovery fences/);
+  assert.match(retry.content[0].text, /mode fences/);
   assert.equal(count, 1);
   await next.client.close();
   assert.equal(
