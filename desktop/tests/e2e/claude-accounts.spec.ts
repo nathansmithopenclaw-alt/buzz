@@ -518,7 +518,9 @@ test("provider sections distinguish defaults from saved account cards", async ({
     anthropic.getByRole("article", { name: "Studio Claude" }),
   ).toBeVisible();
   await expect(openai.getByRole("article")).toHaveCount(0);
-  await expect(grok.getByRole("button", { name: /Ambient/ })).toBeDisabled();
+  await expect(
+    grok.getByRole("button", { name: "Choose default account" }),
+  ).toBeDisabled();
   for (const [name, section] of [
     ["anthropic", anthropic],
     ["openai", openai],
@@ -543,7 +545,7 @@ test("Grok sign-in stays in its provider section and cancellation keeps recovery
   const grok = card.getByRole("region", { name: "Grok accounts", exact: true });
   await grok.getByRole("button", { name: /Sign in with Grok/ }).click();
   const row = grok.getByRole("article");
-  await expect(row).toContainText("connecting");
+  await expect(row).toContainText("Waiting for browser login and verification");
   await expect(row.getByRole("textbox")).toHaveCount(0);
   await expect(
     card
