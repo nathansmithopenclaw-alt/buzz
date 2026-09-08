@@ -1830,6 +1830,28 @@ pub enum NotesCmd {
 
 #[derive(Subcommand)]
 pub enum BriefsCmd {
+    /// Read a selected conversation using the owner's read-only Summary grant
+    Read {
+        /// Owner of the Summary configuration
+        #[arg(long)]
+        owner: String,
+        /// Selected channel or DM UUID
+        #[arg(long)]
+        channel: String,
+        /// Inclusive lower timestamp (unix seconds)
+        #[arg(long)]
+        since: Option<u64>,
+        /// Inclusive upper timestamp (unix seconds)
+        #[arg(long)]
+        until: Option<u64>,
+        /// Stable paging cursor; requires --until
+        #[arg(long, requires = "until")]
+        before_id: Option<String>,
+        /// Maximum messages (1–200)
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+
     /// List published briefing reports recency-first
     List {
         /// Maximum number of reports to return

@@ -11,6 +11,7 @@ pub mod memory;
 pub mod mesh_demo;
 pub mod nip05;
 pub mod operator;
+mod summary_read;
 pub mod workflows;
 
 // Re-export imeta helpers used by ingest pipeline.

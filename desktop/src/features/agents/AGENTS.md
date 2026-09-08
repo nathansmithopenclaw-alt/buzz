@@ -515,3 +515,13 @@ picture is a removal tombstone and must block fallback to a definition or relay
 picture. Fleet selectors prefer the saved selection and preserve its revision
 across later settings projections. Pending publication must remain visible;
 saving locally is not proof of relay acceptance. See `docs/agent-profile-identity.md`.
+
+## Summary setup
+
+Summary uses `ManagedAgentPickerDialog`, the same managed roster and confirmation
+surface as agent delegation. Its new-agent runtime controls reuse Edit Agent's
+model discovery, catalog merge, dropdown, effort, and native fast-mode controls.
+Saved preferred harness and inherited model seed Nectar; explicit choices are
+local to this setup. Existing agents open the canonical instance editor.
+Summary reads are snapshot-only grants from the owner's signed config, not channel
+membership changes. See `docs/summary-read-delegation.md` for the relay boundary.

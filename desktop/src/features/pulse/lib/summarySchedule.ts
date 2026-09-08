@@ -14,6 +14,7 @@ export function summaryWorkflowYaml(input: {
   minute: number;
   timezone: string;
   reporterName: string;
+  ownerPubkey?: string;
 }): string {
   const hour = clampInt(input.hour, 0, 23);
   const minute = clampInt(input.minute, 0, 59);
@@ -28,7 +29,7 @@ export function summaryWorkflowYaml(input: {
     "steps:",
     "  - id: run",
     "    action: send_message",
-    `    text: "@${reporterName} Write today's Summary. Publish a kind 40030 report from your watermarks. Do not invent work."`,
+    `    text: ${JSON.stringify(`@${reporterName} Write today's Summary. Read the owner's configured conversations with buzz briefs config get --owner ${input.ownerPubkey ?? "<owner>"}, then buzz briefs read --owner ${input.ownerPubkey ?? "<owner>"} --channel <id> --since <watermark>. Page with --until and --before-id when needed. Publish a kind 40030 report for that owner from your watermarks. Do not invent work.`)}`,
     "",
   ].join("\n");
 }
@@ -84,8 +85,10 @@ async function loadSummaryWorkflow(
   if (previousWorkflowId) {
     try {
       return await getWorkflow(previousWorkflowId);
-    } catch {
-      // Fall through to a name lookup on the host channel.
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== "workflow not found") throw error;
+      // An explicitly missing workflow can be recreated; transport errors cannot.
     }
   }
   const workflows = await getChannelWorkflows(hostChannelId);
@@ -94,11 +97,7 @@ async function loadSummaryWorkflow(
 
 async function deleteSummaryWorkflow(workflowId: string | null): Promise<void> {
   if (!workflowId) return;
-  try {
-    await deleteWorkflow(workflowId);
-  } catch {
-    // Already gone is a successful teardown.
-  }
+  await deleteWorkflow(workflowId);
 }
 
 function clampInt(value: number, min: number, max: number): number {

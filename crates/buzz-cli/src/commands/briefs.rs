@@ -268,6 +268,7 @@ pub async fn cmd_config_set(
         minute: 0,
         timezone: "UTC".into(),
         auto_include: true,
+        read_delegation: false,
         channels: Vec::new(),
         dms: Vec::new(),
         exclude: Vec::new(),
@@ -366,6 +367,56 @@ pub async fn cmd_watermark_set(
 pub async fn dispatch(cmd: crate::BriefsCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::BriefsCmd;
     match cmd {
+        BriefsCmd::Read {
+            owner,
+            channel,
+            since,
+            until,
+            before_id,
+            limit,
+        } => {
+            validate_hex64(&owner)?;
+            validate_uuid(&channel)?;
+            if let Some(id) = before_id.as_deref() {
+                validate_hex64(id)?;
+            }
+            if !(1..=200).contains(&limit) {
+                return Err(CliError::Usage("limit must be 1–200".into()));
+            }
+            let mut filter =
+                serde_json::json!({"summary_owner": owner, "#h": [channel], "limit": limit});
+            if let Some(value) = since {
+                filter["since"] = value.into();
+            }
+            if let Some(value) = until {
+                filter["until"] = value.into();
+            }
+            if let Some(value) = before_id {
+                filter["before_id"] = value.into();
+            }
+            let raw = client.query(&filter).await?;
+            let response: serde_json::Value =
+                serde_json::from_str(&raw).map_err(|e| CliError::Other(e.to_string()))?;
+            if response
+                .get("summary_read")
+                .and_then(serde_json::Value::as_u64)
+                != Some(1)
+            {
+                return Err(CliError::Other(
+                    "This relay does not support read-only Summary delegation".into(),
+                ));
+            }
+            let events = response
+                .get("events")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| CliError::Other("Invalid Summary read response".into()))?;
+            println!(
+                "{}",
+                serde_json::to_string(events).map_err(|e| CliError::Other(e.to_string()))?
+            );
+            Ok(())
+        }
+
         BriefsCmd::List { limit } => cmd_list(client, limit).await,
         BriefsCmd::Get { id, run } => cmd_get(client, id.as_deref(), run.as_deref()).await,
         BriefsCmd::Publish {

@@ -86,6 +86,7 @@ export type EnsureNectarReporterInput = {
   runtime: AcpRuntime;
   model?: string | null;
   provider?: string | null;
+  envVars?: Record<string, string>;
   avatarDataUrl: string;
   createPersona: (input: CreatePersonaInput) => Promise<AgentPersona>;
   updatePersona?: (input: UpdatePersonaInput) => Promise<AgentPersona>;
@@ -142,8 +143,11 @@ export async function ensureNectarReporter(
     input.toInstanceInput ??
     ((nextPersona, runtime) =>
       buildInstanceInputForDefinition(nextPersona, runtime));
-  const created = await input.createManagedAgent(
-    await toInstanceInput(persona, input.runtime),
-  );
+  const created = await input.createManagedAgent({
+    ...(await toInstanceInput(persona, input.runtime)),
+    model: model ?? undefined,
+    provider: provider ?? undefined,
+    envVars: input.envVars,
+  });
   return created.agent.pubkey;
 }
