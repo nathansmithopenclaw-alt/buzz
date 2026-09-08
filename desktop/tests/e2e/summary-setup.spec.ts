@@ -13,6 +13,18 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
       model: "gpt-5.4",
       provider: null,
     },
+    acpRuntimesCatalog: ["buzz-agent", "codex"].map((id) => ({
+      id,
+      label: id === "codex" ? "Codex" : "Buzz Agent",
+      availability: "available" as const,
+      command: id,
+      binary_path: `/local/bin/${id}`,
+      default_args: [],
+      model_env_var: "CODEX_MODEL",
+      source: "preset" as const,
+      install_hint: "",
+      can_auto_install: false,
+    })),
     managedAgents: [
       { pubkey: AGENT, name: "Summary specialist", channelNames: ["general"] },
     ],
@@ -29,7 +41,8 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
       ],
     },
   });
-  await page.goto("/pulse", { waitUntil: "domcontentloaded" });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-pulse-view").click();
   await page.getByTestId("pulse-tab-summary").click();
   await expect(
     page.getByRole("heading", { name: "Build your Summary" }),
@@ -54,7 +67,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.getByText("Step 2 of 3", { exact: false })).toBeVisible();
   await expect(
-    page.getByText("Direct messages", { exact: true }),
+    page.getByRole("heading", { name: "Direct messages", exact: true }),
   ).toBeVisible();
   await expect(page.getByText("Daily time", { exact: true })).not.toBeVisible();
   await page.getByRole("button", { name: "Continue", exact: true }).click();
