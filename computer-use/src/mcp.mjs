@@ -54,7 +54,12 @@ const tools = [
     inputSchema: schema(
       {
         session,
-        generation: { type: "integer", minimum: 1 },
+        generation: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Copy generation exactly from the latest browser_observe result. Never increment or guess it; observing does not advance generation.",
+        },
         kind: {
           type: "string",
           enum: [
@@ -73,7 +78,11 @@ const tools = [
         },
         width: { type: "integer", minimum: 320, maximum: 1920 },
         height: { type: "integer", minimum: 200, maximum: 1200 },
-        observation: { type: "string" },
+        observation: {
+          type: "string",
+          description:
+            "Required whenever ref is supplied. Copy observation exactly from the latest browser_observe result; obtain a new observation after each action.",
+        },
         ref: { type: "integer", minimum: 0 },
         url: { type: "string" },
         text: { type: "string", maxLength: 24000 },

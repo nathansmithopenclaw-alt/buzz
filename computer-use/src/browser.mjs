@@ -300,11 +300,15 @@ export class BrowserService {
           `Input is owned by ${s.controller}; wait for explicit handback`,
         );
       if (action.generation !== s.generation)
-        throw new Error("Stale page/control generation; observe again");
+        throw new Error(
+          "Stale page/control generation; no input sent. Call browser_observe, then copy its generation exactly into browser_action. Never increment or guess generation: observing does not advance it.",
+        );
       let ref;
       if (action.ref !== undefined) {
         if (!s.observation || action.observation !== s.observation)
-          throw new Error("Stale element observation; observe again");
+          throw new Error(
+            "Stale element observation; no input sent. Call browser_observe, then include its observation token together with the ref and generation in browser_action. Every action consumes the observation.",
+          );
         ref = s.refs[action.ref];
         if (!ref) throw new Error("Unknown element reference");
       }
