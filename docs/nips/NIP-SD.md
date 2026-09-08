@@ -402,6 +402,13 @@ check.
 
 ## CLI examples
 
+For `apply-create`, `apply-update`, and `apply-global-config`, `--channel` must
+name a channel shared by the requesting agent and its human owner. A DM between
+two agents does not qualify when the owner is absent. The CLI checks membership
+before publishing and reports an authorization error if it cannot establish
+that shared origin; Desktop still enforces ownership and delegation. Relay
+acceptance alone is not confirmation that Desktop applied a request.
+
 ```bash
 # Instructions/config update. Reuse the UUID only for an identical retry.
 buzz agents apply-update \

@@ -362,7 +362,7 @@ pub enum AgentsCmd {
         /// Stable UUID for idempotent retries after an unknown delivery outcome
         #[arg(long)]
         request_id: Option<String>,
-        /// Current channel UUID
+        /// Channel UUID shared by the requesting agent and its owner
         #[arg(long)]
         channel: String,
         /// Current name of the personal agent to update
@@ -401,7 +401,7 @@ pub enum AgentsCmd {
         /// Stable UUID for idempotent retries after an unknown delivery outcome
         #[arg(long)]
         request_id: Option<String>,
-        /// Current channel UUID
+        /// Channel UUID shared by the requesting agent and its owner
         #[arg(long)]
         channel: String,
         #[arg(long)]
@@ -422,7 +422,7 @@ pub enum AgentsCmd {
         /// Stable UUID for idempotent retries after an unknown delivery outcome
         #[arg(long)]
         request_id: Option<String>,
-        /// Current channel UUID; the new agent is added here after creation
+        /// Channel UUID shared with your owner; the new agent is added here
         #[arg(long)]
         channel: String,
         #[arg(long)]

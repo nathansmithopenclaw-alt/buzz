@@ -14,6 +14,8 @@ use crate::error::CliError;
 use crate::validate::{read_or_stdin, validate_hex64};
 use crate::{AgentsCmd, RespondToArg};
 
+mod management_origin;
+
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
         AgentsCmd::GetNsec { pubkey } => {
@@ -140,6 +142,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             env,
         } => {
             let owner = require_owner(client)?;
+            management_origin::require_shared_origin(client, &owner, &channel).await?;
             let built = build_apply_create(
                 client.keys(),
                 &owner,
@@ -207,6 +210,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             env,
         } => {
             let owner = require_owner(client)?;
+            management_origin::require_shared_origin(client, &owner, &channel).await?;
             let built = build_apply_update(
                 client.keys(),
                 &owner,
@@ -256,6 +260,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             env,
         } => {
             let owner = require_owner(client)?;
+            management_origin::require_shared_origin(client, &owner, &channel).await?;
             let built = build_apply_global_config(
                 client.keys(),
                 &owner,
