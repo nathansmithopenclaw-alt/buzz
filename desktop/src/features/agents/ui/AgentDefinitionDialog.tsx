@@ -348,6 +348,7 @@ export function AgentDefinitionDialog({
       model: modelForSubmit,
       provider: providerForSubmit,
     } = buildRuntimeModelProviderPayload({
+      runtimeMetadata: selectedRuntime,
       runtime,
       model: aiConfigurationMode === "defaults" ? "" : model,
       provider: aiConfigurationMode === "defaults" ? "" : provider,
