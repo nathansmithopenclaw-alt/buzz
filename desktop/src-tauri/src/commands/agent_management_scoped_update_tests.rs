@@ -145,7 +145,7 @@ fn scoped_update_rechecks_revocation_after_registration_and_returns_to_review() 
 }
 
 #[test]
-fn scoped_update_checks_every_field_every_linked_agent_and_community() {
+fn scoped_update_checks_every_field_and_every_linked_agent() {
     let (owner, source, config, persona, records, request) = fixture();
     let owner_key = owner.public_key();
     let authority = EditAuthority {
@@ -189,9 +189,49 @@ fn scoped_update_checks_every_field_every_linked_agent_and_community() {
         None
     )
     .is_err());
-    linked = records.clone();
-    linked[0].relay_url = "wss://other.example.test".into();
-    assert!(authorize_payload(&authority, &source, &request, &linked, &[persona], None).is_err());
+}
+
+#[test]
+fn scoped_update_uses_workspace_authority_with_empty_or_stale_legacy_relay() {
+    let (owner, source, config, persona, records, request) = fixture();
+    for legacy_relay in ["", RELAY, "wss://old.example.test"] {
+        let mut records = records.clone();
+        records[0].relay_url = legacy_relay.into();
+        let active_relay = crate::relay::effective_agent_relay_url(legacy_relay, RELAY);
+        let mut pending = entry(&owner, &source, request.clone());
+        let input = prepare_entry(
+            &mut pending,
+            &EditAuthority {
+                config: &config,
+                owner: &owner.public_key(),
+                relay: &active_relay,
+            },
+            &records,
+            std::slice::from_ref(&persona),
+        )
+        .unwrap();
+        assert_eq!(input.display_name, "Updated worker");
+        assert!(pending.execution_started);
+
+        // A grant from this workspace still cannot authorize another one,
+        // even when a record's old pin happens to name that other workspace.
+        let result = authorize_payload(
+            &EditAuthority {
+                config: &config,
+                owner: &owner.public_key(),
+                relay: "wss://old.example.test",
+            },
+            &source,
+            &request,
+            &records,
+            std::slice::from_ref(&persona),
+            None,
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "Agent edit permission does not apply in this community"
+        );
+    }
 }
 
 #[test]

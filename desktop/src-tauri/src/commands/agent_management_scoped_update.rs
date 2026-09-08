@@ -68,12 +68,10 @@ pub(super) fn authorize_payload(
         .iter()
         .filter(|record| record.persona_id.as_deref() == Some(&persona.id))
         .collect::<Vec<_>>();
-    if targets
-        .iter()
-        .any(|record| canonical_relay_scope(&record.relay_url) != relay)
-    {
-        return Err("Agent definition is also used in another community".into());
-    }
+    // Managed agents follow the active workspace, including records with an
+    // empty or stale creation-era relay_url (see effective_agent_relay_url).
+    // Community authority comes from the signed grant above and the durable
+    // request scope, never from that legacy record pin.
     let fields = request
         .keys()
         .filter(|key| !matches!(key.as_str(), "agentName" | "channelId"))
