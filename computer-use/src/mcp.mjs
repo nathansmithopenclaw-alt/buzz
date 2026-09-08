@@ -164,6 +164,7 @@ export function computerServer(browser, native) {
             native: native?.driver
               ? "configured_check_permissions"
               : "not_configured",
+            nativeState: native?.status(),
             sessionLimit: browser.maxSessions,
             hostSessionLimit: browser.slots?.limit ?? null,
             idleTimeoutMs: browser.idleMs,
@@ -228,15 +229,37 @@ export function computerServer(browser, native) {
           result = { closed: true };
           break;
         default:
-          if (request.params.name.startsWith("native_") && native)
-            return await native.call(request.params.name, args);
+          if (request.params.name.startsWith("native_") && native) {
+            const result = await native.call(request.params.name, args);
+            if (!result.isError) return result;
+            return {
+              ...result,
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({ nativeState: native.status() }),
+                },
+                ...(result.content ?? []),
+              ],
+            };
+          }
           throw new Error("Unknown computer-use tool");
       }
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (error) {
       return {
         isError: true,
-        content: [{ type: "text", text: error.message }],
+        content: [
+          { type: "text", text: error.message },
+          ...(request.params.name.startsWith("native_") && native
+            ? [
+                {
+                  type: "text",
+                  text: JSON.stringify({ nativeState: native.status() }),
+                },
+              ]
+            : []),
+        ],
       };
     }
   });

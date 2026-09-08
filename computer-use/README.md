@@ -49,6 +49,14 @@ or a query when more of the tree is needed. Every input consumes the previous
 observation, including an input that returns an error. Observe again before the
 next input. Image blocks remain intact.
 
+Native failures include the connection's actual lease and recovery state in text
+content so ACP clients that ignore structured results can still recover.
+`computer_status.nativeState` reports the same state without acquiring ownership.
+A failed observation invalidates the previous observation. A transport failure
+fences further native calls, including reacquisition, until host reset; it must not
+be interpreted as proof that the action did not happen. Driver refusals retain
+their original error evidence and require a fresh observation before another input.
+
 ## Build and tests
 
 Activate the repository Hermit environment before running pnpm or Cargo.
