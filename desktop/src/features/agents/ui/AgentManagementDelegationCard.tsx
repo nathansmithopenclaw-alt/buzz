@@ -55,6 +55,7 @@ type PickerState = {
   fields: AgentEditScope["allowedFields"];
   allowSelfEdit: boolean;
   allPermissions?: boolean;
+  editRecipient?: boolean;
   capability: DelegationCapability;
   label: string;
   draft: CapabilitySubject;
@@ -158,7 +159,11 @@ export function AgentManagementDelegationCard({
     index: number,
   ): PickerState {
     const pubkey = recipients[index];
-    const existing = grants[pubkey];
+    const existing =
+      grants[pubkey] ??
+      (grant && "granteePubkey" in grant && grant.granteePubkey === pubkey
+        ? grant
+        : undefined);
     const scope =
       current.scopes[pubkey] ??
       (existing?.version === 4 ? existing.agentEdit : undefined);
@@ -178,8 +183,10 @@ export function AgentManagementDelegationCard({
   async function confirmPicker() {
     if (!picker) return;
     if (picker.capability === "agent_config" && picker.step === "recipients") {
-      const recipients = roster.filter((key) =>
-        agentIsGranted(picker.draft, key),
+      const recipients = roster.filter(
+        (key) =>
+          agentIsGranted(picker.draft, key) &&
+          !agentIsGranted(subjects.agent_config, key),
       );
       if (recipients.length) {
         setPicker(targetStep(picker, recipients, 0));
@@ -229,26 +236,23 @@ export function AgentManagementDelegationCard({
 
   function confirmGrantAll() {
     setGrantAllOpen(false);
-    const recipients = [...roster];
-    setPicker(
-      targetStep(
-        {
-          capability: "agent_config",
-          label: "Update existing agents",
-          draft: { scope: "set", grantees: recipients },
-          step: "recipients",
-          recipients,
-          index: 0,
-          scopes: {},
-          targetDraft: noneSubject(),
-          fields: ["displayName"],
-          allowSelfEdit: false,
-          allPermissions: true,
-        },
-        recipients,
-        0,
-      ),
+    const recipients = roster.filter(
+      (key) => !agentIsGranted(subjects.agent_config, key),
     );
+    const current: PickerState = {
+      capability: "agent_config",
+      label: "Update existing agents",
+      draft: { scope: "set", grantees: [...roster] },
+      step: "recipients",
+      recipients,
+      index: 0,
+      scopes: {},
+      targetDraft: noneSubject(),
+      fields: ["displayName"],
+      allowSelfEdit: false,
+      allPermissions: true,
+    };
+    setPicker(recipients.length ? targetStep(current, recipients, 0) : current);
   }
 
   const targetMode = picker?.step === "targets";
@@ -344,6 +348,40 @@ export function AgentManagementDelegationCard({
                       : `${permissionCount} permissions`}
                   </p>
                 </div>
+                {agentIsGranted(subjects.agent_config, pubkey) &&
+                roster.includes(pubkey) ? (
+                  <Button
+                    aria-label={`Edit agent scope for ${agent?.name ?? truncatePubkey(pubkey)}`}
+                    disabled={saving}
+                    onClick={() =>
+                      setPicker(
+                        targetStep(
+                          {
+                            step: "targets",
+                            recipients: [pubkey],
+                            index: 0,
+                            scopes: {},
+                            targetDraft: noneSubject(),
+                            fields: ["displayName"],
+                            allowSelfEdit: false,
+                            capability: "agent_config",
+                            label: "Update existing agents",
+                            draft: subjects.agent_config,
+                            editRecipient: true,
+                          },
+                          [pubkey],
+                          0,
+                        ),
+                      )
+                    }
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    <UsersRound aria-hidden="true" className="size-4" />
+                    Edit scope
+                  </Button>
+                ) : null}
                 <Button
                   data-testid={`agent-management-revoke-${pubkey}`}
                   disabled={saving}
@@ -446,7 +484,13 @@ export function AgentManagementDelegationCard({
         onConfirm={() => void confirmPicker()}
         confirmLabel={
           picker?.capability === "agent_config" &&
-          (!targetMode || picker.index + 1 < picker.recipients.length)
+          ((!targetMode &&
+            roster.some(
+              (key) =>
+                agentIsGranted(picker.draft, key) &&
+                !agentIsGranted(subjects.agent_config, key),
+            )) ||
+            (targetMode && picker.index + 1 < picker.recipients.length))
             ? "Next"
             : "Confirm"
         }
@@ -457,7 +501,7 @@ export function AgentManagementDelegationCard({
         }
         selectAllButton={targetMode}
         onBack={
-          targetMode && picker
+          targetMode && picker && !picker.editRecipient
             ? () => {
                 const scopes = {
                   ...picker.scopes,

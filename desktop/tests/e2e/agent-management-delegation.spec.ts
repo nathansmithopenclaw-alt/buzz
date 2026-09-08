@@ -628,7 +628,10 @@ test("permission pickers are explicit, keyboard accessible, and persist on reope
       .getByTestId(`agent-management-picker-agent-${FIRST}`)
       .getByRole("checkbox"),
   ).not.toBeChecked();
-  await picker.getByTestId("agent-management-picker-confirm").click();
+  await picker.getByRole("button", { name: "Cancel", exact: true }).click();
+  await card
+    .getByRole("button", { name: "Edit agent scope for Beta", exact: true })
+    .click();
   await expect(
     picker
       .getByTestId(`agent-management-picker-agent-${FIRST}`)
@@ -701,3 +704,96 @@ test("save errors remain in the picker with the draft intact for retry", async (
     page.getByRole("switch", { name: "Create agents", exact: true }),
   ).not.toBeChecked();
 });
+
+for (const version of [1, 4]) {
+  test(`adding an edit recipient preserves an existing v${version} grant`, async ({
+    page,
+  }) => {
+    const existing = {
+      granteePubkey: FIRST,
+      auditChannelId: "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+      capabilities: {
+        agent_config: true,
+        agent_creation: true,
+        env_vars: false,
+        global_config: false,
+        teams: false,
+      },
+      signedEvent: "unchanged-existing-proof",
+      ...(version === 4
+        ? {
+            version: 4,
+            relayScope: "wss://relay.example.test",
+            agentEdit: {
+              targetPubkeys: [SECOND],
+              allowedFields: ["systemPrompt"],
+              allowSelfEdit: false,
+            },
+          }
+        : {}),
+    };
+    await installMockBridge(page, {
+      managedAgents: [
+        { pubkey: FIRST, name: "Alpha" },
+        { pubkey: SECOND, name: "Beta" },
+      ],
+      globalAgentConfig: {
+        env_vars: {},
+        provider: null,
+        model: null,
+        agent_management_delegation: null,
+        agent_management_delegations: { [FIRST]: existing },
+      },
+    });
+    await openAgentDefaults(page);
+    await page
+      .getByRole("button", { name: "Choose agents for update existing agents" })
+      .click();
+    const picker = page.getByTestId("agent-management-picker");
+    await picker
+      .getByTestId(`agent-management-picker-agent-${SECOND}`)
+      .getByRole("checkbox")
+      .check();
+    await picker.getByTestId("agent-management-picker-confirm").click();
+    await expect(
+      picker.getByRole("heading", { name: "Which agents can Beta modify?" }),
+    ).toBeVisible();
+    await picker
+      .getByTestId(`agent-management-picker-agent-${FIRST}`)
+      .getByRole("checkbox")
+      .check();
+    await picker.getByTestId("agent-management-picker-confirm").click();
+    await expect(picker).not.toBeVisible();
+    const stored = await invokeMock<{
+      agent_management_delegations: Record<string, unknown>;
+    }>(page, "get_global_agent_config");
+    expect(stored?.agent_management_delegations[FIRST]).toEqual(existing);
+    await page
+      .getByRole("button", { name: "Edit agent scope for Beta", exact: true })
+      .click();
+    await expect(
+      picker.getByRole("heading", { name: "Which agents can Beta modify?" }),
+    ).toBeVisible();
+    await picker.getByTestId("agent-management-field-systemPrompt").check();
+    await picker.getByTestId("agent-management-picker-confirm").click();
+    await expect(picker).not.toBeVisible();
+    expect(
+      (
+        await invokeMock<{
+          agent_management_delegations: Record<string, unknown>;
+        }>(page, "get_global_agent_config")
+      )?.agent_management_delegations[FIRST],
+    ).toEqual(existing);
+    await page.getByTestId(`agent-management-revoke-${SECOND}`).click();
+    await expect(
+      page.getByTestId(`agent-management-revoke-${SECOND}`),
+    ).not.toBeVisible();
+    expect(
+      (
+        await invokeMock<{
+          agent_management_delegations: Record<string, unknown>;
+        }>(page, "get_global_agent_config")
+      )?.agent_management_delegations[FIRST],
+    ).toEqual(existing);
+  });
+}
