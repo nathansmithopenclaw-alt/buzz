@@ -11,6 +11,7 @@ import { NativeService } from "./native.mjs";
 import { Profiles } from "./profiles.mjs";
 import { HostSlots } from "./slots.mjs";
 import { startViewer } from "./viewer.mjs";
+import { ExecutionEvidence } from "./evidence.mjs";
 
 // Browser children receive a minimal environment, never inherited provider/relay credentials.
 const bundledBrowsers = fileURLToPath(new URL("../browsers", import.meta.url));
@@ -19,6 +20,12 @@ if (existsSync(bundledBrowsers))
 const registry = process.env.BUZZ_COMPUTER_REGISTRY;
 const nativeDriver = process.env.BUZZ_NATIVE_DRIVER;
 const nativeSocket = process.env.BUZZ_NATIVE_SOCKET;
+const evidence = process.env.BUZZ_EXECUTION_ROOT
+  ? new ExecutionEvidence(
+      process.env.BUZZ_EXECUTION_ROOT,
+      process.env.BUZZ_EXECUTION_SESSION,
+    )
+  : null;
 const owner = process.env.BUZZ_COMPUTER_OWNER || "local";
 const label = process.env.BUZZ_COMPUTER_LABEL || "";
 if (!registry)
@@ -57,7 +64,7 @@ const native = new NativeService({
   socket: nativeSocket,
   registry: directory,
 });
-const server = computerServer(browser, native);
+const server = computerServer(browser, native, evidence);
 const id = randomUUID();
 const receipt = join(directory, `${id}.json`);
 try {

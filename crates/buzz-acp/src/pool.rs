@@ -2181,6 +2181,8 @@ async fn create_session_and_apply_model(
         channel.channel_type,
         ctx.session_title.as_deref(),
     );
+    let mcp_servers = crate::execution_evidence::session_servers(ctx, channel.scope, mcp_servers)
+        .map_err(|error| AcpError::Protocol(error.to_string()))?;
 
     if ctx.prefix_budget_warnings {
         let report = prefix_budget_report(
@@ -4267,6 +4269,36 @@ pub async fn run_prompt_task(
     };
 
     let mut prompt_sections = prompt_sections;
+    let execution_turn = match crate::execution_evidence::begin(&ctx, batch.as_ref(), &turn_id) {
+        Ok(turn) => turn,
+        Err(error) => {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::Protocol(error.to_string())),
+                batch,
+            );
+            return;
+        }
+    };
+    if let Some(turn) = &execution_turn {
+        match crate::execution_evidence::prompt(turn) {
+            Ok(section) => prompt_sections.push(section),
+            Err(error) => {
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(AcpError::Protocol(error.to_string())),
+                    batch,
+                );
+                return;
+            }
+        }
+    }
     let continuation = match &source {
         PromptSource::Channel(scope) => crate::account_handoff::unfinished(scope),
         PromptSource::Heartbeat => Ok(false),
@@ -4392,6 +4424,11 @@ pub async fn run_prompt_task(
                     ctx.max_turn_duration,
                 ) => result,
                 mode = rx => {
+                    if let Some(turn) = &execution_turn {
+                        if let Err(error) = turn.revoke() {
+                            tracing::error!(%error, "execution grant revocation failed during cancellation");
+                        }
+                    }
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
                     // Land the model switch before any cancel/requeue work: setting
                     // `desired_model` here means the fresh session created by the
@@ -7061,6 +7098,10 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    mod execution_evidence_tests {
+        include!("execution_evidence_tests.rs");
+    }
 
     /// Conversation scope for a channel — the scope these pool tests exercise
     /// (equivalent to the pre-thread-scoping channel key).

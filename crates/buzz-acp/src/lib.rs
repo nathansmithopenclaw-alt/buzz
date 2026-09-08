@@ -8,6 +8,7 @@ mod auth_recovery;
 mod computer_use_mcp;
 mod config;
 mod engram_fetch;
+mod execution_evidence;
 mod filter;
 mod live_effort;
 mod observer;
@@ -19,6 +20,7 @@ mod prompt_project;
 mod publication_receipts;
 mod queue;
 mod relay;
+mod report_mcp;
 mod runtime_identity;
 mod scope;
 mod setup_mode;
@@ -3138,6 +3140,9 @@ async fn tokio_main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
+    if is_subcommand("report-mcp") {
+        return report_mcp::run().await;
+    }
     if is_subcommand("models") {
         // Strip the subcommand token so clap doesn't reject it as a positional.
         // Keeps argv[0] (binary name) and passes everything after the subcommand.

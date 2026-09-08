@@ -112,7 +112,7 @@ const validators = new Map(
 );
 
 /** Standard MCP surface, shared by ACP adapters; images are native content blocks. */
-export function computerServer(browser, native) {
+export function computerServer(browser, native, evidence = null) {
   const server = new Server(
     { name: "buzz-computer-use", version: "0.1.0" },
     {
@@ -149,7 +149,7 @@ export function computerServer(browser, native) {
       ],
     };
   });
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  const execute = async (request, extra) => {
     const args = request.params.arguments ?? {};
     try {
       const validation = validators.get(request.params.name)?.(args);
@@ -271,6 +271,11 @@ export function computerServer(browser, native) {
         ],
       };
     }
-  });
+  };
+  server.setRequestHandler(CallToolRequestSchema, (request, extra) =>
+    evidence
+      ? evidence.run(request, () => execute(request, extra))
+      : execute(request, extra),
+  );
   return server;
 }
