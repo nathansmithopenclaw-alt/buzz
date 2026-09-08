@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 // UI/IPC fixture proof; endpoint discovery and the dsh launcher have separate real tests.
@@ -41,22 +42,35 @@ test("DeepSeek offers explicit providers and sends the local endpoint with model
   await page.getByTestId("new-agent-card").click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
-  const provider = dialog.getByLabel("LLM provider", { exact: true });
+  const provider = dialog.getByLabel(/^LLM provider/);
   await expect(provider).toBeVisible();
-  await provider.selectOption("deepseek-hosted");
-  await expect(
-    dialog.getByLabel("DeepSeek API key", { exact: true }),
-  ).toBeVisible();
+  await waitForAnimations(page);
+  await provider.click();
+  await waitForAnimations(page);
+  await page
+    .getByRole("menuitemradio", { name: "DeepSeek API", exact: true })
+    .click();
+  await expect(dialog.getByLabel(/^DeepSeek API key/)).toBeVisible();
   await expect(
     dialog.getByLabel("Model endpoint URL", { exact: true }),
   ).toHaveCount(0);
-  await provider.selectOption("deepseek-compatible");
+  await waitForAnimations(page);
+  await provider.click();
+  await waitForAnimations(page);
+  await page
+    .getByRole("menuitemradio", {
+      name: "Local / OpenAI-compatible endpoint",
+      exact: true,
+    })
+    .click();
   await dialog
     .getByLabel("Model endpoint URL", { exact: true })
     .fill("http://127.0.0.1:8010/v1");
   await expect(dialog.getByLabel("Endpoint API key (optional)")).toBeVisible();
-  const model = dialog.getByRole("combobox", { name: "Model", exact: true });
+  const model = dialog.getByLabel(/^Model\s*\*?$/);
+  await waitForAnimations(page);
   await model.click();
+  await waitForAnimations(page);
   await page.getByRole("button", { name: /Qwen/ }).click();
   await expect(model).toContainText("Qwen");
   await expect
