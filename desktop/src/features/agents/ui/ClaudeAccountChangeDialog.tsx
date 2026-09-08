@@ -69,14 +69,22 @@ export function ClaudeAccountChangeDialog({
   });
   const destination =
     request.kind === "remove" ? request.replacement : request.destination;
+  const destinationAccount = accounts.data?.find(
+    (account) => account.id === destination,
+  );
   const destinationName =
-    accounts.data?.find((account) => account.id === destination)?.nickname ??
-    "the selected account";
+    destinationAccount?.nickname ?? "the selected account";
+  const providerLabel =
+    destinationAccount?.harness === "grok"
+      ? "Grok"
+      : destinationAccount?.harness === "codex"
+        ? "OpenAI"
+        : "Claude";
   const title =
     request.kind === "remove"
       ? "Remove this account?"
       : request.kind === "default"
-        ? `Change the default ${accounts.data?.find((account) => account.id === destination)?.harness === "codex" ? "OpenAI" : "Claude"} account?`
+        ? `Change the default ${providerLabel} account?`
         : "Change subscription account?";
   const operation = preview.data?.operation;
   const running =
