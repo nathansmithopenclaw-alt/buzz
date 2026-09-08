@@ -34,6 +34,50 @@ const PROFILE_FILES: &[(&str, &str)] = &[
         "packages/dsh-buzz-publish/index.js",
         include_str!("dsh_profile_resources/packages/dsh-buzz-publish/index.js"),
     ),
+    (
+        "packages/dsh-acp-buzz/LICENSE",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/LICENSE"),
+    ),
+    (
+        "packages/dsh-acp-buzz/UPSTREAM.json",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/UPSTREAM.json"),
+    ),
+    (
+        "packages/dsh-acp-buzz/acp.js",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/acp.js"),
+    ),
+    (
+        "packages/dsh-acp-buzz/index.js",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/index.js"),
+    ),
+    (
+        "packages/dsh-acp-buzz/mcp-client.js",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/mcp-client.js"),
+    ),
+    (
+        "packages/dsh-acp-buzz/package.json",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/package.json"),
+    ),
+    (
+        "packages/dsh-acp-buzz/session.js",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/session.js"),
+    ),
+    (
+        "packages/dsh-acp-buzz/stdio.js",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/stdio.js"),
+    ),
+    (
+        "packages/dsh-acp-buzz/supervisor.js",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/supervisor.js"),
+    ),
+    (
+        "packages/dsh-acp-buzz/observation.js",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/observation.js"),
+    ),
+    (
+        "packages/dsh-acp-buzz/compatibility.js",
+        include_str!("dsh_profile_resources/packages/dsh-acp-buzz/compatibility.js"),
+    ),
 ];
 
 /// Write every embedded profile file under `<dsh_home>/profiles/buzz-acp/`,

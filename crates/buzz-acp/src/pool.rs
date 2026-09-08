@@ -21,6 +21,8 @@
 
 #[path = "pool_fast_mode.rs"]
 mod fast_mode;
+#[path = "pool_session_close.rs"]
+mod session_close;
 use fast_mode::apply_fast_mode;
 #[cfg(test)]
 use fast_mode::resolve_fast_mode_config_option;
@@ -525,13 +527,11 @@ impl OwnedAgent {
         )
     }
 
-    /// Hand every invalidated provider session to the adapter's teardown path.
-    ///
-    /// The request is intentionally not awaited past its write. `try_claim`
-    /// keeps this worker from opening a replacement session until the bounded
-    /// attempt finishes. A write error or timeout drops the remaining cleanup
-    /// queue so a wedged adapter cannot block the requeued turn.
+    /// Owned dsh sessions require cleanup receipts; legacy adapters retain bounded writes.
     async fn flush_pending_session_closes(&mut self) -> usize {
+        if self.agent_name == "buzz-dsh-acp" {
+            return self.flush_acknowledged_session_closes().await;
+        }
         let mut sent = 0;
         while let Some(session_id) = self.state.pending_session_closes.pop_front() {
             match timeout(

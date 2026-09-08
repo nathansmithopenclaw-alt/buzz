@@ -262,8 +262,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             ~/.local/bin/dsh\n\
             (Node 22.19+ / 24).\n\n\
             Buzz runs `dsh --profile buzz-acp` — an owned profile Buzz provisions \
-            into the nest `.dsh-home` on first spawn (LLM route to the Smith Crafts \
-            Spark router, workspace-write sandbox, and an owned `buzz_publish` tool: \
+            into the nest `.dsh-home` on spawn (explicit LLM endpoint and model, \
+            workspace-write sandbox, and an owned `buzz_publish` tool: \
             dsh scrubs credential-shaped env vars out of model shells, so publishing \
             goes through that tool rather than raw CLI calls). Set `DSH_HOME` to \
             override the provisioned home; publish credentials flow only through \
@@ -271,7 +271,9 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             the model or provider per deployment, pass a Cordis patch (`dsh --patch \
             <file>`): each patch row REPLACES that plugin's entire config block, so \
             repeat every field you want to keep.\n\n\
-            Like Prime, one conversation per process — capped at 3 concurrent workers.",
+            Set DSH_LLM_BASE_URL and DSH_MODEL explicitly; DSH_CONTEXT_WINDOW defaults \
+            to 32768, with 4096 maximum output tokens. The retired local-v4 router is \
+            not a default. Multiple scoped ACP sessions are supported; capped at 3 workers.",
         underlying_cli: None,
         underlying_cli_install_hint: None,
         underlying_cli_install_instructions_url: None,
