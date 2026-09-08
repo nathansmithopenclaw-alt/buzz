@@ -416,7 +416,7 @@ mod tests {
         assert!(preset.install_hint.contains("0.1.1-rc.2"));
         // Round 3: all three pins in one command, installed where the
         // profile's up-chain resolution actually reaches (the dsh home), and
-        // the --patch wholesale-replace caveat stated for overlay authors.
+        // UI-based endpoint and model configuration is described.
         assert!(preset.install_hint.contains(
             "npm install @deepseek-ai/dsh@0.1.1-rc.2 \
              @deepseek-ai/dsh-acp@0.1.1-rc.2 @deepseek-ai/dsh-acp-demo@0.1.1-rc.2"
@@ -424,7 +424,8 @@ mod tests {
         assert!(preset
             .install_hint
             .contains("mkdir -p ~/.buzz/.dsh-home && cd ~/.buzz/.dsh-home"));
-        assert!(preset.install_hint.contains("REPLACES"));
+        assert!(preset.install_hint.contains("Choose DeepSeek API"));
+        assert!(preset.install_hint.contains("endpoint's catalog"));
 
         let entry = preset_catalog_entry(preset, |command| {
             (command == "dsh").then(|| PathBuf::from("/usr/local/bin/dsh"))
