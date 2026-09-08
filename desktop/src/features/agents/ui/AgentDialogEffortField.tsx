@@ -124,7 +124,7 @@ export function AgentDialogEffortField({
           useCustomSelect
         />
         <p className="mt-1 text-xs text-muted-foreground">
-          Saved as this colleague’s default. Applies on the next restart. Change
+          Saved as this agent’s default. Applies on the next restart. Change
           a running conversation’s level in its activity panel.
         </p>
       </div>
