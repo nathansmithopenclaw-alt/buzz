@@ -42,6 +42,13 @@ Restart affected agent sessions after a driver reset. Native tools preserve the
 backend's actual image blocks and target/window contracts. Configuration, updates,
 recording, force-kill and personal Chrome attachment are not exposed by this bridge.
 
+Window-state and accessibility-tree observations default to 30 elements and five
+levels of depth to keep fresh element tokens visible in adapters that truncate
+large tool results. Inspect the returned completeness fields; use explicit limits
+or a query when more of the tree is needed. Every input consumes the previous
+observation, including an input that returns an error. Observe again before the
+next input. Image blocks remain intact.
+
 ## Build and tests
 
 Activate the repository Hermit environment before running pnpm or Cargo.
