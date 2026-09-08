@@ -329,7 +329,12 @@ pub fn build_brief_config(
     }
     let content = serde_json::to_string(config)
         .map_err(|e| SdkError::InvalidInput(format!("serialize brief config: {e}")))?;
-    Ok(EventBuilder::new(Kind::Custom(KIND_BRIEF_CONFIG as u16), content).tags(tags))
+    // NIP-BR private reads require the author's own recipient tag after signing.
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_BRIEF_CONFIG as u16), content)
+            .tags(tags)
+            .allow_self_tagging(),
+    )
 }
 
 /// Build a reporter watermark event (kind 30624).
@@ -353,7 +358,12 @@ pub fn build_brief_watermark(
     }
     let content = serde_json::to_string(watermark)
         .map_err(|e| SdkError::InvalidInput(format!("serialize brief watermark: {e}")))?;
-    Ok(EventBuilder::new(Kind::Custom(KIND_BRIEF_WATERMARK as u16), content).tags(tags))
+    // NIP-BR private reads require the author's own recipient tag after signing.
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_BRIEF_WATERMARK as u16), content)
+            .tags(tags)
+            .allow_self_tagging(),
+    )
 }
 
 /// Build an immutable briefing report (kind 40030).
@@ -379,7 +389,12 @@ pub fn build_brief_report(
     }
     let content = serde_json::to_string(report)
         .map_err(|e| SdkError::InvalidInput(format!("serialize brief report: {e}")))?;
-    Ok(EventBuilder::new(Kind::Custom(KIND_BRIEF_REPORT as u16), content).tags(tags))
+    // NIP-BR private reads require the author's own recipient tag after signing.
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_BRIEF_REPORT as u16), content)
+            .tags(tags)
+            .allow_self_tagging(),
+    )
 }
 
 #[cfg(test)]
@@ -408,6 +423,77 @@ mod tests {
             channels: vec![CHANNEL.to_string()],
             dms: vec![],
             exclude: vec![],
+        }
+    }
+
+    #[test]
+    fn signed_briefs_preserve_author_recipient_for_private_reads() {
+        let owner = Keys::generate();
+        let reporter = Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let reporter_hex = reporter.public_key().to_hex();
+        let mut config = sample_config();
+        config.reporter_pubkey = Some(reporter_hex.clone());
+        let watermark = BriefWatermark {
+            v: 1,
+            channel_id: CHANNEL.into(),
+            last_event_id: EVENT.into(),
+            last_created_at: 10,
+        };
+        let report = BriefReport {
+            v: 1,
+            run_id: "806e3534-99d8-4664-90a4-303ab1f28aea".into(),
+            title: "Summary".into(),
+            markdown: "Read one conversation.".into(),
+            status: serde_json::json!({}),
+            period: BriefPeriod {
+                since: 0,
+                until: 10,
+            },
+            sources: BriefSources::default(),
+        };
+        for (builder, signer, recipients) in [
+            (
+                build_brief_config(&owner_hex, &config).unwrap(),
+                &owner,
+                vec![owner_hex.as_str(), reporter_hex.as_str()],
+            ),
+            (
+                build_brief_watermark(&reporter_hex, Some(&owner_hex), &watermark).unwrap(),
+                &reporter,
+                vec![reporter_hex.as_str(), owner_hex.as_str()],
+            ),
+            (
+                build_brief_watermark(&reporter_hex, None, &watermark).unwrap(),
+                &reporter,
+                vec![reporter_hex.as_str()],
+            ),
+            (
+                build_brief_report(&owner_hex, Some(&reporter_hex), &report).unwrap(),
+                &reporter,
+                vec![owner_hex.as_str(), reporter_hex.as_str()],
+            ),
+            (
+                build_brief_report(&owner_hex, Some(&owner_hex), &report).unwrap(),
+                &owner,
+                vec![owner_hex.as_str()],
+            ),
+        ] {
+            let event = builder.sign_with_keys(signer).unwrap();
+            event.verify().unwrap();
+            let actual: Vec<&str> = event
+                .tags
+                .iter()
+                .filter_map(|tag| {
+                    let parts = tag.as_slice();
+                    (parts.first().map(String::as_str) == Some("p")).then(|| parts[1].as_str())
+                })
+                .collect();
+            assert_eq!(
+                actual, recipients,
+                "signed kind {} lost a private-read recipient",
+                event.kind
+            );
         }
     }
 

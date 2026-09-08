@@ -44,6 +44,15 @@ pub(crate) fn watermarks_list_filter(reader: &str) -> serde_json::Value {
     })
 }
 
+fn report_id_filter(id: &str, reader: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ids": [id.to_ascii_lowercase()],
+        "kinds": [KIND_BRIEF_REPORT],
+        "#p": [reader],
+        "limit": 1,
+    })
+}
+
 pub(crate) fn reports_list_filter(owner: &str, reporter: &str, limit: u32) -> serde_json::Value {
     serde_json::json!({
         "kinds": [KIND_BRIEF_REPORT],
@@ -121,7 +130,7 @@ pub async fn cmd_get(
 ) -> Result<(), CliError> {
     let filter = if let Some(id) = event_id {
         validate_hex64(id)?;
-        serde_json::json!({ "ids": [id.to_ascii_lowercase()], "limit": 1 })
+        report_id_filter(id, &client.keys().public_key().to_hex())
     } else if let Some(run) = run_id {
         let uuid = parse_uuid(run)?;
         let me = client.keys().public_key().to_hex();
@@ -503,6 +512,40 @@ mod tests {
             .iter()
             .map(|value| value.as_str().expect("#p values are strings"))
             .collect()
+    }
+
+    #[test]
+    fn report_id_read_filter_pins_authenticated_reader() {
+        let id = "c".repeat(64);
+        for reader in [OWNER, REPORTER] {
+            let filter = report_id_filter(&id.to_uppercase(), reader);
+            assert_eq!(filter["ids"], serde_json::json!([id]));
+            assert_eq!(filter["kinds"], serde_json::json!([KIND_BRIEF_REPORT]));
+            assert_eq!(p_values(&filter), vec![reader]);
+            assert_eq!(filter["limit"], 1);
+        }
+    }
+
+    #[test]
+    fn signed_watermark_matches_reporter_read_filter() {
+        let keys = nostr::Keys::generate();
+        let reporter = keys.public_key().to_hex();
+        let client = BuzzClient::new("https://test.relay".into(), keys, None, None).unwrap();
+        let watermark = BriefWatermark {
+            v: 1,
+            channel_id: "53f97470-aab9-43f7-87c0-8506c7208d73".into(),
+            last_event_id: "c".repeat(64),
+            last_created_at: 10,
+        };
+        let event = client
+            .sign_event(build_brief_watermark(&reporter, Some(OWNER), &watermark).unwrap())
+            .unwrap();
+        event.verify().unwrap();
+        let filter = watermarks_list_filter(&reporter);
+        for reader in p_values(&filter) {
+            assert!(event.tags.iter().any(|tag| tag.as_slice() == ["p", reader]));
+        }
+        assert_eq!(parse_brief_watermark(&event).unwrap(), watermark);
     }
 
     #[test]
