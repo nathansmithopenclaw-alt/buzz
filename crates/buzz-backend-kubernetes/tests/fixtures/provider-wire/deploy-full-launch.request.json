@@ -11,7 +11,9 @@
     "idle_timeout_seconds": null,
     "launch": {
       "args": [
-        "acp"
+        "acp",
+        "--with-builtin",
+        "developer"
       ],
       "command": "goose",
       "env": {

@@ -566,6 +566,8 @@ test("effort selection is singular, Cancel-safe, and retryable after Save failur
         pubkey: AGENT_PUBKEY,
         name: AGENT_NAME,
         status: "stopped",
+        // Seed before boot so the initial inventory cache agrees with the wrapper.
+        effortLevel: "low",
         channelNames: ["agents"],
       },
     ],

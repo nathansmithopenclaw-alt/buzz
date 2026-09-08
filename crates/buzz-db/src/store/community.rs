@@ -314,6 +314,11 @@ impl Db {
         &self,
         community_id: CommunityId,
     ) -> Result<Vec<CommunityHostRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
         let rows = sqlx::query(
             r#"
             SELECT ch.host, lower(ch.host) = lower(c.host) AS is_canonical
@@ -324,7 +329,7 @@ impl Db {
             "#,
         )
         .bind(community_id.as_uuid())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?;
 
         rows.into_iter()
@@ -343,6 +348,11 @@ impl Db {
         community_id: CommunityId,
         normalized_host: &str,
     ) -> Result<AddCommunityHostResult> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
         let inserted = sqlx::query(
             r#"
             INSERT INTO community_hosts (host, community_id)
@@ -352,7 +362,7 @@ impl Db {
         )
         .bind(normalized_host)
         .bind(community_id.as_uuid())
-        .execute(&self.pool)
+        .execute(&mut *connection)
         .await?;
 
         if inserted.rows_affected() == 1 {
@@ -363,7 +373,7 @@ impl Db {
             "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
         )
         .bind(normalized_host)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
         Ok(if mapped_community == Some(*community_id.as_uuid()) {
             AddCommunityHostResult::AlreadyMapped
@@ -378,6 +388,11 @@ impl Db {
         community_id: CommunityId,
         normalized_host: &str,
     ) -> Result<RemoveCommunityHostResult> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
         let is_canonical: Option<bool> = sqlx::query_scalar(
             r#"
             SELECT lower(ch.host) = lower(c.host)
@@ -388,7 +403,7 @@ impl Db {
         )
         .bind(community_id.as_uuid())
         .bind(normalized_host)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
 
         match is_canonical {
@@ -400,7 +415,7 @@ impl Db {
                 )
                 .bind(community_id.as_uuid())
                 .bind(normalized_host)
-                .execute(&self.pool)
+                .execute(&mut *connection)
                 .await?;
                 Ok(RemoveCommunityHostResult::Removed)
             }

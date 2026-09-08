@@ -369,7 +369,10 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     assert!(ensure_community.contains("WriterOperation::Bootstrap"));
     assert!(ensure_community.contains("ensure_configured_community_with_operation"));
     assert!(ensure_community.contains("acquire_writer(&self.pool, operation)"));
-    assert!(ensure_community.contains("fetch_optional(&mut *connection)"));
+    assert!(ensure_community.contains("sqlx::Transaction::begin(connection, None)"));
+    assert!(ensure_community.contains("fetch_optional(&mut *tx)"));
+    assert!(!ensure_community.contains("fetch_optional(&self.pool)"));
+    assert!(!ensure_community.contains("self.pool.begin("));
     let management_lookup = community_store
         .split_once("pub async fn lookup_community_by_host_for_management(")
         .expect("community store must expose management host lookup")
@@ -429,8 +432,8 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         archived_identity_production
             .matches("WriterOperation::EventWrite")
             .count(),
-        4,
-        "all four archived identity operations must be attributed to event writes"
+        5,
+        "all five archived identity operations must be attributed to event writes"
     );
     assert!(!archived_identity_production.contains("fetch_optional(pool)"));
     assert!(!archived_identity_production.contains("fetch_all(pool)"));
