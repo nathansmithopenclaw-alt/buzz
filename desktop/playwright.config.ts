@@ -21,6 +21,7 @@ export default defineConfig({
     {
       name: "smoke",
       testMatch: [
+        "**/agent-management-delegation.spec.ts",
         "**/codex-thinking-level.spec.ts",
         "**/summary-setup.spec.ts",
         "**/computer-use.spec.ts",
