@@ -319,3 +319,16 @@ test("runtime catalog declares DeepSeek provider controls and limits choices", (
   );
   assert.equal(getProviderApiKeyLabel("deepseek-hosted"), "DeepSeek API key");
 });
+
+test("DeepSeek setup errors do not promise nonexistent built-in models", () => {
+  assert.deepEqual(
+    formatModelDiscoveryErrorStatus(
+      "DeepSeek model setup: Enter a DeepSeek API key to load hosted models",
+      "deepseek-hosted",
+    ),
+    {
+      message: "Enter a DeepSeek API key to load hosted models",
+      tone: "warning",
+    },
+  );
+});
