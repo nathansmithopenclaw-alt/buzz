@@ -7,9 +7,53 @@ import { join } from "node:path";
 import { NativeService } from "../src/native.mjs";
 
 const driver = process.env.BUZZ_TEST_NATIVE_DRIVER;
+test("native observations bound default AX walks without overriding explicit limits", async (t) => {
+  const directory = await mkdtemp("/tmp/buzz-native-bounds-");
+  const native = new NativeService({
+    driver: "test",
+    socket: "test",
+    registry: directory,
+  });
+  t.after(async () => {
+    await native.shutdown();
+    await rm(directory, { recursive: true });
+  });
+  const calls = [];
+  native.connect = async () => ({
+    callTool: async (request) => {
+      calls.push(request);
+      return { content: [] };
+    },
+  });
+  await native.acquire();
+  await native.call("native_get_window_state", { pid: 42, window_id: 7 });
+  await native.call("native_get_accessibility_tree", {
+    pid: 42,
+    max_elements: 100,
+    max_depth: 12,
+    query: "Editor",
+  });
+  await native.call("native_list_windows", { pid: 42 });
+  assert.deepEqual(calls, [
+    {
+      name: "get_window_state",
+      arguments: { pid: 42, window_id: 7, max_elements: 30, max_depth: 5 },
+    },
+    {
+      name: "get_accessibility_tree",
+      arguments: { pid: 42, max_elements: 100, max_depth: 12, query: "Editor" },
+    },
+    { name: "list_windows", arguments: { pid: 42 } },
+  ]);
+});
+
 test("content-only ACP clients receive native snapshot tokens alongside unchanged images", async (t) => {
   const directory = await mkdtemp("/tmp/buzz-native-content-");
-  const native = new NativeService({ driver: "test", socket: "test", registry: directory });
+  const native = new NativeService({
+    driver: "test",
+    socket: "test",
+    registry: directory,
+  });
   t.after(async () => {
     await native.shutdown();
     await rm(directory, { recursive: true });
@@ -20,19 +64,27 @@ test("content-only ACP clients receive native snapshot tokens alongside unchange
   };
   const image = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
   const markdown = { type: "text", text: "[1] AXTextArea" };
-  native.connect = async () => ({ callTool: async () => ({
-    structuredContent, content: [image, markdown],
-  }) });
+  native.connect = async () => ({
+    callTool: async () => ({
+      structuredContent,
+      content: [image, markdown],
+    }),
+  });
   await native.acquire();
   const result = await native.call("native_get_window_state", {});
-  const rendered = result.content.filter((block) => block.type === "text").map((block) => block.text);
+  const rendered = result.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text);
   assert.deepEqual(JSON.parse(rendered[0]), structuredContent);
   assert.equal(result.structuredContent, structuredContent);
   assert.equal(result.content[1], image);
   assert.equal(result.content[2], markdown);
   // Clients that already got JSON text should not receive it twice.
   native.connect = async () => ({ callTool: async () => result });
-  assert.equal((await native.call("native_get_window_state", {})).content.length, 3);
+  assert.equal(
+    (await native.call("native_get_window_state", {})).content.length,
+    3,
+  );
 });
 
 test("pinned native daemon discovers real tools, arbitrates proxies and exits on parent EOF", {
