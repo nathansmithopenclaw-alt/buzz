@@ -3,7 +3,6 @@ use crate::managed_agents::{
     DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
     DEFAULT_ACP_COMMAND,
 };
-
 mod forced_single_flight;
 mod post_install_verification;
 
@@ -147,6 +146,7 @@ pub async fn save_custom_harness(
         mcp_command: None,
         model_env_var: None,
         provider_env_var: None,
+        provider_options: None,
         thinking_env_var: None,
         effort_model_qualifier: false,
         effort_canonical_values: None,

@@ -518,6 +518,7 @@ export type AcpRuntimeCatalogEntry = {
   modelEnvVar: string | null;
   /** Environment variable used to apply the selected LLM provider, when supported. */
   providerEnvVar: string | null;
+  providerOptions?: [string, string][] | null;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
   /** Whether effort is encoded as a model qualifier for this runtime. */

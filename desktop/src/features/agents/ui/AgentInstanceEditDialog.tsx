@@ -1,3 +1,4 @@
+import { ProviderEndpointField } from "./ProviderEndpointField";
 import {
   AgentInstanceAvatarField,
   AgentInstanceNameField,
@@ -285,7 +286,7 @@ export function AgentInstanceEditDialog({
     const matched =
       runtimes.find((r) => r.command?.trim() === originalCommand) ??
       runtimes.find((r) => r.id === originalCommand);
-    return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
+    return runtimeSupportsLlmProviderSelection(matched?.id ?? "", matched);
   }, [runtimes, originalAgentCommand]);
 
   // The runtime id active after submit — the single prospective id feeding BOTH
@@ -320,8 +321,10 @@ export function AgentInstanceEditDialog({
     selectedRuntimeId,
   ]);
 
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(prospectiveRuntimeId);
+  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+    runtimes.find((r) => r.id === prospectiveRuntimeId),
+  );
 
   const prospectiveRuntime = runtimes.find(
     (r) => r.id === prospectiveRuntimeId,
@@ -398,12 +401,17 @@ export function AgentInstanceEditDialog({
       model: inheritedModelDefault,
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
-  } = useAgentDialogDefaults({ inheritedEnvVars, open });
+  } = useAgentDialogDefaults({
+    inheritedEnvVars,
+    open,
+    runtimeId: prospectiveRuntimeId,
+  });
 
   // Runtime/provider-required credential state for the PROSPECTIVE post-submit runtime.
   // globalProvider/globalEnvVars: fallback for empty per-agent provider; keys satisfied globally don't block Save.
   const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
     useRequiredCredentialState({
+      runtime: prospectiveRuntime,
       open,
       prospectiveRuntimeId,
       provider: inheritedSubmission.provider ?? "",
@@ -562,6 +570,7 @@ export function AgentInstanceEditDialog({
         nextRuntime: nextRuntime?.id ?? nextRuntimeId,
         nextRuntimeCanChooseProvider: runtimeSupportsLlmProviderSelection(
           nextRuntime?.id ?? nextRuntimeId,
+          nextRuntime,
         ),
         lockedRuntimeReset: "full",
       }),
@@ -725,14 +734,12 @@ export function AgentInstanceEditDialog({
       // Classify the effective post-submit runtime's provider capability as a
       // tri-state: "capable" persists the provider, "locked" clears it (only
       // when we KNOW it's provider-locked, e.g. Claude), "unknown" OMITS it so a
-      // transient/custom state never becomes a destructive write. Resolved
-      // STATICALLY (by id) so a not-yet-loaded catalog can't misclassify a known
-      // runtime as "unknown" — see resolveRuntimeProviderCapability. The runtime
-      // id is the shared prospectiveRuntimeId, so submit and the block-save gate
-      // always agree on which runtime is being saved.
+      // transient/custom state never becomes a destructive write. Reuse the
+      // visible control's catalog capability (including its legacy fallback)
+      // so submit and the block-save gate agree on the prospective runtime.
       const providerRuntimeCapability = resolveRuntimeProviderCapability(
         prospectiveRuntimeId,
-        runtimeSupportsLlmProviderSelection(prospectiveRuntimeId),
+        llmProviderFieldVisible,
       );
 
       // Provider + env to persist — the shared inherited-submission snapshot
@@ -910,6 +917,7 @@ export function AgentInstanceEditDialog({
       ? inheritedProviderDefault.value
       : "",
     hideProviderIds,
+    selectedRuntime,
   );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -1054,6 +1062,20 @@ export function AgentInstanceEditDialog({
               </div>
             ) : null}
             {/* LLM provider + provider API key + model */}
+            {llmProviderFieldVisible ? (
+              <ProviderEndpointField
+                provider={effectiveProvider}
+                envVars={envVars}
+                onChange={(next, endpointChanged) => {
+                  setEnvVars(next);
+                  if (endpointChanged) {
+                    setModel("");
+                    setIsCustomModelEditing(false);
+                  }
+                }}
+                disabled={isSaving}
+              />
+            ) : null}
             <EditAgentProviderModelFields
               disabled={isSaving}
               llmProviderFieldVisible={llmProviderFieldVisible}

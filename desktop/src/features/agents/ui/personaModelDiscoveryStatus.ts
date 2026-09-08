@@ -47,6 +47,12 @@ export function formatModelDiscoveryErrorStatus(
   agentLabel?: string,
 ): PersonaModelDiscoveryStatus | null {
   const message = errorMessage(error);
+  // Owned endpoint discovery emits only bounded, credential-free setup errors.
+  // It has no built-in catalog to fall back to.
+  const deepseekPrefix = "DeepSeek model setup: ";
+  if (message.startsWith(deepseekPrefix)) {
+    return { message: message.slice(deepseekPrefix.length), tone: "warning" };
+  }
 
   if (provider.trim() === "relay-mesh") {
     if (message.includes("waiting for the current member roster")) {

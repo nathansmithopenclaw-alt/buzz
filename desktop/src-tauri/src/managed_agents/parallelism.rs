@@ -32,9 +32,8 @@ pub const PRIME_MAX_PARALLELISM: u32 = 3;
 
 /// Maximum parallelism for the DeepSeek Harness (`dsh`).
 ///
-/// Like Prime, the harness holds one ACP conversation per process, so Buzz
-/// spawns one `dsh` subprocess per channel; three concurrent workers is the
-/// starting cap (mirrors [`PRIME_MAX_PARALLELISM`]).
+/// The owned bridge supports multiple isolated ACP sessions per process.
+/// Three concurrent workers remains the conservative starting resource cap.
 pub const DSH_MAX_PARALLELISM: u32 = 3;
 
 /// Return the maximum allowed parallelism for the given harness command, or

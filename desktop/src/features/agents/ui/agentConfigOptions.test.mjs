@@ -294,3 +294,41 @@ test("getProviderApiKeyLabel_provider_id_trimmed_and_lowercased", () => {
   // Mirrors getProviderApiKeyEnvVar normalisation behaviour.
   assert.equal(getProviderApiKeyLabel(" Anthropic "), "Anthropic API Key");
 });
+
+test("runtime catalog declares DeepSeek provider controls and limits choices", () => {
+  const runtime = {
+    ...makeRuntime("deepseek"),
+    providerEnvVar: "DSH_PROVIDER",
+    modelEnvVar: "DSH_MODEL",
+    providerOptions: [
+      ["deepseek-hosted", "DeepSeek API"],
+      ["deepseek-compatible", "Local / OpenAI-compatible endpoint"],
+    ],
+  };
+  assert.equal(runtimeSupportsLlmProviderSelection(runtime.id, runtime), true);
+  const options = getPersonaProviderOptions(
+    "",
+    runtime.id,
+    "",
+    undefined,
+    runtime,
+  );
+  assert.deepEqual(
+    options.map((o) => o.id),
+    ["", "deepseek-hosted", "deepseek-compatible"],
+  );
+  assert.equal(getProviderApiKeyLabel("deepseek-hosted"), "DeepSeek API key");
+});
+
+test("DeepSeek setup errors do not promise nonexistent built-in models", () => {
+  assert.deepEqual(
+    formatModelDiscoveryErrorStatus(
+      "DeepSeek model setup: Enter a DeepSeek API key to load hosted models",
+      "deepseek-hosted",
+    ),
+    {
+      message: "Enter a DeepSeek API key to load hosted models",
+      tone: "warning",
+    },
+  );
+});

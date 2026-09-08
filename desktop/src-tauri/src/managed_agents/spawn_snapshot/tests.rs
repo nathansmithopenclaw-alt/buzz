@@ -626,11 +626,13 @@ fn global_model_change_trips_snapshot_for_linked_inherited_agent() {
     let personas = vec![persona("p1", Some("goose"), "prompt")];
 
     let global_a = GlobalAgentConfig {
+        preferred_runtime: Some("goose".into()),
         model: Some("model-a".to_string()),
         provider: Some("prov-a".to_string()),
         ..Default::default()
     };
     let global_b = GlobalAgentConfig {
+        preferred_runtime: Some("goose".into()),
         model: Some("model-b".to_string()),
         provider: Some("prov-b".to_string()),
         ..Default::default()
@@ -641,7 +643,14 @@ fn global_model_change_trips_snapshot_for_linked_inherited_agent() {
 
     assert_ne!(
         snapshot_a, snapshot_b,
-        "changing the global default must drift a linked inherited agent"
+        "changing the matching runtime default must drift a linked inherited agent"
+    );
+
+    rec.agent_command_override = Some("cursor-agent-acp".into());
+    assert_eq!(
+        snapshot(&rec, &personas, &[], "wss://ws.example", &global_a),
+        snapshot(&rec, &personas, &[], "wss://ws.example", &global_b),
+        "a foreign global model must not change the runtime restart snapshot"
     );
 }
 

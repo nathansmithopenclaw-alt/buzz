@@ -1,3 +1,4 @@
+import { ProviderEndpointField } from "./ProviderEndpointField";
 /**
  * Controlled field group for global agent config (provider, model, effort, env vars).
  *
@@ -330,6 +331,7 @@ export function AgentConfigFields({
     providerFieldVisible && !isCustomProvider ? effectiveProvider : "";
   const credentialRuntimeId = runtimeSupportsLlmProviderSelection(
     selectedRuntimeId,
+    selectedRuntime,
   )
     ? selectedRuntimeId
     : "buzz-agent";
@@ -603,6 +605,7 @@ export function AgentConfigFields({
     credentialRuntimeId,
     undefined,
     hideProviderIds,
+    selectedRuntime,
   );
   const providerSelectValue = isCustomProvider
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -773,6 +776,20 @@ export function AgentConfigFields({
 
   const dependentContent = (
     <>
+      {providerFieldVisible ? (
+        <ProviderEndpointField
+          provider={effectiveProvider}
+          envVars={config.env_vars}
+          inheritedEnvVars={bakedEnvMap}
+          onChange={(env_vars, endpointChanged) =>
+            onConfigChange({
+              ...config,
+              env_vars,
+              model: endpointChanged ? null : config.model,
+            })
+          }
+        />
+      ) : null}
       {providerFieldVisible && apiKeyEnvVar ? (
         <div className={blockClassName}>
           <PersonaProviderApiKeyField

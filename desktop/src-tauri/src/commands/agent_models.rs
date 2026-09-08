@@ -1,3 +1,5 @@
+#[path = "agent_models_dsh.rs"]
+mod dsh;
 use std::collections::{BTreeMap, HashSet};
 
 use nostr::Keys;
@@ -99,6 +101,12 @@ pub async fn get_agent_models(
     // so a build-provided provider still gets live discovery.
     let effective_provider =
         effective_discovery_provider(saved_provider.as_deref(), provider_env_var, &merged_env);
+    if let Some(models) = dsh::discover(&agent_command, &merged_env, persisted_model.clone())
+        .await
+        .map_err(|error| format!("DeepSeek model setup: {error}"))?
+    {
+        return Ok(models);
+    }
     if let Some(models) = discover_openrouter_models(
         &state.http_client,
         &effective_provider,
@@ -286,6 +294,12 @@ pub async fn discover_agent_models(
         == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
     {
         return Err("Buzz shared compute is not available in this build".to_string());
+    }
+    if let Some(models) = dsh::discover(&input.agent_command, &merged_env, input.model.clone())
+        .await
+        .map_err(|error| format!("DeepSeek model setup: {error}"))?
+    {
+        return Ok(models);
     }
     if let Some(models) = discover_openrouter_models(
         &state.http_client,

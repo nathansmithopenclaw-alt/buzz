@@ -18,6 +18,8 @@ use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 #[path = "codex_model_config.rs"]
 mod codex_model_config;
 pub use codex_model_config::resolve_model_switch_method;
+#[path = "acp_session_close.rs"]
+mod session_close;
 mod subscription_token;
 
 use crate::observer::{ObserverContext, ObserverHandle};
@@ -1628,9 +1630,7 @@ impl AcpClient {
     ///
     /// Session invalidation is a local state transition: callers must be able to
     /// requeue the interrupted Buzz turn even if the adapter is wedged. The pool
-    /// therefore bounds only this request's write and treats the eventual response
-    /// as stale. [`read_until_response`](Self::read_until_response) already ignores
-    /// responses whose IDs do not match the next awaited request.
+    /// bounds this write; unmatched responses are ignored. Owned dsh uses acknowledged close.
     pub(crate) async fn session_close_fire_and_forget(
         &mut self,
         session_id: &str,

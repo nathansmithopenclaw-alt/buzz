@@ -688,6 +688,7 @@ pub struct AcpRuntimeCatalogEntry {
     pub model_env_var: Option<String>,
     /// Environment variable used to apply the selected LLM provider, when supported.
     pub provider_env_var: Option<String>,
+    pub provider_options: Option<Vec<(String, String)>>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
     /// Whether effort is encoded as a model-id qualifier rather than an env var.

@@ -21,6 +21,8 @@
 
 #[path = "pool_fast_mode.rs"]
 mod fast_mode;
+#[path = "pool_session_close.rs"]
+mod session_close;
 use fast_mode::apply_fast_mode;
 #[cfg(test)]
 use fast_mode::resolve_fast_mode_config_option;
@@ -525,13 +527,11 @@ impl OwnedAgent {
         )
     }
 
-    /// Hand every invalidated provider session to the adapter's teardown path.
-    ///
-    /// The request is intentionally not awaited past its write. `try_claim`
-    /// keeps this worker from opening a replacement session until the bounded
-    /// attempt finishes. A write error or timeout drops the remaining cleanup
-    /// queue so a wedged adapter cannot block the requeued turn.
+    /// Owned dsh sessions require cleanup receipts; legacy adapters retain bounded writes.
     async fn flush_pending_session_closes(&mut self) -> usize {
+        if self.agent_name == "buzz-dsh-acp" {
+            return self.flush_acknowledged_session_closes().await;
+        }
         let mut sent = 0;
         while let Some(session_id) = self.state.pending_session_closes.pop_front() {
             match timeout(
@@ -2291,9 +2291,11 @@ async fn create_session_and_apply_model(
     //                   model. Effort resolution and the Desktop capture both
     //                   read it so they converge on the model the session is
     //                   actually running, not the pre-switch default.
-    //   `None`        → no switch, or the adapter rejected/does-not-know the
-    //                   model; the session/new snapshot is cached as-is and
-    //                   `switch_succeeded` stays false.
+    //   `None`        → no switch, or a live pick was rejected; the session/new
+    //                   snapshot is cached as-is and `switch_succeeded` stays
+    //                   false. Rejected configured models return an error
+    //                   before the caller can send any prompt. Catalog-less
+    //                   runtimes retain their spawn-selected model.
     let post_switch_snapshot: Option<serde_json::Value> = if let Some(ref desired) =
         agent.desired_model
     {
@@ -2365,6 +2367,11 @@ async fn create_session_and_apply_model(
                                 "requestId": agent.desired_model_request_id,
                             }),
                         );
+                        if !agent.model_overridden {
+                            return Err(AcpError::Protocol(format!(
+                                "configured model {desired:?} was rejected by the agent; select a supported model before retrying"
+                            )));
+                        }
                         None
                     }
                 }
@@ -2373,7 +2380,7 @@ async fn create_session_and_apply_model(
                 if session_advertises_model_catalog(&resp.raw) {
                     tracing::error!(
                         target: "pool::model",
-                        "desired model {desired} not found in agent's available models — refusing silent fallback"
+                        "desired model {desired} not found in agent's available models"
                     );
                     agent.acp.observe(
                         "control_result",
@@ -2385,6 +2392,11 @@ async fn create_session_and_apply_model(
                             "requestId": agent.desired_model_request_id,
                         }),
                     );
+                    if !agent.model_overridden {
+                        return Err(AcpError::Protocol(format!(
+                            "configured model {desired:?} is not in the agent's model catalog; select a supported model before retrying"
+                        )));
+                    }
                 } else {
                     // Prime (and other exclusive ACP servers) return only
                     // `{sessionId}`. The spawn command / nest settings already
@@ -2661,7 +2673,7 @@ async fn apply_model_switch(
         Ok(Err(e)) => {
             tracing::error!(
                 target: "pool::model",
-                "failed to set model {desired} via {method_label}: {e} — refusing silent fallback"
+                "failed to set model {desired} via {method_label}: {e}"
             );
             Ok(ModelSwitchOutcome::Rejected)
         }
@@ -13471,7 +13483,7 @@ mod model_switch_tests {
     /// A protocol-v2 agent with a live `desired_model` override and no startup
     /// effort. `model_overridden` is set so the capture's `modelOverridden`
     /// reflects only whether the switch actually landed.
-    fn switching_agent(acp: AcpClient, desired_model: &str) -> OwnedAgent {
+    pub(super) fn switching_agent(acp: AcpClient, desired_model: &str) -> OwnedAgent {
         OwnedAgent {
             index: 0,
             acp,
@@ -14282,3 +14294,7 @@ done"#
         );
     }
 }
+
+#[cfg(test)]
+#[path = "pool/configured_model_tests.rs"]
+mod configured_model_tests;

@@ -892,3 +892,68 @@ fn linked_record_with_legacy_bytes_inherits_global_not_mesh() {
     assert_eq!(cfg.model.value.as_deref(), Some("gpt-5"));
     assert_eq!(cfg.relay_mesh_model_id(), None);
 }
+
+#[test]
+fn global_defaults_are_scoped_to_the_effective_runtime() {
+    let mut g = global(Some("claude-fable-5[1m]"), Some("anthropic"));
+    g.preferred_runtime = Some("claude".into());
+    for linked in [false, true] {
+        for runtime in ["cursor", "codex", "claude", "prime"] {
+            for explicit in [None, Some("default[]")] {
+                let mut rec = record(linked.then_some("d1"), explicit, None, None);
+                rec.runtime = Some(runtime.into());
+                let mut def = definition("d1", explicit, None, "");
+                def.runtime = Some(runtime.into());
+                let cfg = resolve_effective_config(&rec, &[def], &g)
+                    .require_resolved()
+                    .unwrap();
+                let expected = explicit.or((runtime == "claude").then_some("claude-fable-5[1m]"));
+                assert_eq!(
+                    cfg.model.value.as_deref(),
+                    expected,
+                    "{runtime}, linked={linked}"
+                );
+                assert_eq!(
+                    cfg.provider.value.as_deref(),
+                    (runtime == "claude").then_some("anthropic")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn runtime_pin_controls_global_inheritance_without_reviving_stale_model() {
+    let mut g = global(Some("claude-fable-5[1m]"), Some("anthropic"));
+    g.preferred_runtime = Some("claude".into());
+    let mut rec = record(Some("d1"), Some("stale-instance-model"), None, None);
+    let mut def = definition("d1", None, None, "");
+    def.runtime = Some("claude".into());
+    rec.agent_command_override = Some("cursor-agent-acp".into());
+    let cfg = resolve_effective_config(&rec, &[def.clone()], &g)
+        .require_resolved()
+        .unwrap();
+    assert_eq!(cfg.model.value, None);
+    rec.agent_command_override = None;
+    let cfg = resolve_effective_config(&rec, &[def], &g)
+        .require_resolved()
+        .unwrap();
+    assert_eq!(cfg.model.value.as_deref(), Some("claude-fable-5[1m]"));
+}
+
+#[test]
+fn absent_preference_limits_globals_to_builtin_and_keeps_explicit_provider() {
+    let g = global(Some("global-model"), Some("global-provider"));
+    let mut rec = record(None, None, Some("explicit-provider"), None);
+    rec.runtime = Some("cursor".into());
+    let cfg = resolve_effective_config(&rec, &[], &g)
+        .require_resolved()
+        .unwrap();
+    assert_eq!(cfg.model.value, None);
+    assert_eq!(cfg.provider.value.as_deref(), Some("explicit-provider"));
+    rec.runtime = None;
+    let cfg = resolve_effective_config(&rec, &[], &g)
+        .require_resolved()
+        .unwrap();
+    assert_eq!(cfg.model.value.as_deref(), Some("global-model"));
+}
