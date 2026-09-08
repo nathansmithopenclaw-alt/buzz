@@ -387,12 +387,15 @@ Unlike [NIP-AE](NIP-AE.md), persona events involve no encryption, no HMAC deriva
 
 ## Optional picture-edit provenance
 
-Buzz's owner-authored 30175 definitions and 30177 instance projections may carry
+Buzz's owner-authored 30177 instance projections may carry
 `avatar_selection: {"revision": <unsigned milliseconds>, "edit_id": <UUID>,
 "url": <string|null>}`. This is a picture-specific edit, independent of the
 whole event's replacement timestamp. Receivers preserve the greatest
 `(revision, edit_id)` they have observed for the identity. A null URL is an
-explicit removal. Revision zero with edit ID `legacy` denotes preservation of
+explicit removal. A 30175 definition carries only `revision` and `edit_id` in
+`avatar_selection`; its existing `avatar_url` carries the picture once, with an
+empty string denoting removal. This avoids doubling large inline images and
+keeps the picture visible to older readers. Revision zero with edit ID `legacy` denotes preservation of
 an existing stored picture and does not authorize definition-wide replacement.
 A direct definition edit advances past linked instance selections and fans out;
 an instance edit affects only that public key. Author and community validation

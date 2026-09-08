@@ -222,3 +222,31 @@ test("projection retains removal across later settings snapshots and accepts a n
     "https://example.com/new.png",
   );
 });
+
+test("definition edit stamp resolves its single image field and explicit removal", () => {
+  const cache = createFleetProjectionCache();
+  cache.reset([OWNER], false);
+  cache.ingest(agentEvent());
+  for (const [revision, url] of [
+    [42, "https://example.com/selected.png"],
+    [43, ""],
+  ]) {
+    cache.ingest(
+      event({
+        kind: 30175,
+        createdAt: revision + 100,
+        tags: [["d", PERSONA]],
+        content: {
+          display_name: "Selected",
+          avatar_url: url,
+          avatar_selection: { revision, edit_id: `edit-${revision}` },
+        },
+      }),
+    );
+    cache.finishLoading();
+    assert.equal(
+      cache.getSnapshot().owners[0].agents[0].selectedAvatarUrl,
+      url,
+    );
+  }
+});

@@ -236,7 +236,12 @@ function parsePersonaHead(event: RelayEvent): PersonaHead | null {
       : null;
   if (!displayName) return null;
   return {
-    avatarSelection: avatarSelection(content.avatar_selection),
+    avatarSelection: avatarSelection(
+      typeof content.avatar_selection === "object" &&
+        content.avatar_selection !== null
+        ? { ...content.avatar_selection, url: avatarUrl }
+        : null,
+    ),
     ownerPubkey: normalizePubkey(event.pubkey),
     personaId,
     displayName,

@@ -1038,3 +1038,32 @@ mod flush_barrier {
         );
     }
 }
+
+#[test]
+fn inline_avatar_owner_event_fits_relay_limit_and_round_trips_selection_and_removal() {
+    use crate::managed_agents::avatar_selection::AvatarSelection;
+    let mut record = sample_persona();
+    let url = format!("data:image/png;base64,{}", "A".repeat(193_632));
+    for picture in [Some(url), None] {
+        let selection = AvatarSelection {
+            revision: 42,
+            edit_id: "direct-edit".into(),
+            url: picture,
+        };
+        record.avatar_url = selection.stored_url();
+        record.avatar_selection = Some(selection.clone());
+        let event = build_persona_event(&record)
+            .unwrap()
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        assert!(
+            event.content.len() < 256 * 1024,
+            "owner event exceeds relay content limit"
+        );
+        let wire: serde_json::Value = serde_json::from_str(&event.content).unwrap();
+        assert!(wire["avatar_selection"].get("url").is_none());
+        let restored = persona_from_event(&event).unwrap();
+        assert_eq!(restored.avatar_selection, Some(selection));
+        assert_eq!(restored.avatar_url, record.avatar_url);
+    }
+}

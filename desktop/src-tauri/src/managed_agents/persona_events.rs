@@ -76,7 +76,7 @@ pub struct PersonaEventContent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avatar_selection: Option<super::avatar_selection::AvatarSelection>,
+    pub avatar_selection: Option<PersonaAvatarEdit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,6 +102,14 @@ pub struct PersonaEventContent {
     /// must not badge linked instances as needing a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Definition events already carry the image in `avatar_url`. Keep only its
+/// edit stamp here so inline artwork is not duplicated beyond relay limits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonaAvatarEdit {
+    pub revision: u64,
+    pub edit_id: String,
 }
 
 /// Derive the d-tag (persona slug) from a `AgentDefinition`.
@@ -238,8 +246,14 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
     Ok(AgentDefinition {
         id: d_tag.clone(),
         display_name: content.display_name,
+        avatar_selection: content.avatar_selection.map(|edit| {
+            super::avatar_selection::AvatarSelection {
+                revision: edit.revision,
+                edit_id: edit.edit_id,
+                url: content.avatar_url.clone().filter(|url| !url.is_empty()),
+            }
+        }),
         avatar_url: content.avatar_url,
-        avatar_selection: content.avatar_selection,
         description: content.description,
         system_prompt: content.system_prompt.unwrap_or_default(),
         runtime: content.runtime,
@@ -529,7 +543,13 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
     PersonaEventContent {
         display_name: record.display_name.clone(),
         avatar_url: record.avatar_url.clone(),
-        avatar_selection: record.avatar_selection.clone(),
+        avatar_selection: record
+            .avatar_selection
+            .as_ref()
+            .map(|edit| PersonaAvatarEdit {
+                revision: edit.revision,
+                edit_id: edit.edit_id.clone(),
+            }),
         // Always Some — including for an empty prompt — so pre-revision
         // records serialize byte-identically and persona_content_hash is
         // stable across the upgrade (drift badges must not flip).
