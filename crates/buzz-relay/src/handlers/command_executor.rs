@@ -1113,27 +1113,11 @@ async fn handle_approval_grant(
     // 6. Resume workflow execution (post-commit, async)
     let community_id = tenant.community();
     let run_id = approval.run_id;
-    let workflow_id = approval.workflow_id;
-    let resume_index = approval.step_index as usize + 1;
-    let definition_hash = approval.definition_hash;
-    let step_index = approval.step_index;
-    let step_id = approval.step_id;
     let engine = Arc::clone(&state.workflow_engine);
     let db = state.db.clone();
 
     tokio::spawn(async move {
-        resume_workflow_after_approval(
-            engine,
-            db,
-            community_id,
-            run_id,
-            workflow_id,
-            resume_index,
-            definition_hash,
-            step_index,
-            step_id,
-        )
-        .await;
+        resume_workflow_after_approval(engine, db, community_id, approval).await;
     });
 
     // 7. Return response
@@ -1293,13 +1277,17 @@ async fn resume_workflow_after_approval(
     engine: Arc<buzz_workflow::WorkflowEngine>,
     db: buzz_db::Db,
     community_id: CommunityId,
-    run_id: Uuid,
-    workflow_id: Uuid,
-    resume_index: usize,
-    definition_hash: Vec<u8>,
-    step_index: i32,
-    step_id: String,
+    approval: buzz_db::workflow::ApprovalRecord,
 ) {
+    let buzz_db::workflow::ApprovalRecord {
+        run_id,
+        workflow_id,
+        definition_hash,
+        step_index,
+        step_id,
+        ..
+    } = approval;
+    let resume_index = step_index as usize + 1;
     let run = match db.get_workflow_run(community_id, run_id).await {
         Ok(r) => r,
         Err(e) => {
