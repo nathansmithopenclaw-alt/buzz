@@ -53,6 +53,15 @@ that frontend inventory.
 
 ## Rules
 
+Global model/provider defaults are scoped to the configured preferred runtime
+(the bundled buzz-agent runtime when unset). Explicit definition/legacy model
+authority is unchanged. Dialogs pass their prospective runtime to
+`getInheritedAgentDefaults`; backend resolution compares the actual spawn
+command through the runtime catalog, including instance pins. Global env and
+account selection keep their existing independent precedence. A configured ACP
+model rejected by a nonempty catalog must block prompts; rejection of an
+explicit live pick keeps the existing recovery path and correlated failure.
+
 1. **No hardcoded harness-ID checks in render code.** `runtime.id === "claude"`
    belongs in `deriveAgentConfigFieldModel` (once, with a named reason), never
    in a component. Components ask the field model what exists

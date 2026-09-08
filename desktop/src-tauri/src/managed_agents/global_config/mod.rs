@@ -67,14 +67,18 @@ pub struct GlobalAgentConfig {
     /// Global fallback provider (e.g. `"databricks_v2"`, `"anthropic"`).
     ///
     /// Used only when neither the agent record nor the linked persona specifies
-    /// a provider. `None` = no global default.
+    /// a provider, and the effective harness matches `preferred_runtime` (or
+    /// Buzz's built-in runtime when unset). `None` = no global default.
     #[serde(default)]
     pub provider: Option<String>,
 
     /// Global fallback model identifier.
     ///
     /// Used only when neither the agent record nor the linked persona specifies
-    /// a model. `None` = no global default.
+    /// a model, and the effective harness matches `preferred_runtime` (or
+    /// Buzz's built-in runtime when unset). Other harnesses use their native
+    /// default rather than inheriting an identifier from another catalog.
+    /// `None` = no global default.
     #[serde(default)]
     pub model: Option<String>,
 

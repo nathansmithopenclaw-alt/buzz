@@ -141,33 +141,49 @@ export function getInheritedAgentDefaults(
     env_vars: Record<string, string>;
     model: string | null;
     provider: string | null;
+    preferred_runtime?: string | null;
   },
   bakedEnv: readonly BakedEnvEntry[] | undefined,
+  runtimeId?: string,
 ): {
   effort: InheritedDefault;
   model: InheritedDefault;
   provider: InheritedDefault;
 } {
+  let modelBakedEnv = bakedEnv;
+  // A global selector belongs to the preferred runtime. An omitted runtime
+  // means the defaults overview; dialogs pass their prospective runtime.
+  // Baked BUZZ_AGENT_* defaults belong to the bundled runtime only.
+  if (runtimeId !== undefined) {
+    const runtime = runtimeId.trim() || "buzz-agent";
+    const preferred = globalConfig.preferred_runtime?.trim() || "buzz-agent";
+    globalConfig = {
+      ...globalConfig,
+      model: runtime === preferred ? globalConfig.model : null,
+      provider: runtime === preferred ? globalConfig.provider : null,
+    };
+    if (runtime !== "buzz-agent") modelBakedEnv = undefined;
+  }
   return {
     provider: resolveInheritedDefault(
       globalConfig.provider,
-      bakedEnv,
+      modelBakedEnv,
       "BUZZ_AGENT_PROVIDER",
     ),
     model: (() => {
       const structured = resolveInheritedDefault(
         globalConfig.model,
-        bakedEnv,
+        modelBakedEnv,
         "BUZZ_AGENT_MODEL",
       );
       if (structured.value) return structured;
       const provider = resolveInheritedDefault(
         globalConfig.provider,
-        bakedEnv,
+        modelBakedEnv,
         "BUZZ_AGENT_PROVIDER",
       );
       const fallback = getGlobalModelFallback(
-        bakedEnv,
+        modelBakedEnv,
         provider.value,
         globalConfig.env_vars,
       );
