@@ -1,3 +1,4 @@
+import { InputRefused } from "./refusal.mjs";
 import { randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import { existsSync } from "node:fs";
@@ -296,21 +297,21 @@ export class BrowserService {
     const s = this.get(id);
     return this.serial(s, async () => {
       if (actor !== s.controller)
-        throw new Error(
+        throw new InputRefused(
           `Input is owned by ${s.controller}; wait for explicit handback`,
         );
       if (action.generation !== s.generation)
-        throw new Error(
+        throw new InputRefused(
           "Stale page/control generation; no input sent. Call browser_observe, then copy its generation exactly into browser_action. Never increment or guess generation: observing does not advance it.",
         );
       let ref;
       if (action.ref !== undefined) {
         if (!s.observation || action.observation !== s.observation)
-          throw new Error(
+          throw new InputRefused(
             "Stale element observation; no input sent. Call browser_observe, then include its observation token together with the ref and generation in browser_action. Every action consumes the observation.",
           );
         ref = s.refs[action.ref];
-        if (!ref) throw new Error("Unknown element reference");
+        if (!ref) throw new InputRefused("Unknown element reference");
       }
       const viewport = s.page.viewportSize();
       switch (action.kind) {
@@ -322,7 +323,9 @@ export class BrowserService {
             action.height < 200 ||
             action.height > 1200
           )
-            throw new Error("Viewport must be 320–1920 by 200–1200 pixels");
+            throw new InputRefused(
+              "Viewport must be 320–1920 by 200–1200 pixels",
+            );
           await s.page.setViewportSize({
             width: action.width,
             height: action.height,
@@ -354,20 +357,22 @@ export class BrowserService {
               action.y < 0 ||
               action.y >= viewport.height
             )
-              throw new Error("Coordinates outside viewport");
+              throw new InputRefused("Coordinates outside viewport");
             await s.page.mouse.click(action.x, action.y);
           }
           break;
         case "fill":
           if (typeof action.text !== "string")
-            throw new Error("fill requires text");
+            throw new InputRefused("fill requires text");
           if (!ref)
-            throw new Error("fill requires an observed element reference");
+            throw new InputRefused(
+              "fill requires an observed element reference",
+            );
           await ref.fill(String(action.text).slice(0, MAX_TEXT));
           break;
         case "type":
           if (typeof action.text !== "string")
-            throw new Error("type requires text");
+            throw new InputRefused("type requires text");
           await s.page.keyboard.insertText(
             String(action.text).slice(0, MAX_TEXT),
           );
@@ -377,18 +382,18 @@ export class BrowserService {
           break;
         case "scroll": {
           if (!Number.isFinite(action.dy) || Math.abs(action.dy) > 4000)
-            throw new Error("Invalid scroll distance");
+            throw new InputRefused("Invalid scroll distance");
           await s.page.mouse.wheel(0, action.dy);
           break;
         }
         case "dialog":
-          if (!s.dialog) throw new Error("No pending dialog");
+          if (!s.dialog) throw new InputRefused("No pending dialog");
           if (action.accept === true) await s.dialog.accept(action.text);
           else await s.dialog.dismiss();
           s.dialog = null;
           break;
         default:
-          throw new Error("Unsupported browser action");
+          throw new InputRefused("Unsupported browser action");
       }
       s.observation = null;
       return this.info(s);

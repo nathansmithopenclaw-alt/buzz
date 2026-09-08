@@ -166,16 +166,9 @@ export class ExecutionEvidence {
       }
       dispatched = true;
       result = await execute();
-      const text = (result.content ?? [])
-        .filter((b) => b.type === "text")
-        .map((b) => b.text)
-        .join("\n");
-      // Refusal evidence must explicitly establish that no input was sent.
+      // Free-form errors can contain page/AX text; only host metadata is authoritative.
       fact.state = result.isError
-        ? !/"outcome_uncertain"\s*:\s*true/.test(text) &&
-          /no input sent|no tool dispatched|Invalid tool arguments|Observe the target after acquiring ownership|"effect":"refused"|"status":"refused"|AXUIElementPerformAction\(AXPress\) returned -25206/.test(
-            text,
-          )
+        ? result._meta?.["buzz/execution-effect"] === "refused"
           ? "refused"
           : "unknown"
         : "succeeded";

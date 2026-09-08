@@ -1,3 +1,4 @@
+import { InputRefused } from "./refusal.mjs";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -154,7 +155,9 @@ export function computerServer(browser, native, evidence = null) {
     try {
       const validation = validators.get(request.params.name)?.(args);
       if (validation && !validation.valid)
-        throw new Error(`Invalid tool arguments: ${validation.errorMessage}`);
+        throw new InputRefused(
+          `Invalid tool arguments: ${validation.errorMessage}`,
+        );
       let result;
       switch (request.params.name) {
         case "native_acquire":
@@ -210,7 +213,7 @@ export function computerServer(browser, native, evidence = null) {
         }
         case "browser_action": {
           if (extra.signal.aborted)
-            throw new Error("Request cancelled before action");
+            throw new InputRefused("Request cancelled before action");
           const cancel = () => {
             void browser
               .close(args.session)
@@ -258,6 +261,10 @@ export function computerServer(browser, native, evidence = null) {
     } catch (error) {
       return {
         isError: true,
+        _meta: {
+          "buzz/execution-effect":
+            error instanceof InputRefused ? "refused" : "unknown",
+        },
         content: [
           { type: "text", text: error.message },
           ...(request.params.name.startsWith("native_") && native

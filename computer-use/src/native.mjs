@@ -1,3 +1,4 @@
+import { InputRefused, nativeRefused } from "./refusal.mjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { HostSlots } from "./slots.mjs";
@@ -172,15 +173,15 @@ export class NativeService {
   call(name, args) {
     return this.serial(async () => {
       if (!this.release)
-        throw new Error(
+        throw new InputRefused(
           "Call native_acquire before observing or controlling native apps",
         );
       const original = name.replace(/^native_/, "");
       if (!allowed.has(original))
-        throw new Error("Native operation is not exposed by Buzz");
-      if (this.uncertain) throw new Error(this.status().recovery);
+        throw new InputRefused("Native operation is not exposed by Buzz");
+      if (this.uncertain) throw new InputRefused(this.status().recovery);
       if (inputs.has(original) && !this.observed)
-        throw new Error(
+        throw new InputRefused(
           "Observe the target after acquiring ownership and after every input action",
         );
       const client = await this.connect();
@@ -196,11 +197,20 @@ export class NativeService {
       if (inputs.has(original) || observations.has(original))
         this.observed = false;
       try {
-        const result = await client.callTool(
+        let result = await client.callTool(
           { name: original, arguments: args },
           undefined,
           { timeout: 60_000 },
         );
+        result = {
+          ...result,
+          _meta: {
+            ...result._meta,
+            "buzz/execution-effect": nativeRefused(result)
+              ? "refused"
+              : "unknown",
+          },
+        };
         if (observations.has(original) && !result.isError) this.observed = true;
         // Some ACP clients render only content, ignoring MCP structuredContent.
         // Keep observation tokens available to those clients without flattening
