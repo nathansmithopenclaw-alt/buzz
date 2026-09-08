@@ -12,6 +12,8 @@ const KIND_DELETE: u32 = 5;
 
 fn member(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        avatar_selection: None,
+
         id: id.to_string(),
         display_name: display_name.to_string(),
         description: None,

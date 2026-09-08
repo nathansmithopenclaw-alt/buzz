@@ -621,7 +621,7 @@ pub(crate) async fn sync_managed_agent_profile_from_snapshot(
         prior_tags,
         auth_tag,
     )?;
-    submit_managed_agent_profile_event(state, relay_url, agent_keys, event, auth_tag).await
+    submit_managed_agent_profile_event(state, relay_url, agent_keys, event, auth_tag, false).await
 }
 
 /// Apply an explicit owner-directed avatar change while the agent-managed
@@ -645,10 +645,134 @@ pub async fn sync_agent_managed_profile_avatar(
         avatar_url,
         auth_tag,
     )?;
-    submit_managed_agent_profile_event(state, relay_url, agent_keys, event, auth_tag).await
+    submit_managed_agent_profile_event(state, relay_url, agent_keys, event, auth_tag, true).await
 }
 
 async fn submit_managed_agent_profile_event(
+    state: &AppState,
+    relay_url: &str,
+    agent_keys: &nostr::Keys,
+    event: nostr::Event,
+    auth_tag: Option<&str>,
+    avatar_only: bool,
+) -> Result<(), String> {
+    let pubkey = agent_keys.public_key().to_hex();
+    let metadata: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&event.content)
+        .map_err(|e| format!("invalid profile metadata: {e}"))?;
+    let fallback = metadata
+        .get("picture")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let selection = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        crate::managed_agents::avatar_publication::publish_current(
+            relay_url,
+            &pubkey,
+            || query_agent_profile(state, relay_url, &pubkey),
+            |latest| {
+                let selection =
+                    crate::managed_agents::avatar_publication::current_selection(state, &pubkey)?;
+                if selection.is_some() {
+                    return Ok(selection);
+                }
+                crate::managed_agents::avatar_publication::initialize_selection(
+                    state,
+                    &pubkey,
+                    latest.and_then(|p| p.picture.clone()).or(fallback),
+                )
+            },
+            |latest, selection| async move {
+                let event = if avatar_only {
+                    build_agent_managed_avatar_event(
+                        agent_keys,
+                        latest.as_ref(),
+                        metadata
+                            .get("display_name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or(""),
+                        metadata
+                            .get("picture")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or(""),
+                        auth_tag,
+                    )?
+                } else {
+                    event
+                };
+                let event = build_selected_profile_event(
+                    agent_keys,
+                    &event,
+                    latest.as_ref(),
+                    selection.as_ref(),
+                )?;
+                post_managed_profile_event(state, relay_url, agent_keys, event, auth_tag).await
+            },
+        ),
+    )
+    .await
+    .map_err(|_| "avatar publication pending: relay timed out".to_string())??;
+    if let Some(selection) = &selection {
+        crate::managed_agents::avatar_publication::mark_synced(
+            state, relay_url, &pubkey, selection,
+        )?;
+    }
+    Ok(())
+}
+
+fn build_selected_profile_event(
+    agent_keys: &nostr::Keys,
+    event: &nostr::Event,
+    latest: Option<&AgentProfileInfo>,
+    selection: Option<&crate::managed_agents::avatar_selection::AvatarSelection>,
+) -> Result<nostr::Event, String> {
+    let mut metadata: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&event.content).map_err(|e| e.to_string())?;
+    if let Some(selection) = &selection {
+        if let Some(marker) = latest.and_then(|p| p.metadata.get("buzz_avatar_edit")) {
+            if let (Some(revision), Some(edit_id)) = (
+                marker.get("revision").and_then(serde_json::Value::as_u64),
+                marker.get("edit_id").and_then(serde_json::Value::as_str),
+            ) {
+                if (revision, edit_id) > (selection.revision, selection.edit_id.as_str()) {
+                    return Err("avatar publication pending: a newer picture edit is published; waiting for owner edit synchronization".into());
+                }
+            }
+        }
+        metadata.insert(
+            "buzz_avatar_edit".into(),
+            serde_json::json!({"revision": selection.revision, "edit_id": selection.edit_id}),
+        );
+        // A legacy conflict has no proof of edit intent. Preserve the relay
+        // picture until the owner resolves it with an explicit avatar edit.
+        if selection.revision == 0
+            && latest
+                .and_then(|p| p.picture.as_deref())
+                .is_some_and(|p| !p.is_empty() && Some(p) != selection.url.as_deref())
+        {
+            return Err("avatar conflict: saved and published legacy pictures differ; select the intended picture through Edit agent".into());
+        }
+        metadata.insert(
+            "picture".into(),
+            serde_json::Value::String(selection.url.clone().unwrap_or_default()),
+        );
+    }
+    let now = nostr::Timestamp::now().as_secs();
+    let timestamp = now.max(latest.map_or(0, |p| (p.created_at as u64).saturating_add(1)));
+    if timestamp > now.saturating_add(30) {
+        return Err("avatar publication pending: profile clock is ahead".into());
+    }
+    let event = nostr::EventBuilder::new(
+        nostr::Kind::Metadata,
+        serde_json::to_string(&metadata).map_err(|e| e.to_string())?,
+    )
+    .tags(event.tags.iter().cloned())
+    .custom_created_at(nostr::Timestamp::from(timestamp))
+    .sign_with_keys(agent_keys)
+    .map_err(|e| e.to_string())?;
+    Ok(event)
+}
+
+async fn post_managed_profile_event(
     state: &AppState,
     relay_url: &str,
     agent_keys: &nostr::Keys,
@@ -683,6 +807,16 @@ async fn submit_managed_agent_profile_event(
         ));
     }
 
+    let receipt: SubmitEventResponse = parse_json_response(response).await?;
+    validate_profile_receipt(&receipt, &event.id.to_hex())
+}
+
+fn validate_profile_receipt(receipt: &SubmitEventResponse, event_id: &str) -> Result<(), String> {
+    if !receipt.accepted || receipt.event_id != event_id {
+        return Err(
+            "avatar publication pending: relay did not acknowledge the exact profile event".into(),
+        );
+    }
     Ok(())
 }
 
@@ -1298,3 +1432,6 @@ mod tests {
 #[cfg(test)]
 #[path = "relay/tests.rs"]
 mod extracted_tests;
+
+#[cfg(test)]
+mod avatar_selection_tests;

@@ -488,6 +488,8 @@ fn sample_agent_record() -> ManagedAgentRecord {
 
 fn sample_persona() -> AgentDefinition {
     AgentDefinition {
+        avatar_selection: None,
+
         description: None,
         id: "custom:helper".to_string(),
         display_name: "Helper".to_string(),
@@ -720,6 +722,7 @@ fn summary_fixture(
     restart_diff: Vec<crate::managed_agents::spawn_snapshot::RestartDiffEntry>,
 ) -> super::ManagedAgentSummary {
     super::ManagedAgentSummary {
+        avatar_sync_pending: false,
         effort_level: None,
         pubkey: "aa".repeat(32),
         name: "test".into(),

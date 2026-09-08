@@ -1,3 +1,4 @@
+import { resolveSelectedAvatar } from "@/shared/lib/selectedAvatar";
 import * as React from "react";
 import type {
   AcpRuntimeCatalogEntry,
@@ -181,6 +182,7 @@ export function buildPersonaDraftProfile(persona: AgentPersona): Profile {
 }
 
 export function resolvePanelProfile({
+  managedAgent,
   persona,
   profile,
 }: {
@@ -190,7 +192,15 @@ export function resolvePanelProfile({
 }): Profile | undefined {
   const baseProfile =
     profile ?? (persona ? buildPersonaDraftProfile(persona) : undefined);
-  return withProfileAvatarFallback(baseProfile, [persona?.avatarUrl]);
+  if (!baseProfile) return baseProfile;
+  return {
+    ...baseProfile,
+    avatarUrl: resolveSelectedAvatar(
+      managedAgent?.avatarUrl,
+      persona?.avatarUrl,
+      baseProfile.avatarUrl,
+    ),
+  };
 }
 
 export function resolveProfileAvatarUrl(

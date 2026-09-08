@@ -69,6 +69,9 @@ fn test_runtime() -> &'static KnownAcpRuntime {
 
 fn test_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        avatar_selection: None,
+        avatar_synced: Default::default(),
+
         description: None,
         pubkey: "test".to_string(),
         name: "Test Agent".to_string(),

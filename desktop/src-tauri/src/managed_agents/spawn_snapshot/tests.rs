@@ -78,6 +78,9 @@ fn residency_policy_is_effective_only_behind_experiment() {
 
 fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        avatar_selection: None,
+        avatar_synced: Default::default(),
+
         description: None,
         pubkey: "p".repeat(64),
         name: "agent".into(),
@@ -146,6 +149,8 @@ fn record() -> ManagedAgentRecord {
 
 fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
     AgentDefinition {
+        avatar_selection: None,
+
         description: None,
         id: id.into(),
         display_name: id.into(),

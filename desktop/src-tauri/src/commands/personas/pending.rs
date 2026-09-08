@@ -310,6 +310,8 @@ mod tests {
 
     fn persona() -> AgentDefinition {
         AgentDefinition {
+            avatar_selection: None,
+
             description: None,
             id: "catalog-reviewer".to_string(),
             display_name: "Catalog Reviewer".to_string(),

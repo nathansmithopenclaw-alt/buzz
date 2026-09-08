@@ -31,7 +31,15 @@ struct AvatarAuthorization {
     request_id: String,
     target_pubkey: String,
     url: String,
+    #[serde(default)]
+    clear: bool,
+    #[serde(default = "default_avatar_scope")]
+    scope: String,
     issued_at: String,
+}
+
+fn default_avatar_scope() -> String {
+    "definition".into()
 }
 
 #[derive(Debug, Serialize)]
@@ -121,7 +129,16 @@ fn validate_avatar_authorization(
     PublicKey::parse(source_pubkey.trim())
         .map_err(|error| format!("invalid avatar source pubkey: {error}"))?;
     authorization.target_pubkey = target.to_hex();
-    authorization.url = validate_avatar_url(&authorization.url)?;
+    if !matches!(authorization.scope.as_str(), "definition" | "instance") {
+        return Err("invalid avatar scope".into());
+    }
+    if authorization.clear {
+        if !authorization.url.is_empty() {
+            return Err("remove cannot also set an avatar URL".into());
+        }
+    } else {
+        authorization.url = validate_avatar_url(&authorization.url)?;
+    }
 
     let issued_at = DateTime::parse_from_rfc3339(&authorization.issued_at)
         .map_err(|error| format!("invalid avatar authorization timestamp: {error}"))?
@@ -151,6 +168,47 @@ fn apply_avatar_to_state(
                 .eq_ignore_ascii_case(&authorization.target_pubkey)
         })
         .ok_or_else(|| format!("managed agent not found: {}", authorization.target_pubkey))?;
+    if authorization.scope == "instance" {
+        let index = records
+            .iter()
+            .position(|r| r.pubkey.eq_ignore_ascii_case(&authorization.target_pubkey))
+            .ok_or("managed agent disappeared")?;
+        let record = &mut records[index];
+        if record
+            .avatar_selection
+            .as_ref()
+            .is_some_and(|s| s.revision >= issued_at.timestamp_millis().max(0) as u64)
+        {
+            return Ok((
+                record
+                    .persona_id
+                    .clone()
+                    .unwrap_or_else(|| format!("instance:{}", record.pubkey)),
+                Vec::new(),
+                false,
+            ));
+        }
+        record.avatar_selection = crate::managed_agents::avatar_selection::AvatarSelection::edit(
+            record.avatar_selection.as_ref(),
+            if authorization.clear {
+                crate::managed_agents::avatar_selection::AvatarEdit::Remove
+            } else {
+                crate::managed_agents::avatar_selection::AvatarEdit::Set {
+                    url: authorization.url.clone(),
+                }
+            },
+        )?;
+        record.avatar_url = Some(authorization.url.clone());
+        record.updated_at = now_iso();
+        return Ok((
+            record
+                .persona_id
+                .clone()
+                .unwrap_or_else(|| format!("instance:{}", record.pubkey)),
+            vec![index],
+            true,
+        ));
+    }
     let persona_id = target
         .persona_id
         .clone()
@@ -160,13 +218,26 @@ fn apply_avatar_to_state(
         .find(|persona| persona.id == persona_id)
         .ok_or_else(|| format!("persona definition not found: {persona_id}"))?;
 
-    let prior_update = DateTime::parse_from_rfc3339(&persona.updated_at)
-        .ok()
-        .map(|value| value.with_timezone(&Utc));
-    if prior_update.is_some_and(|updated_at| updated_at >= issued_at) {
+    let previous = records
+        .iter()
+        .filter(|r| r.persona_id.as_deref() == Some(persona_id.as_str()))
+        .filter_map(|r| r.avatar_selection.as_ref())
+        .chain(persona.avatar_selection.as_ref())
+        .max_by_key(|s| (s.revision, &s.edit_id));
+    if previous.is_some_and(|s| s.revision >= issued_at.timestamp_millis().max(0) as u64) {
         return Ok((persona_id, Vec::new(), false));
     }
 
+    persona.avatar_selection = crate::managed_agents::avatar_selection::AvatarSelection::edit(
+        previous,
+        if authorization.clear {
+            crate::managed_agents::avatar_selection::AvatarEdit::Remove
+        } else {
+            crate::managed_agents::avatar_selection::AvatarEdit::Set {
+                url: authorization.url.clone(),
+            }
+        },
+    )?;
     persona.avatar_url = Some(authorization.url.clone());
     persona.updated_at = now_iso();
     let linked = records
@@ -174,6 +245,7 @@ fn apply_avatar_to_state(
         .enumerate()
         .filter_map(|(index, record)| {
             if record.persona_id.as_deref() == Some(persona_id.as_str()) {
+                record.avatar_selection = persona.avatar_selection.clone();
                 record.avatar_url = Some(authorization.url.clone());
                 record.updated_at = now_iso();
                 Some(index)
@@ -227,6 +299,12 @@ pub async fn apply_managed_agent_avatar_request(
                 .map(AgentDefinition::into_agent_record)
                 .collect();
             save_agent_definitions_and_instances(&app, &definitions, &records)?;
+            if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
+                super::personas::retain_persona_pending(&app, &state, persona);
+            }
+            for index in &linked {
+                super::agents::retain_managed_agent_pending(&app, &state, &records[*index]);
+            }
             try_regenerate_nest(&app);
 
             let targets = linked
@@ -242,9 +320,6 @@ pub async fn apply_managed_agent_avatar_request(
                             target_relay_url: None,
                             avatar_url: record.avatar_url.clone(),
                             auth_tag: record.auth_tag.clone(),
-                            pubkey: record.pubkey.clone(),
-                            agent_command: record.agent_command.clone(),
-                            persona_id: record.persona_id.clone(),
                             about: crate::managed_agents::record_effective_description(
                                 record, &personas,
                             ),
@@ -385,6 +460,8 @@ mod tests {
 
     fn persona(id: &str, updated_at: &str) -> AgentDefinition {
         AgentDefinition {
+            avatar_selection: None,
+
             id: id.into(),
             display_name: id.into(),
             avatar_url: Some("https://relay.example/old.png".into()),
@@ -484,6 +561,9 @@ mod tests {
             instance(&personas[1], &unrelated),
         ];
         let authorization = AvatarAuthorization {
+            clear: false,
+            scope: "definition".into(),
+
             request_type: AVATAR_APPLY_REQUEST_KIND.into(),
             request_id: uuid::Uuid::new_v4().to_string(),
             target_pubkey: target.public_key().to_hex(),
@@ -512,5 +592,42 @@ mod tests {
             apply_avatar_to_state(&mut personas, &mut records, &authorization, issued_at).unwrap();
         assert!(!replay_applied);
         assert!(replay_links.is_empty());
+    }
+    #[test]
+    fn explicit_instance_removal_does_not_clear_definition_or_sibling() {
+        let issued_at = Utc::now();
+        let old = (issued_at - Duration::minutes(1)).to_rfc3339();
+        let target = Keys::generate();
+        let sibling = Keys::generate();
+        let mut personas = vec![persona("bolt", &old)];
+        let mut records = vec![
+            instance(&personas[0], &target),
+            instance(&personas[0], &sibling),
+        ];
+        let authorization = AvatarAuthorization {
+            clear: true,
+            scope: "instance".into(),
+            request_type: AVATAR_APPLY_REQUEST_KIND.into(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            target_pubkey: target.public_key().to_hex(),
+            url: String::new(),
+            issued_at: issued_at.to_rfc3339(),
+        };
+        let (_, linked, applied) =
+            apply_avatar_to_state(&mut personas, &mut records, &authorization, issued_at).unwrap();
+        assert!(applied);
+        assert_eq!(linked, vec![0]);
+        assert_eq!(records[0].avatar_url.as_deref(), Some(""));
+        assert_eq!(records[0].avatar_selection.as_ref().unwrap().url, None);
+        assert_eq!(records[1].avatar_url, personas[0].avatar_url);
+        assert_eq!(
+            personas[0].avatar_url.as_deref(),
+            Some("https://relay.example/old.png")
+        );
+        assert!(
+            !apply_avatar_to_state(&mut personas, &mut records, &authorization, issued_at)
+                .unwrap()
+                .2
+        );
     }
 }

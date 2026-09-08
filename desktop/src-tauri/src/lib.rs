@@ -502,6 +502,27 @@ pub fn run() {
 
             // Sole publisher; failures remain pending. Recovery mode cannot publish.
             if !recovery_mode {
+                let avatar_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        let state = avatar_handle.state::<AppState>();
+                        if state
+                            .shutdown_started
+                            .load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            break;
+                        }
+                        if let Err(e) = managed_agents::avatar_publication::flush_pending(
+                            &avatar_handle,
+                            &state,
+                        )
+                        .await
+                        {
+                            eprintln!("buzz-desktop: {e}");
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                });
                 let flush_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     use managed_agents::fleet_visibility::retain_host_heartbeat_tick;

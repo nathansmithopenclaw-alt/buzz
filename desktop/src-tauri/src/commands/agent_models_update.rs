@@ -181,6 +181,20 @@ pub async fn update_managed_agent(
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
+        let next_avatar = crate::managed_agents::avatar_selection::AvatarSelection::edit(
+            record.avatar_selection.as_ref(),
+            input
+                .avatar_edit
+                .unwrap_or(crate::managed_agents::avatar_selection::AvatarEdit::Keep),
+        )?;
+        let avatar_changed = next_avatar != record.avatar_selection;
+        if avatar_changed {
+            record.avatar_selection = next_avatar;
+            if let Some(selection) = &record.avatar_selection {
+                record.avatar_url = selection.stored_url();
+            }
+            record.updated_at = crate::util::now_iso();
+        }
         validate_effort_update(record, input.effort_level.as_ref())?;
 
         let mut name_changed = false;
@@ -350,7 +364,7 @@ pub async fn update_managed_agent(
         // update that touched only runtime/local fields is a no-op publish.
         super::super::agents::retain_managed_agent_pending(&app, &state, record);
 
-        let sync_params = if name_changed {
+        let sync_params = if name_changed || avatar_changed {
             let agent_keys = Keys::parse(&record.private_key_nsec)
                 .map_err(|e| format!("failed to parse agent keys: {e}"))?;
             // Re-publish the renamed profile to the agent's effective relay:

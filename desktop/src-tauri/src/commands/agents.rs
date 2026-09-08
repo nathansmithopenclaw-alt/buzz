@@ -614,6 +614,9 @@ pub async fn create_managed_agent(
             linked_persona.as_ref(),
         )?;
         let mut record = ManagedAgentRecord {
+            avatar_selection: None,
+            avatar_synced: Default::default(),
+
             pubkey: pubkey.clone(),
             name: name.clone(),
             description: None,
@@ -1242,11 +1245,9 @@ use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
 
 #[path = "agents_profile.rs"]
 mod profile;
-pub(crate) use profile::*;
 #[cfg(test)]
-use profile::{
-    profile_needs_sync, resolve_avatar_precedence, resolve_legacy_avatar, AvatarPrecedence,
-};
+use profile::profile_needs_sync;
+pub(crate) use profile::*;
 
 #[cfg(test)]
 #[path = "agents_tests.rs"]

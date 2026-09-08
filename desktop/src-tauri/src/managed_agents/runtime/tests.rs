@@ -342,6 +342,8 @@ fn persona_with_provider(
     provider: Option<&str>,
 ) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        avatar_selection: None,
+
         description: None,
         id: id.to_string(),
         display_name: id.to_string(),

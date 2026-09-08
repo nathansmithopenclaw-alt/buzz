@@ -111,11 +111,11 @@ export async function createPersona(
 }
 
 /** The `UpdatePersonaRequest` payload shared by both edit commands. */
-function updatePersonaPayload(input: UpdatePersonaInput) {
+export function updatePersonaPayload(input: UpdatePersonaInput) {
   return {
     id: input.id,
     displayName: input.displayName,
-    avatarUrl: input.avatarUrl,
+    avatarEdit: input.avatarEdit,
     description: normalizeDescription(input.description),
     systemPrompt: input.systemPrompt,
     runtime: input.runtime,

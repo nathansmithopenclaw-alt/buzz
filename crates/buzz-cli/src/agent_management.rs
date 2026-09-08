@@ -179,6 +179,8 @@ struct AvatarAuthorization {
     request_id: String,
     target_pubkey: String,
     url: String,
+    clear: bool,
+    scope: String,
     issued_at: String,
 }
 
@@ -232,18 +234,39 @@ fn validate_avatar_url(value: String) -> Result<String, CliError> {
 /// Build a narrow avatar apply request. The invoking agent signs the observer
 /// frame so it follows the existing authenticated owner-scoped route; the
 /// embedded authorization event separately authorizes the requested target.
+#[cfg(test)]
 pub fn build_set_avatar(
     owner_keys: &Keys,
     requester_keys: &Keys,
     target: &PublicKey,
     url: String,
 ) -> Result<BuiltAvatarApplyRequest, CliError> {
+    build_avatar_edit(owner_keys, requester_keys, target, Some(url), "definition")
+}
+
+/// Build a signed explicit Set/Remove action with a pinned mutation scope.
+pub fn build_avatar_edit(
+    owner_keys: &Keys,
+    requester_keys: &Keys,
+    target: &PublicKey,
+    url: Option<String>,
+    scope: &str,
+) -> Result<BuiltAvatarApplyRequest, CliError> {
+    if !matches!(scope, "definition" | "instance") {
+        return Err(CliError::Usage("invalid avatar scope".into()));
+    }
+    let clear = url.is_none();
     let request_id = uuid::Uuid::new_v4().to_string();
     let issued_at = chrono::Utc::now().to_rfc3339();
     let target_pubkey = target.to_hex();
-    let url = validate_avatar_url(url)?;
+    let url = url
+        .map(validate_avatar_url)
+        .transpose()?
+        .unwrap_or_default();
     let authorization = AvatarAuthorization {
         request_type: AVATAR_APPLY_REQUEST_KIND,
+        clear,
+        scope: scope.into(),
         request_id: request_id.clone(),
         target_pubkey: target_pubkey.clone(),
         url: url.clone(),
@@ -695,6 +718,24 @@ mod tests {
         let content: serde_json::Value = serde_json::from_str(&authorization.content).unwrap();
         assert_eq!(content["targetPubkey"], target.public_key().to_hex());
         assert_eq!(content["url"], "https://relay.example/media/bolt.png");
+    }
+
+    #[test]
+    fn clear_avatar_authorization_pins_instance_scope_and_removal() {
+        let owner = Keys::generate();
+        let requester = Keys::generate();
+        let target = Keys::generate();
+        let built =
+            build_avatar_edit(&owner, &requester, &target.public_key(), None, "instance").unwrap();
+        let decrypted: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        let authorization =
+            Event::from_json(decrypted["payload"]["authorizationEvent"].as_str().unwrap()).unwrap();
+        assert!(authorization.verify().is_ok());
+        let content: serde_json::Value = serde_json::from_str(&authorization.content).unwrap();
+        assert_eq!(content["clear"], true);
+        assert_eq!(content["scope"], "instance");
+        assert_eq!(content["url"], "");
+        assert!(build_avatar_edit(&owner, &requester, &target.public_key(), None, "all").is_err());
     }
 
     #[test]

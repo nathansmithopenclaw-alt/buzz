@@ -125,7 +125,12 @@ pub struct CreatePersonaRequest {
 pub struct UpdatePersonaRequest {
     pub id: String,
     pub display_name: String,
+    /// Accepted for old clients, deliberately ignored: a full-form URL is not an edit.
+    #[allow(dead_code)]
     pub avatar_url: Option<String>,
+    /// Explicit avatar action; legacy whole-form avatarUrl is not edit intent.
+    #[serde(default)]
+    pub avatar_edit: Option<super::super::avatar_selection::AvatarEdit>,
     /// Optional short, PUBLIC description (max 280 chars). The dialog always
     /// sends the current value, so absent and empty both clear it.
     #[serde(default)]
@@ -232,6 +237,9 @@ pub struct CreateManagedAgentRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateManagedAgentRequest {
+    /// Instance-scoped direct avatar edit. Omission preserves the saved choice.
+    #[serde(default)]
+    pub avatar_edit: Option<super::super::avatar_selection::AvatarEdit>,
     pub pubkey: String,
     /// Absent = don't touch. Present = rename the agent.
     #[serde(default)]
@@ -312,6 +320,8 @@ mod tests {
 
     fn record_without_quad() -> AgentDefinition {
         AgentDefinition {
+            avatar_selection: None,
+
             description: None,
             id: "p-1".to_string(),
             display_name: "Test".to_string(),

@@ -494,3 +494,15 @@ A generation-bound local resume acknowledgment also confirms the new broker is l
 The agent profile and Agents Start/Restart actions also probe the exact broker generation before confirming its running account. This readiness probe never releases an authentication hold or resumes retained work. If confirmation fails, retain the running process and expose the error with Restart available; do not label a saved selection as a confirmed runtime binding.
 
 A detached or unfinished account operation with no saved binding renders an explicit Account required selection. Ambient must not appear selected while the durable spawn fence requires a named account.
+
+## Explicit picture edits
+
+Picture controls track direct interaction separately from the rest of the form.
+An unchanged control sends Keep; selection sends Set; removal sends Remove.
+Never infer picture intent from a runtime change, an empty form default, a relay
+fetch, or a stock-artwork URL. Instance edits go through `update_managed_agent`;
+shared-definition edits explicitly fan out to linked instances. A stored empty
+picture is a removal tombstone and must block fallback to a definition or relay
+picture. Fleet selectors prefer the saved selection and preserve its revision
+across later settings projections. Pending publication must remain visible;
+saving locally is not proof of relay acceptance. See `docs/agent-profile-identity.md`.

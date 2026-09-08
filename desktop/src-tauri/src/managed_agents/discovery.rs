@@ -1290,19 +1290,5 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
     Some(runtime.avatar_url.to_string())
 }
 
-/// Whether `url` is a built-in runtime's default avatar rather than a picture
-/// somebody chose.
-///
-/// Derived from the runtime table, so it stays true as runtimes are added and
-/// covers every default — not just the one for the agent's current command.
-/// A record can legitimately carry another runtime's icon (the harness was
-/// switched after the record was written), and that icon is no more an owner
-/// choice than the current one.
-pub fn is_managed_agent_default_avatar(url: &str) -> bool {
-    KNOWN_ACP_RUNTIMES
-        .iter()
-        .any(|runtime| runtime.avatar_url == url)
-}
-
 #[cfg(test)]
 mod tests;

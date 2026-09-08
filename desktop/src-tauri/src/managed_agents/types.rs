@@ -17,6 +17,9 @@ pub struct AgentDefinition {
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// Durable avatar edit, independent of unrelated configuration revisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_selection: Option<super::avatar_selection::AvatarSelection>,
     /// Optional short, PUBLIC description (max 280 chars), shown on the
     /// agent's card/profile and carried on the public kind:30175 persona
     /// event. EXCLUDED from `persona_content_hash` (no restart badge).
@@ -119,6 +122,8 @@ impl AgentDefinition {
             auth_tag: None,
             relay_url: String::new(),
             avatar_url: self.avatar_url,
+            avatar_selection: self.avatar_selection,
+            avatar_synced: BTreeMap::new(),
             acp_command: DEFAULT_ACP_COMMAND.to_string(),
             agent_command: String::new(),
             agent_command_override: None,
@@ -194,6 +199,7 @@ impl ManagedAgentRecord {
                 .clone()
                 .unwrap_or_else(|| self.name.clone()),
             avatar_url: self.avatar_url.clone(),
+            avatar_selection: self.avatar_selection.clone(),
             description: self.description.clone(),
             system_prompt: self.system_prompt.clone().unwrap_or_default(),
             runtime: self.runtime.clone(),
@@ -271,6 +277,12 @@ pub struct ManagedAgentRecord {
     /// `#[serde(default)]` so pre-existing records deserialize as `None`.
     #[serde(default)]
     pub avatar_url: Option<String>,
+    /// Durable avatar edit, independent of unrelated configuration revisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_selection: Option<super::avatar_selection::AvatarSelection>,
+    /// Last accepted avatar edit per relay; mismatches are durable pending work.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub avatar_synced: BTreeMap<String, String>,
     pub acp_command: String,
     pub agent_command: String,
     /// Explicit per-instance harness pin; `None` inherits the persona runtime.
@@ -543,6 +555,8 @@ pub struct ManagedAgentSummary {
     pub parallelism: u32,
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,
+    /// Saved choice has not yet been acknowledged by this relay.
+    pub avatar_sync_pending: bool,
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_source: Option<super::effective_config::ConfigSource>,

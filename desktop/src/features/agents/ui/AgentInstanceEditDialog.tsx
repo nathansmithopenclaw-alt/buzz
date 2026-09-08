@@ -181,6 +181,7 @@ export function AgentInstanceEditDialog({
   );
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
+  const avatarTouched = React.useRef(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
@@ -216,6 +217,7 @@ export function AgentInstanceEditDialog({
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
+      avatarTouched.current = false;
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
       setIsAddHarnessOpen(false);
@@ -811,6 +813,11 @@ export function AgentInstanceEditDialog({
       if (agentCommandUpdate === "") {
         delete input.effortLevel;
       }
+      input.avatarEdit = avatarTouched.current
+        ? avatarUrl.trim()
+          ? { action: "set", url: avatarUrl.trim() }
+          : { action: "remove" }
+        : { action: "keep" };
       const result = await updateMutation.mutateAsync(input);
       let savedAgent = result.agent;
       if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
@@ -957,7 +964,11 @@ export function AgentInstanceEditDialog({
           <AgentInstanceAvatarField
             previewAvatarUrl={previewAvatarUrl}
             previewLabel={previewLabel}
-            setAvatarUrl={setAvatarUrl}
+            avatarSyncPending={agent.avatarSyncPending}
+            setAvatarUrl={(value) => {
+              avatarTouched.current = true;
+              setAvatarUrl(value);
+            }}
             setIsAvatarUploadPending={setIsAvatarUploadPending}
             isSaving={isSaving}
             onOpenChange={onOpenChange}

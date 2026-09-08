@@ -28,6 +28,9 @@ fn buzz_agent() -> &'static KnownAcpRuntime {
 
 pub(super) fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        avatar_selection: None,
+        avatar_synced: Default::default(),
+
         pubkey: "test".to_string(),
         name: "Test Agent".to_string(),
         persona_id: None,
@@ -103,6 +106,8 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 fn persona(id: &str, env_vars: BTreeMap<String, String>) -> AgentDefinition {
     AgentDefinition {
+        avatar_selection: None,
+
         id: id.to_string(),
         display_name: "P".to_string(),
         avatar_url: None,

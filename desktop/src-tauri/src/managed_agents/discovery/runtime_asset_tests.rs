@@ -33,33 +33,6 @@ fn returns_none_for_unknown_commands() {
 }
 
 #[test]
-fn recognizes_every_runtime_default_avatar() {
-    for default_avatar in [
-        GOOSE_AVATAR_URL,
-        CLAUDE_CODE_AVATAR_URL,
-        CODEX_AVATAR_URL,
-        BUZZ_AGENT_AVATAR_URL,
-    ] {
-        assert!(
-            is_managed_agent_default_avatar(default_avatar),
-            "{default_avatar} is a runtime default"
-        );
-    }
-}
-
-#[test]
-fn does_not_treat_a_chosen_picture_as_a_runtime_default() {
-    assert!(!is_managed_agent_default_avatar(
-        "https://relay.example/media/portrait.png"
-    ));
-    assert!(!is_managed_agent_default_avatar(""));
-    // A near-miss must not match: comparison is exact, not a prefix.
-    assert!(!is_managed_agent_default_avatar(&format!(
-        "{GOOSE_AVATAR_URL}?v=2"
-    )));
-}
-
-#[test]
 fn default_agent_command_resolves_bundled_buzz_agent() {
     // The default must be bundled buzz-agent, never bare `goose` on a stock Windows install.
     assert_eq!(default_agent_command(), "buzz-agent");

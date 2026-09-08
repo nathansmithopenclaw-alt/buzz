@@ -9,6 +9,8 @@ export type FleetProjectionRespondTo = "owner-only" | "allowlist" | "anyone";
 export type FleetProjectionLifecycleState = "running" | "stopped" | "error";
 
 export type FleetProjectionAgent = {
+  /** Explicit selected picture; empty string is removal, undefined is legacy. */
+  selectedAvatarUrl?: string;
   ownerPubkey: string;
   agentPubkey: string;
   name: string;

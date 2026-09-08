@@ -1,3 +1,4 @@
+import { resolveSelectedAvatar } from "@/shared/lib/selectedAvatar";
 import type { AgentPersona, ManagedAgent, Profile } from "@/shared/api/types";
 
 type FleetIdentityInput = {
@@ -34,10 +35,11 @@ export function resolveFleetAgentIdentity({
     : null;
 
   return {
-    avatarUrl:
-      profileAvatarUrl ??
-      trimmed(persona?.avatarUrl) ??
-      trimmed(agent.avatarUrl),
+    avatarUrl: resolveSelectedAvatar(
+      agent.avatarUrl,
+      persona?.avatarUrl,
+      profileAvatarUrl,
+    ),
     displayName:
       profileDisplayName ??
       trimmed(persona?.displayName) ??

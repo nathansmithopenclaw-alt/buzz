@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 
 fn make_definition(slug: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        avatar_selection: None,
+        avatar_synced: Default::default(),
+
         description: None,
         pubkey: String::new(),
         slug: Some(slug.to_string()),

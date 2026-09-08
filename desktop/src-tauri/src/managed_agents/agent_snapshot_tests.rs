@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 /// relevant to snapshot export are filled; the rest use defaults.
 fn minimal_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        avatar_selection: None,
+        avatar_synced: Default::default(),
+
         description: None,
         pubkey: "deadbeef".to_string(),
         name: "Test Agent".to_string(),

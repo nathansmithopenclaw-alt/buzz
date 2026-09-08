@@ -135,6 +135,7 @@ export type RawManagedAgent =
       parallelism: number;
       system_prompt: string | null;
       avatar_url?: string | null;
+      avatar_sync_pending?: boolean;
       effort_level?: string | null;
       model: string | null;
       model_source?: ManagedAgent["modelSource"];
@@ -654,6 +655,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     parallelism: agent.parallelism,
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
+    avatarSyncPending: agent.avatar_sync_pending ?? false,
     model: agent.model,
     effortLevel: agent.effort_level ?? null,
     modelSource: agent.model_source ?? null,

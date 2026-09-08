@@ -866,3 +866,25 @@ fn install_log_filename_accepts_ordinary_runtime_ids() {
         );
     }
 }
+
+#[test]
+fn atomic_store_preserves_removed_avatar_after_restart_and_stale_save() {
+    use crate::managed_agents::avatar_selection::{AvatarEdit, AvatarSelection};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("managed-agents.json");
+    let mut original = record_with_key("");
+    original.avatar_url = Some("https://example.com/a.png".into());
+    super::write_agent_store_at(&path, &mut [original.clone()]).unwrap();
+    let mut records = load_agent_store_at(&path).unwrap();
+    records[0].avatar_selection =
+        AvatarSelection::edit(records[0].avatar_selection.as_ref(), AvatarEdit::Remove).unwrap();
+    super::write_agent_store_at(&path, &mut records).unwrap();
+    original.name = "Unrelated name edit".into();
+    super::write_agent_store_at(&path, &mut [original]).unwrap();
+    for _ in 0..2 {
+        let saved = load_agent_store_at(&path).unwrap();
+        assert_eq!(saved[0].name, "Unrelated name edit");
+        assert_eq!(saved[0].avatar_url.as_deref(), Some(""));
+        assert_eq!(saved[0].avatar_selection.as_ref().unwrap().url, None);
+    }
+}

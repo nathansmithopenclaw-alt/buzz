@@ -10,6 +10,8 @@ const UUID: &str = "11111111-2222-3333-4444-555555555555"; // sadscan:disable sq
 /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
 fn local_in_app() -> AgentDefinition {
     AgentDefinition {
+        avatar_selection: None,
+
         description: None,
         id: UUID.to_string(),
         display_name: "Local".to_string(),
@@ -40,6 +42,8 @@ fn local_in_app() -> AgentDefinition {
 /// slug = Some(d-tag), empty env_vars, source_team None.
 fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        avatar_selection: None,
+
         description: None,
         id: d_tag.to_string(),
         display_name: display_name.to_string(),
@@ -165,6 +169,9 @@ const AGENT_PUBKEY: &str = "agentpubkeyhex00000000000000000000000000000000000000
 /// event must NEVER be able to overwrite.
 fn local_agent() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        avatar_selection: None,
+        avatar_synced: Default::default(),
+
         description: None,
         pubkey: AGENT_PUBKEY.to_string(),
         name: "Local Agent".to_string(),
@@ -884,6 +891,8 @@ fn inbound_managed_agent_content(
     system_prompt: Option<&str>,
 ) -> crate::managed_agents::agent_events::ManagedAgentEventContent {
     crate::managed_agents::agent_events::ManagedAgentEventContent {
+        avatar_selection: None,
+
         name: name.to_string(),
         persona_id: persona_id.map(str::to_string),
         system_prompt: system_prompt.map(str::to_string),
@@ -925,4 +934,34 @@ fn inbound_definition_less_agent_accepts_visible_multiline_prompt() {
     );
 
     assert!(validate_inbound_managed_agent_definition(&inbound).is_ok());
+}
+
+#[test]
+fn newer_cross_device_settings_snapshot_preserves_newer_local_avatar_edit() {
+    use crate::managed_agents::avatar_selection::{AvatarEdit, AvatarSelection};
+    let mut local = local_in_app();
+    local.avatar_selection = AvatarSelection::edit(None, AvatarEdit::Remove).unwrap();
+    local.avatar_url = Some(String::new());
+    let choice = local.avatar_selection.clone();
+    let mut personas = vec![local];
+    let mut inbound = inbound_for(UUID, "New name from another device");
+    inbound.avatar_url = Some("https://example.com/old.png".into());
+    inbound.updated_at = "2099-01-01T00:00:00Z".into();
+    apply_inbound_persona(&mut personas, inbound);
+    assert_eq!(personas[0].display_name, "New name from another device");
+    assert_eq!(personas[0].avatar_url.as_deref(), Some(""));
+    assert_eq!(personas[0].avatar_selection, choice);
+    let mut inbound = inbound_for(UUID, "Next edit");
+    inbound.avatar_selection = AvatarSelection::edit(
+        choice.as_ref(),
+        AvatarEdit::Set {
+            url: "https://example.com/new.png".into(),
+        },
+    )
+    .unwrap();
+    apply_inbound_persona(&mut personas, inbound);
+    assert_eq!(
+        personas[0].avatar_url.as_deref(),
+        Some("https://example.com/new.png")
+    );
 }

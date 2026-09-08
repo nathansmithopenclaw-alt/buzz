@@ -336,6 +336,7 @@ export type ManagedAgent =
       parallelism: number;
       systemPrompt: string | null;
       avatarUrl: string | null;
+      avatarSyncPending?: boolean;
       model: string | null;
       /** Canonical next-session effort; absent on older hosts. */
       effortLevel?: string | null;
@@ -686,6 +687,7 @@ export type RuntimeConfigSurface = {
 };
 
 export type UpdateManagedAgentInput = {
+  avatarEdit?: import("./personaTypes").AvatarEdit;
   pubkey: string;
   name?: string;
   model?: string | null;

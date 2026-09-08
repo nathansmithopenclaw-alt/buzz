@@ -84,7 +84,13 @@ export type CreatePersonaInput = {
   catalogSource?: CatalogSourceCoordinate;
 };
 
+export type AvatarEdit =
+  | { action: "keep" }
+  | { action: "set"; url: string }
+  | { action: "remove" };
+
 export type UpdatePersonaInput = {
+  avatarEdit?: AvatarEdit;
   id: string;
   displayName: string;
   avatarUrl?: string;

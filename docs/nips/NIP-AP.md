@@ -384,3 +384,18 @@ Unlike [NIP-AE](NIP-AE.md), persona events involve no encryption, no HMAC deriva
 1. Correct NIP-01 event-id serialization: `json.dumps([0, pubkey, created_at, kind, tags, content], separators=(",", ":"), ensure_ascii=False)` over UTF-8 bytes.
 2. BIP-340 Schnorr signing with the pinned aux value.
 3. JSON serialization of the content body with no trailing whitespace or BOM.
+
+## Optional picture-edit provenance
+
+Buzz's owner-authored 30175 definitions and 30177 instance projections may carry
+`avatar_selection: {"revision": <unsigned milliseconds>, "edit_id": <UUID>,
+"url": <string|null>}`. This is a picture-specific edit, independent of the
+whole event's replacement timestamp. Receivers preserve the greatest
+`(revision, edit_id)` they have observed for the identity. A null URL is an
+explicit removal. Revision zero with edit ID `legacy` denotes preservation of
+an existing stored picture and does not authorize definition-wide replacement.
+A direct definition edit advances past linked instance selections and fans out;
+an instance edit affects only that public key. Author and community validation
+remain the existing event-envelope requirements. Unknown optional fields remain
+ignorable by older implementations, which do not provide these preservation
+semantics.

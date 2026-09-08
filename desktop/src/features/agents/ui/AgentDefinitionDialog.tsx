@@ -150,6 +150,7 @@ export function AgentDefinitionDialog({
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [avatarUrl, setAvatarUrl] = React.useState("");
+  const avatarTouched = React.useRef(false);
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [runtime, setRuntime] = React.useState("");
   const [model, setModel] = React.useState("");
@@ -215,6 +216,7 @@ export function AgentDefinitionDialog({
     setDisplayName(initialValues.displayName);
     setDescriptionDraft(initialValues.description ?? "");
     setAvatarUrl(initialValues.avatarUrl ?? "");
+    avatarTouched.current = false;
     setSystemPrompt(initialValues.systemPrompt);
     setRuntime(initialValues.runtime ?? "");
     setModel(initialValues.model ?? "");
@@ -387,6 +389,11 @@ export function AgentDefinitionDialog({
         {
           id: initialValues.id,
           ...baseInput,
+          avatarEdit: avatarTouched.current
+            ? avatarUrl.trim()
+              ? { action: "set", url: avatarUrl.trim() }
+              : { action: "remove" }
+            : { action: "keep" },
         },
         {
           publishCatalogUpdates: publishCatalogUpdatesOnSave && hasUserChanges,
@@ -762,11 +769,13 @@ export function AgentDefinitionDialog({
         disabled={isPending || isAvatarUploadPending}
         label={previewLabel}
         onClearAvatar={() => {
+          avatarTouched.current = true;
           setHasUserChanges(true);
           setAvatarUrl("");
         }}
         onUploadPendingChange={setIsAvatarUploadPending}
         onSelectAvatar={(nextAvatarUrl) => {
+          avatarTouched.current = true;
           setHasUserChanges(true);
           setAvatarUrl(nextAvatarUrl);
         }}

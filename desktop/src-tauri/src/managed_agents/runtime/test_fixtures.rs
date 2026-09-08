@@ -36,6 +36,9 @@ pub(super) fn fixture(
     auth_tag: Option<String>,
 ) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        avatar_selection: None,
+        avatar_synced: Default::default(),
+
         description: None,
         pubkey: "p".into(),
         name: "n".into(),

@@ -454,11 +454,6 @@ pub async fn restore_managed_agents_on_launch(
             .iter()
             .filter_map(|(pubkey, spawn_relay)| {
                 let record = records.iter().find(|r| r.pubkey == *pubkey)?;
-                // Resolve the effective harness for the avatar-fallback
-                // derivation (the snapshot may be empty/stale for an inherited
-                // harness). Mirrors the UI start path.
-                let effective_command =
-                    crate::managed_agents::record_agent_command(record, &reconcile_personas);
                 Some((
                     pubkey.clone(),
                     crate::commands::ProfileReconcileData {
@@ -471,9 +466,6 @@ pub async fn restore_managed_agents_on_launch(
                         target_relay_url: Some(spawn_relay.clone()),
                         avatar_url: record.avatar_url.clone(),
                         auth_tag: record.auth_tag.clone(),
-                        pubkey: record.pubkey.clone(),
-                        agent_command: effective_command,
-                        persona_id: record.persona_id.clone(),
                         about: crate::managed_agents::record_effective_description(
                             record,
                             &reconcile_personas,

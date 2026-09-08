@@ -305,6 +305,18 @@ pub fn build_managed_agent_summary(
         parallelism: record.parallelism,
         system_prompt: effective_prompt,
         avatar_url: record.avatar_url.clone(),
+        avatar_sync_pending: record.avatar_selection.as_ref().is_some_and(|selection| {
+            let relay = crate::relay::effective_agent_relay_url(
+                &record.relay_url,
+                &crate::relay::relay_ws_url_with_override(
+                    app.state::<crate::app_state::AppState>().inner(),
+                ),
+            );
+            record
+                .avatar_synced
+                .get(&crate::relay::relay_http_base_url(&relay))
+                != Some(&selection.edit_id)
+        }),
         model: effective_model,
         model_source,
         provider: effective_provider,

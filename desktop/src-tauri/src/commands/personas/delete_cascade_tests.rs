@@ -17,6 +17,9 @@ fn make_agent(
     runtime_pid: Option<u32>,
 ) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        avatar_selection: None,
+        avatar_synced: Default::default(),
+
         description: None,
         pubkey: pubkey.to_string(),
         name: "Test Agent".to_string(),

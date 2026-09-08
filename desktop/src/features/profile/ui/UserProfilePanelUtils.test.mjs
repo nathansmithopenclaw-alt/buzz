@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  resolvePanelProfile,
   parseProfilePanelTab,
   parseProfilePanelView,
   personaManagedAgentUpdate,
@@ -244,4 +245,20 @@ test("profile target identity stays stable while a requested pubkey is canonical
     profilePanelTargetKey(undefined, "requested-persona"),
     "persona:requested-persona",
   );
+});
+
+test("managed profile uses the exact instance selection and preserves removal", () => {
+  for (const avatarUrl of ["https://example.com/selected.png", ""]) {
+    const result = resolvePanelProfile({
+      managedAgent: agent({ avatarUrl }),
+      persona: persona({ avatarUrl: "https://example.com/definition.png" }),
+      profile: {
+        pubkey: agent().pubkey,
+        avatarUrl: "https://example.com/stale.png",
+        displayName: "Relay",
+      },
+    });
+    assert.equal(result.avatarUrl, avatarUrl || null);
+    assert.equal(result.displayName, "Relay");
+  }
 });

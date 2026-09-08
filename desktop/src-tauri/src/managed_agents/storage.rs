@@ -277,6 +277,9 @@ fn load_agent_store_at(path: &Path) -> Result<Vec<ManagedAgentRecord>, String> {
         backup_invalid_store(path);
         format!("failed to parse agent store (preserved as .invalid): {error}")
     })?;
+    for record in &mut records {
+        super::avatar_selection::bootstrap(record);
+    }
     let repaired = repair_stale_agent_command_snapshots(&mut records);
     if repaired > 0 {
         let payload = serde_json::to_vec_pretty(&records)
@@ -516,17 +519,26 @@ fn write_agent_store<R: tauri::Runtime>(
     all.extend(instances);
 
     let path = managed_agents_store_path(app)?;
-    let payload = serde_json::to_vec_pretty(&all)
+    write_agent_store_at(&path, &mut all)?;
+
+    // Central lifecycle seam; disabled/Observer devices are true no-ops.
+    super::fleet_visibility::retain_after_agent_store_write(app, &all);
+    Ok(())
+}
+
+/// Shared atomic persistence path, also exercised with isolated on-disk fixtures.
+fn write_agent_store_at(path: &Path, all: &mut [ManagedAgentRecord]) -> Result<(), String> {
+    let previous = load_agent_store_at(path)?;
+    super::avatar_selection::prepare_store(all, &previous);
+    let payload = serde_json::to_vec_pretty(all)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
 
     // `managed-agents.json` carries plaintext agent nsecs in the keyringless
     // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
     // keyring-backed case (it is the user's own agent store) and closes the
     // umask window a post-write `chmod` would leave open.
-    atomic_write_json_restricted(&path, &payload)?;
+    atomic_write_json_restricted(path, &payload)?;
 
-    // Central lifecycle seam; disabled/Observer devices are true no-ops.
-    super::fleet_visibility::retain_after_agent_store_write(app, &all);
     Ok(())
 }
 

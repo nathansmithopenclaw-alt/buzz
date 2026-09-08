@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizations() {
+fn refresh_builtin_agent_avatars_preserves_all_existing_choices() {
     use sha2::{Digest as _, Sha256};
 
     let dir = tempfile::tempdir().unwrap();
@@ -25,6 +25,8 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         },
     ];
     let definition = crate::managed_agents::AgentDefinition {
+        avatar_selection: None,
+
         description: None,
         id: "builtin:fizz".to_string(),
         display_name: "Fizz".to_string(),
@@ -113,35 +115,7 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
 
     let migrated: Vec<serde_json::Value> =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let new_fizz = crate::managed_agents::built_in_persona_avatar_url("builtin:fizz").unwrap();
-    assert_eq!(migrated[0]["avatar_url"], new_fizz);
-    assert_eq!(migrated[0]["updated_at"], "after");
-    assert_eq!(migrated[0]["future_definition_field"], "preserved");
-    let migrated_definition: crate::managed_agents::ManagedAgentRecord =
-        serde_json::from_value(migrated[0].clone()).unwrap();
-    let new_persona_version = crate::managed_agents::persona_events::persona_content_hash(
-        &crate::managed_agents::persona_events::persona_event_content(
-            &migrated_definition.to_definition_view().unwrap(),
-        ),
-    );
-    assert_ne!(new_persona_version, old_persona_version);
-    assert_eq!(migrated[1]["avatar_url"], new_fizz);
-    assert_eq!(migrated[1]["updated_at"], "after");
-    assert_eq!(migrated[1]["persona_source_version"], new_persona_version);
-    assert_eq!(migrated[1]["future_instance_field"], "preserved");
-    assert_eq!(migrated[2]["avatar_url"], new_fizz);
-    assert_eq!(migrated[2]["updated_at"], "after");
-    assert_eq!(
-        migrated[2]["persona_source_version"],
-        "genuinely-drifted-version"
-    );
-    assert_eq!(
-        migrated[3]["avatar_url"],
-        "data:image/png;base64,user-customized"
-    );
-    assert_eq!(migrated[3]["updated_at"], "before");
-    assert_eq!(migrated[4]["avatar_url"], old_fizz);
-    assert_eq!(migrated[4]["updated_at"], "before");
+    assert_eq!(serde_json::Value::Array(migrated), records);
 
     let once = std::fs::read(&path).unwrap();
     refresh_builtin_agent_avatars_in_file(&path, &legacy_avatars, "later");
@@ -163,7 +137,7 @@ fn current_builtin_agent_avatars_do_not_match_legacy_hashes() {
 }
 
 #[test]
-fn refresh_builtin_agent_avatars_updates_versions_without_stored_definitions() {
+fn refresh_builtin_agent_avatars_preserves_instances_without_stored_definitions() {
     use sha2::{Digest as _, Sha256};
 
     let dir = tempfile::tempdir().unwrap();
@@ -206,25 +180,11 @@ fn refresh_builtin_agent_avatars_updates_versions_without_stored_definitions() {
 
     let migrated: Vec<serde_json::Value> =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let current_definition =
-        crate::managed_agents::built_in_persona_definition("builtin:fizz", "after").unwrap();
-    let current_version = crate::managed_agents::persona_events::persona_content_hash(
-        &crate::managed_agents::persona_events::persona_event_content(&current_definition),
-    );
-    let new_fizz = crate::managed_agents::built_in_persona_avatar_url("builtin:fizz").unwrap();
-    assert_eq!(migrated[0]["avatar_url"], new_fizz);
-    assert_eq!(migrated[0]["persona_source_version"], current_version);
-    assert_eq!(migrated[0]["updated_at"], "after");
-    assert_eq!(migrated[1]["avatar_url"], new_fizz);
-    assert_eq!(
-        migrated[1]["persona_source_version"],
-        "genuinely-drifted-version"
-    );
-    assert_eq!(migrated[1]["updated_at"], "after");
+    assert_eq!(serde_json::Value::Array(migrated), records);
 }
 
 #[test]
-fn refresh_builtin_agent_avatars_updates_uploaded_media_urls() {
+fn refresh_builtin_agent_avatars_preserves_uploaded_media_urls() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("managed-agents.json");
     let media_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -279,23 +239,5 @@ fn refresh_builtin_agent_avatars_updates_uploaded_media_urls() {
 
     let migrated: Vec<serde_json::Value> =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let current_definition =
-        crate::managed_agents::built_in_persona_definition("builtin:fizz", "after").unwrap();
-    let current_version = crate::managed_agents::persona_events::persona_content_hash(
-        &crate::managed_agents::persona_events::persona_event_content(&current_definition),
-    );
-    let new_fizz = crate::managed_agents::built_in_persona_avatar_url("builtin:fizz").unwrap();
-    assert_eq!(migrated[0]["avatar_url"], new_fizz);
-    assert_eq!(migrated[0]["persona_source_version"], current_version);
-    assert_eq!(migrated[0]["updated_at"], "after");
-    assert_eq!(migrated[1]["avatar_url"], new_fizz);
-    assert_eq!(
-        migrated[1]["persona_source_version"],
-        "genuinely-drifted-version"
-    );
-    assert_eq!(migrated[1]["updated_at"], "after");
-    assert_eq!(migrated[2]["avatar_url"], custom_url);
-    assert_eq!(migrated[2]["updated_at"], "before");
-    assert_eq!(migrated[3]["avatar_url"], embedded_hash_url);
-    assert_eq!(migrated[3]["updated_at"], "before");
+    assert_eq!(serde_json::Value::Array(migrated), records);
 }

@@ -276,6 +276,22 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
             if outcome == InboundOutcome::Skipped {
                 return Ok(None);
             }
+            let saved = load_personas(&app)?;
+            if let Some(persona) = saved.iter().find(|p| persona_d_tag(p) == d_tag) {
+                let received: serde_json::Value =
+                    serde_json::from_str(&inbound_retained_event.content)
+                        .map_err(|e| e.to_string())?;
+                let selected =
+                    serde_json::to_value(&persona.avatar_selection).map_err(|e| e.to_string())?;
+                if persona
+                    .avatar_selection
+                    .as_ref()
+                    .is_some_and(|s| s.revision > 0)
+                    && received.get("avatar_selection") != Some(&selected)
+                {
+                    super::retain_persona_pending_at(&scope, persona)?;
+                }
+            }
             // A persona edit changes every shared catalog head it is a member
             // of. Refresh those heads on THIS device so the projection tracks
             // the inbound edit — matching the local `update_persona` path.
@@ -395,6 +411,25 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
             save_managed_agents(&app, &agents)?;
             let outcome = retain_inbound_event(&conn, &inbound_retained_event)?;
             debug_assert_eq!(outcome, InboundOutcome::Applied);
+            if let Some(record) = agents.iter().find(|r| r.pubkey == d_tag) {
+                let received: serde_json::Value =
+                    serde_json::from_str(&inbound_retained_event.content)
+                        .map_err(|e| e.to_string())?;
+                let selected =
+                    serde_json::to_value(&record.avatar_selection).map_err(|e| e.to_string())?;
+                if record
+                    .avatar_selection
+                    .as_ref()
+                    .is_some_and(|s| s.revision > 0)
+                    && received.get("avatar_selection") != Some(&selected)
+                {
+                    crate::managed_agents::reconcile::retain_agent_record(
+                        &conn,
+                        &scope.owner_keys,
+                        record,
+                    )?;
+                }
+            }
         }
         _ => unreachable!("kind gated above"),
     }
@@ -686,8 +721,14 @@ fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefi
         .find(|record| persona_d_tag(record) == d_tag)
     {
         Some(local) => {
+            let mut next = inbound.clone().into_agent_record();
+            crate::managed_agents::avatar_selection::preserve_selection(
+                &mut next,
+                &local.clone().into_agent_record(),
+            );
+            local.avatar_url = next.avatar_url;
+            local.avatar_selection = next.avatar_selection;
             local.display_name = inbound.display_name;
-            local.avatar_url = inbound.avatar_url;
             local.description = inbound.description;
             local.system_prompt = inbound.system_prompt;
             local.runtime = inbound.runtime;
@@ -727,6 +768,11 @@ fn apply_inbound_managed_agent(
     if let Some(local) = agents.iter_mut().find(|record| record.pubkey == d_tag) {
         let previous_mode = local.respond_to;
         let previous_allowlist = local.respond_to_allowlist.clone();
+        let mut next = local.clone();
+        next.avatar_selection = inbound.avatar_selection;
+        crate::managed_agents::avatar_selection::preserve_selection(&mut next, local);
+        local.avatar_selection = next.avatar_selection;
+        local.avatar_url = next.avatar_url;
         local.name = inbound.name;
         // Mirror of the slimmed writer (agent_event_content): a
         // definition-linked event omits the definition quad because those

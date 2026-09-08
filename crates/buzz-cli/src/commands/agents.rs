@@ -6,9 +6,8 @@ use serde_json::json;
 use std::collections::HashMap;
 
 use crate::agent_management::{
-    build_apply_create, build_apply_global_config, build_apply_update, build_create,
-    build_set_avatar, build_update, parse_env_vars, CreateAgentDraft, GlobalAgentConfigDraft,
-    UpdateAgentDraft,
+    build_apply_create, build_apply_global_config, build_apply_update, build_create, build_update,
+    parse_env_vars, CreateAgentDraft, GlobalAgentConfigDraft, UpdateAgentDraft,
 };
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -26,13 +25,24 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             println!("{nsec}");
             Ok(())
         }
-        AgentsCmd::SetAvatar { pubkey, url } => {
+        AgentsCmd::SetAvatar {
+            pubkey,
+            url,
+            clear: _,
+            scope,
+        } => {
             let owner = require_owner(client)?;
             let target = PublicKey::parse(pubkey.trim())
                 .map_err(|e| CliError::Usage(format!("invalid agent pubkey: {e}")))?;
             let secrets = read_desktop_secret_blob()?;
             let owner_keys = desktop_owner_keys_from_secrets(&secrets, &owner)?;
-            let built = build_set_avatar(&owner_keys, client.keys(), &target, url)?;
+            let built = crate::agent_management::build_avatar_edit(
+                &owner_keys,
+                client.keys(),
+                &target,
+                url,
+                &scope,
+            )?;
             let request_id = built.request_id.clone();
             let target_pubkey = built.target_pubkey.clone();
             let avatar_url = built.url.clone();
@@ -46,6 +56,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                 obj.insert("request_id".into(), request_id.into());
                 obj.insert("target_pubkey".into(), target_pubkey.into());
                 obj.insert("avatar_url".into(), avatar_url.into());
+                obj.insert("scope".into(), scope.clone().into());
                 obj.insert("applied".into(), true.into());
                 obj.insert("persona_id".into(), receipt["personaId"].clone());
                 obj.insert("instance_count".into(), receipt["instanceCount"].clone());
@@ -64,9 +75,9 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     obj.insert("reconcile_skipped".into(), reason.clone());
                 }
                 let message = if receipt.get("reconcileSkipped").is_some() {
-                    "Buzz Desktop persisted the avatar to the definition and linked instances, skipped automatic reconciliation because Agent-managed profiles is enabled, and published agent-signed profile updates instead."
+                    "Buzz Desktop saved the picture edit in the requested scope and published agent-signed profile updates."
                 } else {
-                    "Buzz Desktop persisted the avatar to the definition and linked instances, then completed immediate profile reconciliation."
+                    "Buzz Desktop saved the picture edit in the requested scope and completed immediate profile reconciliation."
                 };
                 obj.insert("message".into(), message.into());
             }

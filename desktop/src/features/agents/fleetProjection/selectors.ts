@@ -1,3 +1,4 @@
+import { resolveSelectedAvatar } from "@/shared/lib/selectedAvatar";
 import type { RelayAgent, UserProfileSummary } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type {
@@ -43,8 +44,11 @@ export function presentFleetProjectionAgent(
       profileName ||
       relayAgent?.name.trim() ||
       agent.name,
-    avatarUrl:
-      agent.personaAvatarUrl?.trim() || profile?.avatarUrl?.trim() || null,
+    avatarUrl: resolveSelectedAvatar(
+      agent.selectedAvatarUrl,
+      agent.personaAvatarUrl,
+      profile?.avatarUrl,
+    ),
   };
 }
 

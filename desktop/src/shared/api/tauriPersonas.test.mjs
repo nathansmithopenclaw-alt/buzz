@@ -37,3 +37,26 @@ test("fromRawPersona maps authored description and defaults absence to null", ()
   );
   assert.equal(fromRawPersona(rawPersona()).description, null);
 });
+
+test("settings payload requires explicit avatar intent", async () => {
+  const { updatePersonaPayload } = await import("./tauriPersonas.ts");
+  const input = {
+    id: "p",
+    displayName: "Renamed",
+    systemPrompt: "test",
+    avatarUrl: "stale.png",
+  };
+  const unchanged = updatePersonaPayload(input);
+  assert.equal(unchanged.avatarEdit, undefined);
+  assert.equal("avatarUrl" in unchanged, false);
+  for (const edit of [
+    { action: "keep" },
+    { action: "remove" },
+    { action: "set", url: "https://example.com/new.png" },
+  ]) {
+    assert.deepEqual(
+      updatePersonaPayload({ ...input, avatarEdit: edit }).avatarEdit,
+      edit,
+    );
+  }
+});

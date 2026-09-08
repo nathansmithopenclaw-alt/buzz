@@ -735,6 +735,13 @@ fn built_in_persona_version_update(
 }
 
 fn replace_builtin_avatar(record: &mut serde_json::Value, persona_id: &str, now: &str) -> bool {
+    // Stored stock artwork is still a selection. Catalogue changes may fill
+    // an unset identity, but must never replace or resurrect an existing one.
+    if record.get("avatar_url").is_some_and(|v| !v.is_null())
+        || record.get("avatar_selection").is_some()
+    {
+        return false;
+    }
     let Some(replacement) = crate::managed_agents::built_in_persona_avatar_url(persona_id) else {
         return false;
     };

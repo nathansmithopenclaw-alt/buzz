@@ -10,6 +10,7 @@ import {
 export function AgentInstanceAvatarField({
   previewAvatarUrl,
   previewLabel,
+  avatarSyncPending,
   setAvatarUrl,
   setIsAvatarUploadPending,
   isSaving,
@@ -18,6 +19,7 @@ export function AgentInstanceAvatarField({
 }: {
   previewAvatarUrl: string | null;
   previewLabel: string;
+  avatarSyncPending?: boolean;
   setAvatarUrl: (value: string) => void;
   setIsAvatarUploadPending: (pending: boolean) => void;
   isSaving: boolean;
@@ -26,17 +28,23 @@ export function AgentInstanceAvatarField({
 }) {
   return (
     <>
-      {/* Avatar is definition-level identity. hideEditControl suppresses
-              the internal pencil badge; the CTA below is the only edit path. */}
+      {/* The picture editor changes this instance; the secondary action edits the shared definition. */}
       <div className="flex flex-col items-center gap-2">
         <AgentCreationPreview
           avatarUrl={previewAvatarUrl}
-          hideEditControl
           label={previewLabel}
           onClearAvatar={() => setAvatarUrl("")}
           onUploadPendingChange={setIsAvatarUploadPending}
           onSelectAvatar={setAvatarUrl}
         />
+        {avatarSyncPending && (
+          <p
+            role="status"
+            className="text-center text-xs text-muted-foreground"
+          >
+            Picture saved. Publication pending; Buzz will retry automatically.
+          </p>
+        )}
         {onEditLinkedPersona ? (
           <Button
             className="w-full"
@@ -49,11 +57,11 @@ export function AgentInstanceAvatarField({
             type="button"
             variant="outline"
           >
-            Edit avatar
+            Edit shared definition
           </Button>
         ) : (
           <p className="text-center text-xs text-muted-foreground">
-            Avatar is shared identity
+            Picture changes apply to this agent
           </p>
         )}
       </div>

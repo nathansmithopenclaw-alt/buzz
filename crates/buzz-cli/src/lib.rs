@@ -324,9 +324,15 @@ pub enum AgentsCmd {
     SetAvatar {
         /// Managed agent public key (hex or npub)
         pubkey: String,
-        /// HTTPS avatar URL
+        /// HTTPS avatar URL (or use --clear)
+        #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
+        url: Option<String>,
+        /// Explicitly remove the picture; background sync must not restore it
         #[arg(long)]
-        url: String,
+        clear: bool,
+        /// Apply to the definition and linked instances, or only this instance
+        #[arg(long, default_value = "definition", value_parser = ["definition", "instance"])]
+        scope: String,
     },
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
     DraftCreate {

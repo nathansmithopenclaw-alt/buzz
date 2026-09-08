@@ -71,6 +71,8 @@ pub async fn create_persona(
             None => Uuid::new_v4().to_string(),
         };
         let mut persona = AgentDefinition {
+            avatar_selection: None,
+
             id,
             display_name,
             avatar_url,

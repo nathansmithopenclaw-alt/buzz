@@ -366,6 +366,9 @@ mod tests {
     /// pubkey/nsec pair matters here.
     fn record_with_keys(pubkey: String, private_key_nsec: String) -> ManagedAgentRecord {
         ManagedAgentRecord {
+            avatar_selection: None,
+            avatar_synced: Default::default(),
+
             description: None,
             pubkey,
             name: "Locked Test".to_string(),

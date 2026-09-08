@@ -36,6 +36,9 @@ use super::{ManagedAgentRecord, RespondTo};
 /// absent and must stay that way.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedAgentEventContent {
+    /// Owner-signed avatar edit; absent on legacy events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_selection: Option<super::avatar_selection::AvatarSelection>,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona_id: Option<String>,
@@ -78,6 +81,7 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
     // definition-backed (B5 backfill).
     let definition_linked = record.persona_id.is_some();
     ManagedAgentEventContent {
+        avatar_selection: record.avatar_selection.clone(),
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
         system_prompt: if definition_linked {
@@ -164,6 +168,9 @@ mod tests {
 
     fn sample_agent() -> ManagedAgentRecord {
         ManagedAgentRecord {
+            avatar_selection: None,
+            avatar_synced: Default::default(),
+
             description: None,
             pubkey: "agentpubkeyhex".to_string(),
             name: "Test Agent".to_string(),

@@ -119,6 +119,8 @@ fn definition_from_snapshot(
         .then(|| behavior.respond_to.as_str().to_string());
 
     Ok(AgentDefinition {
+        avatar_selection: None,
+
         id: Uuid::new_v4().to_string(),
         display_name: member.profile.display_name.trim().to_string(),
         avatar_url: effective_avatar(member),
@@ -561,6 +563,9 @@ pub async fn confirm_team_snapshot_import(
 
         // Build the ManagedAgentRecord for this member.
         let record = ManagedAgentRecord {
+            avatar_selection: None,
+            avatar_synced: Default::default(),
+
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,

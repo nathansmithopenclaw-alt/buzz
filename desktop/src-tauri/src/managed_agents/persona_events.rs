@@ -76,6 +76,8 @@ pub struct PersonaEventContent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_selection: Option<super::avatar_selection::AvatarSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -237,6 +239,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         id: d_tag.clone(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
+        avatar_selection: content.avatar_selection,
         description: content.description,
         system_prompt: content.system_prompt.unwrap_or_default(),
         runtime: content.runtime,
@@ -511,6 +514,7 @@ pub fn persona_content_hash(content: &PersonaEventContent) -> String {
     use sha2::{Digest, Sha256};
     let hashed = PersonaEventContent {
         description: None,
+        avatar_selection: None,
         ..content.clone()
     };
     let json = serde_json::to_vec(&hashed).unwrap_or_default();
@@ -525,6 +529,7 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
     PersonaEventContent {
         display_name: record.display_name.clone(),
         avatar_url: record.avatar_url.clone(),
+        avatar_selection: record.avatar_selection.clone(),
         // Always Some — including for an empty prompt — so pre-revision
         // records serialize byte-identically and persona_content_hash is
         // stable across the upgrade (drift badges must not flip).

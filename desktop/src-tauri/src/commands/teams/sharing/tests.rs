@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 
 fn member(id: &str) -> AgentDefinition {
     AgentDefinition {
+        avatar_selection: None,
+
         id: id.to_string(),
         display_name: "One".to_string(),
         description: None,

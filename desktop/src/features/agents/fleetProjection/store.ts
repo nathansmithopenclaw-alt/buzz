@@ -51,7 +51,26 @@ type Version = {
   eventId: string;
 };
 
+type AvatarSelection = {
+  revision: number;
+  edit_id: string;
+  url: string | null;
+};
+
+function avatarSelection(value: unknown): AvatarSelection | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  return typeof v.revision === "number" &&
+    Number.isSafeInteger(v.revision) &&
+    v.revision >= 0 &&
+    typeof v.edit_id === "string" &&
+    (v.url === null || typeof v.url === "string")
+    ? (v as AvatarSelection)
+    : null;
+}
+
 type AgentHead = Version & {
+  avatarSelection: AvatarSelection | null;
   ownerPubkey: string;
   agentPubkey: string;
   name: string;
@@ -61,6 +80,7 @@ type AgentHead = Version & {
 };
 
 type PersonaHead = Version & {
+  avatarSelection: AvatarSelection | null;
   ownerPubkey: string;
   personaId: string;
   displayName: string;
@@ -182,6 +202,7 @@ function parseAgentHead(event: RelayEvent): AgentHead | null {
   return {
     ownerPubkey: normalizePubkey(event.pubkey),
     agentPubkey: normalizePubkey(agentPubkey),
+    avatarSelection: avatarSelection(content.avatar_selection),
     name,
     personaId,
     respondTo,
@@ -215,6 +236,7 @@ function parsePersonaHead(event: RelayEvent): PersonaHead | null {
       : null;
   if (!displayName) return null;
   return {
+    avatarSelection: avatarSelection(content.avatar_selection),
     ownerPubkey: normalizePubkey(event.pubkey),
     personaId,
     displayName,
@@ -475,9 +497,21 @@ function buildSnapshot(
                 coordinate(KIND_PERSONA, ownerPubkey, agent.personaId),
               )
             : null;
+          const selections = [
+            agent.avatarSelection,
+            persona?.avatarSelection,
+          ].filter((v): v is AvatarSelection => v != null);
+          selections.sort(
+            (a, b) =>
+              b.revision - a.revision ||
+              (b.edit_id > a.edit_id ? 1 : b.edit_id < a.edit_id ? -1 : 0),
+          );
           return {
             ownerPubkey,
             agentPubkey: agent.agentPubkey,
+            selectedAvatarUrl: selections.length
+              ? (selections[0].url ?? "")
+              : undefined,
             name: agent.name,
             personaId: agent.personaId,
             personaDisplayName: persona?.displayName ?? null,
@@ -622,6 +656,22 @@ export function createFleetProjectionCache() {
     if (tombstone && parsed.createdAt <= tombstone.createdAt) return false;
     const current = heads.get(key);
     if (!versionWins(parsed, current)) return false;
+    if (
+      current &&
+      "avatarSelection" in current &&
+      "avatarSelection" in parsed
+    ) {
+      const old = current.avatarSelection;
+      const next = parsed.avatarSelection;
+      if (
+        old &&
+        (!next ||
+          old.revision > next.revision ||
+          (old.revision === next.revision && old.edit_id >= next.edit_id))
+      ) {
+        parsed.avatarSelection = old;
+      }
+    }
     heads.set(key, parsed);
     return true;
   };

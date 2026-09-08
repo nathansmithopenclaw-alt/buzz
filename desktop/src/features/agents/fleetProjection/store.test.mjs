@@ -193,3 +193,32 @@ test("events from authors outside the membership scope are ignored", () => {
   cache.ingest(agentEvent());
   assert.deepEqual(cache.getSnapshot().owners, []);
 });
+
+test("projection retains removal across later settings snapshots and accepts a newer direct edit", () => {
+  const cache = createFleetProjectionCache();
+  cache.reset([OWNER], false);
+  const send = (createdAt, selection) =>
+    cache.ingest(
+      event({
+        kind: 30177,
+        createdAt,
+        tags: [["d", AGENT]],
+        content: {
+          name: "Renamed",
+          respond_to: "owner-only",
+          persona_id: PERSONA,
+          avatar_selection: selection,
+        },
+      }),
+    );
+  send(100, { revision: 10, edit_id: "a", url: null });
+  send(101, { revision: 9, edit_id: "z", url: "https://example.com/old.png" });
+  cache.finishLoading();
+  assert.equal(cache.getSnapshot().owners[0].agents[0].selectedAvatarUrl, "");
+  send(102, { revision: 11, edit_id: "b", url: "https://example.com/new.png" });
+  cache.finishLoading();
+  assert.equal(
+    cache.getSnapshot().owners[0].agents[0].selectedAvatarUrl,
+    "https://example.com/new.png",
+  );
+});

@@ -143,6 +143,7 @@ fn prepare_linked_profile_update(
             std::slice::from_ref(persona),
             record.agent_command_override.as_deref(),
         );
+        record.avatar_selection = persona.avatar_selection.clone();
         record.avatar_url = persona
             .avatar_url
             .clone()
@@ -572,7 +573,9 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let system_prompt = input.system_prompt.clone();
             validate_agent_definition_text(&display_name, &system_prompt)?;
             let description = normalize_description(input.description)?;
-            let avatar_url = trim_optional(input.avatar_url);
+            let avatar_edit = input
+                .avatar_edit
+                .unwrap_or(crate::managed_agents::avatar_selection::AvatarEdit::Keep);
             let runtime = trim_optional(input.runtime);
             let model = trim_optional(input.model);
             let provider = trim_optional(input.provider);
@@ -582,6 +585,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 .managed_agents_store_lock
                 .lock()
                 .map_err(|error| error.to_string())?;
+            let mut records = load_managed_agents(&app)?;
             let mut personas = load_personas(&app)?;
             pending::project_active_persona_sharing(&app, &state, &mut personas);
             let persona = personas
@@ -590,7 +594,23 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 .ok_or_else(|| format!("agent {} not found", input.id))?;
 
             // Track what changed so we can propagate to linked agent records.
-            let avatar_changed = persona.avatar_url != avatar_url;
+            let next_selection = crate::managed_agents::avatar_selection::AvatarSelection::edit(
+                records
+                    .iter()
+                    .filter(|r| r.persona_id.as_deref() == Some(persona.id.as_str()))
+                    .filter_map(|r| r.avatar_selection.as_ref())
+                    .chain(persona.avatar_selection.as_ref())
+                    .max_by_key(|s| (s.revision, &s.edit_id))
+                    .filter(|_| {
+                        !matches!(
+                            avatar_edit,
+                            crate::managed_agents::avatar_selection::AvatarEdit::Keep
+                        )
+                    })
+                    .or(persona.avatar_selection.as_ref()),
+                avatar_edit,
+            )?;
+            let avatar_changed = next_selection != persona.avatar_selection;
             let name_changed = persona.display_name != display_name;
             let old_display_name = persona.display_name.clone();
             // The kind:0 `about` is the authored description, so a
@@ -602,7 +622,12 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let about_changed = old_about != new_about;
 
             persona.display_name = display_name;
-            persona.avatar_url = avatar_url;
+            if avatar_changed {
+                persona.avatar_selection = next_selection;
+                if let Some(selection) = &persona.avatar_selection {
+                    persona.avatar_url = selection.stored_url();
+                }
+            }
             persona.description = description;
             persona.system_prompt = system_prompt;
             persona.runtime = runtime;
@@ -630,10 +655,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 let mut preview_records = load_managed_agents(&app)?;
                 apply_linked_instance_behavior_patch(&mut preview_records, &result.id, patch)?;
             }
-            save_personas(&app, &personas)?;
-
-            let retained = retain(&app, &state, &result)?;
-            try_regenerate_nest(&app);
+            let mut retained_instances = std::collections::HashSet::new();
 
             // Propagate identity fields and any explicit existing-agent
             // behavior patch to linked records, then collect relay profile sync
@@ -643,7 +665,6 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 || about_changed
                 || linked_instance_behavior_patch.is_some()
             {
-                let mut records = load_managed_agents(&app)?;
                 let mut params: ProfileSyncParams = Vec::new();
                 let mut agents_modified = false;
                 let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
@@ -706,7 +727,6 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 }
 
                 if agents_modified {
-                    save_managed_agents(&app, &records)?;
                     // Keep retained kind:30177 identity records in lockstep with
                     // the rename (#2423): `record.name` is part of the published
                     // identity projection, so skipping this strands the relay on
@@ -714,7 +734,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                     // Avatar-only edits are excluded — the avatar is not in the
                     // projection, so retaining would be a guaranteed no-op.
                     for record in records.iter().filter(|r| renamed.contains(&r.pubkey)) {
-                        crate::commands::agents::retain_managed_agent_pending(&app, &state, record);
+                        retained_instances.insert(record.pubkey.clone());
                     }
                     // Access policy is part of the kind:30177 instance
                     // projection. Retain the changed instances immediately so
@@ -723,7 +743,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                         .iter()
                         .filter(|r| behavior_changed.contains(&r.pubkey))
                     {
-                        crate::commands::agents::retain_managed_agent_pending(&app, &state, record);
+                        retained_instances.insert(record.pubkey.clone());
                     }
                 }
 
@@ -732,6 +752,25 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 Vec::new()
             };
 
+            let definitions: Vec<_> = personas
+                .into_iter()
+                .map(AgentDefinition::into_agent_record)
+                .collect();
+            crate::managed_agents::storage::save_agent_definitions_and_instances(
+                &app,
+                &definitions,
+                &records,
+            )?;
+            let retained = retain(&app, &state, &result)?;
+            if avatar_changed || !retained_instances.is_empty() {
+                for record in records.iter().filter(|r| {
+                    retained_instances.contains(&r.pubkey)
+                        || (avatar_changed && r.persona_id.as_deref() == Some(result.id.as_str()))
+                }) {
+                    crate::commands::agents::retain_managed_agent_pending(&app, &state, record);
+                }
+            }
+            try_regenerate_nest(&app);
             Ok((result, retained, sync_params))
         }
     })

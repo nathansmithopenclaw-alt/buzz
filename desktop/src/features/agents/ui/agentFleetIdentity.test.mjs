@@ -13,7 +13,7 @@ const agent = {
 };
 const persona = { avatarUrl: "definition.png", displayName: "Definition" };
 
-test("fleet identity prefers a real kind-0 profile", () => {
+test("fleet identity preserves selected picture while using relay display name", () => {
   assert.deepEqual(
     resolveFleetAgentIdentity({
       agent,
@@ -24,11 +24,11 @@ test("fleet identity prefers a real kind-0 profile", () => {
         hasProfileEvent: true,
       },
     }),
-    { avatarUrl: "profile.png", displayName: "Profile" },
+    { avatarUrl: "pinned.png", displayName: "Profile" },
   );
 });
 
-test("fleet identity falls back to the definition before pinned instance identity", () => {
+test("fleet identity preserves instance picture ahead of the definition", () => {
   assert.deepEqual(
     resolveFleetAgentIdentity({
       agent,
@@ -39,7 +39,7 @@ test("fleet identity falls back to the definition before pinned instance identit
         hasProfileEvent: false,
       },
     }),
-    { avatarUrl: "definition.png", displayName: "Definition" },
+    { avatarUrl: "pinned.png", displayName: "Definition" },
   );
 });
 
@@ -89,3 +89,19 @@ test("fleet runtime names the inherited default honestly", () => {
     "Default runtime",
   );
 });
+
+for (const [title, overrides, expected] of [
+  ["explicit instance removal blocks every fallback", { avatarUrl: "" }, null],
+  ["unset instance uses definition", { avatarUrl: null }, "definition.png"],
+]) {
+  test(title, () => {
+    assert.equal(
+      resolveFleetAgentIdentity({
+        agent: { ...agent, ...overrides },
+        persona,
+        profile: { avatarUrl: "stale.png", hasProfileEvent: true },
+      }).avatarUrl,
+      expected,
+    );
+  });
+}
