@@ -1,3 +1,4 @@
+import { dailyTimesToCrons } from "./summaryDailyTimes";
 import {
   createWorkflow,
   deleteWorkflow,
@@ -13,12 +14,21 @@ import type { TriggerConfig } from "@/features/workflows/ui/workflowFormTypes";
 
 export type SummarySchedule = Pick<TriggerConfig, "cron" | "interval"> & {
   on: "schedule";
+  dailyTimes?: string[];
 };
 
 export function summaryScheduleError(
   schedule: SummarySchedule | null,
 ): string | null {
   if (!schedule) return null;
+  if (schedule.dailyTimes) {
+    try {
+      dailyTimesToCrons(schedule.dailyTimes);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : "Invalid daily times";
+    }
+  }
   if (
     schedule.on !== "schedule" ||
     Boolean(schedule.cron) === Boolean(schedule.interval)

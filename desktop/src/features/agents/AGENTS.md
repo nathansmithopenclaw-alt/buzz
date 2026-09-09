@@ -548,3 +548,9 @@ only, not tool or harness compatibility. Existing connections remain saved when
 unavailable. Connection edits apply on next start; removal must not silently
 substitute a different server. Secrets are not forwarded when editing an address
 without re-entering or explicitly clearing the key.
+
+The Summary recipient picker reuses `ManagedAgentPickerDialog` through its explicit
+people-directory input. That input replaces the agent roster; it must never merge
+people and managed agents. Membership and identity classification come from the
+relay, including incomplete-directory status. This changes picker reuse only;
+agent runtime configuration rules are unchanged.

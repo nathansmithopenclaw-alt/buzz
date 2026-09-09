@@ -74,6 +74,21 @@ impl From<ActionSinkError> for crate::WorkflowError {
 /// Returns `Pin<Box<dyn Future>>` for dyn-compatibility — required because
 /// `WorkflowEngine` stores `Arc<dyn ActionSink>`.
 pub trait ActionSink: Send + Sync {
+    /// Execute a literal named Summary on behalf of the stored workflow owner.
+    fn run_summary(
+        &self,
+        _community_id: CommunityId,
+        _channel_id: Uuid,
+        _owner: &str,
+        _summary_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, ActionSinkError>> + Send + '_>> {
+        Box::pin(async {
+            Err(ActionSinkError::InvalidInput(
+                "Summary execution is unavailable".into(),
+            ))
+        })
+    }
+
     /// Post a message to a channel on behalf of a workflow owner.
     ///
     /// - `community_id`: the server-resolved community that owns the workflow

@@ -376,8 +376,11 @@ pub async fn cmd_watermark_set(
 pub async fn dispatch(cmd: crate::BriefsCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::BriefsCmd;
     match cmd {
+        BriefsCmd::Run(cmd) => crate::commands::summary_run::dispatch(cmd, client).await,
         BriefsCmd::Read {
             owner,
+            summary,
+            run,
             channel,
             since,
             until,
@@ -394,6 +397,14 @@ pub async fn dispatch(cmd: crate::BriefsCmd, client: &BuzzClient) -> Result<(), 
             }
             let mut filter =
                 serde_json::json!({"summary_owner": owner, "#h": [channel], "limit": limit});
+            if let (Some(summary), Some(run)) = (&summary, &run) {
+                if !buzz_core::summary::valid_summary_id(summary) {
+                    return Err(CliError::Usage("Invalid Summary identity".into()));
+                }
+                validate_uuid(run)?;
+                filter["summary_id"] = summary.clone().into();
+                filter["summary_run"] = run.clone().into();
+            }
             if let Some(value) = since {
                 filter["since"] = value.into();
             }
@@ -409,7 +420,7 @@ pub async fn dispatch(cmd: crate::BriefsCmd, client: &BuzzClient) -> Result<(), 
             if response
                 .get("summary_read")
                 .and_then(serde_json::Value::as_u64)
-                != Some(1)
+                != Some(if summary.is_some() { 2 } else { 1 })
             {
                 return Err(CliError::Other(
                     "This relay does not support read-only Summary delegation".into(),

@@ -453,3 +453,36 @@ test("schedule controls retain local times, selected weekdays and manual-only ch
   assert.ok(screen.getByText(/America\/New_York · Paste all 5 fields/));
   assert.equal(screen.queryByText(/UTC · Paste/), null);
 });
+
+test("people picker replaces the agent directory and includes offline people", () => {
+  let confirmed;
+  function Picker() {
+    const [selected, setSelected] = React.useState([]);
+    return React.createElement(ManagedAgentPickerDialog, {
+      open: true,
+      onOpenChange() {},
+      title: "Summary recipients",
+      description: "Select people",
+      selected,
+      onSelectionChange: setSelected,
+      onConfirm() {
+        confirmed = selected;
+      },
+      directory: {
+        people: [{ pubkey: "cc", name: "Offline Alex", avatarUrl: null }],
+        loading: false,
+        error: false,
+        retry() {},
+      },
+    });
+  }
+  render(wrap(React.createElement(Picker)));
+  assert.equal(screen.queryByRole("checkbox", { name: "Grok" }), null);
+  assert.equal(screen.queryByRole("checkbox", { name: "Nectar" }), null);
+  fireEvent.change(screen.getByRole("textbox", { name: "Search people" }), {
+    target: { value: "Alex" },
+  });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Offline Alex" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  assert.deepEqual(confirmed, ["cc"]);
+});

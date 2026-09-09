@@ -1004,7 +1004,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 50);
+        assert_eq!(migrations.len(), 51);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -2202,6 +2202,9 @@ mod postgres_tests {
         expected_fences.insert("relay_event_journal".to_owned());
         expected_fences.insert("relay_journal_checkpoints".to_owned());
         expected_fences.insert("relay_journal_state".to_owned());
+        // 0051 adds durable Summary execution, observed reads and independent cursors.
+        expected_fences
+            .extend(["summary_runs", "summary_run_reads", "summary_cursors"].map(str::to_owned));
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"

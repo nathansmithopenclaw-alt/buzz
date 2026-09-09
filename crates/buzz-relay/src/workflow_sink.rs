@@ -202,8 +202,10 @@ impl RelayActionSink {
     }
 }
 
-impl ActionSink for RelayActionSink {
-    fn send_message(
+impl RelayActionSink {
+    // Matches ActionSink::send_message plus the validated exact Summary reporter.
+    #[allow(clippy::too_many_arguments)]
+    fn send_message_bound(
         &self,
         community_id: CommunityId,
         channel_id: &str,
@@ -211,6 +213,7 @@ impl ActionSink for RelayActionSink {
         authored_text: &str,
         author_pubkey: &str,
         reply_to: Option<&str>,
+        summary_reporter: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
@@ -388,6 +391,17 @@ impl ActionSink for RelayActionSink {
                 &author_pubkey_hex,
             )?;
 
+            if let Some(reporter) = summary_reporter {
+                tags.push(
+                    Tag::parse(["p", &reporter])
+                        .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
+                );
+                tags.push(
+                    Tag::parse(["buzz:workflow-mention", &reporter])
+                        .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
+                );
+            }
+
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
                 .tags(tags)
@@ -471,6 +485,108 @@ impl ActionSink for RelayActionSink {
             }
 
             Ok(event_id_hex)
+        })
+    }
+}
+
+impl ActionSink for RelayActionSink {
+    fn send_message(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        text: &str,
+        authored_text: &str,
+        author_pubkey: &str,
+        reply_to: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        self.send_message_bound(
+            community_id,
+            channel_id,
+            text,
+            authored_text,
+            author_pubkey,
+            reply_to,
+            None,
+        )
+    }
+
+    fn run_summary(
+        &self,
+        community: CommunityId,
+        channel: Uuid,
+        owner: &str,
+        id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, ActionSinkError>> + Send + '_>> {
+        let owner = owner.to_owned();
+        let id = id.to_owned();
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay shutting down".into()))?;
+            let (event, config) = crate::summary::definition(&state, community, &owner, &id)
+                .await
+                .map_err(ActionSinkError::InvalidInput)?;
+            if config.paused || config.archived || !config.read_delegation {
+                return Ok(
+                    serde_json::json!({"skipped":true,"reason":"Summary paused or archived"}),
+                );
+            }
+            let room = state
+                .db
+                .get_channel_for_event_write(community, channel)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            let members = state
+                .db
+                .get_members_for_event_write(community, channel)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            let keys: std::collections::BTreeSet<String> =
+                members.iter().map(|m| hex::encode(&m.pubkey)).collect();
+            if room.channel_type != "dm"
+                || keys != [owner.clone(), config.reporter_pubkey.clone()].into()
+            {
+                return Err(ActionSinkError::InvalidInput(
+                    "Summary run must be delivered to its private owner-agent DM".into(),
+                ));
+            }
+            let people = crate::summary::audience(&state, community, &owner, &config)
+                .await
+                .map_err(ActionSinkError::InvalidInput)?;
+            crate::summary::source_access(&state, community, &owner, &config, &people)
+                .await
+                .map_err(ActionSinkError::InvalidInput)?;
+            let (run, created) = state
+                .db
+                .claim_summary_run(
+                    community,
+                    &hex::decode(&owner)
+                        .map_err(|e| ActionSinkError::InvalidInput(e.to_string()))?,
+                    &id,
+                    event.event.id.as_bytes(),
+                    &hex::decode(&config.reporter_pubkey)
+                        .map_err(|e| ActionSinkError::InvalidInput(e.to_string()))?,
+                    &people,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if !created {
+                return Ok(serde_json::json!({"run_id":run.run_id,"created":false}));
+            }
+            let prompt=format!("Create the named Summary for owner {owner}, summary {id}, run {}. Read the saved definition and this run's cursors with buzz briefs run status --owner {owner} --summary {id} --run {}. Read only selected sources using buzz briefs read --owner {owner} --summary {id} --run {} --channel <id>. Compose a factual report without inventing work, then use buzz briefs run publish for this exact run. If blocked or approval is needed, record it with buzz briefs run progress using this owner, summary and run plus --state failed or --state needs_approval and --message. Resume with --state running after approval. Do not use generic report publishing or write watermarks separately.",run.run_id,run.run_id,run.run_id);
+            let event_id = self
+                .send_message_bound(
+                    community,
+                    &channel.to_string(),
+                    &prompt,
+                    &prompt,
+                    &owner,
+                    None,
+                    Some(config.reporter_pubkey),
+                )
+                .await?;
+            Ok(serde_json::json!({"run_id":run.run_id,"created":true,"event_id":event_id}))
         })
     }
 

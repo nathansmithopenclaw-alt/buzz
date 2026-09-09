@@ -36,7 +36,14 @@ export function ManagedAgentPickerDialog({
   selectAllButton = false,
   onBack,
   children,
+  directory,
 }: {
+  directory?: {
+    people: { pubkey: string; name: string; avatarUrl: string | null }[];
+    loading: boolean;
+    error: boolean;
+    retry: () => void;
+  };
   confirmLabel?: string;
   confirmDisabled?: boolean;
   selectAllButton?: boolean;
@@ -61,9 +68,13 @@ export function ManagedAgentPickerDialog({
     if (open) setSearch("");
   }, [open]);
   const agents = [
-    ...extraAgents,
-    ...(query.data ?? []).filter((a) => a.pubkey),
+    ...(directory
+      ? directory.people
+      : [...extraAgents, ...(query.data ?? []).filter((a) => a.pubkey)]),
   ].sort((a, b) => a.name.localeCompare(b.name));
+  const loading = directory?.loading ?? query.isLoading;
+  const failed = directory?.error ?? query.isError;
+  const noun = directory ? "people" : "agents";
   const visible = agents.filter((a) =>
     a.name.toLowerCase().includes(search.trim().toLowerCase()),
   );
@@ -89,7 +100,7 @@ export function ManagedAgentPickerDialog({
               className="h-4 w-4 shrink-0 text-muted-foreground/55"
             />
             <input
-              aria-label="Search agents"
+              aria-label={`Search ${noun}`}
               autoCapitalize="none"
               autoCorrect="off"
               className={MODAL_SEARCH_INPUT_CLASS}
@@ -97,7 +108,7 @@ export function ManagedAgentPickerDialog({
               id={`${testId}-search`}
               disabled={saving}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search agents"
+              placeholder={`Search ${noun}`}
               spellCheck={false}
               value={search}
             />
@@ -114,18 +125,18 @@ export function ManagedAgentPickerDialog({
                   disabled={saving}
                   onClick={() => onSelectionChange(agents.map((a) => a.pubkey))}
                 >
-                  Select all agents
+                  Select all {noun}
                 </Button>
               ) : (
                 <label
                   className="flex-1 cursor-pointer text-sm font-medium"
                   htmlFor={`${testId}-all`}
                 >
-                  All current agents
+                  All current {noun}
                 </label>
               )}
               <Checkbox
-                aria-label="All current agents"
+                aria-label={`All current ${noun}`}
                 id={`${testId}-all`}
                 data-testid={`${testId}-all`}
                 disabled={saving}
@@ -179,19 +190,26 @@ export function ManagedAgentPickerDialog({
             ))}
             {!visible.length ? (
               <p className="px-3 py-3 text-sm text-muted-foreground">
-                {query.isLoading
-                  ? "Loading agents…"
+                {loading
+                  ? `Loading ${noun}…`
                   : search.trim()
-                    ? "No matching agents."
-                    : "No managed agents yet."}
+                    ? `No matching ${noun}.`
+                    : directory
+                      ? "No people available."
+                      : "No managed agents yet."}
               </p>
             ) : null}
           </div>
         </div>
-        {query.isError ? (
+        {failed ? (
           <p role="alert" className="text-sm text-destructive">
-            Could not load agents.{" "}
-            <Button variant="link" onClick={() => void query.refetch()}>
+            Could not load {noun}.{" "}
+            <Button
+              variant="link"
+              onClick={() =>
+                directory ? directory.retry() : void query.refetch()
+              }
+            >
               Retry
             </Button>
           </p>
@@ -221,8 +239,8 @@ export function ManagedAgentPickerDialog({
             disabled={
               saving ||
               confirmDisabled ||
-              query.isLoading ||
-              query.isError ||
+              loading ||
+              failed ||
               (!multiple && selected.length !== 1)
             }
             onClick={onConfirm}

@@ -52,7 +52,49 @@ async fn authorize(
     owner: &[u8],
     reporter: &str,
     channel: Uuid,
+    named: Option<(&str, Uuid)>,
 ) -> Result<Vec<u8>, ReadError> {
+    if let Some((id, run_id)) = named {
+        let owner_hex = hex::encode(owner);
+        let (event, config) = crate::summary::definition(state, tenant.community(), &owner_hex, id)
+            .await
+            .map_err(|_| denied())?;
+        if config.archived
+            || !config.read_delegation
+            || config.reporter_pubkey != reporter
+            || !config
+                .channels
+                .iter()
+                .chain(&config.dms)
+                .any(|id| *id == channel)
+        {
+            return Err(denied());
+        }
+        let run = state
+            .db
+            .summary_run(tenant.community(), owner, id, run_id)
+            .await
+            .map_err(|_| denied())?;
+        if run.state != "running"
+            || run.expires_at <= chrono::Utc::now()
+            || run.config_event_id != event.event.id.to_bytes()
+            || hex::encode(run.reporter_pubkey) != reporter
+        {
+            return Err(denied());
+        }
+        let frozen: std::collections::BTreeSet<String> =
+            serde_json::from_value(run.audience).map_err(|_| denied())?;
+        let current = crate::summary::audience(state, tenant.community(), &owner_hex, &config)
+            .await
+            .map_err(|_| denied())?;
+        if !frozen.is_subset(&current) {
+            return Err(denied());
+        }
+        crate::summary::source_access(state, tenant.community(), &owner_hex, &config, &frozen)
+            .await
+            .map_err(|_| denied())?;
+        return Ok(event.event.id.to_bytes().to_vec());
+    }
     // Writer reads prevent replica lag from reviving revoked grants.
     let configs = state
         .db
@@ -107,6 +149,8 @@ pub(super) async fn read(
     if filter.keys().any(|key| {
         ![
             "summary_owner",
+            "summary_id",
+            "summary_run",
             "#h",
             "since",
             "until",
@@ -126,6 +170,16 @@ pub(super) async fn read(
         .and_then(|key| hex::decode(key).ok())
         .filter(|key| key.len() == 32)
         .ok_or_else(denied)?;
+    let named = match (filter.get("summary_id"), filter.get("summary_run")) {
+        (None, None) => None,
+        (Some(id), Some(run)) => Some((
+            id.as_str().ok_or_else(denied)?,
+            run.as_str()
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(denied)?,
+        )),
+        _ => return Err(denied()),
+    };
     let channels = filter
         .get("#h")
         .and_then(Value::as_array)
@@ -146,8 +200,32 @@ pub(super) async fn read(
             })
             .transpose()
     };
-    let since = timestamp("since")?;
-    let until = timestamp("until")?;
+    let mut since = timestamp("since")?;
+    let mut cursor_boundary = None;
+    let mut until = timestamp("until")?;
+    if let Some((id, run_id)) = named {
+        let run = state
+            .db
+            .summary_run(tenant.community(), &owner, id, run_id)
+            .await
+            .map_err(|_| denied())?;
+        until = Some(until.map_or(run.started_at, |requested| requested.min(run.started_at)));
+        let cursors = state
+            .db
+            .summary_cursors(tenant.community(), &owner, id)
+            .await
+            .map_err(|_| denied())?;
+        cursor_boundary = cursors
+            .into_iter()
+            .find(|cursor| cursor.channel_id == channel);
+        let lower = cursor_boundary
+            .as_ref()
+            .map_or(run.started_at.timestamp() - 86_400, |cursor| {
+                cursor.created_at
+            });
+        let lower = chrono::DateTime::from_timestamp(lower, 0).ok_or_else(denied)?;
+        since = Some(since.map_or(lower, |requested| requested.max(lower)));
+    }
     let before_id = filter
         .get("before_id")
         .map(|value| {
@@ -171,7 +249,7 @@ pub(super) async fn read(
             .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Summary limit must be 1–200"))?,
         None => 100,
     };
-    let grant = authorize(state, tenant, &owner, reporter, channel).await?;
+    let grant = authorize(state, tenant, &owner, reporter, channel, named).await?;
     let rows = state
         .db
         .query_events_for_event_write(&EventQuery {
@@ -191,16 +269,32 @@ pub(super) async fn read(
         .await
         .map_err(|e| internal_error(&format!("Summary transcript: {e}")))?;
     // A revoke/reassignment during the read invalidates the response as well.
-    if authorize(state, tenant, &owner, reporter, channel).await? != grant {
+    if authorize(state, tenant, &owner, reporter, channel, named).await? != grant {
         return Err(denied());
     }
     let events: Vec<_> = rows
         .into_iter()
         .filter(|row| row.channel_id == Some(channel))
+        .filter(|row| {
+            cursor_boundary.as_ref().is_none_or(|cursor| {
+                (row.event.created_at.as_secs() as i64, row.event.id.to_hex())
+                    > (cursor.created_at, cursor.event_id.clone())
+            })
+        })
         .map(|row| row.event)
         .collect();
+    if let Some((id, run_id)) = named {
+        state
+            .db
+            .record_summary_reads(tenant.community(), &owner, id, run_id, channel, &events)
+            .await
+            .map_err(|_| denied())?;
+        if authorize(state, tenant, &owner, reporter, channel, named).await? != grant {
+            return Err(denied());
+        }
+    }
     Ok(Json(
-        serde_json::json!({"summary_read": 1, "events": events}),
+        serde_json::json!({"summary_read": if named.is_some() {2} else {1}, "events": events}),
     ))
 }
 

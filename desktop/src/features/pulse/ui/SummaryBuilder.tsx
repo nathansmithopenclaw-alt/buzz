@@ -34,6 +34,9 @@ import { Switch } from "@/shared/ui/switch";
 export type SummaryReporterMode = "nectar" | "existing";
 
 type SummaryBuilderProps = {
+  identityFields?: React.ReactNode;
+  audienceFields?: React.ReactNode;
+  detailsValid?: boolean;
   conversations: SummaryConversation[];
   sourceConfig: SummarySourceConfig;
   schedule: SummarySchedule | null;
@@ -88,6 +91,9 @@ function ConversationRow({
 
 export function SummaryBuilder({
   conversations,
+  identityFields,
+  audienceFields,
+  detailsValid = true,
   sourceConfig,
   schedule,
   timezone,
@@ -121,8 +127,17 @@ export function SummaryBuilder({
   return (
     <fieldset disabled={saving} className="flex min-w-0 flex-col gap-8">
       <p className="text-sm text-muted-foreground">
-        Step {step + 1} of 3 ·{" "}
-        {["Agent", "Conversations", "Schedule and review"][step]}
+        Step {step + 1} of {audienceFields ? 4 : 3} ·{" "}
+        {
+          (audienceFields
+            ? [
+                "Name and agent",
+                "Audience",
+                "Conversations",
+                "Schedule and review",
+              ]
+            : ["Agent", "Conversations", "Schedule and review"])[step]
+        }
       </p>
       <div>
         <h2 className="text-lg font-semibold tracking-tight">
@@ -136,6 +151,7 @@ export function SummaryBuilder({
       </div>
 
       <div hidden={step !== 0} className="space-y-4">
+        {identityFields}
         <SettingsOptionGroup
           description="Use Nectar or choose one of your agents to write your Summary."
           title="Reporter"
@@ -243,7 +259,8 @@ export function SummaryBuilder({
           ) : null}
         </SettingsOptionGroup>
       </div>
-      <div hidden={step !== 1} className="space-y-6">
+      {audienceFields ? <div hidden={step !== 1}>{audienceFields}</div> : null}
+      <div hidden={step !== (audienceFields ? 2 : 1)} className="space-y-6">
         <SettingsOptionGroup title="Channels">
           {channels.length === 0 ? (
             <SettingsOptionRow>
@@ -293,7 +310,7 @@ export function SummaryBuilder({
           )}
         </SettingsOptionGroup>
       </div>
-      <div hidden={step !== 2}>
+      <div hidden={step !== (audienceFields ? 3 : 2)}>
         <p className="mb-4 text-sm">
           {reporterMode === "nectar" ? "Nectar" : selectedAgent?.name} will
           summarize{" "}
@@ -362,14 +379,22 @@ export function SummaryBuilder({
         <Button
           disabled={
             saving ||
-            (step === 2 && Boolean(summaryScheduleError(schedule))) ||
+            !detailsValid ||
+            (step === (audienceFields ? 3 : 2) &&
+              Boolean(summaryScheduleError(schedule))) ||
             (showNectarSetup && !runtimeValid) ||
             (reporterMode === "existing" && !reporterPubkey)
           }
-          onClick={step < 2 ? () => setStep(step + 1) : onSave}
+          onClick={
+            step < (audienceFields ? 3 : 2) ? () => setStep(step + 1) : onSave
+          }
           type="button"
         >
-          {saving ? "Saving…" : step < 2 ? "Continue" : "Save Summary"}
+          {saving
+            ? "Saving…"
+            : step < (audienceFields ? 3 : 2)
+              ? "Continue"
+              : "Save Summary"}
         </Button>
         {onCancel ? (
           <Button

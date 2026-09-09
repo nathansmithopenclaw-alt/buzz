@@ -44,6 +44,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-pulse-view").click();
   await page.getByTestId("pulse-tab-summary").click();
+  await page.getByRole("button", { name: "New Summary", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Build your Summary" }),
   ).toBeVisible();
@@ -67,7 +68,8 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
     page.getByRole("button", { name: "Edit agent setup" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(page.getByText("Step 2 of 3", { exact: false })).toBeVisible();
+  await expect(page.getByText("Step 2 of 4", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Direct messages", exact: true }),
   ).toBeVisible();
@@ -82,6 +84,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await page.locator('label[for="wf-trigger-weekday-5"]').click();
   await page.locator("#wf-trigger-time").fill("17:30");
   await page.getByRole("button", { name: "Save Summary", exact: true }).click();
+  await page.getByRole("button", { name: "Open", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Run summary", exact: true }),
   ).toBeVisible();
@@ -89,16 +92,14 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
     JSON.parse(sessionStorage.getItem("buzz-e2e-summary-events") ?? "[]"),
   );
   expect(JSON.parse(saved.at(-1).content).schedule).toEqual({
-    on: "schedule",
     cron: "30 17 * * 1,5",
   });
   await page.getByRole("button", { name: "Run summary", exact: true }).click();
   await expect(
     page.getByRole("status").filter({ hasText: "Summary requested" }),
   ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Summary settings", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Edit Summary", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.locator("#wf-trigger-time")).toHaveValue("17:30");
@@ -107,6 +108,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
     .getByRole("switch", { name: "Run on a schedule", exact: true })
     .click();
   await page.getByRole("button", { name: "Save Summary", exact: true }).click();
+
   await expect(
     page.getByRole("button", { name: "Run summary", exact: true }),
   ).toBeEnabled();
@@ -118,13 +120,66 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await expect(
     page.getByRole("status").filter({ hasText: "Summary requested" }),
   ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Summary settings", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Edit Summary", exact: true }).click();
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(page.getByText("Step 2 of 3", { exact: false })).toBeVisible();
+  await expect(page.getByText("Step 2 of 4", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.screenshot({
     path: "test-results/summary-conversations.png",
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Back to Summaries", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Duplicate", exact: true }).click();
+  await page
+    .getByRole("textbox", { name: "Summary name" })
+    .fill("Afternoon support");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page
+    .getByRole("radio", { name: "Selected people", exact: true })
+    .check();
+  await page
+    .getByRole("button", { name: "Choose people (0)", exact: true })
+    .click();
+  const people = page.getByTestId("summary-people-picker");
+  await expect(
+    people.getByRole("textbox", { name: "Search people" }),
+  ).toBeVisible();
+  await expect(
+    people.getByRole("checkbox", { name: "Summary specialist" }),
+  ).toHaveCount(0);
+  await expect(people.getByRole("checkbox")).toHaveCount(3);
+  await people.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("radio", { name: "Only me", exact: true }).check();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page
+    .getByRole("switch", { name: "Run on a schedule", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Set daily times", exact: true })
+    .click();
+  await page.getByLabel("Daily time 1", { exact: true }).fill("09:15");
+  await page.getByRole("button", { name: "Add time", exact: true }).click();
+  await page.getByLabel("Daily time 2", { exact: true }).fill("17:45");
+  await page.getByRole("button", { name: "Save Summary", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Open", exact: true }),
+  ).toHaveCount(2);
+  const definitions = await page.evaluate(() =>
+    JSON.parse(sessionStorage.getItem("buzz-e2e-summary-events") ?? "[]").map(
+      (e: { content: string }) => JSON.parse(e.content),
+    ),
+  );
+  const ids = new Set(
+    definitions.map((d: { summary_id: string }) => d.summary_id),
+  );
+  expect(ids.size).toBe(2);
+  expect(definitions.at(-1).schedule.dailyTimes).toEqual(["09:15", "17:45"]);
+  await page.screenshot({
+    path: "test-results/summary-collection.png",
     fullPage: true,
   });
 });

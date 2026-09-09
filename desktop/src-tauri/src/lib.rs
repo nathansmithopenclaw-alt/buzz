@@ -857,6 +857,8 @@ pub fn run() {
             get_channel_workflows,
             get_channels_workflows,
             get_workflow,
+            summary_operation,
+            publish_summary_definition,
             create_workflow,
             update_workflow,
             delete_workflow,

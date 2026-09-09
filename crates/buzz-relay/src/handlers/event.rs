@@ -174,6 +174,27 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
+    let matches = if crate::summary::is_named_report(&stored_event.event) {
+        let mut allowed = Vec::new();
+        for (conn_id, sub_id) in matches {
+            if let Some(reader) = state.conn_manager.pubkey_for_conn(conn_id) {
+                if crate::handlers::req::event_visible_to_reader_with_policy(
+                    state,
+                    community_id,
+                    &stored_event.event,
+                    &reader,
+                )
+                .await
+                {
+                    allowed.push((conn_id, sub_id));
+                }
+            }
+        }
+        allowed
+    } else {
+        matches
+    };
+
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };

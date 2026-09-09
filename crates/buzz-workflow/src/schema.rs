@@ -98,6 +98,11 @@ pub struct Step {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ActionDef {
+    /// Claim and dispatch a named Summary owned by this workflow owner.
+    RunSummary {
+        /// Stable, literal Summary identity; templates are forbidden.
+        summary_id: String,
+    },
     /// Post a message to the workflow's channel (or an override channel).
     SendMessage {
         /// Message text (supports template variables).
@@ -199,6 +204,13 @@ impl WorkflowDef {
 
         let mut seen_ids: HashSet<&str> = HashSet::new();
         for step in &self.steps {
+            if let ActionDef::RunSummary { summary_id } = &step.action {
+                if !buzz_core::summary::valid_summary_id(summary_id) {
+                    return Err(WorkflowError::InvalidDefinition(
+                        "invalid Summary identity".into(),
+                    ));
+                }
+            }
             if step.id.trim().is_empty() {
                 return Err(WorkflowError::InvalidDefinition(
                     "step id must not be empty".into(),

@@ -1,3 +1,5 @@
+import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import * as React from "react";
 import { WorkflowScheduleFields } from "@/features/workflows/ui/WorkflowScheduleFields";
 import {
@@ -50,22 +52,89 @@ export function SummaryScheduleFields({
           <p className="text-sm text-muted-foreground">
             Times use {timezone}, including daylight saving changes.
           </p>
-          <WorkflowScheduleFields
-            disabled={disabled}
-            timezone={timezone}
-            trigger={schedule}
-            onUpdate={(trigger) =>
-              onChange({
-                on: "schedule",
-                cron: trigger.cron,
-                interval: trigger.interval,
-              })
-            }
-          />
-          <p className="text-xs text-muted-foreground">
-            For several runs a day, Custom cron accepts lists of hours. For
-            example, 0 9,13,17 * * * runs at 09:00, 13:00 and 17:00.
-          </p>
+          {schedule.dailyTimes ? (
+            <div className="space-y-3">
+              {schedule.dailyTimes.map((time, index) => (
+                // Each slot is a controlled time input; its position remains stable while editing.
+                // biome-ignore lint/suspicious/noArrayIndexKey: Preserve focus while changing the time value.
+                <div key={index} className="flex items-center gap-2">
+                  <Input
+                    type="time"
+                    aria-label={`Daily time ${index + 1}`}
+                    value={time}
+                    disabled={disabled}
+                    onChange={(e) =>
+                      onChange({
+                        on: "schedule",
+                        dailyTimes: (schedule.dailyTimes ?? []).map((t, i) =>
+                          i === index ? e.target.value : t,
+                        ),
+                      })
+                    }
+                  />
+                  <Button
+                    variant="ghost"
+                    disabled={
+                      disabled || (schedule.dailyTimes ?? []).length === 1
+                    }
+                    onClick={() =>
+                      onChange({
+                        on: "schedule",
+                        dailyTimes: (schedule.dailyTimes ?? []).filter(
+                          (_, i) => i !== index,
+                        ),
+                      })
+                    }
+                  >
+                    Remove
+                  </Button>
+                </div>
+              ))}
+              <Button
+                variant="outline"
+                disabled={disabled || schedule.dailyTimes.length >= 24}
+                onClick={() =>
+                  onChange({
+                    on: "schedule",
+                    dailyTimes: [...(schedule.dailyTimes ?? []), "17:00"],
+                  })
+                }
+              >
+                Add time
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={disabled}
+                onClick={() => onChange({ on: "schedule", cron: "0 9 * * *" })}
+              >
+                Other frequencies
+              </Button>
+            </div>
+          ) : (
+            <>
+              <Button
+                variant="outline"
+                disabled={disabled}
+                onClick={() =>
+                  onChange({ on: "schedule", dailyTimes: ["09:00"] })
+                }
+              >
+                Set daily times
+              </Button>
+              <WorkflowScheduleFields
+                disabled={disabled}
+                timezone={timezone}
+                trigger={schedule}
+                onUpdate={(trigger) =>
+                  onChange({
+                    on: "schedule",
+                    cron: trigger.cron,
+                    interval: trigger.interval,
+                  })
+                }
+              />
+            </>
+          )}
         </>
       ) : (
         <p className="text-sm text-muted-foreground">

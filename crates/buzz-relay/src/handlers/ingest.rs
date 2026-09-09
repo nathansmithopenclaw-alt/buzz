@@ -471,6 +471,9 @@ fn brief_report_owner_hex(event: &Event) -> Option<String> {
 fn brief_report_author_matches_config(author_hex: &str, config_json: &str) -> Result<bool, String> {
     let config: serde_json::Value = serde_json::from_str(config_json)
         .map_err(|e| format!("invalid: brief config is not JSON: {e}"))?;
+    if config.get("v").and_then(serde_json::Value::as_u64) == Some(2) {
+        return Ok(false);
+    }
     let configured = config
         .get("reporter_pubkey")
         .and_then(serde_json::Value::as_str)
@@ -493,12 +496,22 @@ async fn validate_brief_report_binding(
             "invalid: briefing report must tag the owner with #p".into(),
         ));
     };
+    if event.tags.iter().any(|tag| {
+        let t = tag.as_slice();
+        t.first().is_some_and(|key| key == "p")
+            && t.get(1)
+                .is_none_or(|key| key != &owner_hex && key != &event.pubkey.to_hex())
+    }) {
+        return Err(IngestError::Rejected(
+            "invalid: legacy Summary cannot add shared recipients".into(),
+        ));
+    }
     let owner_bytes = hex::decode(&owner_hex).map_err(|_| {
         IngestError::Rejected("invalid: briefing report #p must be a hex pubkey".into())
     })?;
     let events = state
         .db
-        .query_events(&EventQuery {
+        .query_events_for_event_write(&EventQuery {
             kinds: Some(vec![KIND_BRIEF_CONFIG as i32]),
             pubkey: Some(owner_bytes),
             d_tag: Some("summary".into()),
@@ -2897,7 +2910,12 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    if kind_u32 == KIND_BRIEF_REPORT {
+    if kind_u32 == KIND_BRIEF_CONFIG || kind_u32 == KIND_BRIEF_REPORT {
+        crate::summary::validate_event(state, tenant.community(), &event)
+            .await
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+    if kind_u32 == KIND_BRIEF_REPORT && !crate::summary::is_named_report(&event) {
         validate_brief_report_binding(tenant, &event, state).await?;
     }
 
@@ -3325,7 +3343,13 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let (stored_event, was_inserted) = if crate::summary::is_named_report(&event) {
+        state
+            .db
+            .publish_summary_report(tenant.community(), &event)
+            .await
+            .map_err(|e| IngestError::Rejected(format!("restricted: {e}")))?
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
@@ -3343,11 +3367,24 @@ async fn ingest_event_inner(
                 buzz_db::event::D_TAG_MAX_LEN,
             )));
         }
-        state
-            .db
-            .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+        if kind_u32 == KIND_BRIEF_CONFIG
+            && serde_json::from_str::<serde_json::Value>(&event.content)
+                .ok()
+                .is_some_and(|v| v["v"] == 2)
+        {
+            let (stored, inserted) = state
+                .db
+                .replace_summary_definition(tenant.community(), &event, &d_tag)
+                .await
+                .map_err(|e| IngestError::Rejected(format!("invalid Summary: {e}")))?;
+            (stored, inserted)
+        } else {
+            state
+                .db
+                .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+        }
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state

@@ -1,16 +1,19 @@
+import type { SummaryDefinitionRecord } from "../lib/namedSummaries";
 import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { runSummary } from "../lib/runSummary";
+import { runSummary, runNamedSummary } from "../lib/runSummary";
 import { Button } from "@/shared/ui/button";
 
 export function SummaryRunButton({
   ownerPubkey,
+  record,
   enabled,
   onRequested,
 }: {
   ownerPubkey?: string;
+  record?: SummaryDefinitionRecord;
   enabled: boolean;
   onRequested: () => void;
 }) {
@@ -18,7 +21,13 @@ export function SummaryRunButton({
   const inFlight = React.useRef(false);
   const request = useMutation({
     mutationFn: () =>
-      runSummary(ownerPubkey ?? "", activeCommunity?.relayUrl ?? ""),
+      record
+        ? runNamedSummary(
+            ownerPubkey ?? "",
+            activeCommunity?.relayUrl ?? "",
+            record,
+          )
+        : runSummary(ownerPubkey ?? "", activeCommunity?.relayUrl ?? ""),
     retry: false,
     onSuccess: onRequested,
   });

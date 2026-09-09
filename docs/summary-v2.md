@@ -1,0 +1,37 @@
+# Named Summaries and recipient access (version 2)
+
+This extension supersedes the singleton configuration, publication, and cursor rules in NIP-BR for configurations and reports whose content has `v: 2`. Version-one configurations and historical reports remain readable. This is relay-enforced access control over plaintext stored by the relay, not end-to-end encryption or protection from relay operators.
+
+## Identity and audience
+
+A Summary is keyed by community, owner public key, and a canonical UUID. The migrated singleton uses `default` and keeps its `d=summary` address; new definitions use `d=summary:<uuid>`. Owner-signed kind 30623 definitions contain name, reporter, audience, explicitly selected channels/DMs, schedule, timezone, pause/archive flags and read-delegation consent. Only the owner and assigned reporter receive the configuration. Preselecting new conversations in the editor does not silently grant them access.
+
+Audiences are `only_me`, `community`, or `selected` with human public keys. The owner is always included. Human discovery joins the community's relay membership roster with active user records, excluding agent ownership/type and bot membership flags; offline people remain eligible. Missing profiles are not assumed human. Open relays advertise an incomplete directory and cannot select the community audience. The picker uses the same searchable dialog as agent delegation with a separate authoritative people data source.
+
+The relay snapshots recipients for each run. Newly added recipients cannot read older reports. Live audience removal, community departure, and private-source membership removal block subsequent reads through history, direct IDs, counts and live fanout. Recipients must already be eligible to read every private source; community reports accept only community-readable sources. The reporter gets readback of its own reports while it remains the assigned reporter. View permission does not grant edit/run control or source membership. Already downloaded copies cannot be recalled. Named reports do not generate agent push wakes or notifications containing private metadata.
+
+## Scheduling and execution
+
+Desktop stores either manual-only, the existing Workflow cron/interval controls, or explicit daily `dailyTimes` in HH:MM form. Daily times are grouped by minute into separate cron workflows; 09:15 and 17:45 never become a cross product of hours and minutes. All workflows carry a literal `run_summary` action and use the saved IANA timezone. Pausing stops automatic runs while retaining manual execution; archiving prevents new execution and retains reports. Changing a definition invalidates previously claimed grants. Existing runs do not silently adopt a new audience or source set.
+
+The Workflow engine retains its existing missed-tick behavior: cron checks a 60-second window and does not replay every missed occurrence after a long outage. Interval anchors are durable. Source cursors remain unchanged during outages, so the next successful run reads the accumulated delta. A first run reads at most the preceding 24 hours. An empty delta can publish a factual no-new-activity report with no cursor changes. Optional preview is not part of this implementation.
+
+Manual and scheduled claims share a writer-locked execution slot per Summary. A new claim is immediately `running`; concurrent callers receive the same run instead of dispatching again. Runs freeze the definition, audience and upper time boundary, with a 30-minute lease. Reporter progress can record `needs_approval`, return to `running`, or mark `failed`. The owner can cancel to `failed`. Terminal receipts cannot be reopened. On a new claim, expired or superseded runs become failed without moving cursors. The database also reserves a queued state for dispatch integration; it is not currently emitted. Delivery uncertainty leaves the existing lease intact; inspect or cancel that run instead of blindly creating another. Progress never extends a lease.
+
+## Agent operations
+
+Use `buzz briefs run status --owner <key> --summary <id> --run <uuid>` to retrieve a private receipt, definition and independent cursors. Read only selected sources using `buzz briefs read --owner <key> --summary <id> --run <uuid> --channel <id>`; the reporter does not need membership in a delegated DM. This grants no ordinary channel subscription or write capability. Read authorization is checked before and after retrieval against writer state. Only rows actually returned by this operation become observed-read receipts.
+
+The agent writes composition JSON containing `title`, `markdown`, `status` (object), `sources` (channel IDs), and `watermarks` (objects with `channel_id`, `event_id`, `created_at`). It then calls `buzz briefs run publish --owner <key> --summary <id> --run <uuid> --input <file-or-dash>`. The host constructs the authority-bearing envelope; the agent cannot choose another reporter, revision, audience or run boundary. The CLI checks the durable publication receipt even after a missing submission acknowledgement. A generic conversation-report receipt is not Summary success.
+
+Use `buzz briefs run progress` with the same identity flags, `--state running|needs_approval|failed` and an optional `--message`. A needs-approval run cannot read or publish until resumed. Owners may only use progress to cancel; recipients cannot enumerate run status/history/cursors.
+
+## Atomic publication and migration
+
+Kind 40030 carries explicit owner, summary, run and config identity tags plus the frozen audience and executing reporter. The relay rechecks the current revision, agent ownership, audience and source access in the publication transaction. Every proposed watermark must match a server-observed event in this run and source. Actual report storage, recipient indexes, cursor advancement and the published run receipt commit together. A failed transaction leaves all four unchanged. Identical retries do not advance cursors twice; a different second report for the same run is rejected.
+
+Cursors are scoped to community/owner/Summary/source, independently of reporter identity. Migrating the singleton copies its selected-source legacy watermarks once, preserving their original watermark-event provenance, and leaves historical reports intact. Separate Summaries sharing one agent and source have independent boundaries. The additive migration is `0051_summary_runs.sql`; older relay binaries cannot enforce version-two access semantics, so clients require the version-two capability response before saving.
+
+## Verification
+
+Database acceptance tests live in `crates/buzz-db/src/store/summary_tests.rs`; relay-handler tests live in `crates/buzz-relay/src/api/bridge/summary_tests.rs`. These require explicitly isolated Postgres (and Redis for the relay fixture). They cover independent cursors, overlapping claims, atomic/idempotent publication, unobserved-cursor rejection, source revocation, roster classification, migration, expiry, progress and restart receipts. The modules end in `postgres_tests` so the isolated PostgreSQL CI lane discovers them automatically. Handler tests use three humans, an assigned reporter and an unrelated agent for direct-ID/config privacy, frozen community audiences, counts, fanout and delegated reads. The browser test `desktop/tests/e2e/summary-setup.spec.ts` exercises the guided editor, canonical agent picker, people picker, duplicate definitions, manual run and exact multiple daily times. Browser mocks are UI evidence only; they do not prove live publication.

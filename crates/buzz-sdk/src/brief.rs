@@ -397,6 +397,40 @@ pub fn build_brief_report(
     )
 }
 
+/// Build the dedicated named-Summary envelope with the relay-frozen audience.
+/// Callers obtain the audience and configuration revision from a run receipt.
+pub fn build_summary_report(
+    report: &buzz_core::summary::SummaryReport,
+    reporter: &str,
+    audience: &std::collections::BTreeSet<String>,
+) -> Result<EventBuilder, SdkError> {
+    report.validate().map_err(SdkError::InvalidInput)?;
+    if !audience.contains(&report.owner_pubkey) {
+        return Err(SdkError::InvalidInput(
+            "Summary owner must be a recipient".into(),
+        ));
+    }
+    let mut recipients = audience.clone();
+    recipients.insert(check_pubkey_hex(reporter, "reporter")?);
+    let mut tags = vec![
+        tag(&["d", &report.run_id.to_string()])?,
+        tag(&["t", BRIEF_DISCOVERY_TAG])?,
+        tag(&["owner", &report.owner_pubkey])?,
+        tag(&["summary", &report.summary_id])?,
+        tag(&["config", &report.config_event_id])?,
+    ];
+    for recipient in recipients {
+        tags.push(tag(&["p", &check_pubkey_hex(&recipient, "recipient")?])?);
+    }
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_BRIEF_REPORT as u16),
+        serde_json::to_string(report).map_err(|e| SdkError::InvalidInput(e.to_string()))?,
+    )
+    .tags(tags)
+    .allow_self_tagging()
+    .custom_created_at(nostr::Timestamp::from(report.until as u64)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,4 +1,7 @@
-import { handleMockSummaryFrame } from "./e2eBridgeSummary";
+import {
+  handleMockSummaryFrame,
+  handleMockSummaryCommand,
+} from "./e2eBridgeSummary";
 import {
   completeMockSubscriptionToken,
   mockSubscriptionAccountCommand,
@@ -15483,6 +15486,13 @@ export function maybeInstallE2eTauriMocks() {
           tags,
         };
       }
+      case "summary_operation":
+      case "publish_summary_definition":
+        return handleMockSummaryCommand(
+          command,
+          payload as Record<string, unknown>,
+          identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey,
+        );
       case "sign_event": {
         const shape = {
           kind: (payload as { kind: number }).kind,

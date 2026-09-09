@@ -2,6 +2,10 @@
 
 `draft` `optional`
 
+Version-two named Summaries, sharing, and atomic run publication are specified in
+[Summary v2](../summary-v2.md). Its version-two rules supersede the singleton rules
+below; the original version-one format remains supported for migration.
+
 ## Abstract
 
 This document defines a personal daily briefing protocol for Nostr
