@@ -17,6 +17,8 @@ impl Db {
              ON u.community_id = m.community_id AND encode(u.pubkey, 'hex') = m.pubkey
              WHERE m.community_id = $1 AND u.deactivated_at IS NULL
              AND u.agent_owner_pubkey IS NULL AND u.agent_type IS NULL
+             AND NOT EXISTS (SELECT 1 FROM archived_identities a
+               WHERE a.community_id = m.community_id AND a.pubkey = m.pubkey)
              AND NOT EXISTS (SELECT 1 FROM channel_members c WHERE c.community_id = m.community_id
                AND c.pubkey = u.pubkey AND c.role = 'bot')",
         )

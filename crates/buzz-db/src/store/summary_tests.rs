@@ -317,6 +317,18 @@ async fn summary_people_include_offline_humans_exclude_agents_and_unknown_profil
     assert!(!people.contains(&f.reporter.public_key().to_hex()));
     assert!(!people.contains(&f.unrelated.public_key().to_hex()));
     assert!(!people.contains(&unknown.public_key().to_hex()));
+    // Legacy retired agents can have no agent metadata or bot memberships.
+    // The authoritative archive must still exclude them from human audiences.
+    sqlx::query("INSERT INTO archived_identities(community_id,pubkey,consent_path,actor,request_event_id) VALUES($1,$2,'admin',$3,$4)")
+        .bind(f.community.as_uuid())
+        .bind(f.people[1].public_key().to_hex())
+        .bind(f.people[0].public_key().to_hex())
+        .bind("00".repeat(32))
+        .execute(&f.db.pool).await.unwrap();
+    let active_people = f.db.summary_people(f.community).await.unwrap();
+    assert!(!active_people.contains(&f.people[1].public_key().to_hex()));
+    assert!(active_people.contains(&f.people[0].public_key().to_hex()));
+    assert!(active_people.contains(&f.people[2].public_key().to_hex()));
     assert!(f
         .db
         .summary_people(CommunityId::from_uuid(Uuid::new_v4()))
