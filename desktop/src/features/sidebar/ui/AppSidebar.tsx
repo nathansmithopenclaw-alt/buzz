@@ -835,7 +835,9 @@ export function AppSidebar({
           ) : null}
 
           <SidebarFooter>
-            <FeatureGate feature="agentBrowsers"><BrowserPanel /></FeatureGate>
+            <FeatureGate feature="agentBrowsers">
+              <BrowserPanel />
+            </FeatureGate>
             {relayConnectionCard.showSidebarRelayConnectionCard &&
             (isMobile ? openMobile : sidebarOpen) ? (
               <SidebarRelayConnectionCard

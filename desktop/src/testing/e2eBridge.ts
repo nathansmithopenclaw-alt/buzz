@@ -12455,10 +12455,14 @@ export function maybeInstallE2eTauriMocks() {
       case "list_computer_browser_sessions":
         return [];
       case "set_computer_use_enabled":
-        mockComputerUseEnabled = Boolean((payload as { enabled?: boolean } | undefined)?.enabled);
+        mockComputerUseEnabled = Boolean(
+          (payload as { enabled?: boolean } | undefined)?.enabled,
+        );
         return null;
       case "set_computer_native_enabled":
-        mockComputerNativeEnabled = Boolean((payload as { enabled?: boolean } | undefined)?.enabled);
+        mockComputerNativeEnabled = Boolean(
+          (payload as { enabled?: boolean } | undefined)?.enabled,
+        );
         return null;
 
       case "get_huddle_state": {
