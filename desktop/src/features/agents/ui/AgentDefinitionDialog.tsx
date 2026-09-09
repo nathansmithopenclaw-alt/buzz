@@ -700,6 +700,9 @@ export function AgentDefinitionDialog({
     setRuntime(nextRuntime);
     applySelection(
       selectionOnRuntimeChange(selection, {
+        nextRuntimeSupportsConnections: runtimes
+          .find((r) => r.id === nextRuntime)
+          ?.providerOptions?.some(([id]) => id === "buzz-local"),
         previousRuntime: runtime,
         nextRuntime,
         nextRuntimeCanChooseProvider:
@@ -891,7 +894,8 @@ export function AgentDefinitionDialog({
             <ProviderEndpointField
               provider={effectiveProvider}
               envVars={envVars}
-              onChange={(next, endpointChanged) => {
+              onChange={(next, endpointChanged, provider) => {
+                if (provider) setProvider(provider);
                 setEnvVars(next);
                 if (endpointChanged) {
                   setModel("");

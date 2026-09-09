@@ -525,3 +525,26 @@ Saved preferred harness and inherited model seed Nectar; explicit choices are
 local to this setup. Existing agents open the canonical instance editor.
 Summary reads are snapshot-only grants from the owner's signed config, not channel
 membership changes. See `docs/summary-read-delegation.md` for the relay boundary.
+
+## Saved model connections
+
+The device-local Model connections store owns endpoint URLs and model catalogs.
+API keys use the desktop SecretStore and never appear in catalog IPC responses
+or agent snapshots. Agents persist only BUZZ_MODEL_CONNECTION_ID and their model.
+The Rust runtime catalog advertises the `buzz-local` provider for supported
+harnesses; frontend components do not infer support from harness IDs. Runtime
+switches preserve a connection/model only when the destination advertises that
+provider. Local spawn resolves the connection and applies the harness projection;
+remote deployment rejects device-local connections rather than falling back.
+DeepSeek uses native endpoint environment variables. Prime receives a managed,
+agent-specific models.json/settings.json with an environment reference for its key.
+Legacy manual DeepSeek endpoints remain supported.
+
+Opening Connect a model server starts bounded local discovery. Discovery sends
+catalog GET requests only, without credentials; it never invokes a model or
+installs software. Authentication-required results remain unverified until the
+user connects them. Test a model is explicit and reports text-response proof
+only, not tool or harness compatibility. Existing connections remain saved when
+unavailable. Connection edits apply on next start; removal must not silently
+substitute a different server. Secrets are not forwarded when editing an address
+without re-entering or explicitly clearing the key.

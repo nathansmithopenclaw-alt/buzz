@@ -101,6 +101,26 @@ pub async fn get_agent_models(
     // so a build-provided provider still gets live discovery.
     let effective_provider =
         effective_discovery_provider(saved_provider.as_deref(), provider_env_var, &merged_env);
+    if effective_provider.as_deref() == Some("buzz-local") {
+        let models = crate::model_connections::discover_for_env(&app, &merged_env)
+            .await?
+            .ok_or("Choose a saved model connection or connect a server")?;
+        return Ok(AgentModelsResponse {
+            agent_name: agent_command.clone(),
+            agent_version: "model-connection".into(),
+            models: models
+                .into_iter()
+                .map(|id| AgentModelInfo {
+                    name: Some(id.clone()),
+                    id,
+                    description: None,
+                })
+                .collect(),
+            selected_model: persisted_model.clone(),
+            supports_switching: true,
+            ..AgentModelsResponse::default()
+        });
+    }
     if let Some(models) = dsh::discover(&agent_command, &merged_env, persisted_model.clone())
         .await
         .map_err(|error| format!("DeepSeek model setup: {error}"))?
@@ -208,6 +228,7 @@ pub struct DiscoverAgentModelsInput {
 #[tauri::command]
 pub async fn discover_agent_models(
     input: DiscoverAgentModelsInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
@@ -294,6 +315,26 @@ pub async fn discover_agent_models(
         == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
     {
         return Err("Buzz shared compute is not available in this build".to_string());
+    }
+    if effective_provider.as_deref() == Some("buzz-local") {
+        let models = crate::model_connections::discover_for_env(&app, &merged_env)
+            .await?
+            .ok_or("Choose a saved model connection or connect a server")?;
+        return Ok(AgentModelsResponse {
+            agent_name: input.agent_command.clone(),
+            agent_version: "model-connection".into(),
+            models: models
+                .into_iter()
+                .map(|id| AgentModelInfo {
+                    name: Some(id.clone()),
+                    id,
+                    description: None,
+                })
+                .collect(),
+            selected_model: input.model.clone(),
+            supports_switching: true,
+            ..AgentModelsResponse::default()
+        });
     }
     if let Some(models) = dsh::discover(&input.agent_command, &merged_env, input.model.clone())
         .await

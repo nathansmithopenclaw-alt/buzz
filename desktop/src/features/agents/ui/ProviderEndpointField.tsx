@@ -1,3 +1,6 @@
+import { SaveLegacyConnectionButton } from "@/features/model-connections/SaveLegacyConnectionButton";
+import { ModelConnectionPicker } from "@/features/model-connections/ModelConnectionPicker";
+import { CONNECTION_ENV } from "@/features/model-connections/api";
 import { Input } from "@/shared/ui/input";
 import { useId } from "react";
 
@@ -12,13 +15,44 @@ export function ProviderEndpointField({
   provider: string;
   envVars: Record<string, string>;
   inheritedEnvVars?: Record<string, string>;
-  onChange: (env: Record<string, string>, endpointChanged: boolean) => void;
+  onChange: (
+    env: Record<string, string>,
+    endpointChanged: boolean,
+    provider?: string,
+  ) => void;
   disabled?: boolean;
 }) {
   const id = useId();
+  if (provider === "buzz-local")
+    return (
+      <ModelConnectionPicker
+        value={
+          envVars[CONNECTION_ENV] ?? inheritedEnvVars[CONNECTION_ENV] ?? ""
+        }
+        disabled={disabled}
+        onChange={(id) => onChange({ ...envVars, [CONNECTION_ENV]: id }, true)}
+      />
+    );
   if (provider !== "deepseek-compatible") return null;
   return (
     <div className="space-y-3">
+      <SaveLegacyConnectionButton
+        url={
+          envVars.DSH_LLM_BASE_URL ?? inheritedEnvVars.DSH_LLM_BASE_URL ?? ""
+        }
+        apiKey={envVars.DSH_API_KEY ?? inheritedEnvVars.DSH_API_KEY}
+        disabled={disabled}
+        onSaved={(id) => {
+          const next: Record<string, string> = {
+            ...envVars,
+            [CONNECTION_ENV]: id,
+          };
+          delete next.DSH_API_KEY;
+          delete next.DSH_LLM_BASE_URL;
+          delete next.DSH_PROVIDER;
+          onChange(next, false, "buzz-local");
+        }}
+      />
       <div className="space-y-1.5">
         <label htmlFor={`${id}-url`}>Model endpoint URL</label>
         <Input

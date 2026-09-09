@@ -143,7 +143,7 @@ pub(crate) fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntim
 
     KNOWN_ACP_RUNTIMES
         .iter()
-        .chain(std::iter::once(&dsh::DSH_RUNTIME))
+        .chain([&dsh::DSH_RUNTIME, &dsh::PRIME_RUNTIME])
         .find(|runtime| {
             normalized == runtime.id
                 || runtime
@@ -157,7 +157,7 @@ pub(crate) fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntim
 pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRuntime> {
     KNOWN_ACP_RUNTIMES
         .iter()
-        .chain(std::iter::once(&dsh::DSH_RUNTIME))
+        .chain([&dsh::DSH_RUNTIME, &dsh::PRIME_RUNTIME])
         .find(|p| p.id == id)
 }
 

@@ -851,6 +851,15 @@ pub fn spawn_agent_child(
         }
     }
 
+    crate::model_connections::runtime::apply(
+        app,
+        &mut command,
+        effective_command,
+        &descriptor.env,
+        effective_model.as_deref(),
+        &record.pubkey,
+    )?;
+
     // Strip all known effort keys and emit exactly one projected key. Command
     // inherits the parent env — the returned EffortApplied token is consumed
     // by spawn_with_effort_proof below; deleting this call is a compile error.

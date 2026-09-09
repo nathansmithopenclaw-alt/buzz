@@ -57,6 +57,7 @@ export function selectionOnRuntimeChange(
     nextRuntime: string;
     /** Caller-computed: whether the next runtime supports provider selection. */
     nextRuntimeCanChooseProvider: boolean;
+    nextRuntimeSupportsConnections?: boolean;
     /**
      * Persona/Edit clear the managed API key and custom-model editing flag
      * when switching to a provider-locked runtime ("full"); Create clears
@@ -84,16 +85,24 @@ export function selectionOnRuntimeChange(
     next.envVars = envVars;
   }
 
+  const keepConnectionModel =
+    current.provider === "buzz-local" &&
+    params.nextRuntimeSupportsConnections === true;
+  if (current.provider === "buzz-local" && !keepConnectionModel) {
+    next.provider = "";
+    next.envVars = envVarsWithoutKey(next.envVars, "BUZZ_MODEL_CONNECTION_ID");
+  }
   if (
-    shouldClearModelForRuntimeChange(
+    !keepConnectionModel &&
+    (shouldClearModelForRuntimeChange(
       params.previousRuntime,
       params.nextRuntime,
     ) ||
-    shouldClearKnownModelForSelectionScope({
-      model: current.model,
-      provider: current.provider,
-      runtime: params.nextRuntime,
-    })
+      shouldClearKnownModelForSelectionScope({
+        model: current.model,
+        provider: current.provider,
+        runtime: params.nextRuntime,
+      }))
   ) {
     next.model = "";
     next.isCustomModelEditing = false;

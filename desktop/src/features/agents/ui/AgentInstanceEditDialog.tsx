@@ -554,8 +554,7 @@ export function AgentInstanceEditDialog({
       setInheritHarness(false);
     }
 
-    // When switching to a catalog-known runtime, update the agent command to
-    // its resolved command so the command field stays consistent.
+    // Keep the command and default args consistent with the selected runtime.
     if (nextRuntime?.command) {
       setAgentCommand(nextRuntime.command);
       const newArgs = nextRuntime.defaultArgs.join(",");
@@ -564,6 +563,9 @@ export function AgentInstanceEditDialog({
 
     applySelection(
       selectionOnRuntimeChange(selection, {
+        nextRuntimeSupportsConnections: nextRuntime?.providerOptions?.some(
+          ([id]) => id === "buzz-local",
+        ),
         previousRuntime: previousRuntimeId,
         nextRuntime: nextRuntime?.id ?? nextRuntimeId,
         nextRuntimeCanChooseProvider: runtimeSupportsLlmProviderSelection(
@@ -575,10 +577,7 @@ export function AgentInstanceEditDialog({
     );
   }
 
-  // Routed through the normal change handler so a harness registered inline
-  // pins its command and resets model/provider like a hand-picked one. Scoped
-  // to `open` so a pending id can't outlive the dialog that started the
-  // registration.
+  // Inline registration uses the normal change handler; pending IDs are scoped to this dialog.
   const selectSavedHarness = usePendingHarnessSelection(
     runtimes,
     handleRuntimeDropdownChange,
@@ -1042,7 +1041,8 @@ export function AgentInstanceEditDialog({
               <ProviderEndpointField
                 provider={effectiveProvider}
                 envVars={envVars}
-                onChange={(next, endpointChanged) => {
+                onChange={(next, endpointChanged, provider) => {
+                  if (provider) setProvider(provider);
                   setEnvVars(next);
                   if (endpointChanged) {
                     setModel("");

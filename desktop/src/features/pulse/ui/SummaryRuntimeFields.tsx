@@ -207,7 +207,8 @@ export function SummaryRuntimeFields({
         envVars={envVars}
         inheritedEnvVars={inheritedEnvVars}
         disabled={disabled}
-        onChange={(next, endpointChanged) => {
+        onChange={(next, endpointChanged, nextProvider) => {
+          if (nextProvider) setProviderOverride(nextProvider);
           setEnvVars(next);
           if (endpointChanged) {
             setModelOverride("");

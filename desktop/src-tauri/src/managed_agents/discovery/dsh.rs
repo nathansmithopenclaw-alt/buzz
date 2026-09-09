@@ -37,6 +37,18 @@ pub(super) const DSH_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
     auth_probe_args: None,
 };
 
+pub(super) const PRIME_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
+    id: "prime",
+    label: "Prime Agent",
+    commands: &["prime-agent"],
+    aliases: &["primeagent"],
+    model_env_var: Some("BUZZ_PRIME_MODEL"),
+    provider_env_var: Some("BUZZ_PRIME_PROVIDER"),
+    context_limit_env_var: None,
+    required_normalized_fields: &[],
+    ..DSH_RUNTIME
+};
+
 #[cfg(test)]
 mod tests {
     #[test]

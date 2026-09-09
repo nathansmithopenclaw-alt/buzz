@@ -781,10 +781,11 @@ export function AgentConfigFields({
           provider={effectiveProvider}
           envVars={config.env_vars}
           inheritedEnvVars={bakedEnvMap}
-          onChange={(env_vars, endpointChanged) =>
+          onChange={(env_vars, endpointChanged, provider) =>
             onConfigChange({
               ...config,
               env_vars,
+              provider: provider ?? config.provider,
               model: endpointChanged ? null : config.model,
             })
           }

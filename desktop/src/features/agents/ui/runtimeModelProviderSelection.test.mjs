@@ -301,3 +301,29 @@ test("capability-gated model changes preserve a legacy effort without overriding
   assert.equal(pick("new-model", false), "new-model");
   assert.equal(pick("__auto_model__", true), "");
 });
+
+test("saved connection model survives a supported harness change only", () => {
+  const current = {
+    provider: "buzz-local",
+    model: "Qwen/model",
+    envVars: { BUZZ_MODEL_CONNECTION_ID: "saved" },
+    isCustomModelEditing: false,
+    isCustomProviderEditing: false,
+  };
+  const params = {
+    previousRuntime: "deepseek",
+    nextRuntime: "prime",
+    nextRuntimeCanChooseProvider: true,
+    nextRuntimeSupportsConnections: true,
+    lockedRuntimeReset: "full",
+  };
+  const next = selectionOnRuntimeChange(current, params);
+  assert.equal(next.model, "Qwen/model");
+  assert.equal(next.envVars.BUZZ_MODEL_CONNECTION_ID, "saved");
+  const unsupported = selectionOnRuntimeChange(current, {
+    ...params,
+    nextRuntimeSupportsConnections: false,
+  });
+  assert.equal(unsupported.provider, "");
+  assert.equal(unsupported.envVars.BUZZ_MODEL_CONNECTION_ID, undefined);
+});

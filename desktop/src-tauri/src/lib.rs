@@ -27,6 +27,7 @@ mod mesh_llm;
 #[cfg(not(feature = "mesh-llm"))]
 mod mesh_llm_stubs;
 mod migration;
+mod model_connections;
 #[cfg(test)]
 mod model_tests;
 mod models;
@@ -760,6 +761,12 @@ pub fn run() {
             set_managed_agent_session_residency_policy,
             delete_managed_agent,
             get_managed_agent_log,
+            model_connections::list_model_connections,
+            model_connections::save_model_connection,
+            model_connections::remove_model_connection,
+            model_connections::test_model_connection,
+            model_connections::check_model_connection,
+            model_connections::network::discover_model_servers,
             get_agent_models,
             discover_agent_models,
             agent_access_owner_only,

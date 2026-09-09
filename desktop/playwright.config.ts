@@ -74,6 +74,7 @@ export default defineConfig({
         "**/agent-error-state-screenshots.spec.ts",
         "**/edit-agent.spec.ts",
         "**/deepseek-model-selection.spec.ts",
+        "**/model-connections.spec.ts",
         "**/doctor-cta-screenshots.spec.ts",
         "**/pubkey-display-screenshots.spec.ts",
         "**/file-attachment.spec.ts",

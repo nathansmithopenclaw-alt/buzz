@@ -326,6 +326,7 @@ export function providerRequiresExplicitModel(
 ) {
   const trimmedProvider = providerId?.trim() ?? "";
   return (
+    trimmedProvider === "buzz-local" ||
     trimmedProvider === "deepseek-hosted" ||
     trimmedProvider === "deepseek-compatible" ||
     trimmedProvider === "anthropic" ||

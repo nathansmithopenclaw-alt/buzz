@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(entry.default_args, vec!["--profile", "buzz-acp"]);
         assert_eq!(entry.model_env_var.as_deref(), Some("DSH_MODEL"));
         assert_eq!(entry.provider_env_var.as_deref(), Some("DSH_PROVIDER"));
-        assert_eq!(entry.provider_options.as_ref().map(Vec::len), Some(2));
+        assert_eq!(entry.provider_options.as_ref().map(Vec::len), Some(3));
         assert_eq!(entry.source, HarnessSource::Preset);
         assert_eq!(
             entry.max_parallelism,

@@ -17,6 +17,7 @@ pub(super) fn requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         });
     }
     let key = match value("DSH_PROVIDER") {
+        Some("buzz-local") => Some(crate::model_connections::CONNECTION_ENV),
         Some("deepseek-hosted") => Some("DEEPSEEK_API_KEY"),
         Some("deepseek-compatible") => Some("DSH_LLM_BASE_URL"),
         _ => {

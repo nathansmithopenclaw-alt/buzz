@@ -1,3 +1,4 @@
+import { ModelConnectionsSettingsCard } from "@/features/model-connections/ModelConnectionsSettingsCard";
 import { SubscriptionAccountsSettingsCard } from "./SubscriptionAccountsSettingsCard";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import { ClaudeAccountsSettingsCard } from "./ClaudeAccountsSettingsCard";
@@ -28,6 +29,7 @@ export function AgentsSettingsPanel() {
 
       <SettingsOptionGroupList>
         <DeviceRoleSettingsCard />
+        <ModelConnectionsSettingsCard />
         <SubscriptionAccountsSettingsCard />
         <ClaudeAccountsSettingsCard />
         <SettingsOptionGroup title="Conversations">
