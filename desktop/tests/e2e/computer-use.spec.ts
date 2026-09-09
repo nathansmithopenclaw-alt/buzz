@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
+import { openSettings } from "../helpers/settings";
 import { waitForAnimations } from "../helpers/animations";
 import { BrowserService } from "../../../computer-use/src/browser.mjs";
 import { startViewer } from "../../../computer-use/src/viewer.mjs";
@@ -20,6 +21,9 @@ test("Buzz panel displays and hands back the agent's actual isolated browser", a
     await installMockBridge(page);
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    await openSettings(page, "experimental");
+    await page.getByTestId("feature-toggle-agentBrowsers").click();
+    await page.getByRole("button", { name: "Back to app" }).click();
     await page.evaluate((viewerUrl) => {
       const internals = (
         window as unknown as {
@@ -81,4 +85,47 @@ test("Buzz panel displays and hands back the agent's actual isolated browser", a
     await viewer.close();
     await service.shutdown();
   }
+});
+
+test("Browser footer requires experiment opt-in and preserves tool controls", async ({
+  page,
+}) => {
+  await installMockBridge(page, undefined, { seedPreviewFeatures: false });
+  await page.goto("/");
+  const browser = page.getByRole("button", { name: "Open agent browsers" });
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+  await expect(browser).toHaveCount(0);
+  await openSettings(page, "experimental");
+  const experiment = page.getByTestId("feature-toggle-agentBrowsers");
+  await expect(experiment).not.toBeChecked();
+  await experiment.click();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await expect(browser).toBeVisible();
+  await browser.click();
+  await page
+    .getByRole("button", { name: "Enable browser tools", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", {
+      name: "Disable for new agent starts",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Enable native control", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Disable native control", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Close", exact: true })
+    .click();
+  await page.reload();
+  await expect(browser).toBeVisible();
+  await openSettings(page, "experimental");
+  await expect(page.getByTestId("feature-toggle-agentBrowsers")).toBeChecked();
+  await page.getByTestId("feature-toggle-agentBrowsers").click();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await expect(browser).toHaveCount(0);
 });

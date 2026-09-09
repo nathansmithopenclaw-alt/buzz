@@ -3927,6 +3927,8 @@ type PersistedMockHuddle = {
 };
 
 const MOCK_HUDDLE_STORAGE_KEY = "buzz.e2e.mock-huddle.v1";
+let mockComputerUseEnabled = false;
+let mockComputerNativeEnabled = false;
 let mockHuddle: PersistedMockHuddle | null = null;
 
 function persistMockHuddle() {
@@ -12442,6 +12444,23 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
+      case "computer_use_status":
+        return {
+          enabled: mockComputerUseEnabled,
+          dependencyReady: true,
+          nativeEnabled: mockComputerNativeEnabled,
+          nativeReady: true,
+          detail: "Local browser tools for new agent sessions.",
+        };
+      case "list_computer_browser_sessions":
+        return [];
+      case "set_computer_use_enabled":
+        mockComputerUseEnabled = Boolean((payload as { enabled?: boolean } | undefined)?.enabled);
+        return null;
+      case "set_computer_native_enabled":
+        mockComputerNativeEnabled = Boolean((payload as { enabled?: boolean } | undefined)?.enabled);
+        return null;
+
       case "get_huddle_state": {
         const snapshot = mockHuddle ? structuredClone(mockHuddle.state) : null;
         const delayMs = activeConfig?.mock?.huddleStateReadDelayMs ?? 0;
