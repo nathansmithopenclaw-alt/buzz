@@ -1,6 +1,6 @@
 # Model connections
 
-Settings → Agents → Model connections connects a model server once for local
+Settings → AI → Model connections connects a model server once for local
 DeepSeek and Prime agents. Add connection automatically searches this computer,
 local service advertisements and common model ports. Manual setup is always
 available. The optional private-network switch reads online Tailscale peers;
@@ -51,3 +51,8 @@ requested. Browser tests cover automatic connection, model selection and harness
 switching, manual failure/retry, availability retry, explicit test and removal,
 and the existing manual DeepSeek flow. See the task verification report for exact
 commits, current gate results and installed acceptance evidence.
+
+On macOS, discovery uses system Bonjour to request Local Network access. Denied
+access is explained with the System Settings recovery path; allow access and
+search again. A reachable Tailscale endpoint can still be used when LAN access
+is unavailable. Discovery cannot override operating-system permission decisions.

@@ -33,7 +33,7 @@ export function SaveLegacyConnectionButton({
             });
             onSaved(row.id);
           } catch (error) {
-            setError(String(error));
+            setError(error instanceof Error ? error.message : String(error));
           } finally {
             setBusy(false);
           }

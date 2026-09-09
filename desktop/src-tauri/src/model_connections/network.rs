@@ -87,6 +87,9 @@ pub async fn discover_model_servers(
         return Err("A model server search is already running".into());
     }
     let _guard = ScanGuard;
+    let permission_denied = tokio::task::spawn_blocking(super::local_permission::denied)
+        .await
+        .map_err(|_| "Local network permission check stopped unexpectedly")?;
     let interfaces =
         if_addrs::get_if_addrs().map_err(|_| "Cannot inspect local network interfaces")?;
     let mut hosts = BTreeSet::from([Ipv4Addr::LOCALHOST]);
@@ -188,7 +191,19 @@ pub async fn discover_model_servers(
         }
     }
     servers.sort_by(|a, b| a.name.cmp(&b.name).then(a.base_url.cmp(&b.base_url)));
-    Ok(DiscoveryResult { servers, notice: if !private_notice.is_empty() { private_notice.as_str() } else if limited { "Searched this computer and nearby local addresses. Larger networks, VPNs, and custom ports may need manual setup." } else { "Searched this computer, local service advertisements, and common model ports. Private networks and custom ports may need manual setup." }.into() })
+    let mut notice = if !private_notice.is_empty() {
+        private_notice
+    } else if limited {
+        "Searched this computer and nearby local addresses. Larger networks, VPNs, and custom ports may need manual setup.".into()
+    } else {
+        "Searched this computer, local service advertisements, and common model ports. Private networks and custom ports may need manual setup.".into()
+    };
+    if permission_denied {
+        notice.push_str(" macOS denied local network access. Enable Buzz in System Settings → Privacy & Security → Local Network, then search again.");
+    } else if cfg!(target_os = "macos") && servers.is_empty() {
+        notice.push_str(" On macOS, allow Buzz's Local Network request. If access was previously denied, check System Settings → Privacy & Security → Local Network, then search again.");
+    }
+    Ok(DiscoveryResult { servers, notice })
 }
 #[cfg(test)]
 mod tests {

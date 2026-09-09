@@ -49,7 +49,8 @@ export function ConnectModelDialog({
       setServers(result.servers);
       setNotice(result.notice);
     } catch (error) {
-      if (token === generation.current) setError(String(error));
+      if (token === generation.current)
+        setError(error instanceof Error ? error.message : String(error));
     } finally {
       if (token === generation.current) setSearching(false);
     }
@@ -86,7 +87,7 @@ export function ConnectModelDialog({
       onConnected(row);
       onOpenChange(false);
     } catch (error) {
-      setError(String(error));
+      setError(error instanceof Error ? error.message : String(error));
     } finally {
       setSaving(false);
     }
@@ -134,7 +135,7 @@ export function ConnectModelDialog({
             </div>
             {searching && (
               <p role="status" className="text-sm text-muted-foreground">
-                Finding model servers… This can take up to 30 seconds.
+                Finding model servers… This can take up to 35 seconds.
               </p>
             )}
             {servers.map((server) => (

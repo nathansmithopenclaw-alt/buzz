@@ -31,7 +31,8 @@ export function ModelConnectionsSettingsCard() {
         if (live) setRows(rows);
       })
       .catch((error) => {
-        if (live) setError(String(error));
+        if (live)
+          setError(error instanceof Error ? error.message : String(error));
       });
     return () => {
       live = false;
@@ -43,7 +44,7 @@ export function ModelConnectionsSettingsCard() {
     try {
       upsert(await testConnection(row.id, model));
     } catch (error) {
-      setError(String(error));
+      setError(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy("");
     }
@@ -56,7 +57,7 @@ export function ModelConnectionsSettingsCard() {
       setRows((rows) => rows.filter((r) => r.id !== row.id));
       setRemoving("");
     } catch (error) {
-      setError(String(error));
+      setError(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy("");
     }

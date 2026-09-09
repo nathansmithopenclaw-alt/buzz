@@ -28,7 +28,8 @@ export function ModelConnectionPicker({
         if (live) setRows(rows);
       })
       .catch((error) => {
-        if (live) setError(String(error));
+        if (live)
+          setError(error instanceof Error ? error.message : String(error));
       });
     return () => {
       live = false;

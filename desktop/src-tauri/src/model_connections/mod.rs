@@ -1,4 +1,5 @@
 //! Device-local model connections. Secrets never appear in catalog IPC responses.
+mod local_permission;
 pub(crate) mod network;
 mod private_network;
 mod probe;
