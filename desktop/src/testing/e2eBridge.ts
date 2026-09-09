@@ -1,3 +1,4 @@
+import { handleMockSummaryFrame } from "./e2eBridgeSummary";
 import {
   completeMockSubscriptionToken,
   mockSubscriptionAccountCommand,
@@ -11283,6 +11284,13 @@ function sendToMockSocket(args: {
     string,
     ...unknown[],
   ];
+
+  if (
+    handleMockSummaryFrame(type, rest, MOCK_IDENTITY_PUBKEY, (frame) =>
+      sendWsText(socket.handler, frame),
+    )
+  )
+    return;
 
   if (type === "AUTH") {
     const event = rest[0] as RelayEvent;

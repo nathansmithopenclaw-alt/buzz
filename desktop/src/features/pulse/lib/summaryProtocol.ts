@@ -10,7 +10,11 @@ import {
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { KIND_BRIEF_CONFIG, KIND_BRIEF_REPORT } from "@/shared/constants/kinds";
 
-import { syncSummarySchedule } from "./summarySchedule";
+import {
+  syncSummarySchedule,
+  type SummarySchedule,
+  summaryScheduleError,
+} from "./summarySchedule";
 import type {
   SummaryConversation,
   SummarySourceConfig,
@@ -23,6 +27,8 @@ export const BRIEF_CONFIG_D_TAG = "summary";
 export type BriefConfigPayload = {
   v: 1;
   read_delegation?: boolean;
+  /** Absent on legacy daily setups; null means manual only. */
+  schedule?: SummarySchedule | null;
   reporter_pubkey: string | null;
   hour: number;
   minute: number;
@@ -193,9 +199,13 @@ export async function publishBriefConfig(input: {
   reporterName: string;
   conversations: SummaryConversation[];
   sourceConfig: SummarySourceConfig;
+  schedule?: SummarySchedule | null;
+  previousConfigCreatedAt?: number;
   previousChannelIds?: string[];
   previousWorkflowId?: string | null;
 }): Promise<void> {
+  const scheduleError = summaryScheduleError(input.schedule ?? null);
+  if (scheduleError) throw new Error(scheduleError);
   const lists = listsFromChecked(input.conversations, input.sourceConfig);
   if (!input.reporterPubkey) throw new Error("Choose a Summary agent.");
   const host =
@@ -213,10 +223,12 @@ export async function publishBriefConfig(input: {
     minute: input.minute,
     timezone: input.timezone,
     reporterName: input.reporterName,
+    schedule: input.schedule,
   });
   const payload: BriefConfigPayload = {
     v: 1,
     read_delegation: true,
+    ...(input.schedule !== undefined ? { schedule: input.schedule } : {}),
     reporter_pubkey: input.reporterPubkey,
     hour: input.hour,
     minute: input.minute,
@@ -249,6 +261,10 @@ export async function publishBriefConfig(input: {
   const event = await signRelayEvent({
     allowSelfTagging: true,
     kind: KIND_BRIEF_CONFIG,
+    createdAt: Math.max(
+      Math.floor(Date.now() / 1000),
+      (input.previousConfigCreatedAt ?? 0) + 1,
+    ),
     content: JSON.stringify(payload),
     tags,
   });

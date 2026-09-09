@@ -99,8 +99,7 @@ test("guided workflow retains source choices and saves only at the final step", 
       ],
       sourceConfig,
       onSourceConfigChange: setSourceConfig,
-      hour: 9,
-      minute: 0,
+      schedule: { on: "schedule", cron: "0 9 * * *" },
       timezone: "UTC",
       reporterMode: "existing",
       reporterPubkey: "aa",
@@ -109,7 +108,7 @@ test("guided workflow retains source choices and saves only at the final step", 
       onRuntimeDraftChange() {},
       saving: false,
       error: null,
-      onTimeChange() {},
+      onScheduleChange() {},
       onReporterModeChange() {},
       onReporterChange() {},
       onSave() {
@@ -417,4 +416,37 @@ test("Nectar keeps delayed discovery active across unrelated parent renders", as
     for (const request of pending) request.resolve(response);
     window.__TAURI_INTERNALS__.invoke = previous;
   }
+});
+
+test("schedule controls retain local times, selected weekdays and manual-only choices", async () => {
+  const { SummaryScheduleFields } = await import("./SummaryScheduleFields.tsx");
+  let value;
+  function Form() {
+    const [schedule, setSchedule] = React.useState({
+      on: "schedule",
+      cron: "15 8 * * *",
+    });
+    value = schedule;
+    return React.createElement(SummaryScheduleFields, {
+      schedule,
+      timezone: "America/New_York",
+      onChange: setSchedule,
+    });
+  }
+  render(wrap(React.createElement(Form)));
+  assert.ok(screen.getByText("Run time (America/New_York)"));
+  fireEvent.click(screen.getByRole("radio", { name: "Weekly" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Friday" }));
+  assert.equal(value.cron, "15 8 * * 1,5");
+  fireEvent.change(document.querySelector('input[type="time"]'), {
+    target: { value: "17:45" },
+  });
+  assert.equal(value.cron, "45 17 * * 1,5");
+  fireEvent.click(screen.getByRole("switch", { name: "Run on a schedule" }));
+  assert.equal(value, null);
+  assert.ok(screen.getByText("Manual only. No scheduled runs."));
+  fireEvent.click(screen.getByRole("switch", { name: "Run on a schedule" }));
+  assert.equal(value.cron, "45 17 * * 1,5");
+  fireEvent.click(screen.getByRole("radio", { name: "Every 30 minutes" }));
+  assert.equal(value.interval, "30m");
 });

@@ -62,3 +62,29 @@ Desktop rollout. It does not establish upstream allocation of the existing
 NIP-BR event kinds or prove live provider execution. Save failures remain visible
 and retryable; creation of the agent/DM/workflow and signed config publication
 are distinct operations, not one distributed transaction.
+
+## Scheduled and manual runs
+
+Summary setup stores an optional `schedule` alongside the existing v1 source
+configuration. Missing `schedule` retains the legacy daily `hour`/`minute` in the
+saved IANA timezone. A schedule is `{ "on": "schedule", "cron": "…" }` or
+`{ "on": "schedule", "interval": "…" }`; `null` selects manual-only mode and
+removes the companion workflow without revoking the saved source selection.
+Saving zero sources still removes the workflow and revokes read access.
+
+The schedule step reuses Workflow scheduling fields, with the Summary's saved
+local timezone. It supports 15/30-minute and hourly intervals, daily, selected
+weekdays, monthly, and custom cron (including lists of hours for several runs per
+day). Invalid schedule drafts cannot be saved. Sequential config saves use a
+monotonically increasing event timestamp so rapid schedule edits do not lose to
+NIP-33 same-second ordering.
+
+**Run summary** reads the current saved config, starts the selected managed agent
+if stopped, and sends one explicit-pubkey request in the owner's DM with that
+agent. Startup, DM creation and message signing are bound to the captured relay
+and owner identity. This action does not edit the schedule or read grant. The UI
+shows request acceptance separately from report completion, links to the agent
+conversation, and refreshes reports for up to ten minutes. Concurrent button
+clicks are suppressed; uncertain delivery is shown and never automatically
+retried. Both scheduled and manual prompts summarize new activity from existing
+watermarks, without inventing work or repeating earlier material.

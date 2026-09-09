@@ -1,3 +1,8 @@
+import { SummaryScheduleFields } from "./SummaryScheduleFields";
+import {
+  summaryScheduleError,
+  type SummarySchedule,
+} from "../lib/summarySchedule";
 import { AgentDialog } from "@/features/agents/ui/AgentDialog";
 import * as React from "react";
 import { UsersRound } from "lucide-react";
@@ -12,9 +17,7 @@ import {
   NECTAR_DISPLAY_NAME,
 } from "@/features/pulse/lib/nectarPersona";
 import {
-  formatLocalTime,
   isConversationChecked,
-  parseLocalTime,
   partitionLiveConversations,
   toggleConversation,
   type SummaryConversation,
@@ -26,7 +29,6 @@ import {
 } from "@/features/settings/ui/SettingsOptionGroup";
 import type { ManagedAgent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
-import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
 
 export type SummaryReporterMode = "nectar" | "existing";
@@ -34,8 +36,7 @@ export type SummaryReporterMode = "nectar" | "existing";
 type SummaryBuilderProps = {
   conversations: SummaryConversation[];
   sourceConfig: SummarySourceConfig;
-  hour: number;
-  minute: number;
+  schedule: SummarySchedule | null;
   timezone: string;
   reporterMode: SummaryReporterMode;
   reporterPubkey: string | null;
@@ -46,7 +47,7 @@ type SummaryBuilderProps = {
   saving: boolean;
   error: string | null;
   onSourceConfigChange: (config: SummarySourceConfig) => void;
-  onTimeChange: (hour: number, minute: number) => void;
+  onScheduleChange: (schedule: SummarySchedule | null) => void;
   onReporterModeChange: (mode: SummaryReporterMode) => void;
   onReporterChange: (pubkey: string | null) => void;
 
@@ -88,8 +89,7 @@ function ConversationRow({
 export function SummaryBuilder({
   conversations,
   sourceConfig,
-  hour,
-  minute,
+  schedule,
   timezone,
   reporterMode,
   reporterPubkey,
@@ -100,7 +100,7 @@ export function SummaryBuilder({
   saving,
   error,
   onSourceConfigChange,
-  onTimeChange,
+  onScheduleChange,
   onReporterModeChange,
   onReporterChange,
 
@@ -108,7 +108,6 @@ export function SummaryBuilder({
   onCancel,
 }: SummaryBuilderProps) {
   const { channels, dms } = partitionLiveConversations(conversations);
-  const timeValue = formatLocalTime(hour, minute);
   const [step, setStep] = React.useState(0);
   const [editAgentOpen, setEditAgentOpen] = React.useState(false);
   const [pickerOpen, setPickerOpen] = React.useState(false);
@@ -138,7 +137,7 @@ export function SummaryBuilder({
 
       <div hidden={step !== 0} className="space-y-4">
         <SettingsOptionGroup
-          description="Use Nectar or choose one of your agents to write the daily Summary."
+          description="Use Nectar or choose one of your agents to write your Summary."
           title="Reporter"
         >
           {reporterMode === "nectar" ? (
@@ -302,36 +301,21 @@ export function SummaryBuilder({
             conversations.filter((c) => isConversationChecked(sourceConfig, c))
               .length
           }{" "}
-          conversations daily. Selected DMs are shared with this agent for
-          read-only Summary access.
+          conversations. Selected DMs are shared with this agent for read-only
+          Summary access.
         </p>
         <SettingsOptionGroup
-          description="09:00 means 09:00 where you are, including daylight saving."
+          description="Choose when to run automatically, or use manual runs only."
           title="Schedule"
         >
-          <SettingsOptionRow>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium" id="summary-time-label">
-                Daily time
-              </p>
-              <p
-                className="text-xs text-muted-foreground/70"
-                data-settings-subcopy
-              >
-                {timezone}
-              </p>
-            </div>
-            <Input
-              aria-labelledby="summary-time-label"
-              className="w-32"
-              onChange={(event) => {
-                const parsed = parseLocalTime(event.target.value);
-                if (parsed) onTimeChange(parsed.hour, parsed.minute);
-              }}
-              type="time"
-              value={timeValue}
+          <div className="p-4">
+            <SummaryScheduleFields
+              schedule={schedule}
+              timezone={timezone}
+              disabled={saving}
+              onChange={onScheduleChange}
             />
-          </SettingsOptionRow>
+          </div>
           <SettingsOptionRow>
             <div className="min-w-0 flex-1">
               <p
@@ -378,6 +362,7 @@ export function SummaryBuilder({
         <Button
           disabled={
             saving ||
+            (step === 2 && Boolean(summaryScheduleError(schedule))) ||
             (showNectarSetup && !runtimeValid) ||
             (reporterMode === "existing" && !reporterPubkey)
           }

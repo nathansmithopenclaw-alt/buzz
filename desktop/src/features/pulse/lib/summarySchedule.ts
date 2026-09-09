@@ -7,6 +7,39 @@ import {
 } from "@/shared/api/tauriWorkflows";
 import type { Workflow } from "@/shared/api/workflowTypes";
 
+import { cronExpressionError } from "@/features/workflows/ui/cronExpression";
+import { parseDurationSeconds } from "@/features/workflows/ui/workflowDuration";
+import type { TriggerConfig } from "@/features/workflows/ui/workflowFormTypes";
+
+export type SummarySchedule = Pick<TriggerConfig, "cron" | "interval"> & {
+  on: "schedule";
+};
+
+export function summaryScheduleError(
+  schedule: SummarySchedule | null,
+): string | null {
+  if (!schedule) return null;
+  if (
+    schedule.on !== "schedule" ||
+    Boolean(schedule.cron) === Boolean(schedule.interval)
+  ) {
+    return "Choose a schedule with either a run time or an interval.";
+  }
+  if (schedule.cron) return cronExpressionError(schedule.cron);
+  const seconds = parseDurationSeconds(schedule.interval ?? "");
+  return seconds !== null && seconds >= 60
+    ? null
+    : "Choose an interval of at least one minute.";
+}
+
+export function summaryPrompt(
+  ownerPubkey: string,
+  reporterName: string,
+): string {
+  const name = sanitizeMentionName(reporterName) || "Nectar";
+  return `@${name} Write a Summary of new activity since your previous Summary. Read the owner's configured conversations with buzz briefs config get --owner ${ownerPubkey}, then buzz briefs read --owner ${ownerPubkey} --channel <id> --since <watermark>. Page with --until and --before-id when needed. Publish a kind 40030 report for that owner from your watermarks. Do not invent work. If there is no new activity, report that without republishing previous material. Advance watermarks only for conversations actually read.`;
+}
+
 export const SUMMARY_WORKFLOW_NAME = "Summary";
 
 export function summaryWorkflowYaml(input: {
@@ -15,21 +48,29 @@ export function summaryWorkflowYaml(input: {
   timezone: string;
   reporterName: string;
   ownerPubkey?: string;
+  schedule?: SummarySchedule;
 }): string {
   const hour = clampInt(input.hour, 0, 23);
   const minute = clampInt(input.minute, 0, 59);
   const timezone = sanitizeYamlScalar(input.timezone) || "UTC";
-  const reporterName = sanitizeMentionName(input.reporterName) || "Nectar";
+  const schedule = input.schedule ?? {
+    on: "schedule",
+    cron: `${minute} ${hour} * * *`,
+  };
+  const error = summaryScheduleError(schedule);
+  if (error) throw new Error(error);
   return [
     `name: ${SUMMARY_WORKFLOW_NAME}`,
     "trigger:",
     "  on: schedule",
-    `  cron: '${minute} ${hour} * * *'`,
+    schedule.cron
+      ? `  cron: '${schedule.cron.trim()}'`
+      : `  interval: ${JSON.stringify(schedule.interval)}`,
     `  timezone: ${timezone}`,
     "steps:",
     "  - id: run",
     "    action: send_message",
-    `    text: ${JSON.stringify(`@${reporterName} Write today's Summary. Read the owner's configured conversations with buzz briefs config get --owner ${input.ownerPubkey ?? "<owner>"}, then buzz briefs read --owner ${input.ownerPubkey ?? "<owner>"} --channel <id> --since <watermark>. Page with --until and --before-id when needed. Publish a kind 40030 report for that owner from your watermarks. Do not invent work.`)}`,
+    `    text: ${JSON.stringify(summaryPrompt(input.ownerPubkey ?? "<owner>", input.reporterName))}`,
     "",
   ].join("\n");
 }
@@ -54,13 +95,17 @@ export async function syncSummarySchedule(input: {
   minute: number;
   timezone: string;
   reporterName: string;
+  schedule?: SummarySchedule | null;
 }): Promise<string | null> {
-  const yaml = summaryWorkflowYaml(input);
-  if (!input.hostChannelId) {
+  if (!input.hostChannelId || input.schedule === null) {
     await deleteSummaryWorkflow(input.previousWorkflowId);
     return null;
   }
 
+  const yaml = summaryWorkflowYaml({
+    ...input,
+    schedule: input.schedule ?? undefined,
+  });
   const existing = await loadSummaryWorkflow(
     input.previousWorkflowId,
     input.hostChannelId,

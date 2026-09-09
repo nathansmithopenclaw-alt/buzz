@@ -1,3 +1,5 @@
+import { SummaryRunButton } from "./SummaryRunButton";
+import type { SummarySchedule } from "../lib/summarySchedule";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -65,6 +67,7 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
   const queryClient = useQueryClient();
   const timezone = React.useMemo(() => localTimezone(), []);
   const [editing, setEditing] = React.useState(false);
+  const [requestedAt, setRequestedAt] = React.useState(0);
   const channelsQuery = useChannelsQuery();
   const agentsQuery = useManagedAgentsQuery();
   const personasQuery = usePersonasQuery();
@@ -102,6 +105,8 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
       payload?.reporter_pubkey ?? null,
     ],
     enabled: Boolean(currentPubkey) && configQuery.isFetched,
+    refetchInterval:
+      requestedAt > 0 && Date.now() - requestedAt < 600_000 ? 5000 : false,
     queryFn: () =>
       fetchBriefReports(
         currentPubkey as string,
@@ -116,6 +121,10 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
   );
   const [hour, setHour] = React.useState(9);
   const [minute, setMinute] = React.useState(0);
+  const [schedule, setSchedule] = React.useState<SummarySchedule | null>({
+    on: "schedule",
+    cron: "0 9 * * *",
+  });
   const [reporterMode, setReporterMode] =
     React.useState<SummaryReporterMode>("nectar");
   const [reporterPubkey, setReporterPubkey] = React.useState<string | null>(
@@ -137,6 +146,7 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
       setSourceConfig(defaultSourceConfig(conversations));
       setHour(9);
       setMinute(0);
+      setSchedule({ on: "schedule", cron: "0 9 * * *" });
       setReporterMode("nectar");
       setReporterPubkey(nectarAgent?.pubkey ?? null);
       return;
@@ -144,6 +154,11 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
     setSourceConfig(sourceConfigFromPayload(payload, conversations));
     setHour(payload.hour);
     setMinute(payload.minute);
+    setSchedule(
+      payload.schedule === undefined
+        ? { on: "schedule", cron: `${payload.minute} ${payload.hour} * * *` }
+        : payload.schedule,
+    );
     setReporterPubkey(payload.reporter_pubkey);
     const assignedNectar =
       Boolean(nectarAgent) &&
@@ -204,12 +219,14 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
         ownerPubkey: currentPubkey,
         hour,
         minute,
+        schedule,
         timezone: payload?.timezone || timezone,
         autoInclude: sourceConfig.autoInclude,
         reporterPubkey: reporter,
         reporterName: reporterAgent?.name || "Nectar",
         conversations,
         sourceConfig,
+        previousConfigCreatedAt: configQuery.data?.created_at,
         previousChannelIds: payload?.channels ?? [],
         previousWorkflowId: configQuery.data
           ? workflowIdFromEvent(configQuery.data)
@@ -279,8 +296,7 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
               ? "Failed to save Summary sources"
               : null
         }
-        hour={hour}
-        minute={minute}
+        schedule={schedule}
         nectarExists={Boolean(nectarAgent)}
         onCancel={
           hasSavedConfig
@@ -296,10 +312,7 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
         onReporterModeChange={setReporterMode}
         onSave={() => saveMutation.mutate()}
         onSourceConfigChange={setSourceConfig}
-        onTimeChange={(nextHour, nextMinute) => {
-          setHour(nextHour);
-          setMinute(nextMinute);
-        }}
+        onScheduleChange={setSchedule}
         reporterMode={reporterMode}
         reporterPubkey={reporterPubkey}
         saving={saveMutation.isPending}
@@ -311,6 +324,18 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
 
   return (
     <div className="flex flex-col gap-6">
+      <SummaryRunButton
+        ownerPubkey={currentPubkey}
+        enabled={Boolean(
+          payload?.read_delegation &&
+            payload.reporter_pubkey &&
+            payload.channels.length + payload.dms.length > 0,
+        )}
+        onRequested={() => {
+          setRequestedAt(Date.now());
+          void reportsQuery.refetch();
+        }}
+      />
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold tracking-tight">
@@ -342,9 +367,10 @@ export function SummaryView({ currentPubkey }: SummaryViewProps) {
         </article>
       ) : (
         <div className="rounded-2xl border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
-          Sources are saved. Pick a reporter and it will publish the first
-          report at {String(hour).padStart(2, "0")}:
-          {String(minute).padStart(2, "0")} ({payload?.timezone || timezone}).
+          Your setup is saved. Run a Summary now
+          {payload?.schedule === null
+            ? "."
+            : " or wait for your next scheduled run."}
         </div>
       )}
 

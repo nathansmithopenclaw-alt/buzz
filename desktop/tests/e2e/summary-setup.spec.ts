@@ -49,7 +49,9 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   ).toBeVisible();
   await expect(page.locator("#summary-nectar-harness")).toContainText("Codex");
   await expect(page.locator("#summary-nectar-model")).toContainText("GPT-5.4");
-  await expect(page.getByText("Daily time", { exact: true })).not.toBeVisible();
+  await expect(
+    page.getByText("Run on a schedule", { exact: true }),
+  ).not.toBeVisible();
   await page.getByRole("button", { name: "Choose agent", exact: true }).click();
   const picker = page.getByTestId("summary-agent-picker");
   await picker
@@ -69,10 +71,57 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await expect(
     page.getByRole("heading", { name: "Direct messages", exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("Daily time", { exact: true })).not.toBeVisible();
+  await expect(
+    page.getByText("Run on a schedule", { exact: true }),
+  ).not.toBeVisible();
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(page.getByText("Daily time", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(
+    page.getByText("Run on a schedule", { exact: true }),
+  ).toBeVisible();
+  await page.locator('label[for="wf-trigger-frequency-weekly"]').click();
+  await page.locator('label[for="wf-trigger-weekday-5"]').click();
+  await page.locator("#wf-trigger-time").fill("17:30");
+  await page.getByRole("button", { name: "Save Summary", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Run summary", exact: true }),
+  ).toBeVisible();
+  const saved = await page.evaluate(() =>
+    JSON.parse(sessionStorage.getItem("buzz-e2e-summary-events") ?? "[]"),
+  );
+  expect(JSON.parse(saved.at(-1).content).schedule).toEqual({
+    on: "schedule",
+    cron: "30 17 * * 1,5",
+  });
+  await page.getByRole("button", { name: "Run summary", exact: true }).click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Summary requested" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Summary settings", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.locator("#wf-trigger-time")).toHaveValue("17:30");
+  await expect(page.getByLabel("Friday", { exact: true })).toBeChecked();
+  await page
+    .getByRole("switch", { name: "Run on a schedule", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Save Summary", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Run summary", exact: true }),
+  ).toBeEnabled();
+  const manual = await page.evaluate(() =>
+    JSON.parse(sessionStorage.getItem("buzz-e2e-summary-events") ?? "[]"),
+  );
+  expect(JSON.parse(manual.at(-1).content).schedule).toBeNull();
+  await page.getByRole("button", { name: "Run summary", exact: true }).click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Summary requested" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Summary settings", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.getByText("Step 2 of 3", { exact: false })).toBeVisible();
   await page.screenshot({
     path: "test-results/summary-conversations.png",
