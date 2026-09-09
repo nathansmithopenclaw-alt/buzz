@@ -94,15 +94,29 @@ fn secret(row: &ModelConnection) -> Result<Option<String>, String> {
         .map(Option::flatten)
 }
 pub fn resolve(app: &AppHandle, id: &str) -> Result<(ModelConnection, Option<String>), String> {
-    let row = load(app)?
-        .into_iter()
-        .find(|row| row.id == id)
-        .ok_or("Model connection was removed. Choose another connection.")?;
+    let row = find_connection(app, id)?;
     let key = secret(&row)?;
     if row.has_key && key.is_none() {
         return Err("Model connection key is unavailable. Reconnect in Model connections.".into());
     }
     Ok((row, key))
+}
+fn find_connection(app: &AppHandle, id: &str) -> Result<ModelConnection, String> {
+    load(app)?
+        .into_iter()
+        .find(|row| row.id == id)
+        .ok_or_else(|| "Model connection was removed. Choose another connection.".into())
+}
+fn key_for_save(
+    replacement: Option<String>,
+    saved: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    // An explicit replacement or clearing must recover an unavailable saved key.
+    Ok(match replacement {
+        Some(key) => Some(key),
+        None => saved()?,
+    }
+    .filter(|key| !key.is_empty()))
 }
 #[tauri::command]
 pub fn list_model_connections(app: AppHandle) -> Result<Vec<ModelConnection>, String> {
@@ -135,24 +149,33 @@ pub async fn save_model_connection(
     let old = input
         .id
         .as_deref()
-        .map(|id| resolve(&app, id))
+        .map(|id| find_connection(&app, id))
         .transpose()?;
     if old
         .as_ref()
-        .is_some_and(|(row, _)| row.base_url != base_url && row.has_key)
+        .is_some_and(|row| row.base_url != base_url && row.has_key)
         && input.api_key.is_none()
     {
         return Err("Re-enter the API key for the new server, or clear it explicitly. Saved keys are not sent to a different address.".into());
     }
-    let key = input
-        .api_key
-        .clone()
-        .or_else(|| old.as_ref().and_then(|(_, key)| key.clone()))
-        .filter(|key| !key.is_empty());
+    let key = key_for_save(input.api_key.clone(), || {
+        old.as_ref()
+            .map(|row| {
+                let key = secret(row)?;
+                if row.has_key && key.is_none() {
+                    return Err(
+                        "Saved key is unavailable. Enter a new API key or remove it.".into(),
+                    );
+                }
+                Ok(key)
+            })
+            .transpose()
+            .map(Option::flatten)
+    })?;
     let models = probe::catalog(&base_url, key.as_deref(), 5).await?;
     let _guard = STORE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut rows = load(&app)?;
-    if let Some((previous, _)) = &old {
+    if let Some(previous) = &old {
         let current = rows
             .iter()
             .find(|row| row.id == previous.id)
@@ -192,7 +215,7 @@ pub async fn save_model_connection(
         }
         return Err(error);
     }
-    if let Some(reference) = old.and_then(|(row, _)| row.secret_ref) {
+    if let Some(reference) = old.and_then(|row| row.secret_ref) {
         let _ = crate::secret_store::SecretStore::shared("buzz-desktop").delete(&reference);
     }
     Ok(row)
@@ -268,6 +291,19 @@ pub async fn discover_for_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replacing_or_clearing_a_key_recovers_without_reading_the_old_secret() {
+        let unavailable = || Err("saved key is unavailable".to_string());
+        assert_eq!(
+            key_for_save(Some("replacement".into()), unavailable).unwrap(),
+            Some("replacement".into())
+        );
+        assert_eq!(
+            key_for_save(Some(String::new()), unavailable).unwrap(),
+            None
+        );
+        assert!(key_for_save(None, unavailable).is_err());
+    }
     #[test]
     fn saved_connections_round_trip_without_exposing_keys_and_removal_persists() {
         let dir = tempfile::tempdir().unwrap();
