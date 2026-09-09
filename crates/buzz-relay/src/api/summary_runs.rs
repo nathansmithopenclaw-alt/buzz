@@ -31,6 +31,13 @@ pub(super) async fn handle(
             "Summary operations require one request",
         ));
     }
+    if filters[0]
+        .get("summary_operation")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("reports_"))
+    {
+        return super::summary_reports::handle(state, tenant, actor, filters[0].clone()).await;
+    }
     let request: Request = serde_json::from_value(filters[0].clone())
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid Summary operation"))?;
     if request.summary_operation != "progress"
@@ -40,7 +47,7 @@ pub(super) async fn handle(
     }
     if request.summary_operation == "capabilities" {
         return Ok(Json(
-            json!({"summary_protocol":2,"complete_directory":state.config.require_relay_membership}),
+            json!({"summary_protocol":2,"summary_report_archive":1,"complete_directory":state.config.require_relay_membership}),
         ));
     }
     if request.summary_operation == "people" {

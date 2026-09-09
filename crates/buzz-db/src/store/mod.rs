@@ -48,6 +48,7 @@ pub mod reminder;
 pub mod replaceable;
 /// Summary audience directory and durable run coordination.
 pub mod summary;
+pub mod summary_archive;
 pub mod summary_publish;
 pub mod summary_runs;
 /// Thread metadata persistence.

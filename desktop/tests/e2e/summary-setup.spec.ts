@@ -237,7 +237,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await page.getByTestId("pulse-tab-summary").click();
   await expect(
     page.getByRole("article", { name: "Daily overview", exact: true }),
-  ).toContainText("2 reports");
+  ).toContainText("2 recent reports");
   await page.screenshot({
     path: "test-results/summary-collection.png",
     fullPage: true,
@@ -282,4 +282,73 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
     .getByRole("button", { name: "Edit agent setup", exact: true })
     .click();
   await expect(page.getByRole("dialog").last()).toBeVisible();
+  await page
+    .getByRole("dialog")
+    .last()
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Manage reports", exact: true })
+    .click();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await expect(
+    page.getByRole("button", { name: /Evening report.*Summary specialist/ }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "test-results/summary-report-library.png",
+    fullPage: true,
+  });
+  await page
+    .getByLabel("Search reports", { exact: true })
+    .fill("Morning report");
+  await expect(
+    page.getByRole("button", { name: /Evening report.*Summary specialist/ }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("checkbox", { name: "Select this page", exact: true })
+    .check();
+  await page
+    .getByRole("button", { name: "Archive selected", exact: true })
+    .click();
+  await expect(
+    page.getByText("No matching reports on this page."),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Archived reports", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /Morning report.*Summary specialist/ }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "test-results/summary-archive.png",
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(
+    page.getByText("No matching reports on this page."),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Current reports", exact: true })
+    .click();
+  await page
+    .getByRole("checkbox", { name: "Select this page", exact: true })
+    .check();
+  await page
+    .getByRole("button", { name: "Delete selected", exact: true })
+    .click();
+  await expect(page.getByRole("alertdialog")).toContainText("every recipient");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: /Morning report.*Summary specialist/ }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Delete selected", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Delete reports", exact: true })
+    .click();
+  await expect(
+    page.getByText("No matching reports on this page."),
+  ).toBeVisible();
 });

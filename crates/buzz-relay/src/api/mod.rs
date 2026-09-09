@@ -12,6 +12,7 @@ pub mod mesh_demo;
 pub mod nip05;
 pub mod operator;
 mod summary_read;
+mod summary_reports;
 mod summary_runs;
 pub mod workflows;
 

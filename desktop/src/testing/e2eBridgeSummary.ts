@@ -83,7 +83,84 @@ export function handleMockSummaryCommand(
     summary_operation: string;
     summary_id?: string;
     run_id?: string;
+    event_ids?: string[];
+    filter?: {
+      archived: boolean;
+      query?: string;
+      owner?: string;
+      summary_id?: string;
+      reporter?: string;
+      since?: number;
+      until?: number;
+      before_time?: number;
+      before_id?: string;
+    };
   };
+  if (request.summary_operation.startsWith("reports_")) {
+    const archivedKey = `buzz-e2e-summary-archive:${owner}`;
+    const archived: string[] = JSON.parse(
+      sessionStorage.getItem(archivedKey) ?? "[]",
+    );
+    const events: RelayEvent[] = JSON.parse(
+      sessionStorage.getItem(key) ?? "[]",
+    );
+    if (request.summary_operation === "reports_list") {
+      const f = request.filter ?? { archived: false };
+      const rows = events
+        .filter(
+          (e) =>
+            e.kind === 40030 &&
+            e.tags.some((t) => t[0] === "p" && t[1] === owner),
+        )
+        .filter(
+          (e) =>
+            archived.includes(e.id) === f.archived &&
+            (!f.query ||
+              e.content.toLowerCase().includes(f.query.toLowerCase())) &&
+            (!f.summary_id ||
+              e.tags.some(
+                (t) => t[0] === "summary" && t[1] === f.summary_id,
+              )) &&
+            (!f.owner ||
+              e.tags.some((t) => t[0] === "owner" && t[1] === f.owner)) &&
+            (!f.reporter || e.pubkey === f.reporter) &&
+            (!f.since || e.created_at >= f.since) &&
+            (!f.until || e.created_at <= f.until) &&
+            (!f.before_time ||
+              e.created_at < f.before_time ||
+              (e.created_at === f.before_time && e.id < (f.before_id ?? ""))),
+        )
+        .sort(
+          (a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id),
+        );
+      const page = rows.slice(0, 50);
+      const last = page.at(-1);
+      return {
+        events: page,
+        next:
+          rows.length > 50 && last
+            ? { before_time: last.created_at, before_id: last.id }
+            : null,
+      };
+    }
+    const ids = request.event_ids ?? [];
+    if (request.summary_operation === "reports_delete") {
+      sessionStorage.setItem(
+        key,
+        JSON.stringify(events.filter((e) => !ids.includes(e.id))),
+      );
+    } else {
+      sessionStorage.setItem(
+        archivedKey,
+        JSON.stringify(
+          request.summary_operation === "reports_archive"
+            ? [...new Set([...archived, ...ids])]
+            : archived.filter((id) => !ids.includes(id)),
+        ),
+      );
+    }
+    return { updated: ids.length };
+  }
   if (request.summary_operation === "capabilities")
     return { summary_protocol: 2 };
   if (request.summary_operation === "people")

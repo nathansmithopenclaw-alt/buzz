@@ -123,13 +123,18 @@ export async function fetchSummaryDefinitions(owner: string) {
   }
   return [...unique.values()];
 }
-export async function fetchSharedSummaryReports(owner: string) {
-  return relayClient.fetchEvents({
-    kinds: [40030],
-    "#p": [owner],
-    "#t": ["buzz-brief"],
-    limit: 100,
-  });
+export async function fetchSharedSummaryReports(
+  owner: string,
+  relayUrl: string,
+) {
+  const page = await summaryOperation<{ events: RelayEvent[] }>(
+    { owner, relayUrl },
+    {
+      summary_operation: "reports_list",
+      filter: { archived: false },
+    },
+  );
+  return page.events;
 }
 export async function saveNamedSummary(
   scope: SummaryScope,

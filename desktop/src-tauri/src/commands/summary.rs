@@ -25,6 +25,10 @@ pub async fn summary_operation(
         .and_then(Value::as_str)
         .ok_or("Missing Summary operation")?;
     if ![
+        "reports_list",
+        "reports_archive",
+        "reports_restore",
+        "reports_delete",
         "people",
         "start",
         "status",

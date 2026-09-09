@@ -112,7 +112,7 @@ export function SummaryCollectionCard({
           <span>
             {c.channels.length + c.dms.length} conversations
             {typeof reportCount === "number"
-              ? ` · ${reportCount} ${reportCount === 1 ? "report" : "reports"}`
+              ? ` · ${reportCount} ${reportCount === 1 ? "recent report" : "recent reports"}`
               : ""}
           </span>
         </p>

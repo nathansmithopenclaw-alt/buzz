@@ -1,4 +1,5 @@
 import { summaryScheduleLabel } from "../lib/summaryScheduleLabel";
+import { SummaryReportLibrary } from "./SummaryReportLibrary";
 import { SummaryRunHistory } from "./SummaryRunHistory";
 import * as React from "react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
@@ -47,6 +48,10 @@ function SummaryCollection({
   const [filter, setFilter] = React.useState<"all" | "paused" | "archived">(
     "all",
   );
+  const [library, setLibrary] = React.useState<{
+    archived: boolean;
+    summaryId?: string;
+  } | null>(null);
   const [search, setSearch] = React.useState("");
   const definitions = useQuery({
     queryKey: ["summary-definitions", relayUrl, owner],
@@ -56,7 +61,7 @@ function SummaryCollection({
   const reports = useQuery({
     queryKey: ["summary-reports", relayUrl, owner],
     enabled: Boolean(owner && relayUrl),
-    queryFn: () => fetchSharedSummaryReports(owner),
+    queryFn: () => fetchSharedSummaryReports(owner, relayUrl),
     refetchInterval: 15000,
     staleTime: 0,
   });
@@ -122,6 +127,105 @@ function SummaryCollection({
     (id === "default" &&
       !event.tags.some((t) => t[0] === "summary") &&
       event.tags.some((t) => t[0] === "p" && t[1] === owner));
+  if (library)
+    return (
+      <div className="space-y-5">
+        <Button variant="ghost" onClick={() => setLibrary(null)}>
+          Back to Summaries
+        </Button>
+        <h2 className="text-xl font-semibold">
+          {library.archived ? "Summary archive" : "Report library"}
+        </h2>
+        <div className="flex gap-2">
+          <Button
+            variant={!library.archived ? "secondary" : "ghost"}
+            onClick={() => setLibrary({ ...library, archived: false })}
+          >
+            Current reports
+          </Button>
+          <Button
+            variant={library.archived ? "secondary" : "ghost"}
+            onClick={() => setLibrary({ ...library, archived: true })}
+          >
+            Archived reports
+          </Button>
+        </div>
+        {library.archived && !library.summaryId && (
+          <details
+            className="space-y-3 rounded-xl border p-4"
+            aria-label="Archived Summary setups"
+          >
+            <summary className="cursor-pointer font-semibold">
+              Archived Summary setups (
+              {all.filter((r) => r.config.archived).length})
+            </summary>
+            <p className="text-sm text-muted-foreground">
+              These schedules are stopped. Their reports remain available
+              separately.
+            </p>
+            <Input
+              aria-label="Search archived Summary setups"
+              placeholder="Find an archived setup by name or agent…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            {all
+              .filter(
+                (r) =>
+                  r.config.archived &&
+                  `${r.config.name} ${agents.data?.find((a) => a.pubkey === r.config.reporter_pubkey)?.name ?? ""}`
+                    .toLocaleLowerCase()
+                    .includes(search.toLocaleLowerCase()),
+              )
+              .map((r) => (
+                <div
+                  key={r.config.summary_id}
+                  className="flex items-center gap-3 rounded-lg border p-3"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium">{r.config.name}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {agents.data?.find(
+                        (a) => a.pubkey === r.config.reporter_pubkey,
+                      )?.name ?? "Assigned agent"}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setLibrary(null);
+                      setSelected(r.config.summary_id);
+                    }}
+                  >
+                    Open
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={change.isPending}
+                    onClick={() =>
+                      change.mutate({ record: r, action: "archive" })
+                    }
+                  >
+                    Restore setup
+                  </Button>
+                </div>
+              ))}
+            {!all.some((r) => r.config.archived) && (
+              <p className="text-sm text-muted-foreground">
+                No archived setups.
+              </p>
+            )}
+          </details>
+        )}
+        <SummaryReportLibrary
+          key={`${library.archived}:${library.summaryId}`}
+          scope={{ owner, relayUrl }}
+          definitions={all}
+          agents={agents.data ?? []}
+          {...library}
+        />
+      </div>
+    );
   if (chosen) {
     const history = visibleReports
       .filter((e) => mine(e, chosen.config.summary_id))
@@ -147,6 +251,14 @@ function SummaryCollection({
           {chosen.config.channels.length + chosen.config.dms.length}{" "}
           conversations
         </p>
+        <Button
+          variant="outline"
+          onClick={() =>
+            setLibrary({ archived: false, summaryId: chosen.config.summary_id })
+          }
+        >
+          Manage reports
+        </Button>
         <SummaryRunButton
           ownerPubkey={owner}
           record={chosen}
@@ -219,6 +331,23 @@ function SummaryCollection({
           New Summary
         </Button>
       </header>
+      <nav aria-label="Summary organization" className="flex flex-wrap gap-2">
+        <Button
+          variant="outline"
+          onClick={() => setLibrary({ archived: false })}
+        >
+          Browse all reports
+        </Button>
+        <Button
+          variant="outline"
+          onClick={() => {
+            setFilter("archived");
+            setLibrary({ archived: true });
+          }}
+        >
+          Summary archive
+        </Button>
+      </nav>
       {change.isError ? <p role="alert">{change.error.message}</p> : null}
       <section className="space-y-4" aria-label="My Summaries">
         <div className="flex flex-wrap items-center justify-between gap-3">

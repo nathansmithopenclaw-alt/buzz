@@ -481,3 +481,168 @@ async fn summary_delegated_read_and_progress_require_exact_active_run() {
         .is_empty());
     assert_ne!(config.id, source.id);
 }
+
+#[tokio::test]
+#[ignore = "requires isolated Postgres and Redis"]
+async fn summary_report_archive_delete_boundaries() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let audience: BTreeSet<_> = [
+        f.people[0].public_key().to_hex(),
+        f.people[1].public_key().to_hex(),
+    ]
+    .into();
+    let config = f
+        .config(
+            &id,
+            SummaryAudience::Selected {
+                people: vec![f.people[1].public_key().to_hex()],
+            },
+            nostr::Timestamp::now().as_secs(),
+        )
+        .await;
+    let report = f.report(&id, &config, audience).await;
+    let list = |archived| serde_json::json!({"summary_operation":"reports_list","filter":{"archived":archived}});
+    let action = |op| serde_json::json!({"summary_operation":op,"event_ids":[report.id.to_hex()]});
+    assert_eq!(
+        f.query(&f.people[1], list(false)).await.unwrap().0["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(f
+        .query(&f.people[2], action("reports_archive"))
+        .await
+        .is_err());
+    assert!(f
+        .query(&f.people[1], action("reports_delete"))
+        .await
+        .is_err());
+    let _ = f
+        .query(&f.people[1], action("reports_archive"))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.query(&f.people[1], list(false)).await.unwrap().0["events"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        f.query(&f.people[1], list(true)).await.unwrap().0["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        f.query(&f.people[0], list(false)).await.unwrap().0["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let _ = f
+        .query(&f.people[1], action("reports_restore"))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.query(&f.people[1], list(true)).await.unwrap().0["events"],
+        serde_json::json!([])
+    );
+    assert_eq!(f.query(&f.people[0], serde_json::json!({"summary_operation":"reports_list","filter":{"archived":false,"query":"does-not-exist"}})).await.unwrap().0["events"],serde_json::json!([]));
+    let _ = f
+        .query(&f.people[0], action("reports_delete"))
+        .await
+        .unwrap();
+    assert!(!f.can_read(&f.people[0], &report).await);
+    assert!(!f.can_read(&f.people[1], &report).await);
+    assert_eq!(
+        f.query(&f.people[0], list(false)).await.unwrap().0["events"],
+        serde_json::json!([])
+    );
+    // Publication retry cannot restore a deleted report or reopen its run.
+    f.state
+        .db
+        .publish_summary_report(f.tenant.community(), &report)
+        .await
+        .unwrap();
+    assert!(!f.can_read(&f.people[0], &report).await);
+    let history = f
+        .query(
+            &f.people[0],
+            serde_json::json!({"summary_operation":"history","summary_id":id}),
+        )
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(history["runs"][0]["state"], "published");
+    assert_eq!(history["runs"][0]["report_event_id"], report.id.to_hex());
+}
+
+#[tokio::test]
+#[ignore = "requires isolated Postgres and Redis"]
+async fn summary_report_pages_and_archive_revocation() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let at = nostr::Timestamp::now().as_secs();
+    let people = vec![f.people[1].public_key().to_hex()];
+    let audience: BTreeSet<_> = [f.people[0].public_key().to_hex(), people[0].clone()].into();
+    let config = f
+        .config(&id, SummaryAudience::Selected { people }, at)
+        .await;
+    for _ in 0..52 {
+        f.report(&id, &config, audience.clone()).await;
+    }
+    let list = serde_json::json!({"summary_operation":"reports_list","filter":{"archived":false,"summary_id":id,"query":"Private report title","reporter":f.reporter.public_key().to_hex()}});
+    let first = f.query(&f.people[1], list.clone()).await.unwrap().0;
+    assert_eq!(first["events"].as_array().unwrap().len(), 50);
+    let mut next = list.clone();
+    next["filter"]["before_time"] = first["next"]["before_time"].clone();
+    next["filter"]["before_id"] = first["next"]["before_id"].clone();
+    let last = f.query(&f.people[1], next).await.unwrap().0;
+    assert_eq!(last["events"].as_array().unwrap().len(), 2);
+    assert!(last["next"].is_null());
+    for row in last["events"].as_array().unwrap() {
+        assert!(!first["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == row["id"]));
+    }
+    let selected: Vec<_> = first["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(2)
+        .map(|e| e["id"].clone())
+        .collect();
+    let _ = f
+        .query(
+            &f.people[1],
+            serde_json::json!({"summary_operation":"reports_archive","event_ids":selected}),
+        )
+        .await
+        .unwrap();
+    let archived =
+        serde_json::json!({"summary_operation":"reports_list","filter":{"archived":true}});
+    assert_eq!(
+        f.query(&f.people[1], archived.clone()).await.unwrap().0["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    f.config(&id, SummaryAudience::OnlyMe, at + 1).await;
+    let withdrawn = f.query(&f.people[1], archived).await.unwrap().0;
+    assert_eq!(withdrawn["events"], serde_json::json!([]));
+    assert!(withdrawn["next"].is_null());
+    assert!(f
+        .query(
+            &f.people[1],
+            serde_json::json!({"summary_operation":"reports_restore","event_ids":selected})
+        )
+        .await
+        .is_err());
+    let visible = f.query(&f.people[0], list).await.unwrap().0;
+    assert_eq!(visible["events"].as_array().unwrap().len(), 50);
+}
