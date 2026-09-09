@@ -604,3 +604,17 @@ fn parse_nostr_bind_deep_link_accepts_expired_link_for_user_facing_error() {
     let payload = parse_nostr_bind_deep_link(&url).unwrap();
     assert_eq!(payload.expires_at, "2000-01-01T00:00:00Z");
 }
+
+#[test]
+fn summary_links_require_exact_report_and_safe_relay() {
+    let id = "ab".repeat(32);
+    let valid = format!("buzz://summary?id={id}&relay=wss%3A%2F%2Frelay.example");
+    assert!(parse_entity_deep_link(&Url::parse(&valid).unwrap()).is_some());
+    for invalid in [
+        format!("{valid}&id={id}"),
+        format!("buzz://summary?id={id}&relay=https%3A%2F%2Frelay.example"),
+        format!("buzz://summary?id={id}&relay=wss%3A%2F%2Fu%3Ap%40relay.example"),
+    ] {
+        assert!(parse_entity_deep_link(&Url::parse(&invalid).unwrap()).is_none());
+    }
+}

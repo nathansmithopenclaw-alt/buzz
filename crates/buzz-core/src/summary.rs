@@ -104,13 +104,24 @@ pub fn valid_pubkey(key: &str) -> bool {
 }
 
 impl SummaryDefinition {
+    /// Presentation and recurrence edits do not revoke an already claimed read
+    /// grant. Audience, source, reporter and archive changes still do.
+    pub fn same_execution_authority(&self, other: &Self) -> bool {
+        self.summary_id == other.summary_id
+            && self.reporter_pubkey == other.reporter_pubkey
+            && self.audience == other.audience
+            && self.read_delegation == other.read_delegation
+            && self.archived == other.archived
+            && self.channels.iter().collect::<BTreeSet<_>>() == other.channels.iter().collect()
+            && self.dms.iter().collect::<BTreeSet<_>>() == other.dms.iter().collect()
+    }
     /// Validate structural invariants before signing or applying a policy.
     pub fn validate(&self) -> Result<(), String> {
         if self.v != 2 || !valid_summary_id(&self.summary_id) {
             return Err("invalid Summary version or identifier".into());
         }
         if self.name.trim().is_empty()
-            || self.name.len() > 200
+            || self.name.chars().count() > 200
             || !valid_pubkey(&self.reporter_pubkey)
         {
             return Err("invalid Summary name or reporter".into());
@@ -119,7 +130,7 @@ impl SummaryDefinition {
         if sources.len() > 256 || sources.len() != self.channels.len() + self.dms.len() {
             return Err("Summary sources must be unique and bounded".into());
         }
-        if self.exclude.len() > 256 || self.exclude.iter().any(|id| sources.contains(id)) {
+        if self.exclude.len() > 4096 || self.exclude.iter().any(|id| sources.contains(id)) {
             return Err("excluded conversations cannot be Summary sources".into());
         }
         if let SummaryAudience::Selected { people } = &self.audience {
@@ -299,6 +310,57 @@ impl SummaryReport {
         }
         Ok(())
     }
+}
+
+/// Translate five-field Unix weekday numbers to names before handing a Summary
+/// schedule to the workflow cron library (which numbers Sunday as 1).
+/// Six/seven-field engine-native expressions retain their existing semantics.
+pub fn workflow_cron(expression: &str) -> Result<String, String> {
+    let mut fields: Vec<String> = expression.split_whitespace().map(str::to_owned).collect();
+    if fields.len() != 5 || fields[4] == "*" {
+        return Ok(expression.to_owned());
+    }
+    let names = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+    let mut output = Vec::new();
+    for part in fields[4].split(',') {
+        if part.chars().any(char::is_alphabetic) {
+            output.push(part.to_ascii_uppercase());
+            continue;
+        }
+        let (base, step) = part.split_once('/').map_or((part, 1), |(base, step)| {
+            (base, step.parse::<usize>().unwrap_or(0))
+        });
+        if step == 0 {
+            return Err("Invalid Summary weekday step".into());
+        }
+        let (start, end) = if base == "*" {
+            (0, 6)
+        } else if let Some((start, end)) = base.split_once('-') {
+            (
+                start
+                    .parse::<usize>()
+                    .map_err(|_| "Invalid Summary weekday")?,
+                end.parse::<usize>()
+                    .map_err(|_| "Invalid Summary weekday")?,
+            )
+        } else {
+            let start = base
+                .parse::<usize>()
+                .map_err(|_| "Invalid Summary weekday")?;
+            (start, if part.contains('/') { 7 } else { start })
+        };
+        if start > 7 || end > 7 || start > end {
+            return Err("Invalid Summary weekday range".into());
+        }
+        for day in (start..=end).step_by(step) {
+            let name = names[day % 7].to_owned();
+            if !output.contains(&name) {
+                output.push(name);
+            }
+        }
+    }
+    fields[4] = output.join(",");
+    Ok(fields.join(" "))
 }
 
 #[cfg(test)]

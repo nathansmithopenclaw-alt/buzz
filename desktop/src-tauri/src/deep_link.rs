@@ -366,7 +366,7 @@ fn parse_join_deep_link(url: &Url) -> Option<serde_json::Value> {
 
 /// Hosts of the `buzz://` git-entity links built by
 /// `desktop/src/shared/lib/entityLink.ts` and `crates/buzz-cli/src/links.rs`.
-const ENTITY_LINK_HOSTS: [&str; 4] = ["repo", "project", "pr", "issue"];
+const ENTITY_LINK_HOSTS: [&str; 5] = ["repo", "project", "pr", "issue", "summary"];
 
 fn is_hex64(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
@@ -430,6 +430,37 @@ fn parse_entity_deep_link(url: &Url) -> Option<()> {
         return None;
     }
 
+    if host == "summary" {
+        if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+            return None;
+        }
+        let (mut id, mut relay) = (None, None);
+        for (key, value) in url.query_pairs() {
+            let slot = match key.as_ref() {
+                "id" => &mut id,
+                "relay" => &mut relay,
+                _ => return None,
+            };
+            if slot.is_some() {
+                return None;
+            }
+            *slot = Some(value.into_owned());
+        }
+        if !id.is_some_and(|id| is_hex64(&id)) {
+            return None;
+        }
+        let relay = relay?;
+        if relay.len() > 2048 {
+            return None;
+        }
+        let address = Url::parse(&relay).ok()?;
+        return (matches!(address.scheme(), "ws" | "wss")
+            && address.host_str().is_some()
+            && address.username().is_empty()
+            && address.password().is_none()
+            && address.fragment().is_none())
+        .then_some(());
+    }
     let needs_event_id = host == "pr" || host == "issue";
     let allows_tab = host == "repo" || host == "project";
     let (mut owner, mut dtag, mut id, mut tab, mut commit) = (None, None, None, None, None);
@@ -689,7 +720,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             queue_navigation_deep_link(app, "message", &payload);
             let _ = app.emit("deep-link-message", payload);
         }
-        Some("repo" | "project" | "pr" | "issue") => {
+        Some("repo" | "project" | "pr" | "issue" | "summary") => {
             // OS routing uses this build's scheme; frontend navigation consumes
             // canonical buzz:// entity links rather than transport identity.
             let Some(href) = canonical_entity_deep_link(

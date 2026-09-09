@@ -2059,6 +2059,8 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
 
 -- Runs and cursors belong to a named Summary, never to a reporter process.
 CREATE TABLE summary_runs (
+    replay_period JSONB,
+    dispatch_managed BOOLEAN NOT NULL DEFAULT FALSE,
     community_id UUID NOT NULL REFERENCES communities(id),
     owner_pubkey BYTEA NOT NULL CHECK (octet_length(owner_pubkey) = 32),
     summary_id TEXT NOT NULL,
@@ -2104,3 +2106,51 @@ CREATE TABLE summary_run_reads (
 SELECT attach_community_write_fence('summary_runs');
 SELECT attach_community_write_fence('summary_cursors');
 SELECT attach_community_write_fence('summary_run_reads');
+-- A source read is recorded even when it returns no messages. Publication checks
+-- the complete frozen interval against observed rows, rather than trusting a
+-- client's newest watermark as proof that it paged through the conversation.
+CREATE TABLE summary_run_sources (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    owner_pubkey BYTEA NOT NULL,
+    summary_id TEXT NOT NULL,
+    run_id UUID NOT NULL,
+    channel_id UUID NOT NULL,
+    PRIMARY KEY (community_id, owner_pubkey, summary_id, run_id, channel_id),
+    FOREIGN KEY (community_id, owner_pubkey, summary_id, run_id)
+        REFERENCES summary_runs (community_id, owner_pubkey, summary_id, run_id) ON DELETE CASCADE
+);
+SELECT attach_community_write_fence('summary_run_sources');
+
+-- Scheduled jobs are a transactional projection of the owner's signed Summary.
+-- This also records manual-only setups so legacy jobs cannot revive them.
+CREATE TABLE summary_schedule_state (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    owner_pubkey BYTEA NOT NULL,
+    summary_id TEXT NOT NULL,
+    config_event_id BYTEA NOT NULL,
+    PRIMARY KEY (community_id, owner_pubkey, summary_id)
+);
+CREATE TABLE summary_schedule_jobs (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    owner_pubkey BYTEA NOT NULL,
+    summary_id TEXT NOT NULL,
+    workflow_id UUID NOT NULL,
+    PRIMARY KEY (community_id, owner_pubkey, summary_id, workflow_id),
+    FOREIGN KEY (community_id, workflow_id) REFERENCES workflows(community_id, id)
+);
+SELECT attach_community_write_fence('summary_schedule_state');
+SELECT attach_community_write_fence('summary_schedule_jobs');
+
+-- Archive state belongs to each reader, independently of the immutable report.
+CREATE TABLE summary_report_archive (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    reader_pubkey BYTEA NOT NULL CHECK (octet_length(reader_pubkey) = 32),
+    event_id BYTEA NOT NULL CHECK (octet_length(event_id) = 32),
+    archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, reader_pubkey, event_id)
+);
+SELECT attach_community_write_fence('summary_report_archive');
+CREATE INDEX summary_report_history ON events (community_id, created_at DESC, id DESC)
+    WHERE kind = 40030 AND deleted_at IS NULL;
+
+CREATE INDEX summary_read_consumption ON summary_run_reads (community_id,owner_pubkey,summary_id,channel_id,event_id,run_id);

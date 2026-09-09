@@ -4445,7 +4445,7 @@ mod postgres_tests {
 
 #[cfg(test)]
 #[path = "summary_read_tests.rs"]
-mod summary_read_tests;
+mod summary_read_postgres_tests;
 
 #[cfg(test)]
 #[path = "bridge/summary_tests.rs"]

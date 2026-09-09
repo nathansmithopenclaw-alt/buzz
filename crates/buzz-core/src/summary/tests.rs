@@ -91,3 +91,31 @@ fn malformed_definitions_fail_closed() {
     });
     assert!(invalid.validate().is_err());
 }
+
+#[test]
+fn unix_summary_weekdays_match_human_calendar_days() {
+    for (expression, expected) in [
+        ("0 9 * * 1", "0 9 * * MON"),
+        ("0 9 * * 0,7", "0 9 * * SUN"),
+        ("0 9 * * 1-5", "0 9 * * MON,TUE,WED,THU,FRI"),
+        ("0 9 * * */2", "0 9 * * SUN,TUE,THU,SAT"),
+        ("0 9 * * 1-7/2", "0 9 * * MON,WED,FRI,SUN"),
+        ("0 9 * * mon-fri", "0 9 * * MON-FRI"),
+        ("0 0 9 * * 1", "0 0 9 * * 1"),
+    ] {
+        assert_eq!(workflow_cron(expression).unwrap(), expected);
+    }
+    for invalid in ["0 9 * * 8", "0 9 * * 1/0", "0 9 * * 7-1"] {
+        assert!(workflow_cron(invalid).is_err());
+    }
+}
+
+#[test]
+fn summary_names_count_characters_and_exclusions_do_not_consume_source_slots() {
+    let mut config = definition();
+    config.name = "界".repeat(200);
+    config.exclude = (0..300).map(|_| Uuid::new_v4()).collect();
+    config.validate().unwrap();
+    config.name.push('界');
+    assert!(config.validate().is_err());
+}

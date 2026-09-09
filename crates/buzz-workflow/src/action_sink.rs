@@ -65,6 +65,20 @@ impl From<ActionSinkError> for crate::WorkflowError {
     }
 }
 
+/// Distinguishes owner-requested runs from revision-bound scheduled work.
+pub enum SummaryInvocation {
+    /// A manual run may explicitly regenerate an earlier report period.
+    Manual {
+        /// Frozen historical interval, or ordinary unread reporting.
+        replay_period: Option<serde_json::Value>,
+    },
+    /// A schedule must still match the saved definition that projected it.
+    Scheduled {
+        /// Signed definition revision; absent only for legacy workflows.
+        config_revision: Option<String>,
+    },
+}
+
 /// Interface for workflow actions that produce side effects.
 ///
 /// Implemented by the relay to provide direct DB/event access to the executor.
@@ -81,6 +95,7 @@ pub trait ActionSink: Send + Sync {
         _channel_id: Uuid,
         _owner: &str,
         _summary_id: &str,
+        _invocation: SummaryInvocation,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, ActionSinkError>> + Send + '_>> {
         Box::pin(async {
             Err(ActionSinkError::InvalidInput(

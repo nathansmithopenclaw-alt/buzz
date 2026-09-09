@@ -213,7 +213,7 @@ impl RelayActionSink {
         authored_text: &str,
         author_pubkey: &str,
         reply_to: Option<&str>,
-        summary_reporter: Option<String>,
+        summary_reporter: Option<(String, Uuid, u64)>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
@@ -391,20 +391,27 @@ impl RelayActionSink {
                 &author_pubkey_hex,
             )?;
 
-            if let Some(reporter) = summary_reporter {
+            if let Some((ref reporter, run, _)) = summary_reporter {
                 tags.push(
-                    Tag::parse(["p", &reporter])
+                    Tag::parse(["buzz:summary-run", &run.to_string()])
                         .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
                 );
                 tags.push(
-                    Tag::parse(["buzz:workflow-mention", &reporter])
+                    Tag::parse(["p", reporter])
+                        .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
+                );
+                tags.push(
+                    Tag::parse(["buzz:workflow-mention", reporter])
                         .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
                 );
             }
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
-            let event = EventBuilder::new(kind, &text)
-                .tags(tags)
+            let mut builder = EventBuilder::new(kind, &text).tags(tags);
+            if let Some((_, _, timestamp)) = summary_reporter {
+                builder = builder.custom_created_at(nostr::Timestamp::from(timestamp));
+            }
+            let event = builder
                 .sign_with_keys(&state.relay_keypair)
                 .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
 
@@ -516,9 +523,18 @@ impl ActionSink for RelayActionSink {
         channel: Uuid,
         owner: &str,
         id: &str,
+        invocation: buzz_workflow::action_sink::SummaryInvocation,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, ActionSinkError>> + Send + '_>> {
         let owner = owner.to_owned();
         let id = id.to_owned();
+        let (manual, config_revision, replay_period) = match invocation {
+            buzz_workflow::action_sink::SummaryInvocation::Manual { replay_period } => {
+                (true, None, replay_period)
+            }
+            buzz_workflow::action_sink::SummaryInvocation::Scheduled { config_revision } => {
+                (false, config_revision, None)
+            }
+        };
         Box::pin(async move {
             let state = self
                 .state
@@ -527,10 +543,29 @@ impl ActionSink for RelayActionSink {
             let (event, config) = crate::summary::definition(&state, community, &owner, &id)
                 .await
                 .map_err(ActionSinkError::InvalidInput)?;
-            if config.paused || config.archived || !config.read_delegation {
+            if config.archived
+                || !config.read_delegation
+                || (!manual && (config.paused || config.schedule.is_none()))
+            {
                 return Ok(
                     serde_json::json!({"skipped":true,"reason":"Summary paused or archived"}),
                 );
+            }
+            let managed = state
+                .db
+                .summary_schedule_managed(
+                    community,
+                    &hex::decode(&owner)
+                        .map_err(|e| ActionSinkError::InvalidInput(e.to_string()))?,
+                    &id,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if !manual
+                && managed
+                && config_revision.as_deref() != Some(event.event.id.to_hex().as_str())
+            {
+                return Ok(serde_json::json!({"skipped":true,"reason":"Summary schedule changed"}));
             }
             let room = state
                 .db
@@ -551,15 +586,18 @@ impl ActionSink for RelayActionSink {
                     "Summary run must be delivered to its private owner-agent DM".into(),
                 ));
             }
-            let people = crate::summary::audience(&state, community, &owner, &config)
+            let people =
+                crate::summary::prepare_attempt(&state, community, &owner, &event.event, &config)
+                    .await
+                    .map_err(ActionSinkError::InvalidInput)?;
+            let dispatch_lock = state
+                .db
+                .lock_summary_dispatch(community, &owner, &id)
                 .await
-                .map_err(ActionSinkError::InvalidInput)?;
-            crate::summary::source_access(&state, community, &owner, &config, &people)
-                .await
-                .map_err(ActionSinkError::InvalidInput)?;
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
             let (run, created) = state
                 .db
-                .claim_summary_run(
+                .claim_summary_dispatch(
                     community,
                     &hex::decode(&owner)
                         .map_err(|e| ActionSinkError::InvalidInput(e.to_string()))?,
@@ -568,14 +606,50 @@ impl ActionSink for RelayActionSink {
                     &hex::decode(&config.reporter_pubkey)
                         .map_err(|e| ActionSinkError::InvalidInput(e.to_string()))?,
                     &people,
+                    replay_period.as_ref(),
                 )
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            if !created {
-                return Ok(serde_json::json!({"run_id":run.run_id,"created":false}));
+            if !created && !run.dispatch_managed {
+                return Ok(serde_json::json!({"run_id":run.run_id,"run":run,"created":false}));
             }
-            let prompt=format!("Create the named Summary for owner {owner}, summary {id}, run {}. Read the saved definition and this run's cursors with buzz briefs run status --owner {owner} --summary {id} --run {}. Read every conversation in config.channels and config.dms, including those without a cursor. Cursors are previous boundaries, not the source list; the relay supplies an initial lookback when no cursor exists. Use buzz briefs read --owner {owner} --summary {id} --run {} --channel <id>. Compose a factual report without inventing work, then use buzz briefs run publish for this exact run. If blocked or approval is needed, record it with buzz briefs run progress using this owner, summary and run plus --state failed or --state needs_approval and --message. Resume with --state running after approval. Do not use generic report publishing or write watermarks separately.",run.run_id,run.run_id,run.run_id);
-            let event_id = self
+            if !created {
+                let delivered = state
+                    .db
+                    .summary_dispatch_event(
+                        community,
+                        &state.relay_keypair.public_key().to_bytes(),
+                        channel,
+                        run.run_id,
+                    )
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                if let Some(event_id) = delivered {
+                    return Ok(
+                        serde_json::json!({"run_id":run.run_id,"run":run,"created":false,"event_id":event_id}),
+                    );
+                }
+                if run.state == "needs_approval" {
+                    state
+                        .db
+                        .update_summary_run_state(
+                            community,
+                            &hex::decode(&owner)
+                                .map_err(|e| ActionSinkError::InvalidInput(e.to_string()))?,
+                            &id,
+                            run.run_id,
+                            "running",
+                            None,
+                        )
+                        .await
+                        .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                }
+            }
+            let mut prompt=format!("Create the named Summary for owner {owner}, summary {id}, run {}. Read the saved definition and this run's cursors with buzz briefs run status --owner {owner} --summary {id} --run {}. Read every conversation in config.channels and config.dms, including those without a cursor. Cursors are previous boundaries, not the source list; the relay supplies an initial lookback when no cursor exists. Use buzz briefs read --owner {owner} --summary {id} --run {} --channel <id>. Follow the returned next cursor with --until and --before-id until has_more is false for every conversation. Do not publish from an incomplete page, even when its newest event was observed. Compose a factual report without inventing work, then use buzz briefs run publish for this exact run. If blocked or approval is needed, record it with buzz briefs run progress using this owner, summary and run plus --state failed or --state needs_approval and --message. Resume with --state running after approval. Do not use generic report publishing or write watermarks separately.",run.run_id,run.run_id,run.run_id);
+            if let Some(period) = &run.replay_period {
+                prompt.push_str(&format!(" This is an explicitly requested regeneration for {} through {} using the currently saved sources and audience. Use the replay_period in run status; do not use ordinary progress cursors or change them. The original report remains unchanged.", period["since"],period["until"]));
+            }
+            let delivery = self
                 .send_message_bound(
                     community,
                     &channel.to_string(),
@@ -583,10 +657,29 @@ impl ActionSink for RelayActionSink {
                     &prompt,
                     &owner,
                     None,
-                    Some(config.reporter_pubkey),
+                    Some((
+                        config.reporter_pubkey,
+                        run.run_id,
+                        run.started_at.timestamp() as u64,
+                    )),
                 )
-                .await?;
-            Ok(serde_json::json!({"run_id":run.run_id,"created":true,"event_id":event_id}))
+                .await;
+            let event_id = match delivery {
+                Ok(id) => id,
+                Err(error) => {
+                    let _=state.db.update_summary_run_state(community,
+                        &hex::decode(&owner).map_err(|e|ActionSinkError::InvalidInput(e.to_string()))?,
+                        &id,run.run_id,"needs_approval",Some("Delivery could not be confirmed. Check the agent conversation, then cancel and retry if no request arrived.")).await;
+                    return Err(error);
+                }
+            };
+            dispatch_lock
+                .commit()
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            Ok(
+                serde_json::json!({"run_id":run.run_id,"run":run,"created":true,"event_id":event_id}),
+            )
         })
     }
 

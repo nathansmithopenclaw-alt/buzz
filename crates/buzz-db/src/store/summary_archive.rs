@@ -10,7 +10,7 @@ use serde_json::json;
 pub struct SummaryReportFilter {
     /// Select this reader's archived reports instead of active history.
     pub archived: bool,
-    /// Optional literal case-insensitive report text.
+    /// Optional literal case-insensitive report, Summary, owner or agent text.
     pub query: Option<String>,
     /// Optional Summary owner public key.
     pub owner: Option<String>,
@@ -47,7 +47,14 @@ impl Db {
              AND e.tags @> $2::jsonb AND e.tags @> '[[\"t\",\"buzz-brief\"]]'::jsonb
              AND EXISTS(SELECT 1 FROM summary_report_archive a WHERE a.community_id=e.community_id
                  AND a.reader_pubkey=$3 AND a.event_id=e.id) = $4
-             AND ($5::text IS NULL OR strpos(lower(e.content), lower($5)) > 0)
+             AND ($5::text IS NULL OR strpos(lower(e.content), lower($5)) > 0
+                 OR EXISTS(SELECT 1 FROM users u WHERE u.community_id=e.community_id
+                     AND (u.pubkey=e.pubkey OR encode(u.pubkey,'hex')=(SELECT t->>1 FROM jsonb_array_elements(e.tags) t WHERE t->>0='owner' LIMIT 1))
+                     AND strpos(lower(u.display_name),lower($5)) > 0)
+                 OR EXISTS(SELECT 1 FROM events d WHERE d.community_id=e.community_id AND d.kind=30623 AND d.deleted_at IS NULL
+                     AND encode(d.pubkey,'hex')=(SELECT t->>1 FROM jsonb_array_elements(e.tags) t WHERE t->>0='owner' LIMIT 1)
+                     AND d.d_tag='summary:'||(SELECT t->>1 FROM jsonb_array_elements(e.tags) t WHERE t->>0='summary' LIMIT 1)
+                     AND strpos(lower(d.content::jsonb->>'name'),lower($5)) > 0))
              AND ($6::text IS NULL OR e.tags @> jsonb_build_array(jsonb_build_array('owner',$6))
                  OR ($6=encode($3,'hex') AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(e.tags) t WHERE t->>0='owner')))
              AND ($7::text IS NULL OR e.tags @> jsonb_build_array(jsonb_build_array('summary',$7))

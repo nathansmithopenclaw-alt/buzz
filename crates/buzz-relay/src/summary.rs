@@ -100,7 +100,7 @@ pub async fn source_access(
                 .await
                 .map_err(|e| e.to_string())?
         {
-            return Err("Summary source is unavailable".into());
+            return Err(format!("Selected conversation ‘{}’ ({channel}) is archived, deleted, or no longer accessible. Review this Summary's conversations before running it.", room.name.chars().take(40).collect::<String>()));
         }
         if matches!(config.audience, SummaryAudience::Community)
             && (room.channel_type == "dm" || room.visibility != "open")
@@ -125,6 +125,58 @@ pub async fn source_access(
         }
     }
     Ok(())
+}
+
+/// Record failed scheduled/manual preflight so the owner can repair the setup
+/// from Summary history instead of needing to discover an underlying workflow.
+pub async fn prepare_attempt(
+    state: &AppState,
+    community: CommunityId,
+    owner: &str,
+    event: &Event,
+    config: &SummaryDefinition,
+) -> Result<BTreeSet<String>, String> {
+    let result: Result<BTreeSet<String>, String> = async {
+        let people = audience(state, community, owner, config).await?;
+        if config.channels.is_empty() && config.dms.is_empty() {
+            return Err("Choose at least one conversation before running this Summary.".into());
+        }
+        source_access(state, community, owner, config, &people).await?;
+        Ok(people)
+    }
+    .await;
+    if let Err(error) = &result {
+        if let (Ok(owner_bytes), Ok(reporter)) =
+            (hex::decode(owner), hex::decode(&config.reporter_pubkey))
+        {
+            if let Ok((run, true)) = state
+                .db
+                .claim_summary_run(
+                    community,
+                    &owner_bytes,
+                    &config.summary_id,
+                    event.id.as_bytes(),
+                    &reporter,
+                    &[owner.to_owned()].into(),
+                )
+                .await
+            {
+                let message = error.chars().take(240).collect::<String>();
+                let _ = state
+                    .db
+                    .update_summary_run_state(
+                        community,
+                        &owner_bytes,
+                        &config.summary_id,
+                        run.run_id,
+                        "failed",
+                        Some(&message),
+                    )
+                    .await;
+            }
+        }
+    }
+    result
 }
 
 /// Current audience from authoritative membership, excluding registered agents.
@@ -238,7 +290,7 @@ pub async fn validate_event(
                 interval: None,
             });
         let workflow: buzz_workflow::schema::WorkflowDef = serde_json::from_value(serde_json::json!({
-            "name":config.name, "trigger":{"on":"schedule","cron":if schedule.daily_times.is_some() {Some("0 9 * * *".to_string())} else {schedule.cron},"interval":schedule.interval,"timezone":config.timezone},
+            "name":config.name, "trigger":{"on":"schedule","cron":if schedule.daily_times.is_some() {Some("0 9 * * *".to_string())} else {schedule.cron.as_ref().map(|cron|buzz_core::summary::workflow_cron(cron)).transpose()?},"interval":schedule.interval,"timezone":config.timezone},
             "steps":[{"id":"run","action":"run_summary","summary_id":config.summary_id}]
         })).map_err(|e|e.to_string())?;
         workflow.validate().map_err(|e| e.to_string())?;
@@ -290,11 +342,10 @@ pub async fn validate_event(
         {
             return Err("Summary report envelope mismatch".into());
         }
-        let (current, config) = definition(state, community, owner, id).await?;
+        let (_, config) = definition(state, community, owner, id).await?;
         if config.archived
             || !config.read_delegation
             || config.reporter_pubkey != event.pubkey.to_hex()
-            || single_tag(event, "config") != Some(current.event.id.to_hex().as_str())
         {
             return Err("Summary run configuration is no longer current".into());
         }
@@ -310,6 +361,9 @@ pub async fn validate_event(
             )
             .await
             .map_err(|e| e.to_string())?;
+        if !run.matches_definition(&config) {
+            return Err("Summary access changed during run".into());
+        }
         let mut expected: BTreeSet<String> =
             serde_json::from_value(run.audience).map_err(|e| e.to_string())?;
         if !expected.is_subset(&people) {

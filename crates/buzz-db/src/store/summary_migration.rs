@@ -13,13 +13,34 @@ impl Db {
         d_tag: &str,
     ) -> Result<(StoredEvent, bool)> {
         let config: SummaryDefinition = serde_json::from_str(&event.content)?;
+        config.validate().map_err(DbError::InvalidData)?;
+        let owner = event.pubkey.to_bytes();
+        let reporter = hex::decode(&config.reporter_pubkey)
+            .map_err(|e| DbError::InvalidData(e.to_string()))?;
+        let scheduled = !config.archived
+            && !config.paused
+            && config.read_delegation
+            && config.schedule.is_some();
+        let delivery = if scheduled {
+            if config.channels.is_empty() && config.dms.is_empty() {
+                return Err(DbError::InvalidData(
+                    "Choose at least one conversation before scheduling a Summary".into(),
+                ));
+            }
+            Some(
+                self.create_dm(community, &[owner.as_slice(), &reporter], owner.as_slice())
+                    .await?
+                    .id,
+            )
+        } else {
+            None
+        };
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
         let mut tx = connection.begin().await?;
-        let owner = event.pubkey.to_bytes();
         let lock = crate::replaceable::event_replacement_lock_key(
             community,
             30623,
@@ -30,8 +51,8 @@ impl Db {
             .bind(lock)
             .execute(&mut *tx)
             .await?;
-        let previous = sqlx::query_scalar::<_, String>(
-            "SELECT content FROM events WHERE community_id=$1 AND pubkey=$2
+        let previous = sqlx::query_as::<_, (Vec<u8>, String, serde_json::Value)>(
+            "SELECT id,content,tags FROM events WHERE community_id=$1 AND pubkey=$2
             AND kind=30623 AND d_tag=$3 AND deleted_at IS NULL ORDER BY created_at DESC,id LIMIT 1",
         )
         .bind(community.as_uuid())
@@ -39,6 +60,31 @@ impl Db {
         .bind(d_tag)
         .fetch_optional(&mut *tx)
         .await?;
+        // The predecessor is part of the owner's signature. A stale editor
+        // cannot overwrite a newer save or change its derived scheduled jobs.
+        let predecessor: Vec<_> = event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().is_some_and(|k| k == "previous"))
+            .collect();
+        if predecessor.len() > 1 {
+            return Err(DbError::InvalidData("Ambiguous Summary revision".into()));
+        }
+        if let Some(tag) = predecessor.first() {
+            let expected = tag
+                .as_slice()
+                .get(1)
+                .ok_or_else(|| DbError::InvalidData("Missing Summary revision".into()))?;
+            let actual = previous
+                .as_ref()
+                .map(|(id, _, _)| hex::encode(id))
+                .unwrap_or_default();
+            if actual != event.id.to_hex() && *expected != actual {
+                return Err(DbError::AccessDenied(
+                    "This Summary changed in another window. Reload it before saving.".into(),
+                ));
+            }
+        }
         let replaced = self
             .replace_parameterized_event_in_transaction(
                 &mut tx,
@@ -49,11 +95,22 @@ impl Db {
                 crate::replaceable::ParameterizedReplacePrecondition::Unconditional,
             )
             .await?;
+        if replaced.status == crate::replaceable::ParameterizedReplaceStatus::Inserted {
+            super::summary_schedule::project(
+                &mut tx,
+                community,
+                event,
+                &config,
+                delivery,
+                previous.as_ref().map(|(_, _, tags)| tags),
+            )
+            .await?;
+        }
         if replaced.status == crate::replaceable::ParameterizedReplaceStatus::Inserted
             && config.summary_id == "default"
         {
             if let Some(old) =
-                previous.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                previous.and_then(|(_, s, _)| serde_json::from_str::<serde_json::Value>(&s).ok())
             {
                 if old["v"] == 1 {
                     if let Some(reporter) = old["reporter_pubkey"].as_str() {

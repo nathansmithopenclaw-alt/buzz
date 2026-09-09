@@ -1,3 +1,4 @@
+import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { Search } from "lucide-react";
 import * as React from "react";
 
@@ -42,6 +43,7 @@ export type PulseTab =
   | "mine"
   | "summary";
 
+const SUMMARY_LINK_KEYS = ["summaryReport"] as const;
 const pulsePanelId = (tab: PulseTab) => `pulse-panel-${tab}`;
 const pulseTabId = (tab: PulseTab) => `pulse-tab-${tab}`;
 
@@ -82,7 +84,13 @@ function TimelineSkeleton() {
 
 export function PulseView({ currentPubkey }: PulseViewProps) {
   const summaryEnabled = useFeatureEnabled("summary");
-  const [activeTab, setActiveTab] = React.useState<PulseTab>("everyone");
+  const { values: summaryLink } = useHistorySearchState(SUMMARY_LINK_KEYS);
+  const [activeTab, setActiveTab] = React.useState<PulseTab>(
+    summaryLink.summaryReport ? "summary" : "everyone",
+  );
+  React.useEffect(() => {
+    if (summaryLink.summaryReport && summaryEnabled) setActiveTab("summary");
+  }, [summaryLink.summaryReport, summaryEnabled]);
   React.useEffect(() => {
     if (!summaryEnabled && activeTab === "summary") {
       setActiveTab("everyone");

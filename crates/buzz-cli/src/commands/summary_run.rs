@@ -86,11 +86,14 @@ pub async fn dispatch(cmd: BriefsRunCmd, client: &BuzzClient) -> Result<(), CliE
                     "Only the assigned Summary agent may publish".into(),
                 ));
             }
-            let until = receipt["run"]["started_at"]
+            let normal_until = receipt["run"]["started_at"]
                 .as_str()
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .ok_or_else(|| CliError::Other("Invalid Summary run boundary".into()))?
                 .timestamp();
+            let until = receipt["run"]["replay_period"]["until"]
+                .as_i64()
+                .unwrap_or(normal_until);
             let cursors: Vec<SummaryCursor> = serde_json::from_value(receipt["cursors"].clone())
                 .map_err(|e| CliError::Other(e.to_string()))?;
             let since = cursors
@@ -100,6 +103,10 @@ pub async fn dispatch(cmd: BriefsRunCmd, client: &BuzzClient) -> Result<(), CliE
                 .chain(composition.watermarks.iter().map(|c| c.created_at))
                 .min()
                 .unwrap_or(until);
+            let since = receipt["coverage_since"]
+                .as_i64()
+                .or_else(|| receipt["run"]["replay_period"]["since"].as_i64())
+                .unwrap_or(since);
             let report = SummaryReport {
                 v: 2,
                 owner_pubkey: owner.clone(),

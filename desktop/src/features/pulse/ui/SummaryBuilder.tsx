@@ -29,6 +29,7 @@ import {
 } from "@/features/settings/ui/SettingsOptionGroup";
 import type { ManagedAgent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
 
 export type SummaryReporterMode = "nectar" | "existing";
@@ -36,11 +37,13 @@ export type SummaryReporterMode = "nectar" | "existing";
 type SummaryBuilderProps = {
   identityFields?: React.ReactNode;
   audienceFields?: React.ReactNode;
+  reviewFields?: React.ReactNode;
   detailsValid?: boolean;
   conversations: SummaryConversation[];
   sourceConfig: SummarySourceConfig;
   schedule: SummarySchedule | null;
   timezone: string;
+  onTimezoneChange?: (timezone: string) => void;
   reporterMode: SummaryReporterMode;
   reporterPubkey: string | null;
   agents: ManagedAgent[];
@@ -54,6 +57,7 @@ type SummaryBuilderProps = {
   onReporterModeChange: (mode: SummaryReporterMode) => void;
   onReporterChange: (pubkey: string | null) => void;
 
+  onValidateSources?: () => Promise<unknown>;
   onSave: () => void;
   onCancel?: () => void;
 };
@@ -93,10 +97,12 @@ export function SummaryBuilder({
   conversations,
   identityFields,
   audienceFields,
+  reviewFields,
   detailsValid = true,
   sourceConfig,
   schedule,
   timezone,
+  onTimezoneChange,
   reporterMode,
   reporterPubkey,
   agents,
@@ -111,10 +117,40 @@ export function SummaryBuilder({
   onReporterChange,
 
   onSave,
+  onValidateSources,
   onCancel,
 }: SummaryBuilderProps) {
-  const { channels, dms } = partitionLiveConversations(conversations);
+  const [search, setSearch] = React.useState("");
+  const [selectedOnly, setSelectedOnly] = React.useState(false);
+  const visible = conversations.filter(
+    (c) =>
+      c.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()) &&
+      (!selectedOnly || isConversationChecked(sourceConfig, c)),
+  );
+  const { channels, dms } = partitionLiveConversations(visible);
+  const timezoneValid = (() => {
+    try {
+      new Intl.DateTimeFormat(undefined, { timeZone: timezone });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  const selectedCount = conversations.filter((c) =>
+    isConversationChecked(sourceConfig, c),
+  ).length;
+  const setVisible = (checked: boolean) =>
+    onSourceConfigChange(
+      [...channels, ...dms].reduce(
+        (config, c) => toggleConversation(config, c, checked),
+        sourceConfig,
+      ),
+    );
   const [step, setStep] = React.useState(0);
+  const [checking, setChecking] = React.useState(false);
+  const [validationError, setValidationError] = React.useState<string | null>(
+    null,
+  );
   const [editAgentOpen, setEditAgentOpen] = React.useState(false);
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [agentDraft, setAgentDraft] = React.useState<string[]>([]);
@@ -125,7 +161,10 @@ export function SummaryBuilder({
   const showNectarSetup = reporterMode === "nectar" && !nectarExists;
 
   return (
-    <fieldset disabled={saving} className="flex min-w-0 flex-col gap-8">
+    <fieldset
+      disabled={saving || checking}
+      className="flex min-w-0 flex-col gap-8"
+    >
       <p className="text-sm text-muted-foreground">
         Step {step + 1} of {audienceFields ? 4 : 3} ·{" "}
         {
@@ -145,8 +184,9 @@ export function SummaryBuilder({
         </h2>
         <p className="mt-1 text-sm text-muted-foreground">
           Choose the conversations you belong to. New rooms you join can be
-          preselected when you edit this setup. Archived and deleted rooms drop
-          off on their own.
+          preselected when you edit this setup. If a selected room becomes
+          unavailable, review and save your conversations to update the
+          reporting scope.
         </p>
       </div>
 
@@ -245,6 +285,13 @@ export function SummaryBuilder({
               setPickerOpen(false);
             }}
           />
+          {selectedAgent ? (
+            <p className="px-4 pb-3 text-sm text-muted-foreground">
+              Editing this agent saves immediately and affects every
+              conversation and Summary that uses it. Cancelling this Summary
+              setup will not undo agent changes.
+            </p>
+          ) : null}
           {selectedAgent && editAgentOpen ? (
             <AgentDialog
               mode="instance-edit"
@@ -263,11 +310,37 @@ export function SummaryBuilder({
       </div>
       {audienceFields ? <div hidden={step !== 1}>{audienceFields}</div> : null}
       <div hidden={step !== (audienceFields ? 2 : 1)} className="space-y-6">
+        <div className="space-y-3">
+          <Input
+            aria-label="Search conversations"
+            placeholder="Search channels and direct messages"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm">
+              {selectedCount} of 256 conversations selected
+            </span>
+            <Button
+              variant="outline"
+              onClick={() => setSelectedOnly(!selectedOnly)}
+              aria-pressed={selectedOnly}
+            >
+              Selected only
+            </Button>
+            <Button variant="ghost" onClick={() => setVisible(true)}>
+              Select visible
+            </Button>
+            <Button variant="ghost" onClick={() => setVisible(false)}>
+              Clear visible
+            </Button>
+          </div>
+        </div>
         <SettingsOptionGroup title="Channels">
           {channels.length === 0 ? (
             <SettingsOptionRow>
               <p className="text-sm text-muted-foreground">
-                You are not a member of any live channels.
+                No channels match your filters.
               </p>
             </SettingsOptionRow>
           ) : (
@@ -293,7 +366,7 @@ export function SummaryBuilder({
           {dms.length === 0 ? (
             <SettingsOptionRow>
               <p className="text-sm text-muted-foreground">
-                No direct messages yet.
+                No direct messages match your filters.
               </p>
             </SettingsOptionRow>
           ) : (
@@ -313,6 +386,22 @@ export function SummaryBuilder({
         </SettingsOptionGroup>
       </div>
       <div hidden={step !== (audienceFields ? 3 : 2)}>
+        {reviewFields}
+        <details className="mb-4 rounded-lg border p-3">
+          <summary className="cursor-pointer text-sm font-medium">
+            Review {selectedCount} selected conversations
+          </summary>
+          <ul className="mt-2 max-h-48 overflow-auto text-sm">
+            {conversations
+              .filter((c) => isConversationChecked(sourceConfig, c))
+              .map((c) => (
+                <li key={c.id}>
+                  {c.kind === "channel" ? "#" : ""}
+                  {c.name}
+                </li>
+              ))}
+          </ul>
+        </details>
         <p className="mb-4 text-sm">
           {reporterMode === "nectar" ? "Nectar" : selectedAgent?.name} will
           summarize{" "}
@@ -323,6 +412,16 @@ export function SummaryBuilder({
           conversations. Selected DMs are shared with this agent for read-only
           Summary access.
         </p>
+        <p className="mb-4 text-sm text-muted-foreground">
+          The first report covers the previous 24 hours. Later reports cover
+          unread messages since the last successful report for each
+          conversation.
+        </p>
+        {selectedCount === 0 ? (
+          <p role="alert" className="mb-4 text-sm text-destructive">
+            Select at least one conversation before saving a scheduled Summary.
+          </p>
+        ) : null}
         <SettingsOptionGroup
           description="Choose when to run automatically, or use manual runs only."
           title="Schedule"
@@ -331,6 +430,7 @@ export function SummaryBuilder({
             <SummaryScheduleFields
               schedule={schedule}
               timezone={timezone}
+              onTimezoneChange={onTimezoneChange}
               disabled={saving}
               onChange={onScheduleChange}
             />
@@ -362,6 +462,11 @@ export function SummaryBuilder({
           </SettingsOptionRow>
         </SettingsOptionGroup>
       </div>
+      {validationError ? (
+        <p role="alert" className="text-sm text-destructive">
+          {validationError}
+        </p>
+      ) : null}
       {error ? (
         <p className="text-sm text-destructive" role="alert">
           {error}
@@ -383,20 +488,43 @@ export function SummaryBuilder({
             saving ||
             !detailsValid ||
             (step === (audienceFields ? 3 : 2) &&
-              Boolean(summaryScheduleError(schedule))) ||
+              (!timezoneValid ||
+                Boolean(summaryScheduleError(schedule)) ||
+                (schedule !== null && selectedCount === 0))) ||
             (showNectarSetup && !runtimeValid) ||
             (reporterMode === "existing" && !reporterPubkey)
           }
           onClick={
-            step < (audienceFields ? 3 : 2) ? () => setStep(step + 1) : onSave
+            step < (audienceFields ? 3 : 2)
+              ? async () => {
+                  setValidationError(null);
+                  if (step === (audienceFields ? 2 : 1) && onValidateSources) {
+                    setChecking(true);
+                    try {
+                      await onValidateSources();
+                      setStep(step + 1);
+                    } catch (error) {
+                      setValidationError(
+                        error instanceof Error
+                          ? error.message
+                          : "Could not validate conversations.",
+                      );
+                    } finally {
+                      setChecking(false);
+                    }
+                  } else setStep(step + 1);
+                }
+              : onSave
           }
           type="button"
         >
-          {saving
-            ? "Saving…"
-            : step < (audienceFields ? 3 : 2)
-              ? "Continue"
-              : "Save Summary"}
+          {checking
+            ? "Checking access…"
+            : saving
+              ? "Saving…"
+              : step < (audienceFields ? 3 : 2)
+                ? "Continue"
+                : "Save Summary"}
         </Button>
         {onCancel ? (
           <Button

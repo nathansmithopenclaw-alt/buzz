@@ -20,7 +20,10 @@ export function SummaryCollectionCard({
   agentName,
   reportCount,
   latestAt,
+  nextRunAt,
   busy,
+  runState,
+  runError,
   onOpen,
   onEdit,
   onDuplicate,
@@ -31,7 +34,10 @@ export function SummaryCollectionCard({
   agentName: string;
   reportCount: number | null | undefined;
   latestAt?: number;
+  nextRunAt?: string | null;
   busy: boolean;
+  runState?: string;
+  runError?: string;
   onOpen: () => void;
   onEdit: () => void;
   onDuplicate: () => void;
@@ -73,8 +79,10 @@ export function SummaryCollectionCard({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={onEdit}>Edit</DropdownMenuItem>
-            <DropdownMenuItem onSelect={onDuplicate}>
+            <DropdownMenuItem disabled={busy} onSelect={onEdit}>
+              Edit
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled={busy} onSelect={onDuplicate}>
               Duplicate
             </DropdownMenuItem>
             {!c.archived ? (
@@ -97,6 +105,15 @@ export function SummaryCollectionCard({
           />
           <span>{summaryScheduleLabel(c)}</span>
         </p>
+        {nextRunAt ? (
+          <p className="text-xs">
+            Next planned:{" "}
+            {new Date(nextRunAt).toLocaleString(undefined, {
+              timeZone: c.timezone,
+            })}{" "}
+            · {c.timezone}
+          </p>
+        ) : null}
         <p className="flex items-center gap-2">
           <UsersRound aria-hidden="true" className="size-4 shrink-0" />
           <span>
@@ -112,11 +129,23 @@ export function SummaryCollectionCard({
           <span>
             {c.channels.length + c.dms.length} conversations
             {typeof reportCount === "number"
-              ? ` · ${reportCount} ${reportCount === 1 ? "recent report" : "recent reports"}`
+              ? ` · ${reportCount} ${reportCount === 1 ? "report" : "reports"}`
               : ""}
           </span>
         </p>
       </div>
+      {runState && (
+        <p
+          className={`mb-3 text-sm ${["failed", "needs_approval"].includes(runState) ? "text-destructive" : "text-muted-foreground"}`}
+        >
+          {runState === "published"
+            ? "Last run completed"
+            : runState === "needs_approval"
+              ? "Needs your attention"
+              : `Last run: ${runState}`}
+          {runError && <span className="block">{runError}</span>}
+        </p>
+      )}
       <div className="mt-auto flex flex-wrap items-center justify-between gap-3 border-t pt-3">
         <div className="space-y-1">
           <span className="rounded-md bg-muted px-2 py-1 text-xs font-medium">

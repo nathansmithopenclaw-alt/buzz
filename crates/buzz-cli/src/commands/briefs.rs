@@ -459,7 +459,12 @@ pub async fn dispatch(cmd: crate::BriefsCmd, client: &BuzzClient) -> Result<(), 
                 .ok_or_else(|| CliError::Other("Invalid Summary read response".into()))?;
             println!(
                 "{}",
-                serde_json::to_string(events).map_err(|e| CliError::Other(e.to_string()))?
+                if summary.is_some() {
+                    serde_json::to_string(&response)
+                } else {
+                    serde_json::to_string(events)
+                }
+                .map_err(|e| CliError::Other(e.to_string()))?
             );
             Ok(())
         }

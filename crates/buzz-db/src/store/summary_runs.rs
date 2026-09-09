@@ -11,6 +11,10 @@ use uuid::Uuid;
 pub struct SummaryRun {
     /// Stable execution identity.
     pub run_id: Uuid,
+    /// Optional owner-requested report interval; publication never advances cursors.
+    pub replay_period: Option<serde_json::Value>,
+    /// The relay owns delivery recovery for this claim.
+    pub dispatch_managed: bool,
     /// Owner-signed definition revision frozen at claim.
     #[serde(serialize_with = "serialize_hex")]
     pub config_event_id: Vec<u8>,
@@ -34,6 +38,100 @@ pub struct SummaryRun {
     pub error: Option<String>,
 }
 
+impl SummaryRun {
+    /// Frozen upper message boundary, independent of the execution lease.
+    pub fn window_until(&self) -> i64 {
+        self.replay_period
+            .as_ref()
+            .and_then(|p| p["until"].as_i64())
+            .unwrap_or(self.started_at.timestamp())
+    }
+    /// Explicit lower boundary for an owner-requested regeneration.
+    pub fn replay_since(&self) -> Option<i64> {
+        self.replay_period
+            .as_ref()
+            .and_then(|p| p["since"].as_i64())
+    }
+
+    /// Whether the owner still grants this run the same execution authority.
+    pub fn matches_definition(&self, config: &buzz_core::summary::SummaryDefinition) -> bool {
+        serde_json::from_value::<buzz_core::summary::SummaryDefinition>(
+            self.config_snapshot.clone(),
+        )
+        .is_ok_and(|frozen| config.same_execution_authority(&frozen))
+    }
+}
+
+impl Db {
+    /// Bind an explicitly requested historical interval before its agent is dispatched.
+    pub async fn bind_summary_replay(
+        &self,
+        community: CommunityId,
+        owner: &[u8],
+        id: &str,
+        run: Uuid,
+        period: &serde_json::Value,
+    ) -> Result<()> {
+        let since = period["since"]
+            .as_i64()
+            .ok_or_else(|| DbError::InvalidData("Invalid replay interval".into()))?;
+        let until = period["until"]
+            .as_i64()
+            .ok_or_else(|| DbError::InvalidData("Invalid replay interval".into()))?;
+        if since < 0 || since > until || until > Utc::now().timestamp() {
+            return Err(DbError::InvalidData("Invalid replay interval".into()));
+        }
+        let result = sqlx::query("UPDATE summary_runs SET replay_period=$5 WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3 AND run_id=$4 AND state='running' AND replay_period IS NULL AND NOT EXISTS(SELECT 1 FROM summary_run_sources s WHERE s.community_id=$1 AND s.owner_pubkey=$2 AND s.summary_id=$3 AND s.run_id=$4)")
+            .bind(community.as_uuid()).bind(owner).bind(id).bind(run).bind(period).execute(&self.pool).await?;
+        if result.rows_affected() != 1 {
+            return Err(DbError::AccessDenied("Run already started reading".into()));
+        }
+        Ok(())
+    }
+}
+
+impl Db {
+    /// Serialize claim and delivery across relay processes. The transaction owns
+    /// only an advisory lock; a crashed dispatcher releases it automatically.
+    pub async fn lock_summary_dispatch(
+        &self,
+        community: CommunityId,
+        owner: &str,
+        id: &str,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let mut tx = self.pool.begin().await?;
+        let acquired: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!(
+                    "summary-dispatch:{}:{owner}:{id}",
+                    community.as_uuid()
+                ))
+                .fetch_one(&mut *tx)
+                .await?;
+        if !acquired {
+            return Err(DbError::AccessDenied(
+                "Summary delivery is already in progress. Check run history before retrying."
+                    .into(),
+            ));
+        }
+        Ok(tx)
+    }
+
+    /// Locate a relay-authored durable request after an interrupted dispatch.
+    pub async fn summary_dispatch_event(
+        &self,
+        community: CommunityId,
+        relay: &[u8],
+        channel: Uuid,
+        run: Uuid,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT encode(id,'hex') FROM events WHERE community_id=$1 AND pubkey=$2 AND channel_id=$3 AND kind=9 AND deleted_at IS NULL AND tags @> $4::jsonb LIMIT 1")
+            .bind(community.as_uuid()).bind(relay).bind(channel)
+            .bind(serde_json::json!([["buzz:summary-run",run.to_string()]]))
+            .fetch_optional(&self.pool).await.map_err(Into::into)
+    }
+}
+
 impl Db {
     /// Claim one execution slot. Concurrent automatic/manual requests receive the same run.
     /// Expired leases become failures and never move cursors.
@@ -46,6 +144,57 @@ impl Db {
         reporter: &[u8],
         audience: &std::collections::BTreeSet<String>,
     ) -> Result<(SummaryRun, bool)> {
+        self.claim_summary_internal(
+            community, owner, id, config, reporter, audience, false, None,
+        )
+        .await
+    }
+
+    /// Claim a run whose request delivery is owned by the relay.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_summary_dispatch(
+        &self,
+        community: CommunityId,
+        owner: &[u8],
+        id: &str,
+        config: &[u8],
+        reporter: &[u8],
+        audience: &std::collections::BTreeSet<String>,
+        replay_period: Option<&serde_json::Value>,
+    ) -> Result<(SummaryRun, bool)> {
+        self.claim_summary_internal(
+            community,
+            owner,
+            id,
+            config,
+            reporter,
+            audience,
+            true,
+            replay_period,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_summary_internal(
+        &self,
+        community: CommunityId,
+        owner: &[u8],
+        id: &str,
+        config: &[u8],
+        reporter: &[u8],
+        audience: &std::collections::BTreeSet<String>,
+        dispatch_managed: bool,
+        replay_period: Option<&serde_json::Value>,
+    ) -> Result<(SummaryRun, bool)> {
+        if let Some(period) = replay_period {
+            let since = period["since"].as_i64();
+            let until = period["until"].as_i64();
+            if !matches!((since, until), (Some(s), Some(u)) if s >= 0 && s <= u && u <= Utc::now().timestamp())
+            {
+                return Err(DbError::InvalidData("Invalid replay interval".into()));
+            }
+        }
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::EventWrite,
@@ -61,23 +210,37 @@ impl Db {
             .bind(lock)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE summary_runs SET state = 'failed', error = CASE WHEN config_event_id<>$4 THEN 'Summary definition changed; cursors unchanged' ELSE 'Execution lease expired; cursors unchanged' END
+        sqlx::query("UPDATE summary_runs SET state = 'failed', error = 'Execution lease expired; reading progress unchanged'
             WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3
-            AND state IN ('queued','running','needs_approval') AND (expires_at <= NOW() OR config_event_id<>$4)")
-            .bind(community.as_uuid()).bind(owner).bind(id).bind(config).execute(&mut *tx).await?;
-        let active = sqlx::query_as::<_, SummaryRun>("SELECT run_id, config_event_id, reporter_pubkey, audience, config_snapshot, started_at, expires_at, state, report_event_id, error FROM summary_runs
+            AND state IN ('queued','running','needs_approval') AND expires_at <= NOW()")
+            .bind(community.as_uuid()).bind(owner).bind(id).execute(&mut *tx).await?;
+        let active = sqlx::query_as::<_, SummaryRun>("SELECT run_id, replay_period, dispatch_managed, config_event_id, reporter_pubkey, audience, config_snapshot, started_at, expires_at, state, report_event_id, error FROM summary_runs
             WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3
             AND state IN ('queued','running','needs_approval')")
             .bind(community.as_uuid()).bind(owner).bind(id).fetch_optional(&mut *tx).await?;
         if let Some(run) = active {
-            tx.commit().await?;
-            return Ok((run, false));
+            let content: String = sqlx::query_scalar(
+                "SELECT content FROM events WHERE community_id=$1 AND id=$2 AND deleted_at IS NULL",
+            )
+            .bind(community.as_uuid())
+            .bind(config)
+            .fetch_one(&mut *tx)
+            .await?;
+            let definition = serde_json::from_str(&content)?;
+            if run.matches_definition(&definition) {
+                tx.commit().await?;
+                return Ok((run, false));
+            }
+            sqlx::query("UPDATE summary_runs SET state='failed',error='Summary access changed; reading progress unchanged'
+                WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3 AND run_id=$4")
+                .bind(community.as_uuid()).bind(owner).bind(id).bind(run.run_id)
+                .execute(&mut *tx).await?;
         }
         let run = sqlx::query_as::<_, SummaryRun>("INSERT INTO summary_runs
-            (community_id,owner_pubkey,summary_id,run_id,config_event_id,reporter_pubkey,audience,config_snapshot,expires_at,state)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,(SELECT content::jsonb FROM events WHERE community_id=$1 AND id=$5 AND pubkey=$2 AND kind=30623 AND deleted_at IS NULL LIMIT 1),NOW()+INTERVAL '30 minutes','running') RETURNING run_id, config_event_id, reporter_pubkey, audience, config_snapshot, started_at, expires_at, state, report_event_id, error")
+            (community_id,owner_pubkey,summary_id,run_id,config_event_id,reporter_pubkey,audience,config_snapshot,expires_at,state,dispatch_managed,replay_period)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,(SELECT content::jsonb FROM events WHERE community_id=$1 AND id=$5 AND pubkey=$2 AND kind=30623 AND deleted_at IS NULL LIMIT 1),NOW()+INTERVAL '30 minutes','running',$8,$9) RETURNING run_id, replay_period, dispatch_managed, config_event_id, reporter_pubkey, audience, config_snapshot, started_at, expires_at, state, report_event_id, error")
             .bind(community.as_uuid()).bind(owner).bind(id).bind(Uuid::new_v4())
-            .bind(config).bind(reporter).bind(serde_json::to_value(audience)?)
+            .bind(config).bind(reporter).bind(serde_json::to_value(audience)?).bind(dispatch_managed).bind(replay_period)
             .fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok((run, true))
@@ -96,7 +259,7 @@ impl Db {
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        sqlx::query_as::<_, SummaryRun>("SELECT run_id, config_event_id, reporter_pubkey, audience, config_snapshot, started_at, expires_at, state, report_event_id, error FROM summary_runs
+        sqlx::query_as::<_, SummaryRun>("SELECT run_id, replay_period, dispatch_managed, config_event_id, reporter_pubkey, audience, config_snapshot, started_at, expires_at, state, report_event_id, error FROM summary_runs
             WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3 AND run_id=$4")
             .bind(community.as_uuid()).bind(owner).bind(id).bind(run)
             .fetch_optional(&mut *connection).await?.ok_or_else(|| DbError::NotFound("Summary run".into()))
@@ -125,6 +288,18 @@ impl Db {
                 created_at,
             })
             .collect())
+    }
+
+    /// Earliest observed message, including delayed arrivals older than a cursor.
+    pub async fn summary_observed_since(
+        &self,
+        community: CommunityId,
+        owner: &[u8],
+        id: &str,
+        run: Uuid,
+    ) -> Result<Option<i64>> {
+        sqlx::query_scalar("SELECT min(created_at) FROM summary_run_reads WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3 AND run_id=$4")
+            .bind(community.as_uuid()).bind(owner).bind(id).bind(run).fetch_one(&self.pool).await.map_err(Into::into)
     }
 
     /// Record only events returned by an authorized bounded read. Client claims are never receipts.
@@ -157,6 +332,10 @@ impl Db {
         if active.is_none() {
             return Err(DbError::AccessDenied("Summary run is not active".into()));
         }
+        sqlx::query("INSERT INTO summary_run_sources (community_id,owner_pubkey,summary_id,run_id,channel_id)
+            VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING")
+            .bind(community.as_uuid()).bind(owner).bind(id).bind(run).bind(channel)
+            .execute(&mut *tx).await?;
         for event in events {
             sqlx::query("INSERT INTO summary_run_reads (community_id,owner_pubkey,summary_id,run_id,channel_id,event_id,created_at)
                 VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
@@ -194,7 +373,7 @@ impl Db {
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        sqlx::query_as::<_,SummaryRun>("SELECT run_id,config_event_id,reporter_pubkey,audience,config_snapshot,started_at,expires_at,state,report_event_id,error
+        sqlx::query_as::<_,SummaryRun>("SELECT run_id,replay_period,dispatch_managed,config_event_id,reporter_pubkey,audience,config_snapshot,started_at,expires_at,state,report_event_id,error
             FROM summary_runs WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3 ORDER BY started_at DESC LIMIT 50")
             .bind(community.as_uuid()).bind(owner).bind(id).fetch_all(&mut *connection).await.map_err(Into::into)
     }

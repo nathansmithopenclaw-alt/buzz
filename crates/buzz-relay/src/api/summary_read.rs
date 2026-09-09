@@ -77,7 +77,7 @@ async fn authorize(
             .map_err(|_| denied())?;
         if run.state != "running"
             || run.expires_at <= chrono::Utc::now()
-            || run.config_event_id != event.event.id.to_bytes()
+            || !run.matches_definition(&config)
             || hex::encode(run.reporter_pubkey) != reporter
         {
             return Err(denied());
@@ -200,8 +200,7 @@ pub(super) async fn read(
             })
             .transpose()
     };
-    let mut since = timestamp("since")?;
-    let mut cursor_boundary = None;
+    let since = timestamp("since")?;
     let mut until = timestamp("until")?;
     if let Some((id, run_id)) = named {
         let run = state
@@ -209,22 +208,8 @@ pub(super) async fn read(
             .summary_run(tenant.community(), &owner, id, run_id)
             .await
             .map_err(|_| denied())?;
-        until = Some(until.map_or(run.started_at, |requested| requested.min(run.started_at)));
-        let cursors = state
-            .db
-            .summary_cursors(tenant.community(), &owner, id)
-            .await
-            .map_err(|_| denied())?;
-        cursor_boundary = cursors
-            .into_iter()
-            .find(|cursor| cursor.channel_id == channel);
-        let lower = cursor_boundary
-            .as_ref()
-            .map_or(run.started_at.timestamp() - 86_400, |cursor| {
-                cursor.created_at
-            });
-        let lower = chrono::DateTime::from_timestamp(lower, 0).ok_or_else(denied)?;
-        since = Some(since.map_or(lower, |requested| requested.max(lower)));
+        let upper = chrono::DateTime::from_timestamp(run.window_until(), 0).ok_or_else(denied)?;
+        until = Some(until.map_or(upper, |requested| requested.min(upper)));
     }
     let before_id = filter
         .get("before_id")
@@ -250,37 +235,60 @@ pub(super) async fn read(
         None => 100,
     };
     let grant = authorize(state, tenant, &owner, reporter, channel, named).await?;
-    let rows = state
-        .db
-        .query_events_for_event_write(&EventQuery {
-            channel_id: Some(channel),
-            kinds: Some(vec![
-                buzz_core::kind::KIND_STREAM_MESSAGE as i32,
-                buzz_core::kind::KIND_STREAM_MESSAGE_V2 as i32,
-                buzz_core::kind::KIND_FORUM_POST as i32,
-                buzz_core::kind::KIND_FORUM_COMMENT as i32,
-            ]),
-            since,
-            until,
-            before_id,
-            limit: Some(limit),
-            ..EventQuery::for_community(tenant.community())
-        })
-        .await
-        .map_err(|e| internal_error(&format!("Summary transcript: {e}")))?;
+    let mut rows = if let Some((id, run_id)) = named {
+        state
+            .db
+            .summary_source_page(
+                tenant.community(),
+                &owner,
+                id,
+                run_id,
+                channel,
+                since,
+                until.ok_or_else(denied)?,
+                before_id,
+                limit + 1,
+            )
+            .await
+    } else {
+        state
+            .db
+            .query_events_for_event_write(&EventQuery {
+                channel_id: Some(channel),
+                kinds: Some(vec![
+                    buzz_core::kind::KIND_STREAM_MESSAGE as i32,
+                    buzz_core::kind::KIND_STREAM_MESSAGE_V2 as i32,
+                    buzz_core::kind::KIND_FORUM_POST as i32,
+                    buzz_core::kind::KIND_FORUM_COMMENT as i32,
+                ]),
+                since,
+                until,
+                before_id,
+                limit: Some(limit + 1),
+                ..EventQuery::for_community(tenant.community())
+            })
+            .await
+    }
+    .map_err(|e| internal_error(&format!("Summary transcript: {e}")))?;
     // A revoke/reassignment during the read invalidates the response as well.
     if authorize(state, tenant, &owner, reporter, channel, named).await? != grant {
         return Err(denied());
     }
+    // Named reads apply consumed-message filtering before the page limit.
+    let has_more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next = if has_more {
+        rows.last().map(|row| {
+            serde_json::json!({
+                "until":row.event.created_at.as_secs(), "before_id":row.event.id.to_hex()
+            })
+        })
+    } else {
+        None
+    };
     let events: Vec<_> = rows
         .into_iter()
         .filter(|row| row.channel_id == Some(channel))
-        .filter(|row| {
-            cursor_boundary.as_ref().is_none_or(|cursor| {
-                (row.event.created_at.as_secs() as i64, row.event.id.to_hex())
-                    > (cursor.created_at, cursor.event_id.clone())
-            })
-        })
         .map(|row| row.event)
         .collect();
     if let Some((id, run_id)) = named {
@@ -294,7 +302,8 @@ pub(super) async fn read(
         }
     }
     Ok(Json(
-        serde_json::json!({"summary_read": if named.is_some() {2} else {1}, "events": events}),
+        serde_json::json!({"summary_read": if named.is_some() {2} else {1}, "events": events,
+            "has_more":has_more,"next":next}),
     ))
 }
 

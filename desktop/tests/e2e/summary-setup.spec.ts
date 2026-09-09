@@ -99,7 +99,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   });
   await page.getByRole("button", { name: "Run summary", exact: true }).click();
   await expect(
-    page.getByRole("status").filter({ hasText: "Summary requested" }),
+    page.getByRole("status").filter({ hasText: "Summary request delivered" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Edit Summary", exact: true }).click();
   await page.getByRole("button", { name: "Continue", exact: true }).click();
@@ -121,7 +121,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   expect(JSON.parse(manual.at(-1).content).schedule).toBeNull();
   await page.getByRole("button", { name: "Run summary", exact: true }).click();
   await expect(
-    page.getByRole("status").filter({ hasText: "Summary requested" }),
+    page.getByRole("status").filter({ hasText: "already has an active run" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Edit Summary", exact: true }).click();
   await page.getByRole("button", { name: "Continue", exact: true }).click();
@@ -237,7 +237,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await page.getByTestId("pulse-tab-summary").click();
   await expect(
     page.getByRole("article", { name: "Daily overview", exact: true }),
-  ).toContainText("2 recent reports");
+  ).toContainText("2 reports");
   await page.screenshot({
     path: "test-results/summary-collection.png",
     fullPage: true,
@@ -253,8 +253,10 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
     page.getByText("Morning report body", { exact: true }),
   ).toHaveCount(0);
   await page
-    .getByRole("navigation", { name: "Report history" })
-    .getByRole("button", { name: /Morning report/ })
+    .getByRole("button", { name: "Back to reports", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: /^Morning report.*Daily overview/ })
     .click();
   await expect(
     page.getByText("Morning report body", { exact: true }),
@@ -293,7 +295,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
     .click();
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect(
-    page.getByRole("button", { name: /Evening report.*Summary specialist/ }),
+    page.getByRole("button", { name: /^Evening report.*Summary agent/ }),
   ).toBeVisible();
   await page.screenshot({
     path: "test-results/summary-report-library.png",
@@ -303,7 +305,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
     .getByLabel("Search reports", { exact: true })
     .fill("Morning report");
   await expect(
-    page.getByRole("button", { name: /Evening report.*Summary specialist/ }),
+    page.getByRole("button", { name: /^Evening report.*Summary agent/ }),
   ).toHaveCount(0);
   await page
     .getByRole("checkbox", { name: "Select this page", exact: true })
@@ -318,13 +320,13 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
     .getByRole("button", { name: "Archived reports", exact: true })
     .click();
   await expect(
-    page.getByRole("button", { name: /Morning report.*Summary specialist/ }),
+    page.getByRole("button", { name: /^Morning report.*Summary agent/ }),
   ).toBeVisible();
   await page.screenshot({
     path: "test-results/summary-archive.png",
     fullPage: true,
   });
-  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await page.getByRole("button", { name: /^Restore Morning report/ }).click();
   await expect(
     page.getByText("No matching reports on this page."),
   ).toBeVisible();
@@ -340,7 +342,7 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await expect(page.getByRole("alertdialog")).toContainText("every recipient");
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: /Morning report.*Summary specialist/ }),
+    page.getByRole("button", { name: /^Morning report.*Summary agent/ }),
   ).toBeVisible();
   await page
     .getByRole("button", { name: "Delete selected", exact: true })
@@ -351,4 +353,165 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await expect(
     page.getByText("No matching reports on this page."),
   ).toBeVisible();
+});
+
+async function seedHistory(page: import("@playwright/test").Page) {
+  page.on("pageerror", (error) =>
+    console.error("Summary browser error:", error.message),
+  );
+  await installMockBridge(page, {
+    managedAgents: [
+      { pubkey: AGENT, name: "Summary specialist", channelNames: ["general"] },
+    ],
+  });
+  await page.addInitScript(
+    ({ agent }) => {
+      const owner = "deadbeef".repeat(8),
+        at = 1788960000;
+      const id = (i: number) =>
+        `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+      const eventId = (i: number) => i.toString(16).padStart(64, "0");
+      const events = [];
+      for (let i = 0; i < 205; i++) {
+        const config = {
+          v: 2,
+          summary_id: id(i),
+          name:
+            i === 0
+              ? "Busy summary"
+              : i === 1
+                ? "Quiet summary"
+                : `Archived setup ${i}`,
+          reporter_pubkey: agent,
+          audience: { mode: "only_me" },
+          read_delegation: true,
+          channels: [],
+          dms: [],
+          exclude: [],
+          auto_include: false,
+          schedule: null,
+          timezone: "UTC",
+          paused: false,
+          archived: i > 1,
+        };
+        events.push({
+          id: eventId(1000 + i),
+          pubkey: owner,
+          kind: 30623,
+          created_at: at + i,
+          tags: [
+            ["d", `summary:${config.summary_id}`],
+            ["p", owner],
+            ["p", agent],
+            ["t", "buzz-brief"],
+          ],
+          content: JSON.stringify(config),
+          sig: "0".repeat(128),
+        });
+      }
+      for (let i = 0; i < 56; i++) {
+        const summary = id(i === 0 ? 1 : 0);
+        events.push({
+          id: eventId(2000 + i),
+          pubkey: agent,
+          kind: 40030,
+          created_at: at + i,
+          tags: [
+            ["p", owner],
+            ["owner", owner],
+            ["summary", summary],
+            ["t", "buzz-brief"],
+          ],
+          content: JSON.stringify({
+            v: 2,
+            title: i === 0 ? "Older quiet report" : `Repeated report ${i}`,
+            markdown:
+              i === 0
+                ? "Older report remains discoverable."
+                : `Report body ${i}`,
+            since: at - 3600,
+            until: at,
+          }),
+          sig: "0".repeat(128),
+        });
+      }
+      sessionStorage.setItem("buzz-e2e-summary-events", JSON.stringify(events));
+    },
+    { agent: AGENT },
+  );
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-pulse-view").click();
+  await page.getByTestId("pulse-tab-summary").click();
+}
+
+test("older Summary history is independent of the first global page and links open the report", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 900, height: 700 });
+  await seedHistory(page);
+  const quiet = page.getByRole("article", {
+    name: "Quiet summary",
+    exact: true,
+  });
+  await expect(quiet).toContainText("1 report");
+  await quiet.getByRole("button", { name: "Open", exact: true }).click();
+  await expect(
+    page.getByText("Older report remains discoverable.", { exact: true }),
+  ).toBeInViewport();
+  await expect(
+    page.getByRole("heading", { name: "Older quiet report", exact: true }),
+  ).toBeFocused();
+  await expect(
+    page.getByRole("article", { name: "Selected report" }),
+  ).toBeInViewport();
+  await page.screenshot({ path: testInfo.outputPath("summary-reader.png") });
+  await page
+    .getByRole("button", { name: "Regenerate this period", exact: true })
+    .click();
+  await expect(page.getByRole("alertdialog")).toContainText(
+    "Scheduled reporting progress will not change",
+  );
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  const report = (2000).toString(16).padStart(64, "0");
+  await page.evaluate((id) => {
+    window.location.hash = `/pulse?summaryReport=${id}`;
+  }, report);
+  await expect(
+    page.getByRole("article", { name: "Selected report" }),
+  ).toContainText("Older report remains discoverable.");
+});
+
+test("archived setups beyond the old limit stay archived after editing", async ({
+  page,
+}) => {
+  await seedHistory(page);
+  await page
+    .getByRole("button", { name: "Summary archive", exact: true })
+    .click();
+  await page
+    .getByText("Archived Summary setups (203)", { exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: "Search archived Summary setups" })
+    .fill("Archived setup 204");
+  await page.getByRole("button", { name: "Open", exact: true }).click();
+  await page.getByRole("button", { name: "Edit Summary", exact: true }).click();
+  await page
+    .getByRole("textbox", { name: "Summary name" })
+    .fill("Renamed archived setup");
+  for (let i = 0; i < 3; i++)
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.getByRole("button", { name: "Save Summary", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Renamed archived setup", exact: true }),
+  ).toBeVisible();
+  const archived = await page.evaluate(
+    () =>
+      JSON.parse(
+        JSON.parse(
+          sessionStorage.getItem("buzz-e2e-summary-events") ?? "[]",
+        ).at(-1).content,
+      ).archived,
+  );
+  expect(archived).toBe(true);
 });

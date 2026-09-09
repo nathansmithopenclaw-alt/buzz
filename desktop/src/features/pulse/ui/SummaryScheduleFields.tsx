@@ -11,22 +11,45 @@ import { Switch } from "@/shared/ui/switch";
 export function SummaryScheduleFields({
   schedule,
   timezone,
+  onTimezoneChange,
   disabled,
   onChange,
 }: {
   schedule: SummarySchedule | null;
   timezone: string;
+  onTimezoneChange?: (timezone: string) => void;
   disabled?: boolean;
   onChange: (schedule: SummarySchedule | null) => void;
 }) {
+  const timezoneId = React.useId();
+  const dailyDraft = React.useRef<SummarySchedule>({
+    on: "schedule",
+    dailyTimes: ["09:00"],
+  });
+  const frequencyDraft = React.useRef<SummarySchedule>({
+    on: "schedule",
+    cron: "0 9 * * *",
+  });
   const previous = React.useRef<SummarySchedule>({
     on: "schedule",
     cron: "0 9 * * *",
   });
   React.useEffect(() => {
-    if (schedule) previous.current = schedule;
+    if (schedule) {
+      previous.current = schedule;
+      if (schedule.dailyTimes) dailyDraft.current = schedule;
+      else frequencyDraft.current = schedule;
+    }
   }, [schedule]);
-  const error = summaryScheduleError(schedule);
+  const timezoneError = (() => {
+    try {
+      new Intl.DateTimeFormat(undefined, { timeZone: timezone });
+      return null;
+    } catch {
+      return "Choose a valid timezone, such as America/New_York.";
+    }
+  })();
+  const error = timezoneError ?? summaryScheduleError(schedule);
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
@@ -49,6 +72,23 @@ export function SummaryScheduleFields({
       </div>
       {schedule ? (
         <>
+          {onTimezoneChange ? (
+            <label className="block space-y-2 text-sm" htmlFor={timezoneId}>
+              Timezone
+              <Input
+                id={timezoneId}
+                list={`${timezoneId}-options`}
+                value={timezone}
+                disabled={disabled}
+                onChange={(e) => onTimezoneChange(e.target.value)}
+              />
+              <datalist id={`${timezoneId}-options`}>
+                {["UTC", ...Intl.supportedValuesOf("timeZone")].map((zone) => (
+                  <option key={zone} value={zone} />
+                ))}
+              </datalist>
+            </label>
+          ) : null}
           <p className="text-sm text-muted-foreground">
             Times use {timezone}, including daylight saving changes.
           </p>
@@ -105,7 +145,7 @@ export function SummaryScheduleFields({
               <Button
                 variant="ghost"
                 disabled={disabled}
-                onClick={() => onChange({ on: "schedule", cron: "0 9 * * *" })}
+                onClick={() => onChange(frequencyDraft.current)}
               >
                 Other frequencies
               </Button>
@@ -115,9 +155,7 @@ export function SummaryScheduleFields({
               <Button
                 variant="outline"
                 disabled={disabled}
-                onClick={() =>
-                  onChange({ on: "schedule", dailyTimes: ["09:00"] })
-                }
+                onClick={() => onChange(dailyDraft.current)}
               >
                 Set daily times
               </Button>

@@ -14,5 +14,25 @@ export function summaryScheduleLabel(config: NamedSummary): string {
     form.frequency === "custom_interval"
       ? `Every ${form.customInterval}`
       : SCHEDULE_FREQUENCY_LABELS[form.frequency];
-  return `${label}${["daily", "weekly", "monthly"].includes(form.frequency) ? ` at ${form.time}` : ""} · ${config.timezone}`;
+  const days = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+  ];
+  const detail =
+    form.frequency === "weekly"
+      ? ` on ${form.weekday
+          .split(",")
+          .map((day) => days[Number(day)] ?? day)
+          .join(", ")}`
+      : form.frequency === "monthly"
+        ? ` on day ${form.monthDay}`
+        : form.frequency === "custom_cron"
+          ? ` (${form.customCron})`
+          : "";
+  return `${label}${detail}${["daily", "weekly", "monthly"].includes(form.frequency) ? ` at ${form.time}` : ""} · ${config.timezone}`;
 }

@@ -68,7 +68,9 @@ export function SummaryEditor({
     record?.config.audience ?? { mode: "only_me" },
   );
   const queryClient = useQueryClient();
-  const timezone = React.useMemo(() => localTimezone(), []);
+  const [timezone, setTimezone] = React.useState(
+    record?.config.timezone ?? localTimezone(),
+  );
   const [editing, setEditing] = React.useState(true);
   const channelsQuery = useChannelsQuery();
   const agentsQuery = useManagedAgentsQuery();
@@ -149,6 +151,7 @@ export function SummaryEditor({
       setReporterPubkey(nectarAgent?.pubkey ?? null);
       return;
     }
+    setTimezone(payload.timezone || localTimezone());
     setSourceConfig({
       autoInclude: payload.auto_include,
       include: [...payload.channels, ...payload.dms],
@@ -176,11 +179,43 @@ export function SummaryEditor({
     agentsQuery.isFetched,
   ]);
 
+  const validateSources = async () => {
+    const lists = listsFromChecked(conversations, sourceConfig);
+    if (!activeCommunity?.relayUrl) throw new Error("Choose a community.");
+    if (audience.mode !== "only_me")
+      for (const id of [...lists.channels, ...lists.dms]) {
+        const room = channelsQuery.data?.find((c) => c.id === id);
+        if (!room) throw new Error("A selected conversation is unavailable.");
+        if (room.channelType === "dm" || room.visibility !== "open") {
+          if (audience.mode === "community")
+            throw new Error(
+              `${conversations.find((c) => c.id === id)?.name ?? "A private conversation"} cannot be shared with the whole community.`,
+            );
+          const members = await getChannelMembers(id);
+          if (
+            audience.people.some(
+              (person) => !members.some((m) => m.pubkey === person),
+            )
+          )
+            throw new Error(
+              `Every recipient must have access to ${conversations.find((c) => c.id === id)?.name ?? "the selected conversation"}. Change the audience or deselect it.`,
+            );
+        }
+      }
+    if (audience.mode === "selected" && !audience.people.length)
+      throw new Error("Choose at least one recipient.");
+    if (lists.channels.length + lists.dms.length > 256)
+      throw new Error("Choose at most 256 conversations for one Summary.");
+    return lists;
+  };
+
   const saveMutation = useMutation({
     mutationFn: async () => {
       if (!currentPubkey) {
         throw new Error("Sign in to save Summary sources.");
       }
+      if (!activeCommunity?.relayUrl) throw new Error("Choose a community.");
+      const lists = await validateSources();
       let reporter = reporterPubkey;
       if (reporterMode === "nectar") {
         if (nectarAgent) {
@@ -215,30 +250,6 @@ export function SummaryEditor({
           "The selected agent is no longer available. Choose another agent.",
         );
       }
-      const lists = listsFromChecked(conversations, sourceConfig);
-      if (!activeCommunity?.relayUrl) throw new Error("Choose a community.");
-      if (audience.mode !== "only_me")
-        for (const id of [...lists.channels, ...lists.dms]) {
-          const room = channelsQuery.data?.find((c) => c.id === id);
-          if (!room) throw new Error("A selected conversation is unavailable.");
-          if (room.channelType === "dm" || room.visibility !== "open") {
-            if (audience.mode === "community")
-              throw new Error(
-                `${conversations.find((c) => c.id === id)?.name ?? "A private conversation"} cannot be shared with the whole community.`,
-              );
-            const members = await getChannelMembers(id);
-            if (
-              audience.people.some(
-                (person) => !members.some((m) => m.pubkey === person),
-              )
-            )
-              throw new Error(
-                `Every recipient must have access to ${conversations.find((c) => c.id === id)?.name ?? "the selected conversation"}. Change the audience or deselect it.`,
-              );
-          }
-        }
-      if (audience.mode === "selected" && !audience.people.length)
-        throw new Error("Choose at least one recipient.");
       const config: NamedSummary = {
         v: 2,
         summary_id: record?.config.summary_id ?? draftId ?? crypto.randomUUID(),
@@ -255,9 +266,9 @@ export function SummaryEditor({
               dailyTimes: schedule.dailyTimes,
             }
           : null,
-        timezone: payload?.timezone || timezone,
+        timezone,
         paused: record?.config.paused ?? false,
-        archived: false,
+        archived: record?.config.archived ?? false,
       };
       await saveNamedSummary(
         { owner: currentPubkey, relayUrl: activeCommunity.relayUrl },
@@ -316,6 +327,19 @@ export function SummaryEditor({
   if (showBuilder) {
     return (
       <SummaryBuilder
+        reviewFields={
+          <div className="mb-4 space-y-1 text-sm">
+            <p className="font-semibold">{name}</p>
+            <p>
+              Shared with:{" "}
+              {audience.mode === "only_me"
+                ? "Only me"
+                : audience.mode === "community"
+                  ? "Everyone in this community"
+                  : `${audience.people.length} selected people`}
+            </p>
+          </div>
+        }
         identityFields={
           <label htmlFor="summary-name" className="block space-y-2">
             <span>Summary name</span>
@@ -338,7 +362,8 @@ export function SummaryEditor({
             onChange={setAudience}
           />
         }
-        detailsValid={Boolean(name.trim())}
+        detailsValid={Boolean(name.trim()) && [...name].length <= 200}
+        onValidateSources={validateSources}
         agents={agentsQuery.data ?? []}
         conversations={conversations}
         error={
@@ -370,7 +395,8 @@ export function SummaryEditor({
         reporterPubkey={reporterPubkey}
         saving={saveMutation.isPending}
         sourceConfig={sourceConfig}
-        timezone={payload?.timezone || timezone}
+        timezone={timezone}
+        onTimezoneChange={setTimezone}
       />
     );
   }

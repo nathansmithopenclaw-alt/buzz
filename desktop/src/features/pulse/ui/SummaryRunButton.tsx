@@ -58,7 +58,9 @@ export function SummaryRunButton({
       ) : null}
       {request.isSuccess ? (
         <p role="status" className="text-sm text-muted-foreground">
-          Summary requested.{" "}
+          {"alreadyRunning" in request.data && request.data.alreadyRunning
+            ? "This Summary already has an active run. Check its status below before requesting another."
+            : "Summary request delivered."}{" "}
           <Link
             to="/channels/$channelId"
             params={{ channelId: request.data.channelId }}

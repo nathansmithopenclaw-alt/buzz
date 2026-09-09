@@ -1,3 +1,5 @@
+import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
+import { SummaryReportReader } from "./SummaryReportReader";
 import { summaryScheduleLabel } from "../lib/summaryScheduleLabel";
 import { SummaryReportLibrary } from "./SummaryReportLibrary";
 import { SummaryRunHistory } from "./SummaryRunHistory";
@@ -8,17 +10,21 @@ import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { SummaryCollectionCard } from "./SummaryCollectionCard";
-import { SummaryReportBrowser, reportContent } from "./SummaryReportBrowser";
+import {
+  fetchSummaryReportPage,
+  type SummaryReportItem,
+  type SummaryOverview,
+} from "../lib/summaryReports";
 import { SummaryEditor } from "./SummaryView";
 import { SummaryRunButton } from "./SummaryRunButton";
 import {
   fetchSummaryDefinitions,
-  fetchSharedSummaryReports,
+  summaryOperation,
   saveNamedSummary,
   type SummaryDefinitionRecord,
 } from "../lib/namedSummaries";
-import type { RelayEvent } from "@/shared/api/types";
 
+const SUMMARY_LINK_KEYS = ["summaryReport"] as const;
 export function SummariesView({ currentPubkey }: { currentPubkey?: string }) {
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? "";
@@ -39,6 +45,19 @@ function SummaryCollection({
   relayUrl: string;
 }) {
   const cache = useQueryClient();
+  const { values: linked, applyPatch } =
+    useHistorySearchState(SUMMARY_LINK_KEYS);
+  const linkQuery = useQuery({
+    queryKey: ["summary-link", relayUrl, owner, linked.summaryReport],
+    enabled: Boolean(owner && relayUrl && linked.summaryReport),
+    retry: false,
+    gcTime: 0,
+    queryFn: () =>
+      summaryOperation<{ report: SummaryReportItem }>(
+        { owner, relayUrl },
+        { summary_operation: "reports_get", event_ids: [linked.summaryReport] },
+      ),
+  });
   const agents = useManagedAgentsQuery();
   const [editor, setEditor] = React.useState<{
     record?: SummaryDefinitionRecord;
@@ -51,24 +70,61 @@ function SummaryCollection({
   const [library, setLibrary] = React.useState<{
     archived: boolean;
     summaryId?: string;
+    summaryOwner?: string;
   } | null>(null);
   const [search, setSearch] = React.useState("");
+  const capabilities = useQuery({
+    queryKey: ["summary-capabilities", relayUrl, owner],
+    enabled: Boolean(owner && relayUrl),
+    queryFn: () =>
+      summaryOperation<{
+        summary_protocol?: number;
+        summary_hardening?: number;
+        summary_report_archive?: number;
+      }>({ owner, relayUrl }, { summary_operation: "capabilities" }),
+    retry: false,
+  });
+  const supported =
+    capabilities.data?.summary_protocol === 2 &&
+    capabilities.data?.summary_hardening === 1 &&
+    capabilities.data?.summary_report_archive === 1;
+  const overview = useQuery({
+    queryKey: ["summary-overview", relayUrl, owner],
+    enabled: supported && !library && !editor && !selected,
+    queryFn: () =>
+      summaryOperation<{ summaries: SummaryOverview[] }>(
+        { owner, relayUrl },
+        { summary_operation: "overview" },
+      ),
+    refetchInterval: 15000,
+  });
   const definitions = useQuery({
     queryKey: ["summary-definitions", relayUrl, owner],
-    enabled: Boolean(owner && relayUrl),
-    queryFn: () => fetchSummaryDefinitions(owner),
+    enabled: Boolean(owner && relayUrl) && supported,
+    queryFn: () => fetchSummaryDefinitions(owner, relayUrl),
   });
   const reports = useQuery({
     queryKey: ["summary-reports", relayUrl, owner],
-    enabled: Boolean(owner && relayUrl),
-    queryFn: () => fetchSharedSummaryReports(owner, relayUrl),
+    enabled:
+      Boolean(owner && relayUrl) &&
+      supported &&
+      !library &&
+      !editor &&
+      !selected,
+    queryFn: async () =>
+      (await fetchSummaryReportPage({ owner, relayUrl }, { archived: false }))
+        .reports,
     refetchInterval: 15000,
     staleTime: 0,
   });
   // Never keep withdrawn recipient content visible after a failed reauthorization/refetch.
   const visibleReports = reports.isError ? [] : (reports.data ?? []);
   const refresh = async () => {
-    await Promise.all([definitions.refetch(), reports.refetch()]);
+    await Promise.all([
+      definitions.refetch(),
+      reports.refetch(),
+      overview.refetch(),
+    ]);
   };
   const change = useMutation({
     mutationFn: ({
@@ -96,6 +152,22 @@ function SummaryCollection({
     },
     [cache, owner, relayUrl],
   );
+  if (capabilities.isLoading) return <p>Checking Summary support…</p>;
+  if (capabilities.isError)
+    return (
+      <div role="alert">
+        Could not reach the relay to check Summary support.{" "}
+        <Button onClick={() => void capabilities.refetch()}>Retry</Button>
+      </div>
+    );
+  if (!supported)
+    return (
+      <div role="alert">
+        This relay needs an update to use this version of Summaries. Your saved
+        reports remain stored on the relay.{" "}
+        <Button onClick={() => void capabilities.refetch()}>Check again</Button>
+      </div>
+    );
   if (editor)
     return (
       <div className="mx-auto w-full max-w-2xl">
@@ -119,14 +191,32 @@ function SummaryCollection({
         <Button onClick={() => void refresh()}>Retry</Button>
       </div>
     );
+  if (linked.summaryReport)
+    return (
+      <div className="space-y-4">
+        <Button
+          variant="ghost"
+          onClick={() => applyPatch({ summaryReport: null })}
+        >
+          Back to Summaries
+        </Button>
+        {linkQuery.isError ? (
+          <p role="alert">
+            This report is unavailable or you no longer have access.
+          </p>
+        ) : linkQuery.data ? (
+          <SummaryReportReader
+            scope={{ owner, relayUrl }}
+            item={linkQuery.data.report}
+            onClose={() => applyPatch({ summaryReport: null })}
+          />
+        ) : (
+          <p>Loading report…</p>
+        )}
+      </div>
+    );
   const all = definitions.data ?? [];
   const chosen = all.find((r) => r.config.summary_id === selected);
-  const mine = (event: RelayEvent, id: string) =>
-    (event.tags.some((t) => t[0] === "owner" && t[1] === owner) &&
-      event.tags.some((t) => t[0] === "summary" && t[1] === id)) ||
-    (id === "default" &&
-      !event.tags.some((t) => t[0] === "summary") &&
-      event.tags.some((t) => t[0] === "p" && t[1] === owner));
   if (library)
     return (
       <div className="space-y-5">
@@ -158,6 +248,7 @@ function SummaryCollection({
             Archived reports
           </Button>
         </div>
+        {change.isError && <p role="alert">{change.error.message}</p>}
         {library.archived && !library.summaryId && (
           <details
             className="space-y-3 rounded-xl border p-4"
@@ -226,7 +317,7 @@ function SummaryCollection({
           </details>
         )}
         <SummaryReportLibrary
-          key={`${library.archived}:${library.summaryId}`}
+          key={`${library.summaryOwner}:${library.summaryId}`}
           scope={{ owner, relayUrl }}
           definitions={all}
           agents={agents.data ?? []}
@@ -235,9 +326,6 @@ function SummaryCollection({
       </div>
     );
   if (chosen) {
-    const history = visibleReports
-      .filter((e) => mine(e, chosen.config.summary_id))
-      .sort((a, b) => b.created_at - a.created_at);
     return (
       <div className="space-y-5">
         <Button variant="ghost" onClick={() => setSelected(null)}>
@@ -278,36 +366,26 @@ function SummaryCollection({
         />
         {!chosen.legacy ? (
           <SummaryRunHistory
+            record={chosen}
             scope={{ owner, relayUrl }}
             id={chosen.config.summary_id}
           />
         ) : null}
-        {reports.isError ? (
-          <p role="alert">
-            Report access could not be refreshed.{" "}
-            <Button onClick={() => void reports.refetch()}>Retry</Button>
-          </p>
-        ) : history.length ? (
-          <SummaryReportBrowser
-            key={chosen.config.summary_id}
-            events={history}
-          />
-        ) : (
-          <p className="text-muted-foreground">
-            No reports yet. Run this Summary when you’re ready.
-          </p>
-        )}
+        <SummaryReportLibrary
+          key={chosen.config.summary_id}
+          scope={{ owner, relayUrl }}
+          definitions={all}
+          agents={agents.data ?? []}
+          summaryId={chosen.config.summary_id}
+          openLatest
+        />
       </div>
     );
   }
-  const shared = visibleReports.filter((e) =>
-    e.tags.some((t) => t[0] === "owner" && t[1] !== owner),
-  );
-  const groups = new Map<string, RelayEvent[]>();
+  const shared = visibleReports.filter((e) => e.owner !== owner);
+  const groups = new Map<string, SummaryReportItem[]>();
   for (const event of shared) {
-    const creator = event.tags.find((t) => t[0] === "owner")?.[1];
-    const id = event.tags.find((t) => t[0] === "summary")?.[1] ?? "default";
-    const key = `${creator}:${id}`;
+    const key = `${event.owner}:${event.summary_id}`;
     groups.set(key, [...(groups.get(key) ?? []), event]);
   }
   const filtered = all
@@ -391,8 +469,8 @@ function SummaryCollection({
         <div className="grid gap-4 lg:grid-cols-2">
           {filtered.map((record) => {
             const c = record.config;
-            const history = visibleReports.filter((event) =>
-              mine(event, c.summary_id),
+            const stats = overview.data?.summaries.find(
+              (s) => s.summary_id === c.summary_id,
             );
             return (
               <SummaryCollectionCard
@@ -402,18 +480,11 @@ function SummaryCollection({
                   agents.data?.find((a) => a.pubkey === c.reporter_pubkey)
                     ?.name ?? "Assigned agent"
                 }
-                reportCount={
-                  reports.isError
-                    ? null
-                    : reports.isLoading
-                      ? undefined
-                      : history.length
-                }
-                latestAt={
-                  history.length
-                    ? Math.max(...history.map((e) => e.created_at))
-                    : undefined
-                }
+                nextRunAt={stats?.next_run_at}
+                reportCount={overview.isError ? null : stats?.report_count}
+                latestAt={stats?.latest_at ?? undefined}
+                runState={stats?.state ?? undefined}
+                runError={stats?.error ?? undefined}
                 busy={change.isPending}
                 onOpen={() => setSelected(c.summary_id)}
                 onEdit={() => setEditor({ record, draftId: c.summary_id })}
@@ -450,7 +521,7 @@ function SummaryCollection({
         ) : null}
       </section>
       <section className="space-y-3 border-t pt-6" aria-label="Shared with me">
-        <h3 className="font-medium">Shared with me</h3>
+        <h3 className="font-medium">Recently shared with me</h3>
         {reports.isError ? (
           <p role="alert">Shared reports could not be refreshed.</p>
         ) : groups.size ? (
@@ -461,13 +532,24 @@ function SummaryCollection({
             return (
               <details key={key} className="group rounded-xl border p-4">
                 <summary className="cursor-pointer text-sm font-medium">
-                  {reportContent(ordered[0])?.title ?? "Shared Summary"}
+                  {ordered[0].summary_name} · {ordered[0].owner_name}
                   <span className="ml-2 text-xs font-normal text-muted-foreground">
                     {events.length} {events.length === 1 ? "report" : "reports"}
                   </span>
                 </summary>
                 <div className="mt-5">
-                  <SummaryReportBrowser events={ordered} />
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      setLibrary({
+                        archived: false,
+                        summaryId: ordered[0].summary_id,
+                        summaryOwner: ordered[0].owner,
+                      })
+                    }
+                  >
+                    Browse shared reports
+                  </Button>
                 </div>
               </details>
             );

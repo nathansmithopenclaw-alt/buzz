@@ -65,3 +65,5 @@ pub mod workflow;
 mod summary_postgres_tests;
 
 mod summary_migration;
+mod summary_reads;
+mod summary_schedule;

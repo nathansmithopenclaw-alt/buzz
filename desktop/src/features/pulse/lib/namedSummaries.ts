@@ -1,17 +1,7 @@
-import { dailyTimesToCrons } from "./summaryDailyTimes";
 import { invokeTauri, signRelayEvent } from "@/shared/api/tauri";
-import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import type { SummarySchedule } from "./summarySchedule";
 import { configFromEvent } from "./summaryProtocol";
-import {
-  createWorkflow,
-  updateWorkflow,
-  deleteWorkflow,
-  getChannelWorkflows,
-} from "@/shared/api/tauriWorkflows";
-import { openDm } from "@/shared/api/tauriChannels";
-
 export type SummaryAudience =
   | { mode: "only_me" }
   | { mode: "community" }
@@ -105,14 +95,23 @@ export function definitionFromEvent(
     return null;
   }
 }
-export async function fetchSummaryDefinitions(owner: string) {
-  const events = await relayClient.fetchEvents({
-    kinds: [30623],
-    authors: [owner],
-    "#p": [owner],
-    "#t": ["buzz-brief"],
-    limit: 200,
-  });
+export async function fetchSummaryDefinitions(owner: string, relayUrl: string) {
+  const events: RelayEvent[] = [];
+  type Cursor = { before_time: number; before_id: string };
+  let cursor: Cursor | null = null;
+  do {
+    const page: { events: RelayEvent[]; next: Cursor | null } =
+      await summaryOperation(
+        { owner, relayUrl },
+        { summary_operation: "definitions", ...(cursor ?? {}) },
+      );
+    events.push(...page.events);
+    if (cursor && page.next?.before_id === cursor.before_id)
+      throw new Error(
+        "Summary history did not advance. Refresh before continuing.",
+      );
+    cursor = page.next;
+  } while (cursor);
   const unique = new Map<string, SummaryDefinitionRecord>();
   for (const event of events.sort(
     (a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id),
@@ -141,12 +140,15 @@ export async function saveNamedSummary(
   config: NamedSummary,
   previous?: SummaryDefinitionRecord,
 ) {
-  const support = await summaryOperation<{ summary_protocol?: number }>(scope, {
+  const support = await summaryOperation<{
+    summary_protocol?: number;
+    summary_hardening?: number;
+  }>(scope, {
     summary_operation: "capabilities",
   });
-  if (support?.summary_protocol !== 2)
+  if (support?.summary_protocol !== 2 || support.summary_hardening !== 1)
     throw new Error(
-      "This relay needs an update before it can save multiple or shared Summaries.",
+      "Update this relay to save Summaries with reliable schedules and complete message coverage.",
     );
   const event = await signRelayEvent({
     kind: 30623,
@@ -165,6 +167,14 @@ export async function saveNamedSummary(
       ],
       ["t", "buzz-brief"],
       ["summary", config.summary_id],
+      [
+        "previous",
+        previous &&
+        definitionFromEvent(previous.event)?.config.summary_id ===
+          config.summary_id
+          ? previous.event.id
+          : "",
+      ],
       ["p", scope.owner],
       ["p", config.reporter_pubkey],
     ],
@@ -173,88 +183,6 @@ export async function saveNamedSummary(
     throw new Error("Active identity changed. Summary was not saved.");
   await invokeTauri("publish_summary_definition", {
     event: JSON.stringify(event),
-    expectedRelayUrl: scope.relayUrl,
-    expectedSignerPubkey: scope.owner,
-  });
-  const previousIds =
-    previous?.event.tags.filter((t) => t[0] === "workflow").map((t) => t[1]) ??
-    [];
-  if (config.archived || config.paused || !config.schedule) {
-    for (const id of previousIds)
-      await deleteWorkflow(id, {
-        expectedRelayUrl: scope.relayUrl,
-        expectedSignerPubkey: scope.owner,
-      });
-    return;
-  }
-  const dm = await openDm({
-    pubkeys: [config.reporter_pubkey],
-    expectedRelayUrl: scope.relayUrl,
-    expectedSignerPubkey: scope.owner,
-  });
-  // Discover only workflows with this literal owner/summary binding. This also
-  // recovers an accepted workflow whose config-link acknowledgement was lost.
-  const candidates = (await getChannelWorkflows(dm.id)).filter(
-    (w) =>
-      w.ownerPubkey === scope.owner &&
-      Array.isArray(w.definition.steps) &&
-      w.definition.steps.some(
-        (step: unknown) =>
-          typeof step === "object" &&
-          step !== null &&
-          "action" in step &&
-          step.action === "run_summary" &&
-          "summary_id" in step &&
-          step.summary_id === config.summary_id,
-      ),
-  );
-  const expressions = config.schedule.dailyTimes
-    ? dailyTimesToCrons(config.schedule.dailyTimes)
-    : [config.schedule.cron ?? null];
-  const ids: string[] = [];
-  for (const [index, cron] of expressions.entries()) {
-    const yaml = [
-      `name: ${JSON.stringify(`Summary: ${config.name}`)}`,
-      "trigger:",
-      "  on: schedule",
-      cron
-        ? `  cron: ${JSON.stringify(cron)}`
-        : `  interval: ${JSON.stringify(config.schedule.interval)}`,
-      `  timezone: ${JSON.stringify(config.timezone)}`,
-      "steps:",
-      "  - id: run",
-      "    action: run_summary",
-      `    summary_id: ${JSON.stringify(config.summary_id)}`,
-    ].join("\n");
-    const existing = candidates[index];
-    const saved = existing
-      ? await updateWorkflow(existing.id, yaml, existing.revision, {
-          expectedRelayUrl: scope.relayUrl,
-          expectedSignerPubkey: scope.owner,
-        })
-      : await createWorkflow(dm.id, yaml, {
-          expectedRelayUrl: scope.relayUrl,
-          expectedSignerPubkey: scope.owner,
-        });
-    ids.push(saved.workflow.id);
-  }
-  for (const id of new Set([...previousIds, ...candidates.map((w) => w.id)]))
-    if (!ids.includes(id))
-      await deleteWorkflow(id, {
-        expectedRelayUrl: scope.relayUrl,
-        expectedSignerPubkey: scope.owner,
-      });
-  const linked = await signRelayEvent({
-    kind: 30623,
-    allowSelfTagging: true,
-    createdAt: event.created_at + 1,
-    content: event.content,
-    tags: [...event.tags, ...ids.map((id) => ["workflow", id])],
-  });
-  if (linked.pubkey !== scope.owner)
-    throw new Error("Active identity changed while saving the schedule.");
-  await invokeTauri("publish_summary_definition", {
-    event: JSON.stringify(linked),
     expectedRelayUrl: scope.relayUrl,
     expectedSignerPubkey: scope.owner,
   });

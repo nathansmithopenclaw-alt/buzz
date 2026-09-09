@@ -124,6 +124,16 @@ impl Fixture {
         config: &nostr::Event,
         audience: BTreeSet<String>,
     ) -> nostr::Event {
+        self.report_body(id, config, audience, "No new activity.")
+            .await
+    }
+    async fn report_body(
+        &self,
+        id: &str,
+        config: &nostr::Event,
+        audience: BTreeSet<String>,
+        markdown: &str,
+    ) -> nostr::Event {
         let (run, _) = self
             .state
             .db
@@ -137,6 +147,18 @@ impl Fixture {
             )
             .await
             .unwrap();
+        self.state
+            .db
+            .record_summary_reads(
+                self.tenant.community(),
+                &self.people[0].public_key().to_bytes(),
+                id,
+                run.run_id,
+                self.channel,
+                &[],
+            )
+            .await
+            .unwrap();
         let report = SummaryReport {
             v: 2,
             owner_pubkey: self.people[0].public_key().to_hex(),
@@ -144,9 +166,9 @@ impl Fixture {
             run_id: run.run_id,
             config_event_id: config.id.to_hex(),
             title: "Private report title".into(),
-            markdown: "No new activity.".into(),
+            markdown: markdown.into(),
             status: serde_json::json!({}),
-            sources: vec![],
+            sources: vec![self.channel],
             since: run.started_at.timestamp(),
             until: run.started_at.timestamp(),
             watermarks: vec![],
@@ -465,8 +487,20 @@ async fn summary_delegated_read_and_progress_require_exact_active_run() {
     assert!(f.query(&f.reporter, read.clone()).await.is_ok());
     f.config(&id, SummaryAudience::OnlyMe, at + 1).await;
     assert!(
+        f.query(&f.reporter, read.clone()).await.is_ok(),
+        "equivalent configuration preserves the run"
+    );
+    f.config(
+        &id,
+        SummaryAudience::Selected {
+            people: vec![f.people[1].public_key().to_hex()],
+        },
+        at + 2,
+    )
+    .await;
+    assert!(
         f.query(&f.reporter, read).await.is_err(),
-        "edited config must invalidate the run's grant"
+        "an audience change revokes the run"
     );
     assert!(f
         .state
@@ -596,6 +630,36 @@ async fn summary_report_pages_and_archive_revocation() {
     let list = serde_json::json!({"summary_operation":"reports_list","filter":{"archived":false,"summary_id":id,"query":"Private report title","reporter":f.reporter.public_key().to_hex()}});
     let first = f.query(&f.people[1], list.clone()).await.unwrap().0;
     assert_eq!(first["events"].as_array().unwrap().len(), 50);
+    let mut metadata_request = list.clone();
+    metadata_request["metadata_only"] = serde_json::json!(true);
+    let metadata = f.query(&f.people[1], metadata_request).await.unwrap().0;
+    assert!(metadata.get("events").is_none());
+    assert_eq!(metadata["reports"].as_array().unwrap().len(), 50);
+    let item = &metadata["reports"][0];
+    assert_eq!(item["summary_name"], "Shared report");
+    assert_eq!(item["owner"], f.people[0].public_key().to_hex());
+    assert_eq!(item["can_delete"], false);
+    assert!(item.get("content").is_none());
+    assert!(item.get("markdown").is_none());
+    let loaded = f
+        .query(
+            &f.people[1],
+            serde_json::json!({"summary_operation":"reports_get","event_ids":[item["id"]]}),
+        )
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(loaded["event"]["id"], item["id"]);
+    let overview = f
+        .query(
+            &f.people[0],
+            serde_json::json!({"summary_operation":"overview"}),
+        )
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(overview["summaries"][0]["report_count"], 52);
+
     let mut next = list.clone();
     next["filter"]["before_time"] = first["next"]["before_time"].clone();
     next["filter"]["before_id"] = first["next"]["before_id"].clone();
@@ -645,4 +709,451 @@ async fn summary_report_pages_and_archive_revocation() {
         .is_err());
     let visible = f.query(&f.people[0], list).await.unwrap().0;
     assert_eq!(visible["events"].as_array().unwrap().len(), 50);
+}
+
+#[tokio::test]
+#[ignore = "requires isolated Postgres and Redis"]
+async fn summary_read_pages_past_consumed_timestamp_ties() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let at = nostr::Timestamp::now().as_secs();
+    let config = f.config(&id, SummaryAudience::OnlyMe, at).await;
+    let owner = f.people[0].public_key().to_bytes();
+    let (run, _) = f
+        .state
+        .db
+        .claim_summary_run(
+            f.tenant.community(),
+            &owner,
+            &id,
+            config.id.as_bytes(),
+            &f.reporter.public_key().to_bytes(),
+            &[f.people[0].public_key().to_hex()].into(),
+        )
+        .await
+        .unwrap();
+    let mut messages = Vec::new();
+    for i in 0..203 {
+        let event = EventBuilder::new(Kind::Custom(40002), format!("Tied message {i}"))
+            .custom_created_at(nostr::Timestamp::from(at - 1))
+            .tags([Tag::parse(["h", &f.channel.to_string()]).unwrap()])
+            .sign_with_keys(&f.people[0])
+            .unwrap();
+        f.state
+            .db
+            .insert_event(f.tenant.community(), &event, Some(f.channel))
+            .await
+            .unwrap();
+        messages.push(event);
+    }
+    messages.sort_by_key(|e| e.id.to_hex());
+    sqlx::query("INSERT INTO summary_cursors(community_id,owner_pubkey,summary_id,channel_id,event_id,created_at,report_event_id) VALUES($1,$2,$3,$4,$5,$6,$7)")
+        .bind(f.tenant.community().as_uuid()).bind(owner.as_slice()).bind(&id).bind(f.channel).bind(messages[200].id.as_bytes().as_slice()).bind((at-1) as i64).bind([0u8;32].as_slice()).execute(&f.pool).await.unwrap();
+    let mut request = serde_json::json!({"summary_owner":hex::encode(owner),"summary_id":id,"summary_run":run.run_id,"#h":[f.channel],"limit":1});
+    let mut observed = Vec::new();
+    let mut pages = 0;
+    loop {
+        let page = f.query(&f.reporter, request.clone()).await.unwrap().0;
+        pages += 1;
+        if pages == 1 {
+            assert_eq!(page["events"].as_array().unwrap().len(), 1);
+            assert_eq!(page["has_more"], true);
+        }
+        observed.extend(
+            page["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["id"].as_str().unwrap().to_owned()),
+        );
+        if page["has_more"] == false {
+            break;
+        }
+        assert!(pages < 5);
+        request["until"] = page["next"]["until"].clone();
+        request["before_id"] = page["next"]["before_id"].clone();
+    }
+    assert_eq!(pages, 2);
+    assert_eq!(
+        observed,
+        messages[201..]
+            .iter()
+            .map(|e| e.id.to_hex())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires isolated Postgres and Redis"]
+async fn summary_large_history_metadata_and_scoped_counts() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let config = f
+        .config(
+            &id,
+            SummaryAudience::Selected {
+                people: vec![f.people[1].public_key().to_hex()],
+            },
+            nostr::Timestamp::now().as_secs(),
+        )
+        .await;
+    let audience: BTreeSet<_> = [
+        f.people[0].public_key().to_hex(),
+        f.people[1].public_key().to_hex(),
+    ]
+    .into();
+    let markdown = "Synthetic history benchmark paragraph. ".repeat(400);
+    for _ in 0..1000 {
+        f.report_body(&id, &config, audience.clone(), &markdown)
+            .await;
+    }
+    let query = serde_json::json!({"summary_operation":"reports_list","metadata_only":true,"filter":{"archived":false,"summary_id":id}});
+    let started = std::time::Instant::now();
+    let page = f.query(&f.people[1], query.clone()).await.unwrap().0;
+    let metadata_ms = started.elapsed().as_millis();
+    let metadata_bytes = serde_json::to_vec(&page).unwrap().len();
+    assert_eq!(page["reports"].as_array().unwrap().len(), 50);
+    assert!(metadata_bytes < 100_000);
+    let mut full = query;
+    full["metadata_only"] = serde_json::json!(false);
+    let started = std::time::Instant::now();
+    let full = f.query(&f.people[1], full).await.unwrap().0;
+    let full_ms = started.elapsed().as_millis();
+    let full_bytes = serde_json::to_vec(&full).unwrap().len();
+    assert!(metadata_bytes * 10 < full_bytes);
+    let overview = f
+        .query(
+            &f.people[0],
+            serde_json::json!({"summary_operation":"overview"}),
+        )
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(overview["summaries"][0]["report_count"], 1000);
+    eprintln!("SUMMARY_BENCHMARK reports=1000 humans=3 agents=2 body_bytes={} metadata_page_bytes={metadata_bytes} full_page_bytes={full_bytes} metadata_ms={metadata_ms} full_ms={full_ms}",markdown.len());
+}
+
+#[tokio::test]
+#[ignore = "requires isolated Postgres and Redis"]
+async fn summary_definition_directory_pages_beyond_two_hundred() {
+    let f = Fixture::new().await;
+    let at = nostr::Timestamp::now().as_secs();
+    for _ in 0..205 {
+        f.config(&Uuid::new_v4().to_string(), SummaryAudience::OnlyMe, at)
+            .await;
+    }
+    let first = f
+        .query(
+            &f.people[0],
+            serde_json::json!({"summary_operation":"definitions"}),
+        )
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(first["events"].as_array().unwrap().len(), 200);
+    let last=f.query(&f.people[0],serde_json::json!({"summary_operation":"definitions","before_time":first["next"]["before_time"],"before_id":first["next"]["before_id"]})).await.unwrap().0;
+    assert_eq!(last["events"].as_array().unwrap().len(), 5);
+    assert!(last["next"].is_null());
+    let mut ids = BTreeSet::new();
+    for event in first["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(last["events"].as_array().unwrap())
+    {
+        assert!(ids.insert(event["id"].as_str().unwrap()));
+    }
+    let other = f
+        .query(
+            &f.people[1],
+            serde_json::json!({"summary_operation":"definitions"}),
+        )
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(other["events"], serde_json::json!([]));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn summary_dispatch_recovers_failed_delivery_without_duplicate_requests() {
+    let f = Fixture::new().await;
+    f.state
+        .workflow_engine
+        .set_action_sink(Arc::new(crate::workflow_sink::RelayActionSink::new(
+            &f.state,
+        )));
+    let id = Uuid::new_v4().to_string();
+    let config = f
+        .config(
+            &id,
+            SummaryAudience::OnlyMe,
+            nostr::Timestamp::now().as_secs(),
+        )
+        .await;
+    let owner = f.people[0].public_key().to_bytes();
+    let audience = [f.people[0].public_key().to_hex()].into();
+    // A persisted claim with no request represents a crash before delivery.
+    let period = serde_json::json!({"since":100,"until":200});
+    let (claimed, created) = f
+        .state
+        .db
+        .claim_summary_dispatch(
+            f.tenant.community(),
+            &owner,
+            &id,
+            config.id.as_bytes(),
+            &f.reporter.public_key().to_bytes(),
+            &audience,
+            Some(&period),
+        )
+        .await
+        .unwrap();
+    assert!(created);
+    let durable = f
+        .state
+        .db
+        .summary_run(f.tenant.community(), &owner, &id, claimed.run_id)
+        .await
+        .unwrap();
+    assert_eq!(durable.replay_period, Some(period));
+    f.state
+        .db
+        .update_summary_run_state(
+            f.tenant.community(),
+            &owner,
+            &id,
+            claimed.run_id,
+            "needs_approval",
+            Some("Request delivery failed"),
+        )
+        .await
+        .unwrap();
+    let request = serde_json::json!({"summary_operation":"dispatch","owner":f.people[0].public_key().to_hex(),"summary_id":id});
+    let first = f.query(&f.people[0], request.clone()).await.unwrap().0;
+    assert_eq!(first["run_id"], claimed.run_id.to_string());
+    let first_id = first["event_id"].as_str().expect("durable request event");
+    let status=f.query(&f.reporter,serde_json::json!({"summary_operation":"status","owner":f.people[0].public_key().to_hex(),"summary_id":id,"run_id":claimed.run_id})).await.unwrap().0;
+    assert_eq!(status["coverage_since"], 100);
+    // An uncertain acknowledgment must reconcile the existing request.
+    let second = f.query(&f.people[0], request.clone()).await.unwrap().0;
+    assert_eq!(second["event_id"], first_id);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE community_id=$1 AND kind=9 AND tags @> $2::jsonb",
+    )
+    .bind(f.tenant.community().as_uuid())
+    .bind(serde_json::json!([[
+        "buzz:summary-run",
+        claimed.run_id.to_string()
+    ]]))
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    // A legacy/external claim is not permission for the relay to dispatch it.
+    let other = Uuid::new_v4().to_string();
+    let other_config = f
+        .config(
+            &other,
+            SummaryAudience::OnlyMe,
+            nostr::Timestamp::now().as_secs(),
+        )
+        .await;
+    let (external, _) = f
+        .state
+        .db
+        .claim_summary_run(
+            f.tenant.community(),
+            &owner,
+            &other,
+            other_config.id.as_bytes(),
+            &f.reporter.public_key().to_bytes(),
+            &audience,
+        )
+        .await
+        .unwrap();
+    let result=f.query(&f.people[0],serde_json::json!({"summary_operation":"dispatch","owner":f.people[0].public_key().to_hex(),"summary_id":other})).await.unwrap().0;
+    assert_eq!(result["run_id"], external.run_id.to_string());
+    assert!(result.get("event_id").is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn summary_unavailable_source_records_failure_and_names_search_all_history() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let config = f
+        .config(
+            &id,
+            SummaryAudience::OnlyMe,
+            nostr::Timestamp::now().as_secs(),
+        )
+        .await;
+    let owner = f.people[0].public_key().to_hex();
+    let report = f.report(&id, &config, [owner.clone()].into()).await;
+    for (key, name) in [
+        (&f.people[0], "Human Quartz"),
+        (&f.reporter, "Agent Zephyr"),
+    ] {
+        sqlx::query("UPDATE users SET display_name=$3 WHERE community_id=$1 AND pubkey=$2")
+            .bind(f.tenant.community().as_uuid())
+            .bind(key.public_key().to_bytes().as_slice())
+            .bind(name)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    for query in ["Shared report", "Human Quartz", "Agent Zephyr"] {
+        let page=f.query(&f.people[0],serde_json::json!({"summary_operation":"reports_list","metadata_only":true,"filter":{"archived":false,"query":query}})).await.unwrap().0;
+        assert_eq!(page["reports"][0]["id"], report.id.to_hex(), "{query}");
+    }
+    sqlx::query(
+        "DELETE FROM channel_members WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3",
+    )
+    .bind(f.tenant.community().as_uuid())
+    .bind(f.channel)
+    .bind(f.people[0].public_key().to_bytes().as_slice())
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    assert!(f
+        .query(
+            &f.people[0],
+            serde_json::json!({"summary_operation":"start","owner":owner,"summary_id":id})
+        )
+        .await
+        .is_err());
+    let history = f
+        .query(
+            &f.people[0],
+            serde_json::json!({"summary_operation":"history","owner":owner,"summary_id":id}),
+        )
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(history["runs"][0]["state"], "failed");
+    assert!(history["runs"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("conversation"));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn summary_definite_send_failure_is_visible_and_retry_recovers_same_run() {
+    let f = Fixture::new().await;
+    f.state
+        .workflow_engine
+        .set_action_sink(Arc::new(crate::workflow_sink::RelayActionSink::new(
+            &f.state,
+        )));
+    let id = Uuid::new_v4().to_string();
+    f.config(
+        &id,
+        SummaryAudience::OnlyMe,
+        nostr::Timestamp::now().as_secs(),
+    )
+    .await;
+    let owner = f.people[0].public_key().to_bytes();
+    let reporter = f.reporter.public_key().to_bytes();
+    let dm = f
+        .state
+        .db
+        .create_dm(f.tenant.community(), &[&owner, &reporter], &owner)
+        .await
+        .unwrap();
+    // An archived destination is a real, deterministic delivery failure after claim.
+    sqlx::query("UPDATE channels SET archived_at=NOW() WHERE community_id=$1 AND id=$2")
+        .bind(f.tenant.community().as_uuid())
+        .bind(dm.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let request = serde_json::json!({"summary_operation":"dispatch","owner":f.people[0].public_key().to_hex(),"summary_id":id});
+    let failed = f.query(&f.people[0], request.clone()).await;
+    sqlx::query("UPDATE channels SET archived_at=NULL WHERE community_id=$1 AND id=$2")
+        .bind(f.tenant.community().as_uuid())
+        .bind(dm.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert!(failed.is_err());
+    let history=f.query(&f.people[0],serde_json::json!({"summary_operation":"history","owner":f.people[0].public_key().to_hex(),"summary_id":id})).await.unwrap().0;
+    assert_eq!(history["runs"][0]["state"], "needs_approval");
+    let recovered = f.query(&f.people[0], request).await.unwrap().0;
+    assert_eq!(recovered["run_id"], history["runs"][0]["run_id"]);
+    assert!(recovered["event_id"].is_string());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn summary_automatic_runs_require_current_schedule_revision() {
+    use buzz_workflow::action_sink::{ActionSink, SummaryInvocation};
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let original = f
+        .config(
+            &id,
+            SummaryAudience::OnlyMe,
+            nostr::Timestamp::now().as_secs(),
+        )
+        .await;
+    let sink = crate::workflow_sink::RelayActionSink::new(&f.state);
+    let owner = f.people[0].public_key().to_hex();
+    let skipped = sink
+        .run_summary(
+            f.tenant.community(),
+            f.channel,
+            &owner,
+            &id,
+            SummaryInvocation::Scheduled {
+                config_revision: Some(original.id.to_hex()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        skipped["skipped"], true,
+        "manual-only setup never dispatches automatically"
+    );
+    let mut definition: SummaryDefinition = serde_json::from_str(&original.content).unwrap();
+    definition.schedule = Some(buzz_core::summary::SummarySchedule {
+        daily_times: None,
+        cron: Some("0 9 * * 1".into()),
+        interval: None,
+    });
+    let changed = EventBuilder::new(original.kind, serde_json::to_string(&definition).unwrap())
+        .tags(original.tags.iter().cloned())
+        .allow_self_tagging()
+        .custom_created_at(nostr::Timestamp::from(original.created_at.as_secs() + 1))
+        .sign_with_keys(&f.people[0])
+        .unwrap();
+    f.state
+        .db
+        .replace_summary_definition(
+            f.tenant.community(),
+            &changed,
+            &buzz_core::summary::config_d_tag(&id).unwrap(),
+        )
+        .await
+        .unwrap();
+    let stale = sink
+        .run_summary(
+            f.tenant.community(),
+            f.channel,
+            &owner,
+            &id,
+            SummaryInvocation::Scheduled {
+                config_revision: Some(original.id.to_hex()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale["skipped"], true);
+    let count:i64=sqlx::query_scalar("SELECT count(*) FROM summary_runs WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3")
+        .bind(f.tenant.community().as_uuid()).bind(f.people[0].public_key().to_bytes().as_slice()).bind(&id).fetch_one(&f.pool).await.unwrap();
+    assert_eq!(
+        count, 0,
+        "skipped schedules do not create misleading run receipts"
+    );
 }

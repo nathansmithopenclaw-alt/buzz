@@ -102,6 +102,9 @@ pub enum ActionDef {
     RunSummary {
         /// Stable, literal Summary identity; templates are forbidden.
         summary_id: String,
+        /// Signed definition revision for relay-managed schedules.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_revision: Option<String>,
     },
     /// Post a message to the workflow's channel (or an override channel).
     SendMessage {
@@ -204,8 +207,16 @@ impl WorkflowDef {
 
         let mut seen_ids: HashSet<&str> = HashSet::new();
         for step in &self.steps {
-            if let ActionDef::RunSummary { summary_id } = &step.action {
-                if !buzz_core::summary::valid_summary_id(summary_id) {
+            if let ActionDef::RunSummary {
+                summary_id,
+                config_revision,
+            } = &step.action
+            {
+                if !buzz_core::summary::valid_summary_id(summary_id)
+                    || config_revision
+                        .as_ref()
+                        .is_some_and(|id| !buzz_core::summary::valid_pubkey(id))
+                {
                     return Err(WorkflowError::InvalidDefinition(
                         "invalid Summary identity".into(),
                     ));

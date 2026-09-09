@@ -2203,8 +2203,18 @@ mod postgres_tests {
         expected_fences.insert("relay_journal_checkpoints".to_owned());
         expected_fences.insert("relay_journal_state".to_owned());
         // 0051 adds durable Summary execution, observed reads and independent cursors.
-        expected_fences
-            .extend(["summary_runs", "summary_run_reads", "summary_cursors"].map(str::to_owned));
+        expected_fences.extend(
+            [
+                "summary_runs",
+                "summary_run_reads",
+                "summary_run_sources",
+                "summary_schedule_state",
+                "summary_schedule_jobs",
+                "summary_report_archive",
+                "summary_cursors",
+            ]
+            .map(str::to_owned),
+        );
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -2698,14 +2708,21 @@ mod postgres_tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(43, &migrated)
+            .run(&migrated)
             .await
-            .expect("apply migrations 1-43");
+            .expect("apply all embedded migrations");
 
         for table in [
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "summary_runs",
+            "summary_run_reads",
+            "summary_cursors",
+            "summary_report_archive",
+            "summary_run_sources",
+            "summary_schedule_state",
+            "summary_schedule_jobs",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
