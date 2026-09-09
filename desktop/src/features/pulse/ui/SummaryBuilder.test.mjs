@@ -6,6 +6,7 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", {
 });
 Object.assign(globalThis, {
   window: dom.window,
+  self: dom.window,
   document: dom.window.document,
   localStorage: dom.window.localStorage,
   IS_REACT_ACT_ENVIRONMENT: true,
@@ -53,6 +54,13 @@ const { QueryClient, QueryClientProvider } = await import(
   "@tanstack/react-query"
 );
 const { SummaryBuilder } = await import("./SummaryBuilder.tsx");
+const { SummaryReportBrowser } = await import("./SummaryReportBrowser.tsx");
+const {
+  RouterContextProvider,
+  createRouter,
+  createRootRoute,
+  createMemoryHistory,
+} = await import("@tanstack/react-router");
 const { ManagedAgentPickerDialog } = await import(
   "@/features/agents/ui/ManagedAgentPickerDialog.tsx"
 );
@@ -83,6 +91,45 @@ afterEach(() => {
   for (const client of clients.splice(0)) client.clear();
 });
 after(() => dom.window.close());
+test("report history selects one report and drops a withdrawn selection", () => {
+  const router = createRouter({
+    routeTree: createRootRoute(),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  const renderHistory = (events) =>
+    wrap(
+      React.createElement(
+        RouterContextProvider,
+        { router },
+        React.createElement(SummaryReportBrowser, { events }),
+      ),
+    );
+  const old = {
+    id: "old",
+    created_at: 1,
+    content: JSON.stringify({
+      title: "Morning",
+      markdown: "Earlier report body",
+    }),
+  };
+  const latest = {
+    id: "latest",
+    created_at: 2,
+    content: JSON.stringify({
+      title: "Evening",
+      markdown: "Latest report body",
+    }),
+  };
+  const view = render(renderHistory([old, latest]));
+  assert.ok(screen.getByText("Latest report body"));
+  assert.equal(screen.queryByText("Earlier report body"), null);
+  fireEvent.click(screen.getByRole("button", { name: /Morning/ }));
+  assert.ok(screen.getByText("Earlier report body"));
+  assert.equal(screen.queryByText("Latest report body"), null);
+  view.rerender(renderHistory([latest]));
+  assert.equal(screen.queryByText("Earlier report body"), null);
+  assert.ok(screen.getByText("Latest report body"));
+});
 test("guided workflow retains source choices and saves only at the final step", () => {
   let saves = 0;
   function Form() {

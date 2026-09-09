@@ -356,7 +356,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
       <div className="mt-0 min-h-0 flex-1 overflow-y-auto" ref={scrollRef}>
         <div
           aria-labelledby={pulseTabId(activeTab)}
-          className={`mx-auto flex w-full max-w-2xl flex-col px-4 pb-10 sm:px-6 ${
+          className={`mx-auto flex w-full flex-col px-4 pb-10 sm:px-6 ${activeTab === "summary" ? "max-w-5xl" : "max-w-2xl"} ${
             activeTab !== "search" &&
             activeTab !== "agents" &&
             activeTab !== "summary"

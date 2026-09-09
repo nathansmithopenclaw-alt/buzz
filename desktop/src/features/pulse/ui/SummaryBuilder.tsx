@@ -5,7 +5,7 @@ import {
 } from "../lib/summarySchedule";
 import { AgentDialog } from "@/features/agents/ui/AgentDialog";
 import * as React from "react";
-import { UsersRound } from "lucide-react";
+import { SlidersHorizontal, UsersRound } from "lucide-react";
 import { ManagedAgentPickerDialog } from "@/features/agents/ui/ManagedAgentPickerDialog";
 import {
   SummaryRuntimeFields,
@@ -180,7 +180,7 @@ export function SummaryBuilder({
               </div>
             </SettingsOptionRow>
           ) : null}
-          <SettingsOptionRow>
+          <SettingsOptionRow className="flex-wrap gap-3">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">Agent</p>
               <p className="text-sm text-muted-foreground">
@@ -189,22 +189,35 @@ export function SummaryBuilder({
                   : (selectedAgent?.name ?? "Choose an agent")}
               </p>
             </div>
-            <Button
-              aria-haspopup="dialog"
-              onClick={() => {
-                setAgentDraft([
-                  reporterMode === "nectar"
-                    ? NECTAR_SELECT_VALUE
-                    : (reporterPubkey ?? ""),
-                ]);
-                setPickerOpen(true);
-              }}
-              variant="outline"
-              disabled={saving}
-            >
-              <UsersRound aria-hidden="true" className="size-4" />
-              Choose agent
-            </Button>
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {selectedAgent ? (
+                <Button
+                  disabled={saving}
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setEditAgentOpen(true)}
+                >
+                  <SlidersHorizontal aria-hidden="true" className="size-4" />
+                  Edit agent setup
+                </Button>
+              ) : null}
+              <Button
+                aria-haspopup="dialog"
+                onClick={() => {
+                  setAgentDraft([
+                    reporterMode === "nectar"
+                      ? NECTAR_SELECT_VALUE
+                      : (reporterPubkey ?? ""),
+                  ]);
+                  setPickerOpen(true);
+                }}
+                variant="outline"
+                disabled={saving}
+              >
+                <UsersRound aria-hidden="true" className="size-4" />
+                Choose agent
+              </Button>
+            </div>
           </SettingsOptionRow>
           <ManagedAgentPickerDialog
             open={pickerOpen}
@@ -232,24 +245,13 @@ export function SummaryBuilder({
               setPickerOpen(false);
             }}
           />
-          {selectedAgent ? (
-            <>
-              <Button
-                disabled={saving}
-                variant="outline"
-                onClick={() => setEditAgentOpen(true)}
-              >
-                Edit agent setup
-              </Button>
-              {editAgentOpen ? (
-                <AgentDialog
-                  mode="instance-edit"
-                  agent={selectedAgent}
-                  open={editAgentOpen}
-                  onOpenChange={setEditAgentOpen}
-                />
-              ) : null}
-            </>
+          {selectedAgent && editAgentOpen ? (
+            <AgentDialog
+              mode="instance-edit"
+              agent={selectedAgent}
+              open={editAgentOpen}
+              onOpenChange={setEditAgentOpen}
+            />
           ) : null}
           {showNectarSetup ? (
             <SummaryRuntimeFields

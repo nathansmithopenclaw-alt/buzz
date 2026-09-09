@@ -5,7 +5,9 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import { Button } from "@/shared/ui/button";
-import { Markdown } from "@/shared/ui/markdown";
+import { Input } from "@/shared/ui/input";
+import { SummaryCollectionCard } from "./SummaryCollectionCard";
+import { SummaryReportBrowser, reportContent } from "./SummaryReportBrowser";
 import { SummaryEditor } from "./SummaryView";
 import { SummaryRunButton } from "./SummaryRunButton";
 import {
@@ -16,29 +18,6 @@ import {
 } from "../lib/namedSummaries";
 import type { RelayEvent } from "@/shared/api/types";
 
-function reportContent(event: RelayEvent) {
-  try {
-    const v = JSON.parse(event.content);
-    return typeof v.title === "string" && typeof v.markdown === "string"
-      ? (v as { title: string; markdown: string })
-      : null;
-  } catch {
-    return null;
-  }
-}
-function Report({ event }: { event: RelayEvent }) {
-  const content = reportContent(event);
-  if (!content) return null;
-  return (
-    <article className="space-y-3 rounded-xl border p-4">
-      <h3 className="font-semibold">{content.title}</h3>
-      <p className="text-xs text-muted-foreground">
-        {new Date(event.created_at * 1000).toLocaleString()}
-      </p>
-      <Markdown content={content.markdown} />
-    </article>
-  );
-}
 export function SummariesView({ currentPubkey }: { currentPubkey?: string }) {
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? "";
@@ -65,7 +44,10 @@ function SummaryCollection({
     draftId: string;
   } | null>(null);
   const [selected, setSelected] = React.useState<string | null>(null);
-  const [showArchived, setShowArchived] = React.useState(false);
+  const [filter, setFilter] = React.useState<"all" | "paused" | "archived">(
+    "all",
+  );
+  const [search, setSearch] = React.useState("");
   const definitions = useQuery({
     queryKey: ["summary-definitions", relayUrl, owner],
     enabled: Boolean(owner && relayUrl),
@@ -111,16 +93,18 @@ function SummaryCollection({
   );
   if (editor)
     return (
-      <SummaryEditor
-        key={editor.draftId}
-        currentPubkey={owner}
-        record={editor.record}
-        draftId={editor.draftId}
-        onDone={() => {
-          setEditor(null);
-          void refresh();
-        }}
-      />
+      <div className="mx-auto w-full max-w-2xl">
+        <SummaryEditor
+          key={editor.draftId}
+          currentPubkey={owner}
+          record={editor.record}
+          draftId={editor.draftId}
+          onDone={() => {
+            setEditor(null);
+            void refresh();
+          }}
+        />
+      </div>
     );
   if (definitions.isLoading) return <p>Loading Summaries…</p>;
   if (definitions.isError)
@@ -158,6 +142,11 @@ function SummaryCollection({
             Edit Summary
           </Button>
         </div>
+        <p className="text-sm text-muted-foreground">
+          {summaryScheduleLabel(chosen.config)} ·{" "}
+          {chosen.config.channels.length + chosen.config.dms.length}{" "}
+          conversations
+        </p>
         <SummaryRunButton
           ownerPubkey={owner}
           record={chosen}
@@ -179,7 +168,10 @@ function SummaryCollection({
             <Button onClick={() => void reports.refetch()}>Retry</Button>
           </p>
         ) : history.length ? (
-          history.map((event) => <Report key={event.id} event={event} />)
+          <SummaryReportBrowser
+            key={chosen.config.summary_id}
+            events={history}
+          />
         ) : (
           <p className="text-muted-foreground">
             No reports yet. Run this Summary when you’re ready.
@@ -191,132 +183,158 @@ function SummaryCollection({
   const shared = visibleReports.filter((e) =>
     e.tags.some((t) => t[0] === "owner" && t[1] !== owner),
   );
+  const groups = new Map<string, RelayEvent[]>();
+  for (const event of shared) {
+    const creator = event.tags.find((t) => t[0] === "owner")?.[1];
+    const id = event.tags.find((t) => t[0] === "summary")?.[1] ?? "default";
+    const key = `${creator}:${id}`;
+    groups.set(key, [...(groups.get(key) ?? []), event]);
+  }
+  const filtered = all
+    .filter(({ config: c }) => {
+      const matchesFilter =
+        filter === "archived"
+          ? c.archived
+          : !c.archived && (filter !== "paused" || c.paused);
+      const agent =
+        agents.data?.find((a) => a.pubkey === c.reporter_pubkey)?.name ?? "";
+      return (
+        matchesFilter &&
+        `${c.name} ${agent}`
+          .toLocaleLowerCase()
+          .includes(search.trim().toLocaleLowerCase())
+      );
+    })
+    .sort((a, b) => a.config.name.localeCompare(b.config.name));
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold">Summaries</h2>
+    <div className="space-y-7">
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">Summaries</h2>
+          <p className="text-sm text-muted-foreground">
+            Your reports, organized by agent, audience and schedule.
+          </p>
+        </div>
         <Button onClick={() => setEditor({ draftId: crypto.randomUUID() })}>
           New Summary
         </Button>
-      </div>
-      <p className="text-sm text-muted-foreground">
-        Create separate reports for different people, conversations and
-        schedules.
-      </p>
+      </header>
       {change.isError ? <p role="alert">{change.error.message}</p> : null}
-      <section className="space-y-3">
-        <h3 className="font-medium">My Summaries</h3>
-        {all
-          .filter((r) => showArchived || !r.config.archived)
-          .map((record) => {
+      <section className="space-y-4" aria-label="My Summaries">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h3 className="font-medium">My Summaries</h3>
+          <Input
+            aria-label="Search Summaries"
+            placeholder="Search by name or agent…"
+            className="w-full sm:w-64"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <fieldset
+          aria-label="Filter Summaries"
+          className="flex flex-wrap gap-1"
+        >
+          {(["all", "paused", "archived"] as const).map((value) => (
+            <Button
+              key={value}
+              size="sm"
+              variant={filter === value ? "secondary" : "ghost"}
+              aria-pressed={filter === value}
+              onClick={() => setFilter(value)}
+            >
+              {value === "all"
+                ? "All"
+                : value === "paused"
+                  ? "Paused"
+                  : "Archived"}
+            </Button>
+          ))}
+        </fieldset>
+        <div className="grid gap-4 lg:grid-cols-2">
+          {filtered.map((record) => {
             const c = record.config;
+            const history = visibleReports.filter((event) =>
+              mine(event, c.summary_id),
+            );
             return (
-              <div
+              <SummaryCollectionCard
                 key={c.summary_id}
-                className="space-y-3 rounded-xl border p-4"
-              >
-                <button
-                  type="button"
-                  className="text-left font-semibold hover:underline"
-                  onClick={() => setSelected(c.summary_id)}
-                >
-                  {c.name}
-                </button>
-                <p className="text-sm text-muted-foreground">
-                  {agents.data?.find((a) => a.pubkey === c.reporter_pubkey)
-                    ?.name ?? "Assigned agent"}{" "}
-                  ·{" "}
-                  {c.audience.mode === "only_me"
-                    ? "Only me"
-                    : c.audience.mode === "community"
-                      ? "Everyone in this community"
-                      : `${c.audience.people.length} selected people`}{" "}
-                  · {c.channels.length + c.dms.length} conversations
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  {summaryScheduleLabel(c)}
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setSelected(c.summary_id)}
-                  >
-                    Open
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setEditor({ record, draftId: c.summary_id })}
-                  >
-                    Edit
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      const id = crypto.randomUUID();
-                      setEditor({
-                        draftId: id,
-                        record: {
-                          ...record,
-                          legacy: false,
-                          event: { ...record.event, tags: [] },
-                          config: {
-                            ...c,
-                            summary_id: id,
-                            name: `${c.name} copy`,
-                            paused: false,
-                            archived: false,
-                          },
-                        },
-                      });
-                    }}
-                  >
-                    Duplicate
-                  </Button>
-                  {!c.archived ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={change.isPending}
-                      onClick={() => change.mutate({ record, action: "pause" })}
-                    >
-                      {c.paused ? "Resume" : "Pause"}
-                    </Button>
-                  ) : null}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={change.isPending}
-                    onClick={() => change.mutate({ record, action: "archive" })}
-                  >
-                    {c.archived ? "Restore" : "Archive"}
-                  </Button>
-                </div>
-              </div>
+                record={record}
+                agentName={
+                  agents.data?.find((a) => a.pubkey === c.reporter_pubkey)
+                    ?.name ?? "Assigned agent"
+                }
+                reportCount={
+                  reports.isError
+                    ? null
+                    : reports.isLoading
+                      ? undefined
+                      : history.length
+                }
+                latestAt={
+                  history.length
+                    ? Math.max(...history.map((e) => e.created_at))
+                    : undefined
+                }
+                busy={change.isPending}
+                onOpen={() => setSelected(c.summary_id)}
+                onEdit={() => setEditor({ record, draftId: c.summary_id })}
+                onDuplicate={() => {
+                  const id = crypto.randomUUID();
+                  setEditor({
+                    draftId: id,
+                    record: {
+                      ...record,
+                      legacy: false,
+                      event: { ...record.event, tags: [] },
+                      config: {
+                        ...c,
+                        summary_id: id,
+                        name: `${c.name} copy`,
+                        paused: false,
+                        archived: false,
+                      },
+                    },
+                  });
+                }}
+                onPause={() => change.mutate({ record, action: "pause" })}
+                onArchive={() => change.mutate({ record, action: "archive" })}
+              />
             );
           })}
-        {!all.length ? (
-          <p className="text-muted-foreground">
-            Create your first Summary to choose an agent and conversations.
+        </div>
+        {!filtered.length ? (
+          <p className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
+            {!all.length
+              ? "Create your first Summary to choose an agent and conversations."
+              : "No Summaries match this view."}
           </p>
         ) : null}
-        {all.some((r) => r.config.archived) ? (
-          <Button
-            variant="ghost"
-            onClick={() => setShowArchived(!showArchived)}
-          >
-            {showArchived ? "Hide archived" : "Show archived"}
-          </Button>
-        ) : null}
       </section>
-      <section className="space-y-3">
+      <section className="space-y-3 border-t pt-6" aria-label="Shared with me">
         <h3 className="font-medium">Shared with me</h3>
         {reports.isError ? (
           <p role="alert">Shared reports could not be refreshed.</p>
-        ) : shared.length ? (
-          shared.map((event) => <Report key={event.id} event={event} />)
+        ) : groups.size ? (
+          [...groups.entries()].map(([key, events]) => {
+            const ordered = [...events].sort(
+              (a, b) => b.created_at - a.created_at,
+            );
+            return (
+              <details key={key} className="group rounded-xl border p-4">
+                <summary className="cursor-pointer text-sm font-medium">
+                  {reportContent(ordered[0])?.title ?? "Shared Summary"}
+                  <span className="ml-2 text-xs font-normal text-muted-foreground">
+                    {events.length} {events.length === 1 ? "report" : "reports"}
+                  </span>
+                </summary>
+                <div className="mt-5">
+                  <SummaryReportBrowser events={ordered} />
+                </div>
+              </details>
+            );
+          })
         ) : (
           <p className="text-sm text-muted-foreground">
             Reports shared with you appear here.

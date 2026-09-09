@@ -48,6 +48,9 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await expect(
     page.getByRole("heading", { name: "Build your Summary" }),
   ).toBeVisible();
+  await page
+    .getByRole("textbox", { name: "Summary name" })
+    .fill("Daily overview");
   await expect(page.locator("#summary-nectar-harness")).toContainText("Codex");
   await expect(page.locator("#summary-nectar-model")).toContainText("GPT-5.4");
   await expect(
@@ -132,7 +135,10 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   await page
     .getByRole("button", { name: "Back to Summaries", exact: true })
     .click();
-  await page.getByRole("button", { name: "Duplicate", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Actions for Daily overview", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Duplicate", exact: true }).click();
   await page
     .getByRole("textbox", { name: "Summary name" })
     .fill("Afternoon support");
@@ -178,8 +184,102 @@ test("Summary uses defaults, shared agent picker, and a guided source workflow",
   );
   expect(ids.size).toBe(2);
   expect(definitions.at(-1).schedule.dailyTimes).toEqual(["09:15", "17:45"]);
+  await page
+    .getByRole("textbox", { name: "Search Summaries" })
+    .fill("Afternoon");
+  await expect(
+    page.getByRole("button", { name: "Open", exact: true }),
+  ).toHaveCount(1);
+  await page.getByRole("textbox", { name: "Search Summaries" }).fill("");
+  await expect(
+    page.getByRole("button", { name: "Open", exact: true }),
+  ).toHaveCount(2);
+  await page
+    .getByRole("button", { name: "Actions for Afternoon support" })
+    .click();
+  await page.getByRole("menuitem", { name: "Pause", exact: true }).click();
+  await page.getByRole("button", { name: "Paused", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Open", exact: true }),
+  ).toHaveCount(1);
+  await page.getByRole("button", { name: "All", exact: true }).click();
+  await page.evaluate(() => {
+    const key = "buzz-e2e-summary-events";
+    const events = JSON.parse(sessionStorage.getItem(key) ?? "[]");
+    const definition = events.find(
+      (e: { content: string }) =>
+        JSON.parse(e.content).name === "Daily overview",
+    );
+    const config = JSON.parse(definition.content);
+    for (const [index, title] of [
+      "Morning report",
+      "Evening report",
+    ].entries()) {
+      events.push({
+        id: String(index + 7).repeat(64),
+        pubkey: config.reporter_pubkey,
+        kind: 40030,
+        created_at: 1788960000 + index * 3600,
+        sig: "0".repeat(128),
+        tags: [
+          ["p", definition.pubkey],
+          ["owner", definition.pubkey],
+          ["summary", config.summary_id],
+          ["t", "buzz-brief"],
+        ],
+        content: JSON.stringify({ v: 2, title, markdown: `${title} body` }),
+      });
+    }
+    sessionStorage.setItem(key, JSON.stringify(events));
+  });
+  await page.reload();
+  await page.getByTestId("open-pulse-view").click();
+  await page.getByTestId("pulse-tab-summary").click();
+  await expect(
+    page.getByRole("article", { name: "Daily overview", exact: true }),
+  ).toContainText("2 reports");
   await page.screenshot({
     path: "test-results/summary-collection.png",
     fullPage: true,
   });
+  await page
+    .getByRole("article", { name: "Daily overview", exact: true })
+    .getByRole("button", { name: "Open", exact: true })
+    .click();
+  await expect(
+    page.getByText("Evening report body", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Morning report body", { exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("navigation", { name: "Report history" })
+    .getByRole("button", { name: /Morning report/ })
+    .click();
+  await expect(
+    page.getByText("Morning report body", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Evening report body", { exact: true }),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: "test-results/summary-report-history.png",
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 600, height: 800 });
+  await expect(
+    page.getByRole("article", { name: "Selected report" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Edit Summary", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Edit agent setup", exact: true }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "test-results/summary-agent-controls.png",
+    fullPage: true,
+  });
+  await page
+    .getByRole("button", { name: "Edit agent setup", exact: true })
+    .click();
+  await expect(page.getByRole("dialog").last()).toBeVisible();
 });
