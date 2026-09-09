@@ -1,5 +1,5 @@
 //! Named Summary operations. The host constructs the authority-bearing envelope.
-use crate::{client::BuzzClient, error::CliError, validate::read_or_stdin, BriefsRunCmd};
+use crate::{client::BuzzClient, error::CliError, validate::read_file_or_stdin, BriefsRunCmd};
 use buzz_core::summary::{
     valid_pubkey, valid_summary_id, SummaryCursor, SummaryDefinition, SummaryReport,
 };
@@ -16,6 +16,11 @@ struct Composition {
     status: serde_json::Map<String, Value>,
     sources: Vec<Uuid>,
     watermarks: Vec<SummaryCursor>,
+}
+
+fn read_composition(input: &str) -> Result<Composition, CliError> {
+    serde_json::from_str(&read_file_or_stdin(input)?)
+        .map_err(|e| CliError::Usage(format!("Invalid Summary composition: {e}")))
 }
 
 async fn status(
@@ -73,8 +78,7 @@ pub async fn dispatch(cmd: BriefsRunCmd, client: &BuzzClient) -> Result<(), CliE
                 );
                 return Ok(());
             }
-            let composition: Composition = serde_json::from_str(&read_or_stdin(&input)?)
-                .map_err(|e| CliError::Usage(format!("Invalid Summary composition: {e}")))?;
+            let composition = read_composition(&input)?;
             let config: SummaryDefinition = serde_json::from_value(receipt["config"].clone())
                 .map_err(|e| CliError::Other(e.to_string()))?;
             if config.reporter_pubkey != client.keys().public_key().to_hex() {
@@ -131,4 +135,25 @@ pub async fn dispatch(cmd: BriefsRunCmd, client: &BuzzClient) -> Result<(), CliE
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn composition_input_reads_json_file_and_rejects_authority_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("composition.json");
+        let mut body = json!({"title":"Summary", "markdown":"No new activity.",
+            "status":{}, "sources":[], "watermarks":[]});
+        std::fs::write(&path, body.to_string()).unwrap();
+        assert_eq!(
+            read_composition(path.to_str().unwrap()).unwrap().title,
+            "Summary"
+        );
+        body["audience"] = json!(["unauthorized"]);
+        std::fs::write(&path, body.to_string()).unwrap();
+        assert!(read_composition(path.to_str().unwrap()).is_err());
+    }
 }
