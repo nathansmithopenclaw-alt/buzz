@@ -63,6 +63,28 @@ impl SummaryRun {
 }
 
 impl Db {
+    /// Reconcile expired leases on owner reads, even if the reporter or broker died.
+    pub async fn expire_summary_runs(&self, community: CommunityId, owner: &[u8]) -> Result<()> {
+        sqlx::query("UPDATE summary_runs SET state='failed',error='Summary execution expired before publication; reading progress is unchanged' WHERE community_id=$1 AND owner_pubkey=$2 AND state IN ('queued','running','needs_approval') AND expires_at<=NOW()")
+            .bind(community.as_uuid()).bind(owner).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Read server-observed coverage for constructing report metadata, never model estimates.
+    pub async fn summary_coverage(
+        &self,
+        community: CommunityId,
+        owner: &[u8],
+        id: &str,
+        run: Uuid,
+    ) -> Result<serde_json::Value> {
+        sqlx::query_scalar("SELECT jsonb_build_object(
+            'sources', COALESCE((SELECT jsonb_agg(channel_id ORDER BY channel_id) FROM summary_run_sources WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3 AND run_id=$4),'[]'::jsonb),
+            'messages_observed', (SELECT count(DISTINCT event_id) FROM summary_run_reads WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3 AND run_id=$4),
+            'watermarks', COALESCE((SELECT jsonb_agg(jsonb_build_object('channel_id',channel_id,'event_id',encode(event_id,'hex'),'created_at',created_at) ORDER BY channel_id) FROM (SELECT DISTINCT ON (channel_id) channel_id,event_id,created_at FROM summary_run_reads WHERE community_id=$1 AND owner_pubkey=$2 AND summary_id=$3 AND run_id=$4 ORDER BY channel_id,created_at DESC,event_id DESC) newest),'[]'::jsonb))")
+            .bind(community.as_uuid()).bind(owner).bind(id).bind(run).fetch_one(&self.pool).await.map_err(Into::into)
+    }
+
     /// Bind an explicitly requested historical interval before its agent is dispatched.
     pub async fn bind_summary_replay(
         &self,
@@ -254,6 +276,7 @@ impl Db {
         id: &str,
         run: Uuid,
     ) -> Result<SummaryRun> {
+        self.expire_summary_runs(community, owner).await?;
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
@@ -368,6 +391,7 @@ impl Db {
         owner: &[u8],
         id: &str,
     ) -> Result<Vec<SummaryRun>> {
+        self.expire_summary_runs(community, owner).await?;
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,

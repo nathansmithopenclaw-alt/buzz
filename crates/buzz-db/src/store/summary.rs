@@ -36,6 +36,7 @@ impl Db {
         community: CommunityId,
         owner: &[u8],
     ) -> Result<Vec<serde_json::Value>> {
+        self.expire_summary_runs(community, owner).await?;
         sqlx::query_scalar("SELECT jsonb_build_object('summary_id',COALESCE(c.content::jsonb->>'summary_id','default'),
             'report_count',r.count,'latest_at',r.latest,'state',run.state,'error',run.error,'last_run_at',run.started_at,'config',c.content::jsonb,
             'last_scheduled',(SELECT max(f.scheduled_for) FROM summary_schedule_jobs j JOIN scheduled_workflow_fires f ON f.community_id=j.community_id AND f.workflow_id=j.workflow_id WHERE j.community_id=c.community_id AND j.owner_pubkey=c.pubkey AND j.summary_id=COALESCE(c.content::jsonb->>'summary_id','default')))

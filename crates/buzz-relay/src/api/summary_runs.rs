@@ -351,8 +351,13 @@ pub(super) async fn handle(
                     .min()
                     .unwrap_or(run.started_at.timestamp())
             });
+            let coverage = state
+                .db
+                .summary_coverage(tenant.community(), &owner_bytes, id, run.run_id)
+                .await
+                .map_err(|_| denied())?;
             Ok(Json(
-                json!({"run":run,"config":config,"cursors":cursors,"coverage_since":coverage_since}),
+                json!({"run":run,"config":config,"cursors":cursors,"coverage_since":coverage_since,"coverage":coverage}),
             ))
         }
         "cursors" => {

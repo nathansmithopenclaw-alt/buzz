@@ -14,13 +14,69 @@ struct Composition {
     markdown: String,
     #[serde(default)]
     status: serde_json::Map<String, Value>,
+    #[serde(default)]
     sources: Vec<Uuid>,
+    #[serde(default)]
     watermarks: Vec<SummaryCursor>,
 }
 
 fn read_composition(input: &str) -> Result<Composition, CliError> {
     serde_json::from_str(&read_file_or_stdin(input)?)
         .map_err(|e| CliError::Usage(format!("Invalid Summary composition: {e}")))
+}
+
+fn observed_composition(
+    mut composition: Composition,
+    config: &SummaryDefinition,
+    receipt: &Value,
+) -> Result<Composition, CliError> {
+    let sources: Vec<Uuid> = serde_json::from_value(receipt["coverage"]["sources"].clone())
+        .map_err(|_| {
+            CliError::Other(
+                "Relay does not supply observed Summary coverage; update the relay".into(),
+            )
+        })?;
+    let configured: std::collections::BTreeSet<_> =
+        config.channels.iter().chain(&config.dms).copied().collect();
+    if sources
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        != configured
+    {
+        return Err(CliError::Usage(
+            "Read every configured conversation before publishing, including empty sources".into(),
+        ));
+    }
+    let watermarks: Vec<SummaryCursor> =
+        serde_json::from_value(receipt["coverage"]["watermarks"].clone())
+            .map_err(|e| CliError::Other(e.to_string()))?;
+    let messages = receipt["coverage"]["messages_observed"]
+        .as_u64()
+        .ok_or_else(|| CliError::Other("Missing observed message count".into()))?;
+    composition.sources = configured.into_iter().collect();
+    composition
+        .status
+        .insert("conversations_read".into(), json!(sources.len()));
+    composition.status.insert(
+        "conversations_with_messages".into(),
+        json!(watermarks.len()),
+    );
+    composition.status.insert(
+        "conversations_without_messages".into(),
+        json!(sources.len().saturating_sub(watermarks.len())),
+    );
+    composition
+        .status
+        .insert("messages_observed".into(), json!(messages));
+    composition
+        .status
+        .insert("sources".into(), json!(composition.sources));
+    composition
+        .status
+        .insert("run_id".into(), receipt["run"]["run_id"].clone());
+    composition.watermarks = watermarks;
+    Ok(composition)
 }
 
 async fn status(
@@ -86,6 +142,7 @@ pub async fn dispatch(cmd: BriefsRunCmd, client: &BuzzClient) -> Result<(), CliE
                     "Only the assigned Summary agent may publish".into(),
                 ));
             }
+            let composition = observed_composition(composition, &config, &receipt)?;
             let normal_until = receipt["run"]["started_at"]
                 .as_str()
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -162,5 +219,28 @@ mod tests {
         body["audience"] = json!(["unauthorized"]);
         std::fs::write(&path, body.to_string()).unwrap();
         assert!(read_composition(path.to_str().unwrap()).is_err());
+    }
+    #[test]
+    fn publication_metadata_uses_observed_sources_and_unique_counts() {
+        let full = Uuid::new_v4();
+        let empty = Uuid::new_v4();
+        let config: SummaryDefinition = serde_json::from_value(json!({"v":2,"summary_id":"default","name":"Daily","reporter_pubkey":"a".repeat(64),"audience":{"mode":"only_me"},"read_delegation":true,"channels":[full,empty],"dms":[],"schedule":null,"timezone":"UTC"})).unwrap();
+        let composition = Composition {
+            title: "Daily".into(),
+            markdown: "Observed work.".into(),
+            status: serde_json::from_value(json!({"messages_observed":12})).unwrap(),
+            sources: vec![full],
+            watermarks: vec![],
+        };
+        let receipt = json!({"run":{"run_id":Uuid::new_v4()},"coverage":{"sources":[full,empty],"messages_observed":11,"watermarks":[{"channel_id":full,"event_id":"b".repeat(64),"created_at":100}]}});
+        let result = observed_composition(composition, &config, &receipt).unwrap();
+        assert_eq!(result.sources.len(), 2);
+        assert!(result.sources.contains(&empty));
+        assert_eq!(result.status["messages_observed"], 11);
+        assert_eq!(result.status["conversations_without_messages"], 1);
+        assert_eq!(result.watermarks.len(), 1);
+        let mut incomplete = receipt.clone();
+        incomplete["coverage"]["sources"] = json!([full]);
+        assert!(observed_composition(result, &config, &incomplete).is_err());
     }
 }

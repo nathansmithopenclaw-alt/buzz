@@ -213,7 +213,7 @@ impl RelayActionSink {
         authored_text: &str,
         author_pubkey: &str,
         reply_to: Option<&str>,
-        summary_reporter: Option<(String, Uuid, u64)>,
+        summary_reporter: Option<(String, Uuid, u64, String)>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
@@ -391,7 +391,11 @@ impl RelayActionSink {
                 &author_pubkey_hex,
             )?;
 
-            if let Some((ref reporter, run, _)) = summary_reporter {
+            if let Some((ref reporter, run, _, ref summary)) = summary_reporter {
+                tags.push(
+                    Tag::parse(["buzz:summary-id", summary])
+                        .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
+                );
                 tags.push(
                     Tag::parse(["buzz:summary-run", &run.to_string()])
                         .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
@@ -408,7 +412,7 @@ impl RelayActionSink {
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let mut builder = EventBuilder::new(kind, &text).tags(tags);
-            if let Some((_, _, timestamp)) = summary_reporter {
+            if let Some((_, _, timestamp, _)) = summary_reporter {
                 builder = builder.custom_created_at(nostr::Timestamp::from(timestamp));
             }
             let event = builder
@@ -645,7 +649,7 @@ impl ActionSink for RelayActionSink {
                         .map_err(|e| ActionSinkError::Database(e.to_string()))?;
                 }
             }
-            let mut prompt=format!("Create the named Summary for owner {owner}, summary {id}, run {}. Read the saved definition and this run's cursors with buzz briefs run status --owner {owner} --summary {id} --run {}. Read every conversation in config.channels and config.dms, including those without a cursor. Cursors are previous boundaries, not the source list; the relay supplies an initial lookback when no cursor exists. Use buzz briefs read --owner {owner} --summary {id} --run {} --channel <id>. Follow the returned next cursor with --until and --before-id until has_more is false for every conversation. Do not publish from an incomplete page, even when its newest event was observed. Compose a factual report without inventing work, then use buzz briefs run publish for this exact run. If blocked or approval is needed, record it with buzz briefs run progress using this owner, summary and run plus --state failed or --state needs_approval and --message. Resume with --state running after approval. Do not use generic report publishing or write watermarks separately.",run.run_id,run.run_id,run.run_id);
+            let mut prompt=format!("Create the named Summary for owner {owner}, summary {id}, run {}. Read the saved definition and this run's cursors with buzz briefs run status --owner {owner} --summary {id} --run {}. Read every conversation in config.channels and config.dms, including those without a cursor. Cursors are previous boundaries, not the source list; the relay supplies an initial lookback when no cursor exists. Use buzz briefs read --owner {owner} --summary {id} --run {} --channel <id>. Follow the returned next cursor with --until and --before-id until has_more is false for every conversation. Do not publish from an incomplete page, even when its newest event was observed. Compose a JSON file with title, markdown and optional status. The CLI derives sources, unique message counts and watermarks from server-observed reads; do not estimate those fields. Do not invent work. Then use buzz briefs run publish for this exact run. If blocked or approval is needed, record it with buzz briefs run progress using this owner, summary and run plus --state failed or --state needs_approval and --message. Resume with --state running after approval. Do not use generic report publishing or write watermarks separately.",run.run_id,run.run_id,run.run_id);
             if let Some(period) = &run.replay_period {
                 prompt.push_str(&format!(" This is an explicitly requested regeneration for {} through {} using the currently saved sources and audience. Use the replay_period in run status; do not use ordinary progress cursors or change them. The original report remains unchanged.", period["since"],period["until"]));
             }
@@ -661,6 +665,7 @@ impl ActionSink for RelayActionSink {
                         config.reporter_pubkey,
                         run.run_id,
                         run.started_at.timestamp() as u64,
+                        id.clone(),
                     )),
                 )
                 .await;

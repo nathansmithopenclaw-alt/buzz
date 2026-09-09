@@ -935,6 +935,18 @@ async fn summary_dispatch_recovers_failed_delivery_without_duplicate_requests() 
     let first_id = first["event_id"].as_str().expect("durable request event");
     let status=f.query(&f.reporter,serde_json::json!({"summary_operation":"status","owner":f.people[0].public_key().to_hex(),"summary_id":id,"run_id":claimed.run_id})).await.unwrap().0;
     assert_eq!(status["coverage_since"], 100);
+    assert_eq!(status["coverage"]["messages_observed"], 0);
+    let tags: serde_json::Value =
+        sqlx::query_scalar("SELECT tags FROM events WHERE community_id=$1 AND encode(id,'hex')=$2")
+            .bind(f.tenant.community().as_uuid())
+            .bind(first_id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert!(tags
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(["buzz:summary-id", id])));
     // An uncertain acknowledgment must reconcile the existing request.
     let second = f.query(&f.people[0], request.clone()).await.unwrap().0;
     assert_eq!(second["event_id"], first_id);

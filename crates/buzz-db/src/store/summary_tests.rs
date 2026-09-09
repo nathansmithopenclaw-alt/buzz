@@ -449,6 +449,20 @@ async fn summary_expired_run_recovery_does_not_advance_cursors() {
     let (first, _) = f.claim(&id, &config).await;
     sqlx::query("UPDATE summary_runs SET expires_at=NOW()-INTERVAL '1 second' WHERE community_id=$1 AND run_id=$2")
         .bind(f.community.as_uuid()).bind(first.run_id).execute(&f.db.pool).await.unwrap();
+    // Merely opening the Summary must clear a stale running state: no new claim required.
+    let visible =
+        f.db.summary_overview(f.community, &f.owner())
+            .await
+            .unwrap();
+    assert_eq!(visible[0]["state"], "failed");
+    let stored: String =
+        sqlx::query_scalar("SELECT state FROM summary_runs WHERE community_id=$1 AND run_id=$2")
+            .bind(f.community.as_uuid())
+            .bind(first.run_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, "failed");
     let (next, created) = f.claim(&id, &config).await;
     assert!(created);
     assert_ne!(first.run_id, next.run_id);
@@ -1191,4 +1205,48 @@ async fn summary_report_cannot_omit_read_sources_or_narrow_observed_coverage() {
     f.db.publish_summary_report(f.community, &valid)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn summary_coverage_counts_distinct_reads_and_empty_sources() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4().to_string();
+    let config = f.config(&id).await;
+    let (run, _) = f.claim(&id, &config).await;
+    let empty = Uuid::new_v4();
+    let source = f.source();
+    for _ in 0..2 {
+        f.db.record_summary_reads(
+            f.community,
+            &f.owner(),
+            &id,
+            run.run_id,
+            f.channel,
+            std::slice::from_ref(&source),
+        )
+        .await
+        .unwrap();
+    }
+    f.db.record_summary_reads(f.community, &f.owner(), &id, run.run_id, empty, &[])
+        .await
+        .unwrap();
+    let coverage =
+        f.db.summary_coverage(f.community, &f.owner(), &id, run.run_id)
+            .await
+            .unwrap();
+    assert_eq!(coverage["sources"].as_array().unwrap().len(), 2);
+    assert_eq!(coverage["messages_observed"], 1);
+    assert_eq!(coverage["watermarks"].as_array().unwrap().len(), 1);
+    assert_eq!(coverage["watermarks"][0]["event_id"], source.id.to_hex());
+    let other =
+        f.db.summary_coverage(
+            CommunityId::from_uuid(Uuid::new_v4()),
+            &f.owner(),
+            &id,
+            run.run_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(other["messages_observed"], 0);
 }

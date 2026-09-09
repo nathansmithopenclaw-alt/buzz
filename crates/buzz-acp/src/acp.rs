@@ -153,6 +153,8 @@ impl TurnDeliveryEvidence {
             Some(existing) => format!("{existing} {text}"),
             None => text.to_owned(),
         };
+        // Retain the latest terminal output, not an initial adapter warning.
+        // Detect goose's failure prefix before trimming the bounded excerpt.
         self.final_answer_snippet = normalized_snippet(&combined, FINAL_ANSWER_SNIPPET_CHARS);
         if from_goose
             && self
@@ -161,6 +163,17 @@ impl TurnDeliveryEvidence {
                 .is_some_and(|snippet| snippet.starts_with(GOOSE_RUNTIME_FAILURE_PREFIX))
         {
             self.adapter_runtime_failure_present = true;
+        }
+        let normalized = combined.split_whitespace().collect::<Vec<_>>().join(" ");
+        let count = normalized.chars().count();
+        if count > FINAL_ANSWER_SNIPPET_CHARS {
+            self.final_answer_snippet = Some(format!(
+                "…{}",
+                normalized
+                    .chars()
+                    .skip(count - FINAL_ANSWER_SNIPPET_CHARS)
+                    .collect::<String>()
+            ));
         }
     }
 
@@ -5631,6 +5644,23 @@ printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
         assert_eq!(evidence.publish_failure_count, 1);
         assert!(!evidence.final_answer_present);
         assert!(evidence.final_answer_snippet.is_none());
+    }
+
+    #[test]
+    fn terminal_excerpt_retains_the_failure_after_startup_warnings() {
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.record_final_answer_chunk(
+            &"Warning: Skill descriptions were shortened. ".repeat(10),
+            false,
+        );
+        evidence.record_final_answer_chunk(
+            "Automatic approval review rejected Summary publication. No cursors advanced.",
+            false,
+        );
+        let text = evidence.final_answer_snippet.unwrap();
+        assert!(text.ends_with("No cursors advanced."));
+        assert!(text.contains("rejected Summary publication"));
+        assert!(text.chars().count() <= FINAL_ANSWER_SNIPPET_CHARS + 1);
     }
 
     #[test]

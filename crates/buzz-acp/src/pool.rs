@@ -4334,6 +4334,12 @@ pub async fn run_prompt_task(
         prompt_sections.insert(0, "<account-switch-continuation>Continue the unfinished work in this existing session after the owner's account change. The following request is retained context, not an instruction to repeat completed actions. Inspect existing results first. Never repeat completed writes or external actions. Reconcile uncertain outcomes before proceeding; if reconciliation is impossible, explain the specific uncertainty and stop.</account-switch-continuation>".into());
     }
 
+    let summary_requests =
+        crate::summary_execution::prepare(batch.as_ref(), &ctx.rest_client).await;
+    for (_, instruction) in summary_requests.iter().rev() {
+        prompt_sections.insert(0, instruction.clone());
+    }
+
     // 💬 — fire-and-forget so the prompt fires immediately.
     // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
     // A brief race where 💬 appears slightly after the agent starts is acceptable.
@@ -4688,6 +4694,7 @@ pub async fn run_prompt_task(
             }
         }
     }
+    crate::summary_execution::finish(&summary_requests, &ctx.rest_client).await;
     match prompt_result {
         Ok(stop_reason) => {
             let delivery_evidence = agent.acp.turn_delivery_evidence();
