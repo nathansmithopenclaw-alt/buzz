@@ -4336,6 +4336,10 @@ pub async fn run_prompt_task(
 
     let summary_requests =
         crate::summary_execution::prepare(batch.as_ref(), &ctx.rest_client).await;
+    let summary_only = !summary_requests.is_empty()
+        && batch.as_ref().is_some_and(|b| {
+            summary_requests.len() == b.events.len() && b.cancelled_events.is_empty()
+        });
     for (_, instruction) in summary_requests.iter().rev() {
         prompt_sections.insert(0, instruction.clone());
     }
@@ -4425,7 +4429,7 @@ pub async fn run_prompt_task(
             tokio::select! {
                 biased;
                 result = crate::report_completion::prompt(
-                    &mut agent.acp, &session_id, &prompt_blocks, execution_turn.as_ref(), &ctx,
+                    &mut agent.acp, &session_id, &prompt_blocks, execution_turn.as_ref().filter(|_| !summary_only), &ctx,
                 ) => result,
             }
         }
@@ -4433,7 +4437,7 @@ pub async fn run_prompt_task(
             tokio::select! {
                 biased;
                 result = crate::report_completion::prompt(
-                    &mut agent.acp, &session_id, &prompt_blocks, execution_turn.as_ref(), &ctx,
+                    &mut agent.acp, &session_id, &prompt_blocks, execution_turn.as_ref().filter(|_| !summary_only), &ctx,
                 ) => result,
                 mode = rx => {
                     if let Some(turn) = &execution_turn {
@@ -4694,7 +4698,11 @@ pub async fn run_prompt_task(
             }
         }
     }
-    crate::summary_execution::finish(&summary_requests, &ctx.rest_client).await;
+    if crate::summary_execution::finish(&summary_requests, &ctx.rest_client).await && summary_only {
+        // A committed kind-40030 receipt delivers a Summary-only turn. Requiring
+        // an additional chat publication here produces a false delivery alarm.
+        publication_watch = None;
+    }
     match prompt_result {
         Ok(stop_reason) => {
             let delivery_evidence = agent.acp.turn_delivery_evidence();

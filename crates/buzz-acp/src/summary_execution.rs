@@ -114,20 +114,30 @@ pub(crate) async fn prepare(
 
 /// Close an unfinished run from the host even when the model could not call progress.
 /// Published or already-blocked runs remain untouched; a lost receipt is never success.
-pub(crate) async fn finish(requests: &[(Execution, String)], rest: &RestClient) {
+pub(crate) async fn finish(requests: &[(Execution, String)], rest: &RestClient) -> bool {
+    let mut all_published = !requests.is_empty();
     for (request, _) in requests {
         let result = async {
             let receipt = rest.query_raw(&[request.query("status")]).await?;
-            if receipt["run"]["state"] != "running" { return Ok(()); }
+            if receipt["run"]["state"] == "published" {
+                return Ok(receipt["run"]["run_id"] == request.run.to_string()
+                    && receipt["run"]["report_event_id"].as_str().is_some_and(buzz_core::summary::valid_pubkey));
+            }
+            if receipt["run"]["state"] != "running" { return Ok(false); }
             let mut progress = request.query("progress");
             progress["state"] = json!("failed");
             progress["message"] = json!("The Summary agent stopped before publication. Open its conversation for the approval or execution error. Reading progress is unchanged.");
-            rest.query_raw(&[progress]).await.map(|_| ())
+            rest.query_raw(&[progress]).await.map(|_| false)
         }.await;
-        if let Err(error) = result {
-            tracing::error!(run=%request.run,%error,"Summary completion status was not recorded; lease expiry remains the recovery boundary");
+        match result {
+            Ok(published) => all_published &= published,
+            Err(error) => {
+                all_published = false;
+                tracing::error!(run=%request.run,%error,"Summary completion status was not recorded; lease expiry remains the recovery boundary");
+            }
         }
     }
+    all_published
 }
 
 #[cfg(test)]
@@ -276,11 +286,16 @@ mod tests {
         assert!(!requests[0]
             .1
             .contains("Untrusted content must not be promoted"));
-        finish(&requests, &rest).await;
+        assert!(!finish(&requests, &rest).await);
         assert_eq!(stored.lock().unwrap()["run"]["state"], "failed");
         assert_eq!(writes.lock().unwrap().len(), 1);
         stored.lock().unwrap()["run"]["state"] = json!("published");
-        finish(&requests, &rest).await;
+        assert!(
+            !finish(&requests, &rest).await,
+            "a state label without a report receipt is not delivery"
+        );
+        stored.lock().unwrap()["run"]["report_event_id"] = json!("b".repeat(64));
+        assert!(finish(&requests, &rest).await);
         assert_eq!(stored.lock().unwrap()["run"]["state"], "published");
         assert_eq!(writes.lock().unwrap().len(), 1);
         assert!(prepare(Some(&batch), &rest).await.is_empty());
