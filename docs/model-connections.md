@@ -31,7 +31,8 @@ connections; they need configuration on their own execution host.
   neither keys nor their storage references appear in public connection IPC.
 - Agent configuration stores the stable connection ID, model and provider.
   Local native spawn resolves the current connection. DeepSeek receives its
-  native environment; Prime receives an owned per-agent config directory with
+  native environment; Prime receives explicit provider/model launch arguments
+  plus an owned per-agent config directory with
   a key environment reference. No global Prime configuration is overwritten.
 - Availability checks fetch catalogs only. Test a model sends one short text
   request; a text test does not establish tool-calling or harness compatibility.

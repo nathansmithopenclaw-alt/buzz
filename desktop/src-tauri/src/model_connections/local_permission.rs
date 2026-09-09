@@ -14,7 +14,7 @@ pub(super) fn denied() -> bool {
         *const c_char,
         *mut c_void,
     );
-    #[link(name = "dns_sd")]
+    // macOS exports DNS-SD through libSystem (not a separate libdns_sd).
     unsafe extern "C" {
         fn DNSServiceBrowse(
             service: *mut Service,

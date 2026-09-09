@@ -21,6 +21,14 @@ fn prime_config(base: &str, model: &str) -> serde_json::Value {
         "models":[{"id":model,"name":model,"contextWindow":32768,"maxTokens":4096}]
     }}})
 }
+fn prime_args(existing: &str, model: &str) -> Result<String, String> {
+    if model.contains(',') {
+        return Err("Prime model names cannot contain commas".into());
+    }
+    // Prime project settings override its global settings.json. Explicit CLI
+    // selection wins over both and errors instead of choosing a default model.
+    Ok(format!("{existing},--provider,buzz-local,--model,{model}"))
+}
 pub(crate) fn apply(
     app: &AppHandle,
     command: &mut Command,
@@ -55,6 +63,14 @@ pub(crate) fn apply(
             command.env("DSH_MODEL", model);
         }
         "prime" => {
+            let existing_args = command
+                .get_envs()
+                .find(|(key, _)| *key == "BUZZ_ACP_AGENT_ARGS")
+                .and_then(|(_, value)| value)
+                .and_then(|value| value.to_str())
+                .unwrap_or("--mode,acp");
+            let args = prime_args(existing_args, model)?;
+            command.env("BUZZ_ACP_AGENT_ARGS", args);
             if agent_key.len() != 64 || !agent_key.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err("Invalid agent identity for model connection".into());
             }
@@ -91,6 +107,13 @@ pub(crate) fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prime_selection_is_explicit_even_with_inherited_provider_arguments() {
+        let args =
+            prime_args("--mode,acp,--provider,openrouter,--model,old", "Qwen/model").unwrap();
+        assert!(args.ends_with(",--provider,buzz-local,--model,Qwen/model"));
+        assert!(prime_args("--mode,acp", "bad,--provider,other").is_err());
+    }
     #[test]
     fn connection_secrets_do_not_cross_public_serialization() {
         let row = super::super::ModelConnection {
