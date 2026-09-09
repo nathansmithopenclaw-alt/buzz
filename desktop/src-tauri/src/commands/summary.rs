@@ -24,23 +24,7 @@ pub async fn summary_operation(
         .get("summary_operation")
         .and_then(Value::as_str)
         .ok_or("Missing Summary operation")?;
-    if ![
-        "reports_list",
-        "reports_archive",
-        "reports_restore",
-        "reports_delete",
-        "people",
-        "start",
-        "status",
-        "cursors",
-        "history",
-        "capabilities",
-        "progress",
-    ]
-    .contains(&operation)
-    {
-        return Err("Unknown Summary operation".into());
-    }
+    validate_summary_operation(operation)?;
     let url = format!("{}/query", base);
     let body = serde_json::to_vec(&[request]).map_err(|e| e.to_string())?;
     let auth = build_nip98_auth_header_for_keys(&keys, &reqwest::Method::POST, &url, &body)?;
@@ -67,6 +51,65 @@ pub async fn summary_operation(
         &state.signing_keys()?.public_key().to_hex(),
     )?;
     Ok(result)
+}
+
+fn validate_summary_operation(operation: &str) -> Result<(), String> {
+    if ![
+        "definitions",
+        "overview",
+        "dispatch",
+        "reports_get",
+        "reports_list",
+        "reports_archive",
+        "reports_restore",
+        "reports_delete",
+        "people",
+        "start",
+        "status",
+        "cursors",
+        "history",
+        "capabilities",
+        "progress",
+    ]
+    .contains(&operation)
+    {
+        return Err("Unknown Summary operation".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_summary_operation;
+
+    #[test]
+    fn summary_bridge_accepts_frontend_requests() {
+        // Bind the real callers to the production bridge validation so browser
+        // fixtures cannot conceal an operation rejected by the native shell.
+        let callers = [
+            include_str!("../../../src/features/pulse/lib/namedSummaries.ts"),
+            include_str!("../../../src/features/pulse/lib/runSummary.ts"),
+            include_str!("../../../src/features/pulse/lib/summaryReports.ts"),
+            include_str!("../../../src/features/pulse/ui/SummariesView.tsx"),
+            include_str!("../../../src/features/pulse/ui/SummaryAudienceFields.tsx"),
+            include_str!("../../../src/features/pulse/ui/SummaryRunHistory.tsx"),
+        ];
+        let mut checked = 0;
+        for source in callers {
+            for suffix in source.split("summary_operation: \"").skip(1) {
+                let operation = suffix.split('"').next().unwrap();
+                assert!(validate_summary_operation(operation).is_ok(), "{operation}");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 10);
+        for operation in ["reports_archive", "reports_restore", "reports_delete"] {
+            assert!(validate_summary_operation(operation).is_ok());
+        }
+        for operation in ["", "publish", "admin", "reports_unknown"] {
+            assert!(validate_summary_operation(operation).is_err());
+        }
+    }
 }
 
 #[tauri::command]
