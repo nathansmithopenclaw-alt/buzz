@@ -136,15 +136,23 @@ function SummaryCollection({
         <h2 className="text-xl font-semibold">
           {library.archived ? "Summary archive" : "Report library"}
         </h2>
+        {library.summaryId && (
+          <p className="text-sm text-muted-foreground">
+            {all.find((r) => r.config.summary_id === library.summaryId)?.config
+              .name ?? "Selected Summary"}
+          </p>
+        )}
         <div className="flex gap-2">
           <Button
-            variant={!library.archived ? "secondary" : "ghost"}
+            aria-pressed={!library.archived}
+            variant={!library.archived ? "default" : "ghost"}
             onClick={() => setLibrary({ ...library, archived: false })}
           >
             Current reports
           </Button>
           <Button
-            variant={library.archived ? "secondary" : "ghost"}
+            aria-pressed={library.archived}
+            variant={library.archived ? "default" : "ghost"}
             onClick={() => setLibrary({ ...library, archived: true })}
           >
             Archived reports
