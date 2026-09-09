@@ -449,4 +449,7 @@ test("schedule controls retain local times, selected weekdays and manual-only ch
   assert.equal(value.cron, "45 17 * * 1,5");
   fireEvent.click(screen.getByRole("radio", { name: "Every 30 minutes" }));
   assert.equal(value.interval, "30m");
+  fireEvent.click(screen.getByRole("radio", { name: "Custom cron" }));
+  assert.ok(screen.getByText(/America\/New_York · Paste all 5 fields/));
+  assert.equal(screen.queryByText(/UTC · Paste/), null);
 });

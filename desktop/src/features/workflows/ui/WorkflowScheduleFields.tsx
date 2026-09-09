@@ -230,6 +230,7 @@ export function WorkflowScheduleFields({
 
       {schedule.frequency === "custom_cron" ? (
         <CronExpressionInput
+          timezone={timezone}
           disabled={disabled}
           onChange={(customCron) => updateSchedule({ customCron })}
           value={schedule.customCron}
