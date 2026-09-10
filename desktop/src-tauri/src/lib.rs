@@ -756,6 +756,7 @@ pub fn run() {
             put_managed_agent_runtime_lifecycle,
             create_managed_agent,
             start_managed_agent,
+            open_external_agent_task,
             ensure_managed_agent_for_inbound,
             resurrect_stopped_active_instances,
             stop_managed_agent,

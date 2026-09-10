@@ -14,6 +14,7 @@ const OTHER = "cc".repeat(32);
 test("surfaces actionable wake refusals without noisy policy skips", () => {
   assert.equal(inboundWakeRefusalMessage("SkipAlreadyRunning"), null);
   assert.equal(inboundWakeRefusalMessage("SkipAuthorGated"), null);
+  assert.equal(inboundWakeRefusalMessage("external_execution"), null);
   assert.match(
     inboundWakeRefusalMessage("SkipCrashBackoff"),
     /repeated startup failures/,

@@ -122,6 +122,7 @@ type MockCommandAvailability = {
 };
 
 export type MockManagedAgentSeed = {
+  externalExecution?: RawManagedAgent["external_execution"];
   pubkey: string;
   name: string;
   avatarUrl?: string | null;
@@ -1003,6 +1004,7 @@ type RawRelayAgent = {
 };
 
 type RawManagedAgent = {
+  external_execution?: { type: "codex_desktop"; thread_id: string } | null;
   effort_level?: string | null;
   subscription_account_id?: string | null;
   subscription_account_inherit_default?: boolean;
@@ -2032,6 +2034,7 @@ function cloneRelayAgent(agent: RawRelayAgent): RawRelayAgent {
 
 function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
   return {
+    external_execution: agent.external_execution ?? null,
     pubkey: agent.pubkey,
     name: agent.name,
     persona_id: agent.persona_id,
@@ -2606,6 +2609,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
 
   return {
     pubkey: seed.pubkey,
+    external_execution: seed.externalExecution ?? null,
     name: seed.name,
     persona_id: seed.personaId ?? null,
     // Native serde always emits this key (`null` when unpinned) — the bridge
@@ -14657,12 +14661,26 @@ export function maybeInstallE2eTauriMocks() {
         });
       case "ensure_managed_agent_for_inbound": {
         const { pubkey } = payload as { pubkey: string };
+        if (
+          mockManagedAgents.find((agent) => agent.pubkey === pubkey)
+            ?.external_execution
+        ) {
+          return { pubkey, spawned: false, reason: "external_execution" };
+        }
         // The fork also checks the relay echo through inbound resurrection.
         // Native deduplicates that check against the pair runtime started by
         // the explicit wake; the mock has no child-process map, so return the
         // corresponding idempotent outcome instead of treating the fork-only
         // command as unsupported.
         return { pubkey, spawned: false, reason: "SkipAlreadyRunning" };
+      }
+      case "open_external_agent_task": {
+        const agent = getMockManagedAgent(
+          (payload as { pubkey: string }).pubkey,
+        );
+        if (!agent.external_execution)
+          throw new Error("No external execution binding");
+        return null;
       }
       case "stop_managed_agent":
         return handleStopManagedAgent(

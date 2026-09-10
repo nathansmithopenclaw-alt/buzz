@@ -26,6 +26,7 @@ mod discovery;
 pub(crate) mod dsh_profile;
 pub(crate) mod effective_config;
 mod env_vars;
+pub(crate) mod external_execution;
 pub(crate) mod fleet_visibility;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;

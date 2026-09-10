@@ -22,12 +22,18 @@ import type { ManagedAgent } from "@/shared/api/types";
  * than falling through to "inherited" for lack of an instance.
  */
 export function resolveAgentCardModelLabel(input: {
-  agent: Pick<ManagedAgent, "modelSource" | "model" | "provider"> | undefined;
+  agent:
+    | Pick<
+        ManagedAgent,
+        "modelSource" | "model" | "provider" | "externalExecution"
+      >
+    | undefined;
   personaModel: string | null | undefined;
   /** Inference provider for the persona/agent — threads provider-qualified label lookup. */
   provider?: string | null | undefined;
   defaultModel: string;
 }): string {
+  if (input.agent?.externalExecution) return "Runs in Codex Desktop";
   if (input.agent) {
     const isInherited =
       !input.agent.modelSource || input.agent.modelSource === "global";

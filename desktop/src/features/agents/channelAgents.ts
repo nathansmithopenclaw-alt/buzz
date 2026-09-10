@@ -193,7 +193,7 @@ export async function attachManagedAgentToChannel(
   let agent = input.agent;
   let started = false;
 
-  if (ensureRunning) {
+  if (ensureRunning && !input.agent.externalExecution) {
     // Running agents (local or provider) auto-discover new channel membership
     // via the harness's membership notifications — no restart needed. Only
     // not-yet-running agents need a start/deploy call before the first mention
