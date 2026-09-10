@@ -40,6 +40,7 @@ test.beforeEach(async ({ page }) => {
       {
         pubkey: PUBKEY,
         name: "Codex Desktop",
+        runtime: "claude",
         status: "stopped",
         channelNames: ["general"],
         externalExecution: { type: "codex_desktop", thread_id: THREAD },
@@ -127,6 +128,12 @@ test("agent card and runtime profile open the external task without local model 
   );
   await expect(
     page.getByRole("switch", { name: "Start on launch" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("Subscription account", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("Agent stopped. This selection will apply when it starts."),
   ).toHaveCount(0);
   await runtime.getByRole("button", { name: "Open Codex Desktop" }).click();
   await expect
