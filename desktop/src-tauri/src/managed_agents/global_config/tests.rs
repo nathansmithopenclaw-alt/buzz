@@ -681,7 +681,11 @@ fn inherited_shared_compute_translates_to_supported_agent_transport() {
     );
     assert_eq!(
         effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str),
-        Some("auto")
+        Some(if cfg!(feature = "mesh-llm") {
+            "mesh"
+        } else {
+            "auto"
+        })
     );
     assert_eq!(
         effective

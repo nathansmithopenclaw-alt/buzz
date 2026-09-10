@@ -621,11 +621,9 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("delete event fixtures");
-        sqlx::query("DELETE FROM communities WHERE id = ANY($1)")
-            .bind(vec![report_community, other_community])
-            .execute(&pool)
-            .await
-            .expect("delete community fixtures");
+        // Admitted events leave durable journal records even after deletion.
+        // Keep their community provenance; the per-test database wrapper owns
+        // teardown of the isolated database and its retained journal.
     }
 
     #[tokio::test]

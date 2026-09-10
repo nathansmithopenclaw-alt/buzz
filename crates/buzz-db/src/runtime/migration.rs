@@ -3676,7 +3676,8 @@ mod postgres_tests {
     /// alone must present a coherent catalog. Its five community-scoped ledger
     /// relations are immutable and durable, so they are registered in the
     /// write-fence exclusion — never counted as tenant-scoped drift, never
-    /// fence-attached — and the exact deletion catalog must still validate.
+    /// fence-attached. The current deletion catalog must identify only the
+    /// later Summary tables as missing from this historical schema.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn migration_0045_identity_foundation_is_durable_ledger_after_migration_a() {
@@ -3743,12 +3744,17 @@ mod postgres_tests {
             "identity ledger relations must be write-fence excluded, not scoped: {scoped_or_fenced:?}"
         );
 
-        // The exact deletion catalog validates: the excluded ledger relations
-        // do not perturb the scoped-table/fence equality check.
-        crate::deletion::DeletionStore::new(pool.clone())
+        // The current catalog correctly rejects this historical schema only
+        // for the later Summary tables. Identity ledger relations remain
+        // excluded; any additional missing/unknown relation fails this check.
+        let catalog_error = crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
-            .expect("deletion catalog validates after migration 0045");
+            .expect_err("the current deletion catalog requires later Summary migrations");
+        assert!(
+            matches!(catalog_error, crate::DbError::DeletionSafety(message)
+            if message == "community deletion catalog drift (missing=summary_cursors,summary_report_archive,summary_run_reads,summary_run_sources,summary_runs,summary_schedule_jobs,summary_schedule_state, unknown=)")
+        );
 
         // The immutability contract is enforced, not merely declared. TRUNCATE
         // fires the statement-level guard unconditionally, so this proves the
@@ -3843,10 +3849,14 @@ mod postgres_tests {
         );
 
         // The exact deletion catalog validates with the full ledger present.
-        crate::deletion::DeletionStore::new(pool.clone())
+        let catalog_error = crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
-            .expect("deletion catalog validates after migrations 0045 + 0046");
+            .expect_err("the current deletion catalog requires later Summary migrations");
+        assert!(
+            matches!(catalog_error, crate::DbError::DeletionSafety(message)
+            if message == "community deletion catalog drift (missing=summary_cursors,summary_report_archive,summary_run_reads,summary_run_sources,summary_runs,summary_schedule_jobs,summary_schedule_state, unknown=)")
+        );
 
         // A migration-B relation is immutable too. TRUNCATE fires the
         // statement-level guard unconditionally.

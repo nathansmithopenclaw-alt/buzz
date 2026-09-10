@@ -234,3 +234,7 @@ BEGIN
         RAISE EXCEPTION 'replica_heartbeat must contain its singleton row after pgschema apply';
     END IF;
 END $$;
+-- pgschema manages schema objects but does not create database extensions.
+-- Fresh template0 databases need the extension declared by schema/schema.sql;
+-- otherwise the relay journal trigger cannot hash its first admitted event.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
