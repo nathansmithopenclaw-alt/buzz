@@ -52,6 +52,21 @@ export async function loadLinkedTaskHistory(
       })),
     );
   }
+  // A task UUID is a complete explicit link even when no message permalink or
+  // home conversation was saved. Discover only those referenced task IDs;
+  // the relay filters authorized channels, and the roster check below still
+  // governs what enters the native projection.
+  const anchoredIds = new Set(anchors.map((event) => tag(event, "task")));
+  const unresolvedIds = refs.taskIds.filter((id) => !anchoredIds.has(id));
+  for (let i = 0; i < unresolvedIds.length; i += CHUNK) {
+    anchors.push(
+      ...(await history.fetchExhaustively({
+        kinds: [9],
+        "#task": unresolvedIds.slice(i, i + CHUNK),
+        "#t": ["buzz-task"],
+      })),
+    );
+  }
   const channels = unique([
     ...issues
       .filter((issue) =>

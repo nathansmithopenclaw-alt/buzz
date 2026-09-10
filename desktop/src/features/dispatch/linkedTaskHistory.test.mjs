@@ -32,6 +32,31 @@ const issue = {
   ],
 };
 
+test("a task UUID alone discovers its authorized conversation without a home channel", async () => {
+  const filters = [];
+  const result = await loadLinkedTaskHistory(
+    {
+      fetch: async () => {
+        throw new Error("no message ID was referenced");
+      },
+      fetchExhaustively: async (filter) => {
+        filters.push(filter);
+        if (filter.kinds[0] === 39002) return [membership];
+        if (filter.kinds[0] === 40027) return [];
+        assert.deepEqual(filter["#task"], [task]);
+        return [anchor];
+      },
+    },
+    [{ externalRefs: [{ type: "task", ref: task }] }],
+    workspace,
+    viewer,
+  );
+  assert.deepEqual(result.channelIds, [channel]);
+  assert.deepEqual(result.taskEvents, [anchor]);
+  assert.equal(filters[0]["#h"], undefined);
+  assert.deepEqual(filters[0]["#task"], [task]);
+});
+
 test("linked tasks fetch their full authorized execution history across channels", async () => {
   const filters = [];
   const history = {
