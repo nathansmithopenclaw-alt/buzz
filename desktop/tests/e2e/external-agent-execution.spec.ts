@@ -71,6 +71,14 @@ test("normal picker preserves signed recipients across two sends without a local
       page.getByTestId("message-row").filter({ hasText: text }),
     ).toBeVisible();
   }
+  expect(
+    await page.evaluate(
+      () =>
+        window.__BUZZ_E2E_COMMAND_LOG__?.filter(
+          (e) => e.command === "start_managed_agent",
+        ).length ?? 0,
+    ),
+  ).toBe(0);
   await expect
     .poll(() =>
       page.evaluate(
