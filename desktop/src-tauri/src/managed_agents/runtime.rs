@@ -285,6 +285,11 @@ pub fn build_managed_agent_summary(
     )
     .map(str::to_owned);
     Ok(ManagedAgentSummary {
+        external_execution: pair_key
+            .as_ref()
+            .map(|key| super::external_execution::load(app, key))
+            .transpose()?
+            .flatten(),
         effort_level: record.effort_level.clone(),
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
@@ -483,6 +488,7 @@ pub fn spawn_agent_child(
         return Err(error);
     }
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    super::external_execution::require_local(app, &runtime_key)?;
     super::account_switch::check_spawn(app, record, &runtime_key)?;
     // Resolve the effective harness (agent command) from the linked persona, so
     // persona harness edits propagate on the next spawn; an explicit per-agent

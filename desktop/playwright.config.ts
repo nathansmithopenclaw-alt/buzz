@@ -87,6 +87,7 @@ export default defineConfig({
         "**/composer-selection-formatting.spec.ts",
         "**/composer-tooltip-dismiss.spec.ts",
         "**/mentions.spec.ts",
+        "**/external-agent-execution.spec.ts",
         "**/mention-spacing.spec.ts",
         "**/mention-clipboard.spec.ts",
         "**/cloud-provenance.spec.ts",

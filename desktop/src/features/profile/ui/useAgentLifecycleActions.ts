@@ -35,6 +35,13 @@ export function useAgentLifecycleActions({
     if (!managedAgent) return;
 
     try {
+      if (managedAgent.externalExecution) {
+        await startManagedAgentWithRules({
+          agent: managedAgent,
+          startManagedAgent,
+        });
+        return;
+      }
       if (isManagedAgentActive(managedAgent)) {
         const result = await stopManagedAgentWithRules({
           agent: managedAgent,
@@ -78,6 +85,13 @@ export function useAgentLifecycleActions({
     if (!managedAgent) return;
 
     try {
+      if (managedAgent.externalExecution) {
+        await startManagedAgentWithRules({
+          agent: managedAgent,
+          startManagedAgent,
+        });
+        return;
+      }
       const blockReason = agentPresenceStartBlockReason(
         isManagedAgentActive(managedAgent),
         availability,

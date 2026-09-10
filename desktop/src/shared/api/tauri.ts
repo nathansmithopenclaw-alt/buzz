@@ -120,6 +120,7 @@ export type RawManagedAgent =
       persona_id: string | null;
       // Optional: pre-feature fixtures may omit it. The record's harness/runtime id.
       runtime?: string | null;
+      external_execution?: { type: "codex_desktop"; thread_id: string } | null;
       team_id?: string | null;
       relay_url: string;
       acp_command: string;
@@ -637,6 +638,12 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
 
 export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   return {
+    externalExecution: agent.external_execution
+      ? {
+          type: agent.external_execution.type,
+          threadId: agent.external_execution.thread_id,
+        }
+      : null,
     pubkey: agent.pubkey,
     name: agent.name,
     personaId: agent.persona_id,

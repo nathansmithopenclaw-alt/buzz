@@ -554,3 +554,20 @@ people-directory input. That input replaces the agent roster; it must never merg
 people and managed agents. Membership and identity classification come from the
 relay, including incomplete-directory status. This changes picker reuse only;
 agent runtime configuration rules are unchanged.
+
+## External execution ownership
+
+An agent may have a host-local, community-scoped external execution binding.
+It is projected as `ManagedAgent.externalExecution`; it is not a persona field,
+relay presence claim, model choice, or credential. The native binding is read
+from `agents/external-execution/<pubkey>.json` and must name the exact community
+and a supported target. Unknown or malformed bindings refuse local execution.
+
+Mention preparation still performs access and membership checks and preserves
+the exact recipient key. It skips queued local wakes and local starts during
+channel attachment. Inbound resurrection and the common native spawn boundary
+also respect the binding, so stale frontend state cannot start a duplicate.
+Cards and profiles name the external app and offer Open Codex Desktop; opening
+uses a native validated task target and does not submit a turn. Keep local model,
+autostart, log and restart controls out of the external runtime presentation.
+See `docs/external-agent-execution.md` for installation and rollback.

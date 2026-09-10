@@ -523,6 +523,8 @@ pub struct ManagedAgentRecord {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentSummary {
+    /// Host-local execution ownership, scoped to the active community.
+    pub external_execution: Option<super::external_execution::ExternalExecution>,
     /// Canonical next-session effort, independent of the live session.
     pub effort_level: Option<String>,
     pub pubkey: String,

@@ -454,7 +454,7 @@ function FleetAgentCard({
               <Settings2 className="h-4 w-4" />
               View runtime
             </DropdownMenuItem>
-            {agent.backend.type === "local" ? (
+            {agent.backend.type === "local" && !agent.externalExecution ? (
               <DropdownMenuItem
                 onSelect={() =>
                   onOpenAgentProfile(agent.pubkey, { view: "logs" })
@@ -465,7 +465,15 @@ function FleetAgentCard({
               </DropdownMenuItem>
             ) : null}
             <DropdownMenuSeparator />
-            {isActive ? (
+            {agent.externalExecution ? (
+              <DropdownMenuItem
+                disabled={isActionPending}
+                onSelect={() => onStartAgent(agent.pubkey)}
+              >
+                <Play className="h-4 w-4" />
+                Open Codex Desktop
+              </DropdownMenuItem>
+            ) : isActive ? (
               <>
                 <DropdownMenuItem
                   disabled={isActionPending}
@@ -520,27 +528,29 @@ function FleetAgentCard({
       }
       ariaLabel={`${identity.displayName} agent profile`}
       avatar={
-        <AgentRuntimeAvatarControl
-          activeTestId={`agent-runtime-active-${agent.pubkey}`}
-          avatarUrl={identity.avatarUrl}
-          errorLabel={friendlyError}
-          errorTestId={`agent-runtime-error-${agent.pubkey}`}
-          isActive={isActive}
-          availability={availability}
-          isRestarting={isRestarting}
-          isStarting={isStarting}
-          label={identity.displayName}
-          requiresRestart={agent.needsRestart}
-          startTestId={`agent-runtime-start-${agent.pubkey}`}
-          onOpenError={() => {
-            onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
-          }}
-          onStart={() =>
-            agent.needsRestart
-              ? onRestartAgent(agent.pubkey)
-              : onStartAgent(agent.pubkey)
-          }
-        />
+        agent.externalExecution ? undefined : (
+          <AgentRuntimeAvatarControl
+            activeTestId={`agent-runtime-active-${agent.pubkey}`}
+            avatarUrl={identity.avatarUrl}
+            errorLabel={friendlyError}
+            errorTestId={`agent-runtime-error-${agent.pubkey}`}
+            isActive={isActive}
+            availability={availability}
+            isRestarting={isRestarting}
+            isStarting={isStarting}
+            label={identity.displayName}
+            requiresRestart={agent.needsRestart}
+            startTestId={`agent-runtime-start-${agent.pubkey}`}
+            onOpenError={() => {
+              onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
+            }}
+            onStart={() =>
+              agent.needsRestart
+                ? onRestartAgent(agent.pubkey)
+                : onStartAgent(agent.pubkey)
+            }
+          />
+        )
       }
       avatarUrl={identity.avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
@@ -551,7 +561,9 @@ function FleetAgentCard({
         </>
       }
       label={identity.displayName}
-      modelLabel={`${runtimeLabel} · ${modelLabel}`}
+      modelLabel={
+        agent.externalExecution ? modelLabel : `${runtimeLabel} · ${modelLabel}`
+      }
       subtitle={persona ? effectiveAgentDescription(persona) : null}
       onClick={() => {
         if (opensRuntimeTab) {
@@ -562,10 +574,14 @@ function FleetAgentCard({
       }}
       statusBadge={
         <div className="flex flex-wrap gap-1.5">
-          <FleetAgentStatusChip
-            status={status}
-            testId={`managed-agent-status-${agent.pubkey}`}
-          />
+          {agent.externalExecution ? (
+            <Badge variant="outline">External app</Badge>
+          ) : (
+            <FleetAgentStatusChip
+              status={status}
+              testId={`managed-agent-status-${agent.pubkey}`}
+            />
+          )}
           {agent.personaOrphaned || (agent.personaId && !persona) ? (
             <Badge className="normal-case tracking-normal" variant="warning">
               No definition on this device

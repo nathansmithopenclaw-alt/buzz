@@ -309,6 +309,8 @@ export type ManagedAgent =
       pubkey: string;
       name: string;
       personaId: string | null;
+      /** Execution ownership only; this does not claim the external app is online. */
+      externalExecution?: { type: "codex_desktop"; threadId: string } | null;
       /**
        * The record's harness/runtime id (e.g. "goose", "my-custom-harness").
        * `null` means the agent inherits its harness from the linked persona.

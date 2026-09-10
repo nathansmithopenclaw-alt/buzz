@@ -1,4 +1,4 @@
-import { sendChannelMessage } from "@/shared/api/tauri";
+import { invokeTauri, sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
 import type { AgentAvailabilityReader } from "./useAgentAvailability";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -33,6 +33,7 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
 }
 
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
+  if (agent.externalExecution) return "Open Codex Desktop";
   if (agent.backend.type === "provider") {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
   }
@@ -82,6 +83,10 @@ export async function startManagedAgentWithRules({
   // Relay-mesh agents are no longer blocked here: the backend start preflight
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
+  if (agent.externalExecution) {
+    await invokeTauri("open_external_agent_task", { pubkey: agent.pubkey });
+    return;
+  }
   await startManagedAgent(agent.pubkey);
 }
 
@@ -98,6 +103,10 @@ export async function respawnManagedAgentWithRules({
    * clear stale working badges at the right boundary. */
   onStopped?: () => void;
 }) {
+  if (agent.externalExecution) {
+    await invokeTauri("open_external_agent_task", { pubkey: agent.pubkey });
+    return;
+  }
   if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
     await stopManagedAgent(agent.pubkey);
     onStopped?.();

@@ -722,6 +722,7 @@ fn summary_fixture(
     restart_diff: Vec<crate::managed_agents::spawn_snapshot::RestartDiffEntry>,
 ) -> super::ManagedAgentSummary {
     super::ManagedAgentSummary {
+        external_execution: None,
         avatar_sync_pending: false,
         effort_level: None,
         pubkey: "aa".repeat(32),
