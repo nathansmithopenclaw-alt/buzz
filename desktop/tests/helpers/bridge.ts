@@ -160,6 +160,7 @@ type MockBridgeOptions = {
     context: DispatchContext;
     /** Next status revision is published then fold-rejected, not applied. */
     rejectNextRevision?: boolean;
+    members?: string[];
   };
   ttsSettings?: {
     version: number;

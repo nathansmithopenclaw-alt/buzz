@@ -875,6 +875,7 @@ dependencies = [
  "buzz-deletion",
  "buzz-media",
  "buzz-pubsub",
+ "buzz-sdk",
  "buzz-search",
  "buzz-workflow",
  "clap",

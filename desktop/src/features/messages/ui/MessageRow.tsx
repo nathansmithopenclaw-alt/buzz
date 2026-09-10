@@ -1,3 +1,4 @@
+import { FeatureGate } from "@/shared/features";
 import * as React from "react";
 import { AlertTriangle } from "lucide-react";
 import {
@@ -61,6 +62,11 @@ import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { WorkflowApprovalRequestCard } from "@/features/workflows/ui/WorkflowApprovalRequestCard";
 import { useMessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
+const ConversationWorkLinks = React.lazy(() =>
+  import("@/features/dispatch/ui/ConversationWorkLinks").then((module) => ({
+    default: module.ConversationWorkLinks,
+  })),
+);
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
 export type ThreadDepthGuideAction = {
@@ -909,6 +915,16 @@ export const MessageRow = React.memo(
                 {headerNode}
                 <div className={bodyContainerClass} data-testid="message-body">
                   {messageBodyNode}
+                  {channelId ? (
+                    <FeatureGate feature="dispatch">
+                      <React.Suspense fallback={null}>
+                        <ConversationWorkLinks
+                          channel={channelId}
+                          messageId={message.id}
+                        />
+                      </React.Suspense>
+                    </FeatureGate>
+                  ) : null}
                 </div>
               </div>
             </>
@@ -919,6 +935,16 @@ export const MessageRow = React.memo(
                 {headerNode}
                 <div className={bodyContainerClass} data-testid="message-body">
                   {messageBodyNode}
+                  {channelId ? (
+                    <FeatureGate feature="dispatch">
+                      <React.Suspense fallback={null}>
+                        <ConversationWorkLinks
+                          channel={channelId}
+                          messageId={message.id}
+                        />
+                      </React.Suspense>
+                    </FeatureGate>
+                  ) : null}
                 </div>
               </div>
             </>

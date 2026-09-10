@@ -1,6 +1,16 @@
+import { IssueWriteRecoveryPanel } from "./IssueWriteRecoveryPanel";
+import { DispatchDraftsPanel } from "./DispatchDraftsPanel";
+import { ConversationUpdatePanel } from "./ConversationUpdatePanel";
+import { DispatchAssignmentDialog } from "./DispatchAssignmentDialog";
+import { DispatchReferenceLink } from "./DispatchReferenceLink";
+import { IssueActivationPanel } from "./IssueActivationPanel";
+import { DeliveryPanel } from "./DeliveryPanel";
+import { DecisionPanel } from "./DecisionPanel";
+import { IssueContextTools } from "./IssueContextTools";
+import { IssueConflictPanel } from "./IssueConflictPanel";
+import { InlineIssueText } from "./InlineIssueText";
 import {
   ArrowLeft,
-  ChevronDown,
   ExternalLink,
   FolderGit2,
   History,
@@ -21,11 +31,16 @@ import { Skeleton } from "@/shared/ui/skeleton";
 import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { AssigneePickerDialog } from "./AssigneePickerDialog";
-import { chronologicalActivity, taskMessageLink } from "../selectors.mjs";
+import { TaskExecutionPanel } from "./TaskExecutionPanel";
+import { IssueEditor } from "./IssueEditor";
+import { issueAlias } from "../issueEditing";
+import { chronologicalActivity } from "../selectors.mjs";
 import { assigneeLabel } from "../viewModel";
 import type { DispatchIssueMutation } from "../mutations";
 import type {
+  DispatchContext,
   DispatchActivity,
+  DispatchDiagnostic,
   DispatchComment,
   DispatchIssue,
   DispatchLinkedTask,
@@ -121,7 +136,7 @@ function AssigneeControl({
   canEdit: boolean;
   currentPubkey?: string;
   isMutating: boolean;
-  onMutate: (mutation: DispatchIssueMutation) => Promise<void>;
+  onMutate: (mutation: DispatchIssueMutation) => Promise<DispatchIssue>;
   profiles?: UserProfileLookup;
   pubkey: string | null;
 }) {
@@ -191,7 +206,7 @@ export function IssueDetailSkeleton() {
   return (
     <main
       aria-label="Loading issue"
-      className="grid h-full grid-cols-[minmax(0,1fr)_320px]"
+      className="grid h-full grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(0,1fr)_20rem] lg:overflow-hidden"
       role="status"
     >
       <div className="space-y-5 p-8">
@@ -243,6 +258,9 @@ export function IssueDetailUnavailable({
 
 export function IssueDetail({
   activity,
+  context,
+  refresh,
+  diagnostics,
   comments,
   currentPubkey,
   issue,
@@ -259,7 +277,10 @@ export function IssueDetail({
   sectionErrors,
   taskLinks,
 }: {
+  context: DispatchContext;
+  refresh: () => Promise<DispatchContext>;
   activity: readonly DispatchActivity[];
+  diagnostics: DispatchDiagnostic[];
   comments: readonly DispatchComment[];
   currentPubkey?: string;
   issue: DispatchIssue;
@@ -267,7 +288,7 @@ export function IssueDetail({
   isMutating: boolean;
   onAddComment: (body: string) => Promise<void>;
   onBack: () => void;
-  onMutate: (mutation: DispatchIssueMutation) => Promise<void>;
+  onMutate: (mutation: DispatchIssueMutation) => Promise<DispatchIssue>;
   onOpenIssue: (issueId: string) => void;
   profiles?: UserProfileLookup;
   profilesError?: string | null;
@@ -280,7 +301,8 @@ export function IssueDetail({
   };
   taskLinks: readonly DispatchLinkedTask[];
 }) {
-  const [expanded, setExpanded] = React.useState(false);
+  const sectionId = React.useId();
+  const [editing, setEditing] = React.useState(false);
   const [comment, setComment] = React.useState("");
   const [reason, setReason] = React.useState("");
   const project = projects.find(
@@ -315,13 +337,14 @@ export function IssueDetail({
 
   return (
     <main
-      className="grid h-full min-h-0 grid-cols-[minmax(0,1fr)_320px]"
+      className="grid h-full min-h-0 grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(0,1fr)_20rem] lg:overflow-hidden"
       data-testid="dispatch-issue-detail"
     >
-      <div className="min-w-0 overflow-y-auto px-8 py-6">
+      <div className="min-w-0 lg:overflow-y-auto px-4 py-5 sm:px-8 sm:py-6">
         <button
           className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
           onClick={onBack}
+          data-testid="dispatch-detail-back"
           type="button"
         >
           <ArrowLeft className="h-4 w-4" />
@@ -330,41 +353,163 @@ export function IssueDetail({
             className="max-w-48 truncate text-foreground"
             title={issue.identifier}
           >
-            {issue.identifier}
+            {issueAlias(issue, issues)}
           </span>
         </button>
-        <h1 className="mt-4 text-2xl font-semibold leading-tight tracking-tight">
-          {issue.title}
-        </h1>
-        <section
-          className={`relative mt-5 overflow-hidden ${expanded ? "" : "max-h-64"}`}
-        >
-          {issue.body.trim() ? (
-            <Markdown className="text-sm" content={issue.body} />
-          ) : (
-            <p className="text-sm italic text-muted-foreground">
-              No description
-            </p>
-          )}
-          {!expanded && issue.body.length > 500 ? (
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-background" />
-          ) : null}
-        </section>
-        {issue.body.length > 500 ? (
-          <button
-            className="mt-2 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-            onClick={() => setExpanded((value) => !value)}
-            type="button"
+        <div className="mt-4 flex items-start justify-between gap-3">
+          <InlineIssueText
+            key={`title:${issue.issueId}`}
+            issue={issue}
+            field="title"
+            disabled={!canEdit || isMutating}
+            onSave={onMutate}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!canEdit || isMutating}
+            onClick={() => setEditing(true)}
           >
-            <ChevronDown
-              className={`h-3.5 w-3.5 ${expanded ? "rotate-180" : ""}`}
-            />
-            {expanded ? "Collapse description" : "Show full description"}
-          </button>
-        ) : null}
-
+            Edit issue
+          </Button>
+        </div>
+        <nav
+          aria-label="Issue sections"
+          className="sticky top-0 z-10 mt-3 flex flex-wrap gap-1 border-b border-border bg-background py-2"
+        >
+          {[
+            ["description", "Details"],
+            ["execution", "Execution"],
+            ["decisions", "Decisions"],
+            ["delivery", "Delivery"],
+            ["activity", "Activity"],
+          ].map(([key, label]) => (
+            <Button
+              key={key}
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                const target = document.getElementById(`${sectionId}-${key}`);
+                target?.scrollIntoView({ behavior: "smooth", block: "start" });
+                target?.focus({ preventScroll: true });
+              }}
+            >
+              {label}
+            </Button>
+          ))}
+        </nav>
+        <IssueActivationPanel
+          key={`activation:${issue.issueId}`}
+          issue={issue}
+          context={context}
+          refresh={refresh}
+        />
+        <IssueConflictPanel
+          issue={issue}
+          diagnostics={diagnostics}
+          disabled={!canEdit || isMutating}
+          onSave={onMutate}
+        />
+        <IssueEditor
+          key={issue.issueId}
+          open={editing}
+          onOpenChange={setEditing}
+          issue={issue}
+          issues={issues}
+          projects={projects}
+          onSave={onMutate}
+          disabled={isMutating}
+        />
         <section
-          className="mt-5 border-t border-border pt-5"
+          id={`${sectionId}-description`}
+          tabIndex={-1}
+          className="mt-5 scroll-mt-16 text-sm"
+        >
+          <InlineIssueText
+            key={`body:${issue.issueId}`}
+            issue={issue}
+            field="body"
+            disabled={!canEdit || isMutating}
+            onSave={onMutate}
+          />
+        </section>
+
+        <DispatchDraftsPanel
+          workspace={issue.streamId}
+          snapshotAt={context.snapshotAt}
+        />
+        <IssueWriteRecoveryPanel
+          workspace={issue.streamId}
+          snapshotAt={context.snapshotAt}
+          refresh={refresh}
+        />
+        <ConversationUpdatePanel
+          issue={issue}
+          context={context}
+          refresh={refresh}
+        />
+        <div
+          id={`${sectionId}-execution`}
+          tabIndex={-1}
+          className="scroll-mt-16"
+        >
+          <TaskExecutionPanel
+            refresh={refresh}
+            viewer={currentPubkey}
+            issue={issue}
+            tasks={taskLinks}
+            error={sectionErrors.tasks}
+            profiles={profiles}
+          />
+          {currentPubkey ? (
+            <DispatchAssignmentDialog
+              key={`assignment:${issue.issueId}`}
+              issue={issue}
+              context={context}
+              viewer={currentPubkey}
+              refresh={refresh}
+            />
+          ) : null}
+        </div>
+        <div
+          id={`${sectionId}-decisions`}
+          tabIndex={-1}
+          className="scroll-mt-16"
+        >
+          {currentPubkey ? (
+            <DecisionPanel
+              key={`decision:${issue.issueId}`}
+              issue={issue}
+              context={context}
+              viewer={currentPubkey}
+              refresh={refresh}
+            />
+          ) : null}
+        </div>
+        <div
+          id={`${sectionId}-delivery`}
+          tabIndex={-1}
+          className="scroll-mt-16"
+        >
+          <DeliveryPanel
+            key={`delivery:${issue.issueId}`}
+            issue={issue}
+            context={context}
+            refresh={refresh}
+          />
+        </div>
+        <IssueContextTools
+          key={`context:${issue.issueId}`}
+          context={context}
+          issue={issue}
+          disabled={!canEdit || isMutating}
+          onOpenIssue={onOpenIssue}
+          onSave={onMutate}
+        />
+        <section
+          className="mt-5 scroll-mt-16 border-t border-border pt-5"
+          id={`${sectionId}-activity`}
+          tabIndex={-1}
           aria-labelledby="activity-heading"
         >
           <h2
@@ -435,7 +580,7 @@ export function IssueDetail({
                         </strong>
                       </>
                     ) : (
-                      `revised ${entry.changes.map((change) => change.field).join(", ")}`
+                      `revised ${entry.changes.map((change) => ({ body: "description", projectId: "project", project_id: "project", estimateMinutes: "estimate", estimate_minutes: "estimate", assignee: "owner", homeChannelId: "conversation", home_channel_id: "conversation", externalRefs: "links", external_refs: "links" })[change.field] ?? change.field).join(", ")}`
                     )}
                     {entry.reason ? <> — “{entry.reason}”</> : null}
                   </span>
@@ -541,7 +686,7 @@ export function IssueDetail({
               ))}
             </select>
           </Property>
-          <Property label="Assignee">
+          <Property label="Owner">
             <AssigneeControl
               canEdit={canEdit}
               currentPubkey={currentPubkey}
@@ -587,6 +732,13 @@ export function IssueDetail({
               <em className="text-muted-foreground">None</em>
             )}
           </Property>
+          <Property label="Estimate">
+            {issue.estimateMinutes === null ? (
+              <em className="text-muted-foreground">None</em>
+            ) : (
+              <span>{issue.estimateMinutes} minutes</span>
+            )}
+          </Property>
           <Property label="Created">
             {dateLabel(issue.rootCreatedAt, true)}
           </Property>
@@ -611,7 +763,7 @@ export function IssueDetail({
                   Imported from {titleCase(imported.system)}
                 </strong>
                 <span className="mt-1 block text-muted-foreground">
-                  {imported.importer_version ?? imported.external_id} ·{" "}
+                  {imported.external_id} ·{" "}
                   {dateLabel(imported.imported_at, true)}
                 </span>
               </a>
@@ -622,7 +774,7 @@ export function IssueDetail({
                   Imported from {titleCase(imported.system)}
                 </strong>
                 <span className="mt-1 block text-muted-foreground">
-                  {imported.importer_version ?? imported.external_id} ·{" "}
+                  {imported.external_id} ·{" "}
                   {dateLabel(imported.imported_at, true)}
                 </span>
               </div>
@@ -640,10 +792,11 @@ export function IssueDetail({
           {relations.length ? (
             <div className="mt-2 space-y-1">
               {relations.map((relation) => {
+                const targetIssue = issues.find(
+                  (candidate) => candidate.issueId === relation.target,
+                );
                 const targetIdentifier =
-                  issues.find(
-                    (candidate) => candidate.issueId === relation.target,
-                  )?.identifier ?? relation.target;
+                  targetIssue?.identifier ?? relation.target;
                 return (
                   <button
                     className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted/40"
@@ -657,7 +810,9 @@ export function IssueDetail({
                       className="ml-auto min-w-0 max-w-24 truncate font-mono text-xs text-muted-foreground"
                       title={targetIdentifier}
                     >
-                      {targetIdentifier}
+                      {targetIssue
+                        ? issueAlias(targetIssue, issues)
+                        : targetIdentifier}
                     </span>
                   </button>
                 );
@@ -669,43 +824,11 @@ export function IssueDetail({
             </p>
           )}
         </section>
-        <section className="mt-5 border-t border-border pt-5">
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Linked tasks
-          </h2>
-          {sectionErrors.tasks ? (
-            <p className="mt-3 text-sm text-muted-foreground">
-              Task envelopes unavailable
-            </p>
-          ) : taskLinks.length ? (
-            <div className="mt-2 space-y-1">
-              {taskLinks.map((task) => (
-                <a
-                  className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted/40"
-                  href={taskMessageLink(task)}
-                  key={task.taskId}
-                >
-                  <Badge
-                    className="normal-case tracking-normal"
-                    variant="outline"
-                  >
-                    {task.status}
-                  </Badge>
-                  <span className="min-w-0 truncate">{task.title}</span>
-                  <ExternalLink className="ml-auto h-3.5 w-3.5" />
-                </a>
-              ))}
-            </div>
-          ) : (
-            <p className="mt-3 text-sm italic text-muted-foreground">
-              No linked task envelopes
-            </p>
-          )}
-        </section>
+
         {issue.externalRefs.length ? (
           <section className="mt-5 border-t border-border pt-5">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              External refs
+              Links and resources
             </h2>
             <div className="mt-2 space-y-1">
               {issue.externalRefs.map((reference) => (
@@ -713,12 +836,7 @@ export function IssueDetail({
                   className="rounded-md px-2 py-1.5 text-xs"
                   key={`${reference.type}:${reference.ref}`}
                 >
-                  <span className="text-muted-foreground">
-                    {reference.type}
-                  </span>
-                  <span className="ml-2 break-all font-mono">
-                    {reference.ref}
-                  </span>
+                  <DispatchReferenceLink value={reference} />
                 </div>
               ))}
             </div>

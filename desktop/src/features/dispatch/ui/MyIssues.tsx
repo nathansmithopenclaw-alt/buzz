@@ -1,7 +1,11 @@
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
 import { selectMyIssues } from "../selectors.mjs";
-import type { DispatchIssue, DispatchProject } from "../types";
+import type {
+  DispatchIssue,
+  DispatchProject,
+  DispatchLinkedTask,
+} from "../types";
 import {
   DispatchIssueEmpty,
   DispatchIssueList,
@@ -10,6 +14,7 @@ import {
 
 export function MyIssues({
   channels,
+  tasks = [],
   currentPubkey,
   isLoading,
   issues,
@@ -18,6 +23,7 @@ export function MyIssues({
   projects,
 }: {
   channels: readonly Channel[];
+  tasks?: readonly DispatchLinkedTask[];
   currentPubkey: string | null | undefined;
   isLoading: boolean;
   issues: readonly DispatchIssue[];
@@ -26,12 +32,12 @@ export function MyIssues({
   projects: readonly DispatchProject[];
 }) {
   if (isLoading) return <DispatchIssueListSkeleton />;
-  const selected = selectMyIssues(issues, currentPubkey);
+  const selected = selectMyIssues(issues, currentPubkey, tasks);
   if (!selected.length) {
     return (
       <DispatchIssueEmpty
-        description="Non-terminal issues assigned to your Desktop identity will appear here."
-        title="No active issues assigned to you"
+        description="Active issues you own or delegated appear here."
+        title="No active work for you"
       />
     );
   }

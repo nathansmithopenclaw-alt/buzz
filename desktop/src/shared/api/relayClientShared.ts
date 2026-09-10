@@ -122,6 +122,7 @@ type LiveSubscription = {
 };
 
 export type PendingEvent = {
+  onAcknowledged?: (message: string) => void;
   event: RelayEvent;
   resolve: (event: RelayEvent) => void;
   reject: (error: Error) => void;

@@ -1,3 +1,4 @@
+import type { DispatchRecordProjection } from "./recordTypes";
 export type DispatchStatus =
   | "triage"
   | "backlog"
@@ -59,6 +60,7 @@ export type DispatchIssue = {
   due: DispatchDue | null;
   estimateMinutes: number | null;
   homeChannelId: string | null;
+  sourceEventId?: string | null;
   workflow: string;
   labels: string[];
   externalRefs: DispatchExternalRef[];
@@ -105,6 +107,25 @@ export type DispatchLinkedTask = {
   channelId: string;
   createdAt: number;
   dispatchRequestId: string | null;
+  assigner?: string;
+  reviewer?: string | null;
+  authorPubkey?: string;
+  assignmentEventId?: string | null;
+  admissionBasis?: "legacy" | "sealed";
+  assignedAt?: number | null;
+  history?: {
+    eventId: string;
+    authorPubkey: string;
+    createdAt: number;
+    status: DispatchLinkedTask["status"];
+    notes: string | null;
+    blockedOn: string | null;
+    evidence: string | null;
+  }[];
+  blockedOn?: string | null;
+  notes?: string | null;
+  deliverables?: { type: string; ref: string }[];
+  verification?: { method: string; evidence_ref: string | null };
 };
 
 export type DispatchProject = {
@@ -114,6 +135,19 @@ export type DispatchProject = {
 };
 
 export type DispatchDiagnostic = {
+  issueId?: string | null;
+  eventId?: string | null;
+  canonicalEvent?: string | null;
+  authorPubkey?: string | null;
+  proposed?: {
+    set: Record<string, unknown>;
+    clear: string[];
+    relations?: { add: unknown[]; remove: unknown[] };
+    external_refs?: {
+      add: DispatchExternalRef[];
+      remove: DispatchExternalRef[];
+    };
+  } | null;
   kind: string;
   message: string;
 };
@@ -124,7 +158,34 @@ export type DispatchWorkspace = {
   trackerEventCount: number;
 };
 
+export type DispatchAutomationObservations = {
+  heartbeats: {
+    eventId: string;
+    signer: string;
+    createdAt: number;
+    serviceId: string;
+    observedAt: number;
+    health: { status: "healthy" | "degraded"; detail: string | null };
+  }[];
+  actions: {
+    eventId: string;
+    signer: string;
+    createdAt: number;
+    issueId: string;
+    requestId: string;
+    action: string;
+    result: string;
+  }[];
+};
 export type DispatchContext = {
+  admission?: {
+    sealed: string[];
+    legacyBaselines: number;
+    unsealed: number;
+    diagnostics: string[];
+  };
+  automation?: DispatchAutomationObservations;
+  records?: DispatchRecordProjection[];
   issues: DispatchIssue[];
   activity: DispatchActivity[];
   comments: DispatchComment[];
@@ -134,6 +195,7 @@ export type DispatchContext = {
   taskDiagnostics: string[];
   viewerRole: "none" | "member" | "maintainer";
   sectionErrors: {
+    records?: string | null;
     comments: string | null;
     projects: string | null;
     tasks: string | null;

@@ -1,3 +1,5 @@
+import { dispatchMockCommand } from "./dispatchMockCommands";
+import { applyDispatchMockEvent } from "./dispatchMockProjection";
 import {
   handleMockSummaryFrame,
   handleMockSummaryCommand,
@@ -47,11 +49,7 @@ import type {
   FeedItemCategory,
   RelayEvent,
 } from "@/shared/api/types";
-import type {
-  DispatchContext,
-  DispatchPriority,
-  DispatchStatus,
-} from "@/features/dispatch/types";
+import type { DispatchContext } from "@/features/dispatch/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -243,6 +241,7 @@ type E2eConfig = {
       context: DispatchContext;
       /** Next status revision is published then fold-rejected, not applied. */
       rejectNextRevision?: boolean;
+      members?: string[];
     };
     ttsSettings?: {
       version: number;
@@ -1434,6 +1433,8 @@ declare global {
       oldId: string,
       item: RawFeedItem,
     ) => RawFeedItem;
+    __BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__?: RelayEvent[];
+    __BUZZ_E2E_FAIL_DISPATCH_ACKS__?: number;
     __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
       content: string;
       createdAt?: number;
@@ -5148,6 +5149,19 @@ function emitMockHistory(
       }
       if (filter.until !== undefined && event.created_at > filter.until) {
         return false;
+      }
+      if (filter.ids && !filter.ids.includes(event.id)) return false;
+      for (const [key, values] of Object.entries(filter)) {
+        if (
+          key.startsWith("#") &&
+          Array.isArray(values) &&
+          !event.tags.some(
+            (tag) =>
+              tag[0] === key.slice(1) &&
+              values.some((value) => value === tag[1]),
+          )
+        )
+          return false;
       }
       return true;
     })
@@ -11197,6 +11211,9 @@ function emitMockDispatchFixture(
           dispatchFixtureEvent((index + 1).toString(16), 39002, [
             ["d", workspace.id],
             ["p", MOCK_IDENTITY_PUBKEY, "", "owner"],
+            ...(fixture.members ?? [])
+              .filter((key) => key !== MOCK_IDENTITY_PUBKEY)
+              .map((key) => ["p", key, "", "member"]),
           ]),
         );
       });
@@ -11554,6 +11571,97 @@ function sendToMockSocket(args: {
   if (type === "EVENT") {
     const event = rest[0] as RelayEvent;
 
+    if (mockDispatchContext && event.kind === 40028) {
+      const workspace = event.tags.find((tag) => tag[0] === "h")?.[1];
+      const request = JSON.parse(event.content).request;
+      const body = {
+        v: 1,
+        workspace,
+        capabilities: { dispatchNotice: 1, taskAuthority: 3 },
+        issues: mockDispatchContext.issues.filter(
+          (issue) =>
+            issue.streamId === workspace &&
+            (!request.issue_id || issue.issueId === request.issue_id),
+        ),
+      };
+      sendWsText(socket.handler, [
+        "OK",
+        event.id,
+        true,
+        `response:${JSON.stringify(body)}`,
+      ]);
+      return;
+    }
+    if (
+      mockDispatchContext &&
+      event.kind === 9 &&
+      event.tags.some((tag) => tag[0] === "t" && tag[1] === "dispatch-update")
+    ) {
+      const channel = getChannelIdFromTags(event.tags),
+        identity = event.tags.find((tag) => tag[0] === "d")?.[1];
+      const existing = (channel ? mockMessages.get(channel) : [])?.find(
+        (value) =>
+          value.kind === 9 &&
+          value.tags.some((tag) => tag[0] === "d" && tag[1] === identity),
+      );
+      window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__?.push(event);
+      if (existing && existing.id !== event.id) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "Dispatch update already shared",
+        ]);
+        return;
+      }
+      if (channel) {
+        recordMockMessage(channel, event);
+        emitMockLiveEvent(channel, event);
+      }
+      const lost = (window.__BUZZ_E2E_FAIL_DISPATCH_ACKS__ ?? 0) > 0;
+      if (lost)
+        window.__BUZZ_E2E_FAIL_DISPATCH_ACKS__ =
+          (window.__BUZZ_E2E_FAIL_DISPATCH_ACKS__ ?? 1) - 1;
+      sendWsText(socket.handler, [
+        "OK",
+        event.id,
+        !lost,
+        lost ? "mock lost acknowledgement after accept" : "",
+      ]);
+      return;
+    }
+    if (
+      mockDispatchContext &&
+      ([40020, 40021, 40022, 40026].includes(event.kind) ||
+        (event.kind === 9 &&
+          event.tags.some((tag) => tag[0] === "t" && tag[1] === "buzz-task")))
+    ) {
+      window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__?.push(event);
+      applyDispatchMockEvent(
+        mockDispatchContext,
+        event,
+        rejectNextDispatchRevision,
+      );
+      if (event.kind === 40021) rejectNextDispatchRevision = false;
+      const channelId = getChannelIdFromTags(event.tags);
+      if (channelId) {
+        recordMockMessage(channelId, event);
+        emitMockLiveEvent(channelId, event);
+      }
+      if ((window.__BUZZ_E2E_FAIL_DISPATCH_ACKS__ ?? 0) > 0) {
+        window.__BUZZ_E2E_FAIL_DISPATCH_ACKS__ =
+          (window.__BUZZ_E2E_FAIL_DISPATCH_ACKS__ ?? 1) - 1;
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "mock lost acknowledgement after accept",
+        ]);
+        return;
+      }
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
     if (event.kind === KIND_AGENT_OBSERVER_FRAME) {
       const frame = event.tags.find((tag) => tag[0] === "frame")?.[1];
       if (frame === "control") {
@@ -11830,7 +11938,7 @@ export function maybeInstallE2eTauriMocks() {
   mockDispatchHistoryRateLimitsRemaining =
     config.mock?.dispatchHistoryRateLimitCount ?? 0;
   mockDispatchHistoryGapPagesRemaining = config.mock?.dispatchHistoryGapOnce
-    ? 2
+    ? 3
     : 0;
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
@@ -12006,6 +12114,8 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__ = (payload) =>
     emit("huddle-tts-speaker-level", payload);
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
+  window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ = [];
+  window.__BUZZ_E2E_FAIL_DISPATCH_ACKS__ = 0;
   window.__BUZZ_E2E_EMIT_MOCK_DISPATCH_EVENT__ = ({
     workspaceId,
     event,
@@ -15379,6 +15489,81 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleGetEvent>[0],
           activeConfig,
         );
+      case "validate_dispatch_audience": {
+        const args = payload as {
+          source: RelayEvent;
+          destination: RelayEvent;
+          viewer: string;
+          requiredReaders?: string[];
+        };
+        const source = args.source as RelayEvent;
+        const destination = args.destination as RelayEvent;
+        const people = (value: RelayEvent) =>
+          new Set(
+            value.tags.filter((tag) => tag[0] === "p").map((tag) => tag[1]),
+          );
+        const sourcePeople = people(source),
+          targetPeople = people(destination);
+        if (
+          source.pubkey !== destination.pubkey ||
+          !sourcePeople.has(String(args.viewer)) ||
+          !targetPeople.has(String(args.viewer)) ||
+          [...targetPeople].some((person) => !sourcePeople.has(person)) ||
+          ((args.requiredReaders ?? []) as string[]).some(
+            (person) => !sourcePeople.has(person) || !targetPeople.has(person),
+          )
+        )
+          throw new Error(
+            "Destination audience cannot read the source conversation.",
+          );
+        return null;
+      }
+      case "dispatch_capture_request_id":
+      case "validate_dispatch_notice_readback":
+      case "build_dispatch_notice_event":
+      case "build_dispatch_task_review_event":
+        return dispatchMockCommand(
+          command,
+          (payload ?? {}) as Record<string, unknown>,
+          mockDispatchContext,
+        );
+      case "build_dispatch_assignment_event": {
+        const args = payload as {
+          channelId: string;
+          context: string;
+          envelope: { task_id: string; status: string; assignee: string };
+        };
+        return {
+          kind: 9,
+          createdAt: Math.floor(Date.now() / 1000),
+          content: `${args.context}\n\n\`\`\`buzz-task\n${JSON.stringify(args.envelope)}\n\`\`\``,
+          tags: [
+            ["h", args.channelId],
+            ["task", args.envelope.task_id, args.envelope.status],
+            ["t", "buzz-task"],
+            ["p", args.envelope.assignee],
+          ],
+        };
+      }
+      case "build_dispatch_record_event": {
+        const args = payload as {
+          streamId: string;
+          record: import("@/features/dispatch/recordTypes").DispatchRecord;
+        };
+        const tags = [
+          ["h", args.streamId],
+          ["record", args.record.record_id],
+          ["request", args.record.request_id],
+        ];
+        if (args.record.parent_event)
+          tags.push(["e", args.record.parent_event, "", "parent"]);
+        return {
+          kind: 40026,
+          content: JSON.stringify(args.record),
+          createdAt: Math.floor(Date.now() / 1000),
+          tags,
+        };
+      }
       case "build_tracker_revision_event": {
         const args = payload as {
           streamId: string;
@@ -15510,121 +15695,6 @@ export function maybeInstallE2eTauriMocks() {
               shape.createdAt,
             );
         window.__BUZZ_E2E_SIGNED_EVENTS__?.push(shape);
-        if (
-          mockDispatchContext &&
-          (signed.kind === 40020 ||
-            signed.kind === 40021 ||
-            signed.kind === 40022)
-        ) {
-          const content = JSON.parse(signed.content) as Record<string, unknown>;
-          const issueId = String(content.issue_id ?? "");
-          const issue = mockDispatchContext.issues.find(
-            (candidate) => candidate.issueId === issueId,
-          );
-          if (signed.kind === 40020 && !issue) {
-            mockDispatchContext.issues.push({
-              streamId: String(content.home_channel_id ?? ""),
-              issueId,
-              rootEvent: signed.id,
-              rootCreatedAt: signed.created_at,
-              tipEvent: signed.id,
-              tipCreatedAt: signed.created_at,
-              revision: 0,
-              enteredStatusAt: signed.created_at,
-              identifier: String(content.identifier ?? ""),
-              title: String(content.title ?? ""),
-              body: String(content.body ?? ""),
-              status: String(content.status ?? "triage") as DispatchStatus,
-              priority: (content.priority ?? null) as DispatchPriority | null,
-              assignee:
-                typeof content.assignee === "string" ? content.assignee : null,
-              projectId:
-                typeof content.project_id === "string"
-                  ? content.project_id
-                  : null,
-              due: null,
-              estimateMinutes: null,
-              homeChannelId:
-                typeof content.home_channel_id === "string"
-                  ? content.home_channel_id
-                  : null,
-              workflow: String(content.workflow ?? "default-v1"),
-              labels: Array.isArray(content.labels)
-                ? content.labels.map(String)
-                : [],
-              externalRefs: [],
-              relations: [],
-            });
-          } else if (signed.kind === 40021 && issue) {
-            const set = (content.set ?? {}) as Record<string, unknown>;
-            const reasonText =
-              typeof content.reason === "string" ? content.reason : null;
-            const rejectBlankStatusReason =
-              Boolean(set.status) && reasonText !== null && !reasonText.trim();
-            const rejectForced =
-              rejectNextDispatchRevision && Boolean(set.status);
-            if (rejectForced) rejectNextDispatchRevision = false;
-            if (rejectBlankStatusReason || rejectForced) {
-              mockDispatchContext.diagnostics.push({
-                kind: "InvalidEvent",
-                message: `InvalidEvent { event_id: "${signed.id}", reason: "status change reason must be non-empty when present" }`,
-              });
-            } else {
-              const clear = Array.isArray(content.clear)
-                ? content.clear.map(String)
-                : [];
-              const changes = Object.entries(set).map(([field, after]) => ({
-                field,
-                before: issue[field as keyof typeof issue] ?? null,
-                after,
-              }));
-              for (const [field, value] of Object.entries(set))
-                (issue as unknown as Record<string, unknown>)[field] = value;
-              for (const field of clear) {
-                changes.push({
-                  field,
-                  before: issue[field as keyof typeof issue] ?? null,
-                  after: null,
-                });
-                (issue as unknown as Record<string, unknown>)[field] = null;
-              }
-              if (Object.hasOwn(set, "status"))
-                issue.enteredStatusAt = signed.created_at;
-              issue.tipEvent = signed.id;
-              issue.tipCreatedAt = signed.created_at;
-              issue.revision = Number(content.revision);
-              mockDispatchContext.activity.push({
-                issueId,
-                eventId: signed.id,
-                authorPubkey: signed.pubkey,
-                createdAt: signed.created_at,
-                revision: issue.revision,
-                reason: reasonText,
-                requestId:
-                  typeof content.request_id === "string"
-                    ? content.request_id
-                    : null,
-                import: null,
-                changes,
-              });
-            }
-          } else if (signed.kind === 40022 && issue) {
-            mockDispatchContext.comments.push({
-              issueId,
-              eventId: signed.id,
-              authorPubkey: signed.pubkey,
-              createdAt: signed.created_at,
-              rootEvent: issue.rootEvent,
-              parentEvent: null,
-              body: String(content.body ?? ""),
-              requestId:
-                typeof content.request_id === "string"
-                  ? content.request_id
-                  : null,
-              import: null,
-            });
-          }
-        }
         return JSON.stringify(signed);
       }
       case "get_events":

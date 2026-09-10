@@ -27,6 +27,10 @@ const MAX_WINDOW_SECS: u64 = 365 * 24 * 3600;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DispatcherConfig {
+    /// Require a signed, bounded shared approval before effects. When enabled,
+    /// missing, paused, preview or expired controls hold pending publications.
+    #[serde(default)]
+    pub remote_controls: bool,
     /// Relay base URL (`http://` or `https://`). May be omitted when
     /// `BUZZ_RELAY_URL` is set in the environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]

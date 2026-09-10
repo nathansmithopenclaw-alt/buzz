@@ -12,6 +12,8 @@ pub mod command_executor;
 pub mod community_provisioning;
 /// NIP-45 COUNT handler.
 pub mod count;
+pub(crate) mod dispatch_admission;
+pub(crate) mod dispatch_client;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;
 /// NIP-IA identity archive request handler (kinds 9035–9036).

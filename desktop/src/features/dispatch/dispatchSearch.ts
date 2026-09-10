@@ -1,3 +1,4 @@
+import { ATTENTION_VIEWS, type AttentionView } from "./attention";
 import type { DispatchPriority, DispatchStatus } from "./types";
 import type {
   DispatchFilters,
@@ -7,10 +8,19 @@ import type {
 } from "./viewModel";
 import { EMPTY_DISPATCH_FILTERS } from "./viewModel";
 
-export type DispatchView = "board" | "list" | "triage" | "my-issues";
+export type DispatchView =
+  | "board"
+  | "list"
+  | "triage"
+  | "my-issues"
+  | "projects"
+  | "insights"
+  | "automation";
 
 export type DispatchRouteSearch = {
   workspace?: string;
+  plan?: string;
+  attention?: AttentionView;
   view?: DispatchView;
   status?: DispatchStatus | "all";
   priority?: DispatchPriority | "none" | "all";
@@ -26,6 +36,8 @@ export type DispatchRouteSearch = {
 
 export const DISPATCH_SEARCH_KEYS = [
   "workspace",
+  "plan",
+  "attention",
   "view",
   "status",
   "priority",
@@ -39,7 +51,15 @@ export const DISPATCH_SEARCH_KEYS = [
   "exclude",
 ] as const;
 
-const VIEWS: DispatchView[] = ["board", "list", "triage", "my-issues"];
+const VIEWS: DispatchView[] = [
+  "board",
+  "list",
+  "triage",
+  "my-issues",
+  "projects",
+  "insights",
+  "automation",
+];
 const STATUSES: Array<DispatchStatus | "all"> = [
   "all",
   "triage",
@@ -100,6 +120,11 @@ export function validateDispatchSearch(
   const exclude = parseExcludedIssueIds(search.exclude);
   return {
     workspace: nonEmptyString(search.workspace),
+    plan: nonEmptyString(search.plan),
+    attention: member(
+      search.attention,
+      Object.keys(ATTENTION_VIEWS) as AttentionView[],
+    ),
     view: member(search.view, VIEWS),
     status: member(search.status, STATUSES),
     priority: member(search.priority, PRIORITIES),

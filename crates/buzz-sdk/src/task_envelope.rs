@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{SdkError, ThreadRef};
 
 /// Current task-envelope schema version.
-pub const TASK_ENVELOPE_VERSION: u8 = 2;
+pub const TASK_ENVELOPE_VERSION: u8 = 3;
 /// Standard NIP-23 hashtag used to discover task-envelope messages.
 pub const TASK_DISCOVERY_HASHTAG: &str = "buzz-task";
 
@@ -135,6 +135,18 @@ pub struct TaskVerification {
     pub evidence_ref: Option<String>,
 }
 
+/// Authority fixed by the signed assignment, independently of later status claims.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskAuthority {
+    /// Assignment event ID. Absent on the assignment itself; required on v3 updates.
+    pub assignment_event_id: Option<String>,
+    /// Accepted predecessor. Establishes causality even within one timestamp second.
+    pub previous_event_id: Option<String>,
+    /// Optional independent reviewer delegated by the assigner at assignment time.
+    pub reviewer: Option<String>,
+}
+
 /// Versioned task metadata appended to a human-readable channel message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -165,14 +177,17 @@ pub struct TaskEnvelope {
     /// Idempotency key assigned by the dispatcher for this execution request.
     #[serde(default)]
     pub dispatch_request_id: Option<Uuid>,
+    /// Version 3 assignment anchor and delegated reviewer; absent in historical v1/v2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<TaskAuthority>,
 }
 
 impl TaskEnvelope {
     /// Validate and normalize an envelope before build or after parse.
     pub fn validate(mut self) -> Result<Self, SdkError> {
-        if !matches!(self.v, 1 | TASK_ENVELOPE_VERSION) {
+        if !matches!(self.v, 1 | 2 | TASK_ENVELOPE_VERSION) {
             return Err(SdkError::InvalidInput(format!(
-                "task envelope v must be 1 or {TASK_ENVELOPE_VERSION}"
+                "task envelope v must be 1, 2 or {TASK_ENVELOPE_VERSION}"
             )));
         }
         if self.v == 1 && (self.tracker_issue_id.is_some() || self.dispatch_request_id.is_some()) {
@@ -182,6 +197,44 @@ impl TaskEnvelope {
         }
         self.assignee = normalize_pubkey(&self.assignee, "assignee")?;
         self.assigner = normalize_pubkey(&self.assigner, "assigner")?;
+        if self.v < 3 && self.authority.is_some() {
+            return Err(SdkError::InvalidInput(
+                "task authority requires envelope v3".into(),
+            ));
+        }
+        if self.v >= 3 {
+            let authority = self.authority.as_mut().ok_or_else(|| {
+                SdkError::InvalidInput("task v3 requires assignment authority".into())
+            })?;
+            authority.reviewer = authority
+                .reviewer
+                .as_deref()
+                .map(|value| normalize_pubkey(value, "authority.reviewer"))
+                .transpose()?;
+            if authority.reviewer.as_deref() == Some(self.assignee.as_str()) {
+                return Err(SdkError::InvalidInput(
+                    "the executor cannot be the independent reviewer".into(),
+                ));
+            }
+            authority.assignment_event_id = authority
+                .assignment_event_id
+                .as_deref()
+                .map(|value| normalize_pubkey(value, "authority.assignment_event_id"))
+                .transpose()?;
+            authority.previous_event_id = authority
+                .previous_event_id
+                .as_deref()
+                .map(|value| normalize_pubkey(value, "authority.previous_event_id"))
+                .transpose()?;
+            if (self.status == TaskStatus::Assigned) != authority.assignment_event_id.is_none() {
+                return Err(SdkError::InvalidInput("task updates must reference the signed assignment; assignments cannot reference another assignment".into()));
+            }
+            if (self.status == TaskStatus::Assigned) != authority.previous_event_id.is_none() {
+                return Err(SdkError::InvalidInput(
+                    "task updates must reference their accepted predecessor".into(),
+                ));
+            }
+        }
         self.title = bounded_nonempty(self.title, "title", 256)?;
         self.verification.method =
             bounded_nonempty(self.verification.method, "verification.method", 2048)?;
@@ -221,6 +274,9 @@ pub struct TaskEnvelopeEvent {
 impl TaskEnvelopeEvent {
     /// Parse and cross-check a signed kind-9 event.
     pub fn from_event(event: &Event) -> Result<Self, SdkError> {
+        event
+            .verify()
+            .map_err(|error| SdkError::InvalidInput(format!("invalid task signature: {error}")))?;
         if event.kind != Kind::Custom(9) {
             return Err(SdkError::InvalidInput(
                 "task envelope event must be kind 9".into(),
@@ -375,24 +431,11 @@ pub fn build_task_message(
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
 
-/// Fold task history to current state using `(created_at, event_id)` ordering.
+/// Fold authorized task history in deterministic order. Rejected claims never advance state.
 pub fn fold_task_events(
     events: impl IntoIterator<Item = TaskEnvelopeEvent>,
 ) -> BTreeMap<Uuid, TaskEnvelopeEvent> {
-    let mut current = BTreeMap::new();
-    for event in events {
-        let task_id = event.envelope.task_id;
-        let replace = current
-            .get(&task_id)
-            .is_none_or(|prior: &TaskEnvelopeEvent| {
-                (event.created_at, event.event_id.as_str())
-                    > (prior.created_at, prior.event_id.as_str())
-            });
-        if replace {
-            current.insert(task_id, event);
-        }
-    }
-    current
+    crate::task_authority::fold_authorized_task_events(events).current
 }
 
 fn parse_tag(parts: &[&str]) -> Result<Tag, SdkError> {
@@ -438,6 +481,11 @@ mod tests {
     fn envelope(status: TaskStatus) -> TaskEnvelope {
         TaskEnvelope {
             v: TASK_ENVELOPE_VERSION,
+            authority: Some(TaskAuthority {
+                assignment_event_id: (status != TaskStatus::Assigned).then(|| "11".repeat(32)),
+                previous_event_id: (status != TaskStatus::Assigned).then(|| "11".repeat(32)),
+                reviewer: None,
+            }),
             task_id: Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap(),
             status,
             assignee: "aa".repeat(32),
@@ -486,7 +534,7 @@ mod tests {
         assert!(parse_task_envelope("```buzz-task\nnot-json\n```").is_err());
         let content = append_task_envelope("human", &envelope(TaskStatus::Done)).unwrap();
         assert!(parse_task_envelope(&format!("{content}\ntrailing text")).is_err());
-        assert!(parse_task_envelope(&content.replace("\"v\": 2", "\"v\": 3")).is_err());
+        assert!(parse_task_envelope(&content.replace("\"v\": 3", "\"v\": 4")).is_err());
     }
 
     #[test]
@@ -535,10 +583,23 @@ mod tests {
         let task_id = envelope(TaskStatus::Assigned).task_id;
         let mk = |created_at, event_id: &str, status| TaskEnvelopeEvent {
             event_id: event_id.into(),
-            author_pubkey: "cc".repeat(32),
+            author_pubkey: if status == TaskStatus::Done {
+                "aa"
+            } else {
+                "bb"
+            }
+            .repeat(32),
             channel_id: Uuid::nil(),
             created_at,
-            envelope: envelope(status),
+            envelope: TaskEnvelope {
+                v: 2,
+                authority: None,
+                verification: TaskVerification {
+                    method: "full suite".into(),
+                    evidence_ref: Some("review receipt".into()),
+                },
+                ..envelope(status)
+            },
         };
         let current = fold_task_events([
             mk(11, "a", TaskStatus::Done),
@@ -549,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_tracker_correlation_round_trips() {
+    fn v3_tracker_correlation_round_trips() {
         let tracker_issue_id = Uuid::new_v4();
         let dispatch_request_id = Uuid::new_v4();
         let mut task = envelope(TaskStatus::Assigned);
@@ -563,12 +624,14 @@ mod tests {
     }
 
     #[test]
-    fn v2_reader_preserves_historical_v1_envelopes() {
-        let content = append_task_envelope("legacy", &envelope(TaskStatus::Assigned)).unwrap();
-        let legacy = content
-            .replace("\"v\": 2", "\"v\": 1")
-            .replace(",\n  \"tracker_issue_id\": null", "")
-            .replace(",\n  \"dispatch_request_id\": null", "");
+    fn v3_reader_preserves_historical_v1_envelopes() {
+        let mut historical = serde_json::to_value(envelope(TaskStatus::Assigned)).unwrap();
+        historical["v"] = serde_json::json!(1);
+        let fields = historical.as_object_mut().unwrap();
+        fields.remove("authority");
+        fields.remove("tracker_issue_id");
+        fields.remove("dispatch_request_id");
+        let legacy = format!("legacy\n\n```buzz-task\n{}\n```", historical);
         let parsed = parse_task_envelope(&legacy).unwrap();
         assert_eq!(parsed.v, 1);
         assert_eq!(parsed.tracker_issue_id, None);
@@ -576,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_deny_unknown_reader_fails_loud_on_v2() {
+    fn v1_deny_unknown_reader_fails_loud_on_v3() {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         #[allow(dead_code)]

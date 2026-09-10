@@ -55,14 +55,6 @@ pub(crate) fn parse_deliverables(values: &[String]) -> Result<Vec<TaskDeliverabl
         .collect()
 }
 
-fn parse_task_events(values: Vec<serde_json::Value>) -> Vec<TaskEnvelopeEvent> {
-    values
-        .into_iter()
-        .filter_map(|value| serde_json::from_value::<Event>(value).ok())
-        .filter_map(|event| TaskEnvelopeEvent::from_event(&event).ok())
-        .collect()
-}
-
 pub(crate) async fn query_task_events(
     client: &BuzzClient,
     channel: Option<Uuid>,
@@ -74,7 +66,68 @@ pub(crate) async fn query_task_events(
     if let Some(channel) = channel {
         filter["#h"] = json!([channel.to_string()]);
     }
-    Ok(parse_task_events(client.query_all(filter).await?))
+    let fetched: Vec<Event> = client
+        .query_all(filter)
+        .await?
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect();
+    let channels: std::collections::BTreeSet<Uuid> = fetched
+        .iter()
+        .filter_map(|event| {
+            TaskEnvelopeEvent::from_event(event)
+                .ok()
+                .map(|task| task.channel_id)
+        })
+        .collect();
+    let mut tasks = Vec::new();
+    for workspace in channels {
+        let roster = client
+            .query_all(json!({"kinds":[39002],"#d":[workspace.to_string()]}))
+            .await?
+            .into_iter()
+            .filter_map(|value| serde_json::from_value::<Event>(value).ok())
+            .filter(|event| event.verify().is_ok())
+            .max_by_key(|event| (event.created_at, event.id));
+        let Some(roster) = roster else {
+            continue;
+        };
+        let viewer = client.keys().public_key().to_hex();
+        if !roster.tags.iter().any(|tag| {
+            tag.as_slice().first().map(String::as_str) == Some("p")
+                && tag.as_slice().get(1) == Some(&viewer)
+        }) {
+            continue;
+        }
+        let mut events: Vec<_> = fetched
+            .iter()
+            .filter(|event| {
+                event
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_slice() == ["h", &workspace.to_string()])
+            })
+            .cloned()
+            .collect();
+        events.extend(
+            client
+                .query_all(json!({"kinds":[40027],"#h":[workspace.to_string()]}))
+                .await?
+                .into_iter()
+                .filter_map(|value| serde_json::from_value::<Event>(value).ok()),
+        );
+        let (admitted, coverage) = buzz_sdk::dispatch_admission::admitted_task_events(
+            &events,
+            workspace,
+            &roster,
+            nostr::Timestamp::now().as_secs(),
+        );
+        if coverage.unsealed > 0 || !coverage.diagnostics.is_empty() {
+            eprintln!("Warning: task history in {workspace} includes {} unsealed events and {} admission diagnostics; legacy author access follows current membership until reviewed baseline.", coverage.unsealed, coverage.diagnostics.len());
+        }
+        tasks.extend(admitted);
+    }
+    Ok(tasks)
 }
 
 fn member_pubkeys(event: &serde_json::Value) -> Vec<String> {
@@ -208,8 +261,11 @@ fn print_write_with_task(
     );
 }
 
-fn upgrade_task_envelope_for_write(envelope: &mut TaskEnvelope) {
+fn upgrade_task_envelope_for_write(envelope: &mut TaskEnvelope, root_id: &str, previous_id: &str) {
     envelope.v = TASK_ENVELOPE_VERSION;
+    let authority = envelope.authority.get_or_insert_with(Default::default);
+    authority.assignment_event_id = Some(root_id.to_string());
+    authority.previous_event_id = Some(previous_id.to_string());
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -220,6 +276,7 @@ async fn assign(
     title: String,
     deliverables: Vec<String>,
     verification: String,
+    reviewer: Option<String>,
     tracker_issue_id: Option<String>,
     dispatch_request_id: Option<String>,
     content: String,
@@ -227,10 +284,18 @@ async fn assign(
 ) -> Result<(), CliError> {
     let channel = parse_uuid(&channel)?;
     let assignee = resolve_assignee(client, channel, &assignee).await?;
+    let reviewer = match reviewer {
+        Some(value) => Some(resolve_assignee(client, channel, &value).await?),
+        None => None,
+    };
     let content = read_or_stdin(&content)?;
     let assigner = client.keys().public_key().to_hex();
     let envelope = TaskEnvelope {
         v: TASK_ENVELOPE_VERSION,
+        authority: Some(buzz_sdk::task_envelope::TaskAuthority {
+            reviewer,
+            ..Default::default()
+        }),
         task_id: Uuid::new_v4(),
         status: TaskStatus::Assigned,
         assignee: assignee.clone(),
@@ -332,11 +397,23 @@ async fn update(client: &BuzzClient, input: TaskUpdateInput) -> Result<(), CliEr
         .into_iter()
         .filter(|event| event.envelope.task_id == task_id)
         .collect();
-    let mut envelope = fold_task_events(history)
+    let current = fold_task_events(history.clone())
         .remove(&task_id)
-        .ok_or_else(|| CliError::Usage(format!("task {task_id} not found in channel {channel}")))?
-        .envelope;
-    upgrade_task_envelope_for_write(&mut envelope);
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "task {task_id} has no unambiguous signed assignment in channel {channel}"
+            ))
+        })?;
+    let root = history
+        .iter()
+        .filter(|event| {
+            event.envelope.status == TaskStatus::Assigned
+                && event.author_pubkey == current.envelope.assigner
+        })
+        .min_by(|a, b| (a.created_at, &a.event_id).cmp(&(b.created_at, &b.event_id)))
+        .ok_or_else(|| CliError::Usage("task assignment is unavailable".into()))?;
+    let mut envelope = current.envelope.clone();
+    upgrade_task_envelope_for_write(&mut envelope, &root.event_id, &current.event_id);
     let author = client.keys().public_key().to_hex();
     if status == TaskStatus::Verified && author == envelope.assignee {
         return Err(CliError::Usage(
@@ -367,6 +444,15 @@ async fn update(client: &BuzzClient, input: TaskUpdateInput) -> Result<(), CliEr
     envelope = envelope
         .validate()
         .map_err(|error| sdk_error("invalid task envelope", error))?;
+    let candidate = TaskEnvelopeEvent {
+        event_id: String::new(),
+        author_pubkey: author.clone(),
+        channel_id: channel,
+        created_at: current.created_at,
+        envelope: envelope.clone(),
+    };
+    buzz_sdk::task_authority::validate_task_transition(root, &current, &candidate)
+        .map_err(|reason| CliError::Usage(format!("task update rejected: {reason}")))?;
     let human = match content {
         Some(content) => read_or_stdin(&content)?,
         None => format!("Task {}: {}.", envelope.title, envelope.status),
@@ -462,6 +548,7 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
             title,
             deliverables,
             verification,
+            reviewer,
             tracker_issue_id,
             dispatch_request_id,
             content,
@@ -474,6 +561,7 @@ pub async fn dispatch(cmd: TasksCmd, client: &BuzzClient) -> Result<(), CliError
                 title,
                 deliverables,
                 verification,
+                reviewer,
                 tracker_issue_id,
                 dispatch_request_id,
                 content,
@@ -526,6 +614,7 @@ mod tests {
     fn task_envelope(version: u8) -> TaskEnvelope {
         TaskEnvelope {
             v: version,
+            authority: (version >= 3).then(Default::default),
             task_id: Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap(),
             status: TaskStatus::Assigned,
             assignee: "aa".repeat(32),
@@ -641,16 +730,23 @@ mod tests {
         let task_id = legacy.task_id;
         let mut expected = legacy.clone();
         expected.v = TASK_ENVELOPE_VERSION;
+        expected.status = TaskStatus::PickedUp;
+        expected.authority = Some(buzz_sdk::task_envelope::TaskAuthority {
+            assignment_event_id: Some("11".repeat(32)),
+            previous_event_id: Some("11".repeat(32)),
+            reviewer: None,
+        });
         let history = [TaskEnvelopeEvent {
-            event_id: "legacy-event".into(),
-            author_pubkey: "cc".repeat(32),
+            event_id: "11".repeat(32),
+            author_pubkey: "bb".repeat(32),
             channel_id: Uuid::nil(),
             created_at: 1,
             envelope: legacy,
         }];
 
         let mut envelope = fold_task_events(history).remove(&task_id).unwrap().envelope;
-        upgrade_task_envelope_for_write(&mut envelope);
+        envelope.status = TaskStatus::PickedUp;
+        upgrade_task_envelope_for_write(&mut envelope, &"11".repeat(32), &"11".repeat(32));
 
         assert_eq!(envelope, expected);
         let event = buzz_sdk::task_envelope::build_task_message(

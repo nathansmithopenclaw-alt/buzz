@@ -65,6 +65,19 @@ fn unsigned_shape(
     })
 }
 
+/// Build a validated shared planning record using the current Desktop signer.
+#[tauri::command]
+pub fn build_dispatch_record_event(
+    stream_id: Uuid,
+    record: buzz_sdk_pkg::dispatch_record::DispatchRecord,
+    author_pubkey: String,
+) -> Result<TrackerUnsignedEvent, String> {
+    unsigned_shape(
+        buzz_sdk_pkg::dispatch_record::build_dispatch_record(stream_id, &record)?,
+        &author_pubkey,
+    )
+}
+
 /// Build and validate a Tracker revision without signing or publishing it.
 #[tauri::command]
 pub fn build_tracker_revision_event(
@@ -96,6 +109,153 @@ pub fn build_tracker_comment_event(
     )
     .map_err(|error| error.to_string())?;
     unsigned_shape(builder, &author_pubkey)
+}
+
+/// Build a new, independently reviewable execution attempt for a Dispatch issue.
+#[tauri::command]
+pub fn build_dispatch_assignment_event(
+    channel_id: Uuid,
+    envelope: buzz_sdk_pkg::task_envelope::TaskEnvelope,
+    context: String,
+    author_pubkey: String,
+) -> Result<TrackerUnsignedEvent, String> {
+    use buzz_sdk_pkg::task_envelope::{build_task_message, TaskStatus, TASK_ENVELOPE_VERSION};
+    if envelope.v != TASK_ENVELOPE_VERSION
+        || envelope.status != TaskStatus::Assigned
+        || envelope.assigner != author_pubkey
+        || envelope.tracker_issue_id.is_none()
+        || envelope.dispatch_request_id.is_none()
+        || envelope
+            .authority
+            .as_ref()
+            .and_then(|value| value.reviewer.as_ref())
+            .is_none()
+    {
+        return Err("A Dispatch assignment requires a current-version issue, request and independent reviewer".into());
+    }
+    if context.len() > 32768 {
+        return Err("Assignment context exceeds the 32 KiB limit".into());
+    }
+    let builder = build_task_message(
+        channel_id,
+        &context,
+        &envelope,
+        None,
+        &[envelope.assignee.as_str()],
+    )
+    .map_err(|error| error.to_string())?;
+    unsigned_shape(builder, &author_pubkey)
+}
+
+/// Prepare an independent review against verified task bytes and current access.
+#[tauri::command]
+pub fn build_dispatch_task_review_event(
+    channel_id: Uuid,
+    events: Vec<nostr::Event>,
+    membership: nostr::Event,
+    workspace_membership: nostr::Event,
+    input: buzz_sdk_pkg::task_authority::TaskReviewInput,
+    author_pubkey: String,
+) -> Result<TrackerUnsignedEvent, String> {
+    membership.verify().map_err(|e| e.to_string())?;
+    workspace_membership.verify().map_err(|e| e.to_string())?;
+    if membership.pubkey != workspace_membership.pubkey
+        || membership.kind.as_u16() != 39002
+        || workspace_membership.kind.as_u16() != 39002
+        || !membership
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["d", &channel_id.to_string()])
+        || !workspace_membership.tags.iter().any(|tag| {
+            tag.as_slice().first().map(String::as_str) == Some("p")
+                && tag.as_slice().get(1) == Some(&author_pubkey)
+        })
+        || !membership.tags.iter().any(|tag| {
+            tag.as_slice().first().map(String::as_str) == Some("p")
+                && tag.as_slice().get(1) == Some(&author_pubkey)
+        })
+    {
+        return Err("Current review-channel membership is required".into());
+    }
+    let (history, coverage) = buzz_sdk_pkg::dispatch_admission::admitted_task_events(
+        &events,
+        channel_id,
+        &membership,
+        nostr::Timestamp::now().as_secs(),
+    );
+    if !coverage.diagnostics.is_empty() {
+        return Err(
+            "Task admission evidence needs review before a new review can be signed".into(),
+        );
+    }
+    unsigned_shape(
+        buzz_sdk_pkg::task_authority::build_task_review(history, &author_pubkey, &input)?,
+        &author_pubkey,
+    )
+}
+
+/// Build an explicit, deduplicated conversation update through normal messaging.
+#[tauri::command]
+pub fn build_dispatch_notice_event(
+    channel_id: Uuid,
+    notice: buzz_sdk_pkg::dispatch_notice::DispatchNotice,
+    body: String,
+    source: Option<nostr::Event>,
+    mentions: Vec<String>,
+    author_pubkey: String,
+) -> Result<TrackerUnsignedEvent, String> {
+    let thread = if let Some(source) = source {
+        source.verify().map_err(|e| e.to_string())?;
+        if notice.source_event.as_deref() != Some(source.id.to_hex().as_str())
+            || !source
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == ["h", &channel_id.to_string()])
+        {
+            return Err("The source message does not match this conversation".into());
+        }
+        let root = source
+            .tags
+            .iter()
+            .find_map(|tag| {
+                let values = tag.as_slice();
+                (values.first().map(String::as_str) == Some("e")
+                    && values.get(3).map(String::as_str) == Some("root"))
+                .then(|| {
+                    values
+                        .get(1)
+                        .and_then(|value| nostr::EventId::from_hex(value).ok())
+                })
+                .flatten()
+            })
+            .unwrap_or(source.id);
+        Some(buzz_sdk_pkg::ThreadRef {
+            root_event_id: root,
+            parent_event_id: source.id,
+        })
+    } else {
+        if notice.source_event.is_some() {
+            return Err("The original message must be available before sharing a reply".into());
+        }
+        None
+    };
+    unsigned_shape(
+        buzz_sdk_pkg::dispatch_notice::build_dispatch_notice(
+            channel_id,
+            &notice,
+            &body,
+            thread.as_ref(),
+            &mentions.iter().map(String::as_str).collect::<Vec<_>>(),
+        )?,
+        &author_pubkey,
+    )
+}
+
+/// Human capture and dispatcher pin capture converge on one source identity.
+#[tauri::command]
+pub fn dispatch_capture_request_id(source_event: String) -> Result<Uuid, String> {
+    nostr::EventId::from_hex(&source_event).map_err(|e| e.to_string())?;
+    Ok(buzz_sdk_pkg::tracker::pin_capture_request_id(&source_event))
 }
 
 #[cfg(test)]
@@ -289,4 +449,39 @@ mod tests {
         .expect_err("invalid root");
         assert!(error.contains("root_event"));
     }
+}
+
+/// Validate that copying Dispatch context cannot widen the source audience.
+#[tauri::command]
+pub fn validate_dispatch_audience(
+    source: nostr::Event,
+    destination: nostr::Event,
+    source_channel: Uuid,
+    destination_channel: Uuid,
+    viewer: String,
+    required_readers: Vec<String>,
+) -> Result<(), String> {
+    buzz_sdk_pkg::dispatch_audience::validate_dispatch_audience(
+        &source,
+        &destination,
+        source_channel,
+        destination_channel,
+        &viewer,
+        &required_readers,
+    )
+}
+
+/// Validate readback against the exact prepared notification identity and signature.
+#[tauri::command]
+pub fn validate_dispatch_notice_readback(
+    event: nostr::Event,
+    channel_id: Uuid,
+    notice: buzz_sdk_pkg::dispatch_notice::DispatchNotice,
+) -> Result<nostr::Event, String> {
+    event.verify().map_err(|error| error.to_string())?;
+    let (channel, parsed, _) = buzz_sdk_pkg::dispatch_notice::parse_dispatch_notice(&event)?;
+    if channel != channel_id || parsed != notice {
+        return Err("The conversation readback does not match this prepared update".into());
+    }
+    Ok(event)
 }

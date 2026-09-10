@@ -21,8 +21,11 @@ arrival order and replaceable-event semantics do not select state.
 | 40023 | `TRACKER_DISPATCH_ACTION` | Immutable idempotent automation action |
 | 40024 | `TRACKER_SERVICE_HEARTBEAT` | Latest heartbeat per service identity |
 | 40025 | `TRACKER_PROJECT_ACTIVITY` | Immutable project update/rename history |
+| 40026 | `DISPATCH_RECORD` | Versioned planning, decisions, delivery, views and controls |
+| 40027 | `DISPATCH_ADMISSION` | Immutable relay-signed per-event authorization evidence |
+| 40028 | `DISPATCH_CLIENT` | Authenticated read/preparation command; never shared history |
 
-All six kinds are workspace-channel scoped and MUST carry exactly one
+All allocated kinds are workspace-channel scoped and MUST carry exactly one
 `["h", "<tracker-stream-uuid>"]` tag. A deployment provides one Tracker
 stream UUID through workspace configuration; protocol implementations MUST
 NOT hardcode organization names, stream IDs, identifier prefixes, roles, or
@@ -212,7 +215,7 @@ Self-authored mentions are not a wake-up mechanism: harnesses may discard
 them. The dispatcher uses its own signing identity and timer-driven
 subscriptions, then publishes human-facing notifications with the intended
 recipient's `p` tag. It may assign a task-envelope itself using one dispatch
-request ID shared between kind 40023 and task-envelope v2.
+request ID shared between kind 40023 and the task envelope.
 
 ## Service heartbeat (40024)
 
@@ -260,7 +263,7 @@ Task-envelope v2 adds nullable `tracker_issue_id` and
 changes `v` from 1 to 2. Therefore an old reader fails loudly on both the
 version and new fields instead of silently dropping tracker correlation.
 New readers continue to parse historical v1 envelopes and normalize their two
-correlation fields to absent; they emit only v2. Release order is: shared SDK
+correlation fields to absent. New authority-aware writers emit v3, described below. Release order is: shared SDK
 readers and relay kind support, then CLI/harness
 writers, then dispatcher activation. Mixed-version writers MUST NOT publish v2
 until the consuming harness has the v2 SDK.
@@ -274,5 +277,159 @@ the complete issue history to the shared folder before claiming current
 state. Raw relay filters are candidate indexes, not current-state queries.
 Consumers persist a local projection and a composite `(created_at,event_id)`
 cursor. Refresh queries are inclusive at the last timestamp and deduplicate by
-event ID, so same-second events cannot be skipped. Naively refetching and
-refolding the full stream for every command is not conformant.
+event ID, so same-second events cannot be skipped. Durable CLI and Desktop consumers retain their verified history. The bounded
+constrained-client command below is an explicit read path for mobile clients
+that do not embed the Rust fold.
+
+
+## Historical authority and admission receipts (40027)
+
+Issue roots, revisions, comments and planning records retain the role held by
+their signer when the relay accepted that exact signed event. On updated relays,
+the original event and a kind-40027 receipt commit in one database transaction,
+behind the same per-channel membership lock used by role changes. A retry of an
+already stored source does not create another observation or upgrade its role.
+The relay publishes the receipt before the source; both are already durable.
+
+The strict receipt has `v:1`, `workspace`, `event_id`, `author`, `role`,
+`observed_at` and `basis`. Its exact tags are `h` (workspace), `e` (source event)
+and `p` (source author). The event timestamp equals the relay's `observed_at`,
+independent of the source's author-controlled timestamp. Roles are `member`,
+`maintainer`, or `none`; `none` is only valid for an explicit legacy baseline.
+The only bases are `admission` and `legacy_baseline`. Clients verify the expected
+workspace relay signer, signature, scope, source identity and clock. Contradictory
+receipts fail closed for their target. An attested role never grants a current
+role, read access, executor access or permission to create another event.
+
+Unreceipted legacy events retain the compatibility policy of current membership,
+with explicit coverage reporting. This is not proof of historical authorization.
+Operators can preview `buzz-admin dispatch-baseline --workspace UUID` using the
+configured community and durable relay key. The preview includes exact event IDs,
+authors, currently observed roles and a digest. Supplying that digest through
+`--apply-digest DIGEST` appends labeled baseline receipts atomically only if the
+manifest still matches. No source events change. Removed authors receive `none`;
+the tool never reconstructs an earlier role it did not observe. The command
+refuses an ephemeral/wrong issuer and caps one reviewed baseline at 10,000 events.
+A retry after an uncertain apply should first preview again; zero pending events
+and the persisted receipts establish completion without another baseline.
+Refresh client history after an operator baseline.
+
+Receipts use relay observation time. Cold, warm and live readers hydrate each
+new receipt's exact scoped source ID: otherwise a backdated source arriving after
+a local timestamp cursor could be omitted. Missing sources are visible history
+errors, not an empty-work claim. This contract seals issue/planning records and valid kind-9 task envelopes in their
+execution channels. A baseline must include each execution channel whose legacy
+history will authorize automation. Task-envelope authority additionally follows
+the assignment chain below.
+
+## Task-envelope v3 authority
+
+V3 retains v2 correlation and adds `authority` with `assignment_event_id`,
+`previous_event_id` and `reviewer`. An assignment root leaves the two event
+references null. Every continuation names the original assignment and its accepted
+predecessor. Task ID, assigner, executor, issue/request correlation and execution
+channel are immutable for the attempt. Legacy readers remain explicit compatibility
+readers; writers must not emit v3 to a harness that cannot parse it.
+
+The assignment signer is its assigner. Execution updates belong to its executor
+within the valid lifecycle. Verification requires a preceding `done` claim and a
+nonempty evidence reference; the signer must be the assigner or designated reviewer
+and must differ from the executor. The same independent authority can reject a
+`done` result with `failed`, evidence and a nonempty explanation. Executors cannot
+review their own completion into either result. `verified` and `failed` attempts cannot resume.
+A later attempt is a new task ID. Signed rejected claims remain diagnostics, never
+accepted current state. Display all accepted attempt history and keep claimed
+completion separate from independent review and delivery observations.
+
+## Planning records (40026)
+
+Strict version-one records carry a stable `record_id`, zero-based `revision`,
+`parent_event`, retained `request_id`, `archived` and a typed payload. Supported
+payloads are shared views, decisions, project plans, imported-work activation,
+delivery observations, capacity and automation controls. Revisions retain record
+identity and subject and name the accepted predecessor. Unknown fields, duplicate
+option IDs, invalid bounds and unauthorized changes are rejected by the shared SDK.
+
+Creators or maintainers can edit ordinary records. Choosing or changing a resolved
+decision requires its named decision maker. Activation, capacity and automation
+controls require maintainer authority. Reviewed/accepted delivery observations
+remain distinct maintainer-authored proof tiers. The latest singleton setting wins
+before archival is applied, so archiving a setting cannot revive an older active one.
+
+Automation is opt-in at the service host (`remote_controls`) and narrows the host
+allowlist. Preview/paused/expired controls produce no work effects. Activation has
+an expiry, exact selected issue/capture scope, per-cycle and total-action limits,
+a current approver and expected service signer. Host reservations survive restart.
+Fresh approval and audience checks precede each effect/replay. The accepted issue
+link precedes an executor message. No unsealed or contradictory workspace history
+can activate unattended work. Pausing or resuming preserves the original allowance.
+Changing rule scope requires a new preview and a visibly separate allowance.
+
+## Constrained-client command (40028)
+
+This is a Nostr command accepted through either existing event transport after
+signature, freshness, actor and `messages:read` scope checks. It requires exactly
+one `h` workspace and current channel membership; token channel restrictions also
+apply. Requests and responses are not stored or broadcast. The response uses the
+existing command receipt `response:{...}` and is an authenticated relay projection,
+not an independently signed delivery or verification receipt.
+
+Content is `{"v":1,"request":{"operation":...}}`. Operations are `snapshot`,
+`prepare_issue`, and `prepare_decision`. The shared SDK performs the same history,
+role, conflict and decision folds used by Desktop/CLI. Snapshot pages use stable
+issue UUIDs (100 per page); a detail read supplies one issue UUID. Terminal work is
+included only when requested, and authorization coverage is explicit. A single
+read-only repeatable database snapshot caps history at 20,000 records and 16 MiB
+before materializing event contents. Oversized history or
+response limits produce an error rather than a partial claim of completeness.
+
+Preparation requires the exact issue/decision version shown to the user and a
+retained request ID. It returns an unsigned standard 40021 or 40026 event. It does
+not sign, publish, assign, wake or resolve work. The mobile client must validate
+its scope and intent, sign locally, durably retain exact signed bytes, publish
+through the ordinary path, then verify accepted ancestry before reporting success.
+Membership and identity changes, conflicts and uncertain results must preserve the
+user's draft and expose recovery. A relay without command support is explicitly
+unavailable; it must not be rendered as an empty Dispatch workspace.
+
+## Explicit conversation updates (kind 9)
+
+A user may share an issue status, execution blocker/result, or decision in a
+conversation. The standard message carries `t=dispatch-update`, an exact `h`
+destination, a `d` identity and one `dispatch` tag with workspace, issue, referenced
+change event and purpose. An optional `q` names the source message, with normal
+thread tags. At most one explicit notification recipient is permitted. These
+messages convey context; they never mutate an issue or establish review authority.
+
+The stable key is SHA-256 over
+`dispatch-notice-v1:workspace:issue:destination:source-or-empty:change-event:purpose`.
+Purposes are `tracking`, `status`, `blocked`, `completion`, `decision_requested`,
+and `decision_resolved`. The relay rejects mixed task markers and malformed keys,
+checks current conversation membership, and serializes duplicate-key insertion
+under the channel membership lock. Identical event retries are idempotent. A
+second signed message for the same key is rejected even after redaction.
+
+Clients preview message text and check the destination audience can read all
+included source channels. They retain the exact signed event before publication,
+then read back and validate its signed descriptor before clearing recovery. A
+concurrent already-shared update is displayed using its actual accepted message.
+A read-only snapshot advertises `capabilities.dispatchNotice=1`; clients require
+this capability before publishing. `taskAuthority=3` describes relay/SDK support,
+not proof that a remote executor has upgraded its serving harness.
+
+## Recovery and client presentation
+
+Durable pending writes are scoped to relay, signing identity and workspace. Lost
+acknowledgement retries reuse the exact original signed event and verify accepted
+ancestry. A stale predecessor cannot be silently rebased. A user may archive a
+pending write as a local draft only after its recovery copy is durably saved;
+archival does not recall a message already published. The UI offers current-history
+review, readable copying, recovery export and local removal. Storage read errors
+must fail closed, never be interpreted as an empty outbox.
+
+Assignment recovery checks the accepted issue link before notifying an executor,
+rechecks every source audience, and holds when capacity/dependency conditions have
+changed. An unresolved existing task link blocks another execution attempt until
+it is reconciled. Retained review and conversation updates similarly freeze the
+reviewed source event. Issue completion, executor completion, independent review,
+merge, installation and observed acceptance remain separate states.

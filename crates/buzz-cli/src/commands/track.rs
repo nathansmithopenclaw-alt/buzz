@@ -8,8 +8,8 @@ use std::str::FromStr;
 
 use base64::Engine;
 use buzz_core::kind::{
-    KIND_NIP29_GROUP_MEMBERS, KIND_PROJECT, KIND_TRACKER_COMMENT, KIND_TRACKER_ISSUE,
-    KIND_TRACKER_PROJECT_ACTIVITY, KIND_TRACKER_REVISION,
+    KIND_DISPATCH_ADMISSION, KIND_DISPATCH_RECORD, KIND_NIP29_GROUP_MEMBERS, KIND_PROJECT,
+    KIND_TRACKER_COMMENT, KIND_TRACKER_ISSUE, KIND_TRACKER_PROJECT_ACTIVITY, KIND_TRACKER_REVISION,
 };
 use buzz_sdk::task_envelope::{
     fold_task_events, TaskEnvelope, TaskEnvelopeEvent, TaskStatus, TaskVerification,
@@ -38,6 +38,9 @@ use crate::commands::tasks::{parse_deliverables, query_task_events, resolve_assi
 use crate::error::CliError;
 use crate::validate::read_or_stdin;
 use crate::{OutputFormat, TrackCmd, TrackFilterArgs, TrackMutationArgs, TrackProjectCmd};
+
+#[path = "track_records.rs"]
+mod records;
 
 const TRACKER_CACHE_ENV: &str = "BUZZ_TRACKER_CACHE_DIR";
 const DEFAULT_TIMEZONE: &str = "America/New_York";
@@ -91,11 +94,31 @@ fn project_slug_matches(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
+fn issue_alias_matches(identifier: &str, query: &str) -> bool {
+    if identifier.eq_ignore_ascii_case(query) {
+        return true;
+    }
+    let Some((prefix, suffix)) = identifier.rsplit_once('-') else {
+        return false;
+    };
+    let Some((query_prefix, query_suffix)) = query.rsplit_once('-') else {
+        return false;
+    };
+    suffix.len() == 32
+        && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && query_suffix.len() >= 6
+        && query_suffix.len() <= 32
+        && prefix.eq_ignore_ascii_case(query_prefix)
+        && suffix
+            .to_ascii_lowercase()
+            .starts_with(&query_suffix.to_ascii_lowercase())
+}
+
 impl TrackerContext {
     fn issue(&self, value: &str) -> Result<&IssueProjection, CliError> {
         let parsed_uuid = Uuid::parse_str(value).ok();
         let mut matches = self.fold.issues.values().filter(|issue| {
-            parsed_uuid == Some(issue.issue_id) || issue.identifier.eq_ignore_ascii_case(value)
+            parsed_uuid == Some(issue.issue_id) || issue_alias_matches(&issue.identifier, value)
         });
         let found = matches
             .next()
@@ -541,7 +564,7 @@ fn fold_workspace_projects(
 }
 
 fn tracker_authorization_from_membership(
-    client: &BuzzClient,
+    _client: &BuzzClient,
     event: &Value,
 ) -> TrackerAuthorization {
     let mut roles = Vec::new();
@@ -568,9 +591,6 @@ fn tracker_authorization_from_membership(
         };
         roles.push((pubkey.to_string(), role));
     }
-    if let Some(owner) = client.auth_tag_owner_hex() {
-        roles.push((owner, TrackerRole::Maintainer));
-    }
     TrackerAuthorization::new(roles)
 }
 
@@ -586,6 +606,8 @@ async fn load_context(
             KIND_TRACKER_REVISION,
             KIND_TRACKER_COMMENT,
             KIND_TRACKER_PROJECT_ACTIVITY,
+            KIND_DISPATCH_RECORD,
+            KIND_DISPATCH_ADMISSION,
         ],
         "#h": [workspace_id.to_string()],
     });
@@ -603,12 +625,62 @@ async fn load_context(
         })
         .collect::<Result<_, _>>()?;
     merge_events(&mut cache.events, incoming);
+    // Admission timestamps belong to the relay; exact source hydration also
+    // covers an edit signed before the warm cursor and delivered only now.
+    let known = cache
+        .events
+        .iter()
+        .map(|event| event.id.to_hex())
+        .collect::<std::collections::HashSet<_>>();
+    let needed = cache
+        .events
+        .iter()
+        .filter(|event| event.kind.as_u16() as u32 == KIND_DISPATCH_ADMISSION)
+        .flat_map(|event| event.tags.iter())
+        .filter_map(|tag| {
+            let tag = tag.as_slice();
+            (tag.first().map(String::as_str) == Some("e"))
+                .then(|| tag.get(1))
+                .flatten()
+                .filter(|id| !known.contains(*id) && nostr::EventId::from_hex(id.as_str()).is_ok())
+                .cloned()
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    for batch in needed.chunks(50) {
+        let sources=client.query_all(json!({"ids":batch,"kinds":[40020,40021,40022,40026],"#h":[workspace_id.to_string()]})).await?
+            .into_iter().map(|value|serde_json::from_value::<Event>(value).map_err(|error|CliError::Other(error.to_string()))).collect::<Result<Vec<_>,_>>()?;
+        if batch
+            .iter()
+            .any(|id| !sources.iter().any(|event| event.id.to_hex() == *id))
+        {
+            return Err(CliError::Other(
+                "An admitted Dispatch edit is unavailable; the history cursor was not advanced"
+                    .into(),
+            ));
+        }
+        merge_events(&mut cache.events, sources);
+    }
     cache.cursor = max_cursor(&cache.events);
     write_cache(&path, &cache)?;
 
     let membership = workspace_membership(client, workspace_id).await?;
-    let authorization = tracker_authorization_from_membership(client, &membership);
+    let mut authorization = tracker_authorization_from_membership(client, &membership);
     let (parsed, mut warnings) = parse_cached_events(&cache.events);
+    let admission = buzz_sdk::dispatch_admission::apply_dispatch_admissions(
+        &cache.events,
+        workspace_id,
+        serde_json::from_value::<Event>(membership.clone())
+            .map_err(|error| CliError::Other(format!("invalid membership: {error}")))?
+            .pubkey,
+        &mut authorization,
+        nostr::Timestamp::now().as_secs(),
+    );
+    warnings.extend(admission.diagnostics);
+    if admission.unsealed > 0 {
+        warnings.push(format!("{} Dispatch events have no admission evidence; legacy history uses current membership until explicitly baselined", admission.unsealed));
+    }
     let fold = fold_tracker_events(parsed.clone(), &authorization);
     warnings.extend(
         fold.diagnostics
@@ -888,6 +960,7 @@ async fn existing_request_event(
                 KIND_TRACKER_REVISION,
                 KIND_TRACKER_COMMENT,
                 KIND_TRACKER_PROJECT_ACTIVITY,
+            KIND_DISPATCH_RECORD,
                 KIND_PROJECT,
             ],
             "#h": [workspace_id.to_string()],
@@ -2176,7 +2249,11 @@ async fn task_for_dispatch_request(
     client: &BuzzClient,
     request_id: Uuid,
 ) -> Result<Option<TaskEnvelopeEvent>, CliError> {
-    let current = fold_task_events(query_task_events(client, None).await?);
+    let history = query_task_events(client, None).await?;
+    let has_request = history
+        .iter()
+        .any(|event| event.envelope.dispatch_request_id == Some(request_id));
+    let current = fold_task_events(history.clone());
     let mut matches = current
         .into_values()
         .filter(|event| event.envelope.dispatch_request_id == Some(request_id));
@@ -2186,7 +2263,22 @@ async fn task_for_dispatch_request(
             "dispatch request {request_id} names multiple tasks"
         )));
     }
-    Ok(found)
+    let Some(found) = found else {
+        if has_request {
+            return Err(CliError::Conflict("dispatch request has incomplete or conflicting assignment history; reconcile it before retrying".into()));
+        }
+        return Ok(None);
+    };
+    // Idempotency compares the immutable assignment, not a later transition
+    // whose deliverables and evidence legitimately changed during execution.
+    Ok(history
+        .into_iter()
+        .filter(|event| {
+            event.envelope.task_id == found.envelope.task_id
+                && event.envelope.status == TaskStatus::Assigned
+                && event.author_pubkey == found.envelope.assigner
+        })
+        .min_by(|a, b| (a.created_at, &a.event_id).cmp(&(b.created_at, &b.event_id))))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2199,6 +2291,7 @@ async fn cmd_dispatch(
     title: Option<String>,
     deliverables: Vec<String>,
     verification: Option<String>,
+    reviewer: Option<String>,
     content: Option<String>,
     allow_active: bool,
     set_status: String,
@@ -2234,6 +2327,10 @@ async fn cmd_dispatch(
         })?,
     };
     let assignee = resolve_issue_assignee(client, channel_id, &assignee).await?;
+    let reviewer = match reviewer {
+        Some(value) => Some(resolve_issue_assignee(client, channel_id, &value).await?),
+        None => None,
+    };
     let set_status = parse_status(&set_status)?;
     if set_status.is_terminal() {
         return Err(CliError::Usage(
@@ -2283,6 +2380,12 @@ async fn cmd_dispatch(
             || existing.envelope.verification.method != verification
             || existing.envelope.deliverables != deliverables
             || existing.envelope.title != task_title
+            || existing
+                .envelope
+                .authority
+                .as_ref()
+                .and_then(|authority| authority.reviewer.as_ref())
+                != reviewer.as_ref()
             || existing.channel_id != channel_id
         {
             return Err(CliError::Conflict(format!(
@@ -2294,6 +2397,10 @@ async fn cmd_dispatch(
         let task_id = Uuid::new_v4();
         let envelope = TaskEnvelope {
             v: TASK_ENVELOPE_VERSION,
+            authority: Some(buzz_sdk::task_envelope::TaskAuthority {
+                reviewer,
+                ..Default::default()
+            }),
             task_id,
             status: TaskStatus::Assigned,
             assignee: assignee.clone(),
@@ -2347,7 +2454,11 @@ async fn cmd_dispatch(
         (issue.tip_event.clone(), true)
     } else {
         let mut set = RevisionSet {
-            assignee: Some(assignee.clone()),
+            // Delegating execution must not remove the accountable person.
+            assignee: issue
+                .assignee
+                .is_none()
+                .then(|| client.keys().public_key().to_hex()),
             ..RevisionSet::default()
         };
         if set_status != issue.status {
@@ -3580,6 +3691,7 @@ pub async fn dispatch(
     format: &OutputFormat,
 ) -> Result<(), CliError> {
     match command {
+        TrackCmd::Records(command) => records::dispatch(client, command).await,
         TrackCmd::Create {
             workspace,
             issue_id,
@@ -3764,6 +3876,7 @@ pub async fn dispatch(
             title,
             deliverables,
             verification,
+            reviewer,
             content,
             allow_active,
             set_status,
@@ -3778,6 +3891,7 @@ pub async fn dispatch(
                 title,
                 deliverables,
                 verification,
+                reviewer,
                 content,
                 allow_active,
                 set_status,
@@ -3860,6 +3974,23 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn short_aliases_require_a_native_identifier_and_at_least_six_characters() {
+        assert!(issue_alias_matches(
+            "DSP-aabbcc11223344556677889900112233",
+            "dsp-aabbcc"
+        ));
+        assert!(!issue_alias_matches(
+            "DSP-aabbcc11223344556677889900112233",
+            "DSP-aabbc"
+        ));
+        assert!(!issue_alias_matches("IMPORTED-aabbcc12", "IMPORTED-aabbcc"));
+        assert!(!issue_alias_matches(
+            "DSP-aabbcc11223344556677889900112233",
+            "OTHER-aabbcc"
+        ));
+    }
 
     #[test]
     fn estimates_are_duration_strings_not_points() {
@@ -4140,6 +4271,7 @@ mod tests {
             created_at,
             envelope: TaskEnvelope {
                 v: TASK_ENVELOPE_VERSION,
+                authority: Some(Default::default()),
                 task_id,
                 status,
                 assignee: "dd".repeat(32),

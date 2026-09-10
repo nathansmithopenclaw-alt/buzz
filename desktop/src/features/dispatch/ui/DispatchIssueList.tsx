@@ -1,3 +1,4 @@
+import { useIssueAlias } from "./DispatchAliases";
 import { Clock3, Hash, Inbox, UserRound } from "lucide-react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -159,7 +160,7 @@ export function DispatchIssueList({
               className="w-20 shrink-0 truncate font-mono text-xs text-muted-foreground"
               title={issue.identifier}
             >
-              {issue.identifier}
+              {<DispatchRowAlias issue={issue} />}
             </span>
             <span className="flex min-w-0 flex-1 items-center gap-2">
               <span className="truncate text-sm font-medium">
@@ -216,4 +217,8 @@ export function DispatchIssueList({
       })}
     </div>
   );
+}
+
+function DispatchRowAlias({ issue }: { issue: DispatchIssue }) {
+  return useIssueAlias(issue);
 }

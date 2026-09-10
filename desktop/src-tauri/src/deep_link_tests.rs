@@ -618,3 +618,22 @@ fn summary_links_require_exact_report_and_safe_relay() {
         assert!(parse_entity_deep_link(&Url::parse(&invalid).unwrap()).is_none());
     }
 }
+
+#[test]
+fn dispatch_links_require_exact_workspace_issue_and_original_community() {
+    let workspace = uuid::Uuid::new_v4();
+    let issue = uuid::Uuid::new_v4();
+    let valid = format!(
+        "buzz://dispatch?workspace={workspace}&issue={issue}&relay=wss%3A%2F%2Frelay.example"
+    );
+    assert!(parse_entity_deep_link(&Url::parse(&valid).unwrap()).is_some());
+    for invalid in [
+        format!("{valid}&issue={issue}"),
+        format!("{valid}#bad"),
+        valid.replace("wss%3A", "https%3A"),
+        valid.replace("relay.example", "u%3Ap%40relay.example"),
+        valid.replace(&issue.to_string(), "not-an-issue"),
+    ] {
+        assert!(parse_entity_deep_link(&Url::parse(&invalid).unwrap()).is_none());
+    }
+}

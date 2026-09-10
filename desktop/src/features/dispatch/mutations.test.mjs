@@ -432,7 +432,10 @@ test("comment mutation publishes the Rust-built signed event and refreshes", asy
       onRollback: () => assert.fail("comment should not roll back"),
       refresh: async () => {
         refreshed = true;
-        return context([current]);
+        return {
+          ...context([current]),
+          comments: [{ eventId: event.id, issueId: current.issueId }],
+        };
       },
     },
     deps.value,
@@ -442,4 +445,116 @@ test("comment mutation publishes the Rust-built signed event and refreshes", asy
   assert.equal(deps.calls.comments[0].comment.body, "Evidence added.");
   assert.equal(optimistic[0].eventId, event.id);
   assert.equal(refreshed, true);
+});
+
+test("human edit publishes one revision and requires canonical readback", async () => {
+  const current = issue();
+  const event = relayEvent();
+  const deps = dependencies(event);
+  const fields = {
+    title: "Reviewed title",
+    body: "**Accepted scope**",
+    due: { value: 1900000000, precision: "date", timezone: "UTC" },
+    estimateMinutes: 45,
+    labels: ["UI"],
+    externalRefs: [{ type: "url", ref: "https://example.com/evidence" }],
+  };
+  const next = { ...current, ...fields, tipEvent: event.id, revision: 2 };
+  const result = await publishDispatchIssueMutation(
+    {
+      issue: current,
+      mutation: { type: "edit", fields, expectedTip: current.tipEvent },
+      viewerRole: "member",
+      onOptimistic: () => {},
+      onRollback: () => {},
+      refresh: async () => context([next]),
+    },
+    deps.value,
+  );
+  assert.equal(result, next);
+  assert.equal(deps.calls.published.length, 1);
+  assert.equal(deps.calls.revisions.length, 1);
+  const wire = deps.calls.revisions[0].revision;
+  assert.equal(wire.parent_event, current.tipEvent);
+  assert.equal(wire.set.title, fields.title);
+  assert.equal(wire.set.body, fields.body);
+  assert.equal(wire.set.estimate_minutes, 45);
+  assert.deepEqual(wire.external_refs.add, fields.externalRefs);
+});
+
+test("stale editor draft cannot sign or publish over a newer issue", async () => {
+  const current = issue();
+  const deps = dependencies();
+  await assert.rejects(
+    publishDispatchIssueMutation(
+      {
+        issue: current,
+        mutation: {
+          type: "edit",
+          fields: { title: "Old draft" },
+          expectedTip: "9".repeat(64),
+        },
+        viewerRole: "member",
+        onOptimistic: () => {},
+        onRollback: () => {},
+        refresh: async () => context([current]),
+      },
+      deps.value,
+    ),
+    /changed|latest/i,
+  );
+  assert.equal(deps.calls.revisions.length, 0);
+  assert.equal(deps.calls.published.length, 0);
+});
+
+test("editor and conflict reconciliation cannot bypass terminal or identifier permissions", () => {
+  const current = issue();
+  assert.equal(
+    canApplyDispatchMutation(
+      current,
+      {
+        type: "edit",
+        fields: { status: "done" },
+        expectedTip: current.tipEvent,
+      },
+      "member",
+    ),
+    false,
+  );
+  assert.equal(
+    canApplyDispatchMutation(
+      current,
+      {
+        type: "edit",
+        fields: { status: "in_progress", identifier: "RENAMED-1" },
+        expectedTip: current.tipEvent,
+      },
+      "member",
+    ),
+    false,
+  );
+  assert.equal(
+    canApplyDispatchMutation(
+      { ...current, status: "done" },
+      {
+        type: "edit",
+        fields: { status: "todo" },
+        expectedTip: current.tipEvent,
+      },
+      "member",
+    ),
+    false,
+  );
+  assert.equal(
+    canApplyDispatchMutation(
+      current,
+      {
+        type: "edit",
+        fields: { status: "done" },
+        expectedTip: current.tipEvent,
+      },
+      "maintainer",
+    ),
+    true,
+  );
 });

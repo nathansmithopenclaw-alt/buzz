@@ -780,6 +780,9 @@ pub enum TasksCmd {
         /// Verification method
         #[arg(long = "verify", default_value = "not specified")]
         verification: String,
+        /// Independent reviewer delegated in the signed assignment (defaults to assigner)
+        #[arg(long)]
+        reviewer: Option<String>,
         /// Correlated Tracker issue UUID (task-envelope v2)
         #[arg(long)]
         tracker_issue_id: Option<String>,
@@ -1096,6 +1099,9 @@ pub enum TrackCmd {
         deliverables: Vec<String>,
         #[arg(long = "verify")]
         verification: Option<String>,
+        /// Independent reviewer delegated in the signed assignment (defaults to assigner)
+        #[arg(long)]
+        reviewer: Option<String>,
         #[arg(long)]
         content: Option<String>,
         /// Allow another task while existing linked tasks remain active
@@ -1122,6 +1128,26 @@ pub enum TrackCmd {
     /// Manage Tracker metadata on NIP-MP project heads
     #[command(subcommand)]
     Project(TrackProjectCmd),
+    /// Read or publish signed shared views, decisions, plans and evidence
+    #[command(subcommand)]
+    Records(TrackRecordCmd),
+}
+
+#[derive(Subcommand)]
+pub enum TrackRecordCmd {
+    /// Read current records with rejected-history diagnostics
+    List {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+    },
+    /// Validate, publish once and verify a complete record JSON document
+    Put {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        /// JSON file, or - for stdin; maximum 64 KiB
+        #[arg(long)]
+        input: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3401,6 +3427,7 @@ mod tests {
                 "link",
                 "list",
                 "project",
+                "records",
                 "relate",
                 "repair-cache",
                 "update",

@@ -183,3 +183,11 @@ const NON_CONVERSATIONAL_UNREAD_KINDS: ReadonlySet<number> = new Set([
 export function isConversationalUnreadKind(kind: number | undefined): boolean {
   return kind === undefined || !NON_CONVERSATIONAL_UNREAD_KINDS.has(kind);
 }
+
+// NIP-BT Dispatch work records and constrained-client command.
+export const KIND_TRACKER_ISSUE = 40020;
+export const KIND_TRACKER_REVISION = 40021;
+export const KIND_TRACKER_COMMENT = 40022;
+export const KIND_DISPATCH_RECORD = 40026;
+export const KIND_DISPATCH_ADMISSION = 40027;
+export const KIND_DISPATCH_CLIENT = 40028;

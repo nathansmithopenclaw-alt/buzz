@@ -21,6 +21,7 @@
 //! the guard against parallel adds (e.g. `xargs -P`).
 
 mod deletions;
+mod dispatch_baseline;
 
 use std::sync::Arc;
 
@@ -43,6 +44,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Preview historical Dispatch roles, then apply only the exact reviewed digest.
+    DispatchBaseline {
+        /// Workspace UUID inside the configured relay community.
+        #[arg(long)]
+        workspace: uuid::Uuid,
+        /// Omit to preview. Supply the exact preview digest to append labeled receipts.
+        #[arg(long)]
+        apply_digest: Option<String>,
+    },
     /// Add a pubkey to the relay membership list.
     ///
     /// Accepts a bech32 npub or 64-char hex pubkey. After inserting the DB row,
@@ -156,6 +166,10 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<i32> {
     match cli.command {
+        Command::DispatchBaseline {
+            workspace,
+            apply_digest,
+        } => dispatch_baseline::run(workspace, apply_digest).await,
         Command::GenerateKey => {
             let keys = Keys::generate();
             println!("Public key:  {}", keys.public_key().to_hex());

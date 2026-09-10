@@ -417,6 +417,7 @@ mod tests {
     fn heartbeat_filter_is_an_object_not_an_array() {
         let home = uuid::Uuid::new_v4();
         let config = crate::config::DispatcherConfig {
+            remote_controls: false,
             relay_url: Some("http://localhost:3000".to_string()),
             service_id: "triage-dispatcher".to_string(),
             stream_id: uuid::Uuid::new_v4(),

@@ -113,6 +113,12 @@ pub const KIND_TRACKER_DISPATCH_ACTION: u32 = 40023;
 pub const KIND_TRACKER_SERVICE_HEARTBEAT: u32 = 40024;
 /// NIP-BT: immutable project configuration activity (M20 history stream).
 pub const KIND_TRACKER_PROJECT_ACTIVITY: u32 = 40025;
+/// Dispatch: immutable shared planning, decision and evidence record.
+pub const KIND_DISPATCH_RECORD: u32 = 40026;
+/// Relay-signed immutable Dispatch event admission authority.
+pub const KIND_DISPATCH_ADMISSION: u32 = 40027;
+/// Authenticated Dispatch projection and unsigned edit preparation command.
+pub const KIND_DISPATCH_CLIENT: u32 = 40028;
 
 /// NIP-PL: encrypted push lease (parameterized replaceable, author-only).
 ///
@@ -722,6 +728,9 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_TRACKER_DISPATCH_ACTION,
     KIND_TRACKER_SERVICE_HEARTBEAT,
     KIND_TRACKER_PROJECT_ACTIVITY,
+    KIND_DISPATCH_RECORD,
+    KIND_DISPATCH_ADMISSION,
+    KIND_DISPATCH_CLIENT,
     KIND_PERSONA,
     KIND_TEAM,
     KIND_MANAGED_AGENT,
@@ -892,6 +901,7 @@ pub const fn is_command_kind(kind: u32) -> bool {
     matches!(
         kind,
         KIND_WORKFLOW_DEF
+            | KIND_DISPATCH_CLIENT
             | KIND_DM_OPEN
             | KIND_DM_ADD_MEMBER
             | KIND_DM_HIDE
@@ -907,6 +917,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
         KIND_NIP43_MEMBERSHIP_LIST
+            | KIND_DISPATCH_ADMISSION
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY

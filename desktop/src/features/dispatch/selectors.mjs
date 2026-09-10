@@ -43,13 +43,18 @@ export function compareMyIssues(left, right) {
   );
 }
 
-export function selectMyIssues(issues, selfPubkey) {
+export function selectMyIssues(issues, selfPubkey, tasks = []) {
   const normalizedSelf = selfPubkey?.toLowerCase();
   if (!normalizedSelf) return [];
   return issues
     .filter(
       (issue) =>
-        issue.assignee?.toLowerCase() === normalizedSelf &&
+        (issue.assignee?.toLowerCase() === normalizedSelf ||
+          tasks.some(
+            (task) =>
+              task.issueId === issue.issueId &&
+              task.assigner?.toLowerCase() === normalizedSelf,
+          )) &&
         !TERMINAL_STATUSES.has(issue.status),
     )
     .sort(compareMyIssues);

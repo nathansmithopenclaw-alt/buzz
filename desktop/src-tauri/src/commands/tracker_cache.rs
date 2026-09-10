@@ -86,6 +86,17 @@ impl TrackerFoldCacheEntry {
         task_events: Vec<Value>,
         membership_event: Option<Value>,
     ) {
+        if membership_event.is_some() {
+            // A resumed workspace must re-establish access to linked execution
+            // channels. Persisted grants are not current read authorization.
+            let workspace = &self.workspace_id;
+            self.events.retain(|_, event| event["kind"] != 39002);
+            self.task_events.retain(|_, event| {
+                event["tags"].as_array().is_some_and(|tags| {
+                    tags.iter().any(|tag| tag[0] == "h" && tag[1] == *workspace)
+                })
+            });
+        }
         merge_raw_events(&mut self.events, events);
         merge_raw_events(&mut self.task_events, task_events);
         if let Some(membership_event) = membership_event {
@@ -265,5 +276,34 @@ mod tests {
         fs::write(path, b"not-json").expect("malformed cache");
 
         assert!(load_entry(root.path(), &key).is_err());
+    }
+
+    #[test]
+    fn resume_drops_cached_foreign_authorization_and_execution_history() {
+        let key = key("wss://relay.example");
+        let workspace_task = serde_json::json!({"id":"local","tags":[["h",key.workspace_id]]});
+        let foreign_task = serde_json::json!({"id":"foreign","tags":[["h","other"]]});
+        let membership = serde_json::json!({"id":"foreign-members","kind":39002});
+        let mut entry = TrackerFoldCacheEntry::new(
+            &key,
+            Some(123),
+            vec![membership],
+            vec![workspace_task, foreign_task],
+            serde_json::json!({}),
+        );
+        entry.merge(Vec::new(), Vec::new(), None);
+        assert_eq!(
+            entry.task_events.len(),
+            2,
+            "live merges retain authorized history"
+        );
+        entry.merge(
+            Vec::new(),
+            Vec::new(),
+            Some(serde_json::json!({"id":"fresh"})),
+        );
+        assert!(entry.events.is_empty());
+        assert_eq!(entry.task_events.len(), 1);
+        assert!(entry.task_events.contains_key("id:local"));
     }
 }

@@ -405,12 +405,40 @@ pub(crate) async fn upload_image_bytes(
     do_upload(body, &mime, state, None, None).await
 }
 
+/// Captured before the picker opens; prevents a delayed file choice or transcode
+/// from following a workspace/identity switch to a different upload destination.
+struct PickedUploadScope {
+    base_url: String,
+    signer: String,
+    generation: u64,
+}
+impl PickedUploadScope {
+    fn capture(state: &AppState) -> Result<Self, String> {
+        Ok(Self {
+            base_url: relay_api_base_url_with_override(state),
+            signer: state.signing_keys()?.public_key().to_hex(),
+            generation: state
+                .workspace_apply_generation
+                .load(std::sync::atomic::Ordering::Acquire),
+        })
+    }
+}
 async fn do_upload(
     body: Vec<u8>,
     mime: &str,
     state: &AppState,
     progress: Option<(tauri::AppHandle, String)>,
     cancellation: Option<&CancellationToken>,
+) -> Result<BlobDescriptor, String> {
+    do_upload_scoped(body, mime, state, progress, cancellation, None).await
+}
+async fn do_upload_scoped(
+    body: Vec<u8>,
+    mime: &str,
+    state: &AppState,
+    progress: Option<(tauri::AppHandle, String)>,
+    cancellation: Option<&CancellationToken>,
+    scope: Option<&PickedUploadScope>,
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
 
@@ -425,6 +453,16 @@ async fn do_upload(
     let base_url = relay_api_base_url_with_override(state);
     let auth_event = {
         let keys = state.signing_keys()?;
+        if scope.is_some_and(|scope| {
+            scope.base_url != base_url
+                || scope.signer != keys.public_key().to_hex()
+                || scope.generation
+                    != state
+                        .workspace_apply_generation
+                        .load(std::sync::atomic::Ordering::Acquire)
+        }) {
+            return Err("Community or identity changed while choosing the attachment. Choose it again in the intended workspace.".into());
+        }
         sign_blossom_upload_auth(&keys, &sha256, expiry_secs, &base_url)?
     };
 
@@ -522,6 +560,7 @@ async fn process_picked_path(
     state: &AppState,
     images_only: bool,
     progress: Option<(tauri::AppHandle, String)>,
+    scope: Option<&PickedUploadScope>,
 ) -> Result<BlobDescriptor, String> {
     // Pin the inode by opening the fd BEFORE spawn_blocking. This prevents a
     // local attacker from swapping the file between dialog return and read.
@@ -588,9 +627,9 @@ async fn process_picked_path(
 
     // Upload video first, then poster (best-effort). If poster upload fails,
     // the video descriptor is returned without an image field.
-    let mut descriptor = do_upload(body, &mime, state, progress, None).await?;
+    let mut descriptor = do_upload_scoped(body, &mime, state, progress, None, scope).await?;
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", state, None, None).await {
+        match do_upload_scoped(poster, "image/jpeg", state, None, None, scope).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
@@ -628,6 +667,7 @@ pub async fn pick_and_upload_media(
 ) -> Result<Vec<BlobDescriptor>, String> {
     use tauri_plugin_dialog::DialogExt;
 
+    let scope = PickedUploadScope::capture(&state)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     // No filter — accept any file. The deny-list (active content + executables)
     // and size caps are enforced by `detect_and_validate_mime` and the relay.
@@ -644,7 +684,7 @@ pub async fn pick_and_upload_media(
     for file_path in file_paths {
         let path = file_path.as_path().ok_or("invalid path")?.to_path_buf();
         let progress = progress_id.clone().map(|id| (app.clone(), id));
-        let descriptor = process_picked_path(path, &state, false, progress).await?;
+        let descriptor = process_picked_path(path, &state, false, progress, Some(&scope)).await?;
         descriptors.push(descriptor);
     }
 
@@ -668,6 +708,7 @@ pub async fn pick_and_upload_image(
 ) -> Result<Option<BlobDescriptor>, String> {
     use tauri_plugin_dialog::DialogExt;
 
+    let scope = PickedUploadScope::capture(&state)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -685,7 +726,7 @@ pub async fn pick_and_upload_image(
     };
 
     let path = file_path.as_path().ok_or("invalid path")?.to_path_buf();
-    let descriptor = process_picked_path(path, &state, true, None).await?;
+    let descriptor = process_picked_path(path, &state, true, None, Some(&scope)).await?;
     Ok(Some(descriptor))
 }
 
@@ -797,6 +838,50 @@ pub(super) async fn upload_media_bytes_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn picked_upload_rejects_changed_relay_signer_or_generation_before_http() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        for changed in ["relay", "signer", "generation"] {
+            let state = crate::app_state::build_app_state();
+            *state.keys.lock().unwrap() = Keys::generate();
+            *state.relay_url_override.lock().unwrap() = Some(base.clone());
+            let scope = PickedUploadScope::capture(&state).unwrap();
+            match changed {
+                "relay" => {
+                    *state.relay_url_override.lock().unwrap() = Some(format!("{base}/other"));
+                }
+                "signer" => *state.keys.lock().unwrap() = Keys::generate(),
+                _ => {
+                    state
+                        .workspace_apply_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                }
+            }
+            let result = do_upload_scoped(
+                b"a delayed attachment".to_vec(),
+                "text/plain",
+                &state,
+                None,
+                None,
+                Some(&scope),
+            )
+            .await;
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("Community or identity changed"),
+                "{changed} must retain the original picker scope"
+            );
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "{changed} must fail before sending attachment bytes"
+            );
+        }
+    }
 
     #[test]
     fn test_extract_server_authority_default_ports() {

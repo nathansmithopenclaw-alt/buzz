@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -85,6 +86,24 @@ Future<NostrEvent> submitSignedEventOnce({
     verify: false,
   );
   final event = NostrEvent.fromJson(signed.toMap());
+  return publishSignedEventOnce(
+    wsUrl: wsUrl,
+    nsec: nsec,
+    event: event,
+    timeout: timeout,
+  );
+}
+
+/// Send a retained signed event to its original relay, with an optional scope
+/// guard checked immediately before the first network publication.
+Future<NostrEvent> publishSignedEventOnce({
+  required String wsUrl,
+  required String nsec,
+  required NostrEvent event,
+  bool Function()? beforePublish,
+  Duration timeout = const Duration(seconds: 12),
+}) async {
+  nostr.Event.fromJson(jsonEncode(event.toJson()));
   final result = Completer<NostrEvent>();
   late final RelaySocket socket;
   socket = RelaySocket(
@@ -97,7 +116,7 @@ Future<NostrEvent> submitSignedEventOnce({
         final bool accepted,
         final String detail,
         ...,
-      ] when eventId == event.id) {
+      ] when eventId == event.id && !result.isCompleted) {
         if (accepted) {
           result.complete(
             NostrEvent(
@@ -115,17 +134,31 @@ Future<NostrEvent> submitSignedEventOnce({
         }
       }
     },
-    onConnected: () => socket.send(['EVENT', event.toJson()]),
+    onConnected: () {
+      if (result.isCompleted) return;
+      if (beforePublish != null && !beforePublish()) {
+        if (!result.isCompleted) {
+          result.completeError(
+            StateError('Community or identity changed before publication.'),
+          );
+        }
+        return;
+      }
+      socket.send(['EVENT', event.toJson()]);
+    },
     onDisconnected: (error) {
       if (!result.isCompleted) {
         result.completeError(error ?? Exception('Relay disconnected'));
       }
     },
   );
-  final resultFuture = result.future.timeout(timeout);
   try {
-    await socket.connect();
-    return await resultFuture;
+    unawaited(
+      socket.connect().catchError((Object error) {
+        if (!result.isCompleted) result.completeError(error);
+      }),
+    );
+    return await result.future.timeout(timeout);
   } finally {
     await socket.disconnect();
   }

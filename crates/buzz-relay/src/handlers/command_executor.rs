@@ -40,6 +40,9 @@ pub async fn handle_command(
     event: Event,
     auth: IngestAuth,
 ) -> Result<IngestResult, IngestError> {
+    if event.kind.as_u16() as u32 == KIND_DISPATCH_CLIENT {
+        return super::dispatch_client::handle(tenant, state, &event, &auth).await;
+    }
     // Ensure the authenticated user exists in the users table (foreign key requirement).
     // The old REST handlers did this via extract_auth_context; command executor must do it explicitly.
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();

@@ -21,6 +21,7 @@ export function compareMyIssues(
 export function selectMyIssues(
   issues: readonly DispatchIssue[],
   selfPubkey: string | null | undefined,
+  tasks?: readonly DispatchLinkedTask[],
 ): DispatchIssue[];
 export function chronologicalActivity(
   activity: readonly DispatchActivity[],

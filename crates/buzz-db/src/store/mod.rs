@@ -16,6 +16,8 @@ pub mod channel_members;
 pub mod community;
 /// Durable whole-community deletion lifecycle and PostgreSQL adapter.
 pub mod deletion;
+/// Atomic Dispatch event admission and role evidence.
+pub mod dispatch_admission;
 /// Direct message channel persistence.
 pub mod dm;
 /// Event storage and retrieval.

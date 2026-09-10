@@ -158,7 +158,7 @@ function context(overrides: Partial<DispatchContext> = {}): DispatchContext {
 async function openDispatch(
   page: import("@playwright/test").Page,
   dispatchContext = context(),
-  dispatchOptions: { rejectNextRevision?: boolean } = {},
+  dispatchOptions: { rejectNextRevision?: boolean; members?: string[] } = {},
 ) {
   await installMockBridge(page, {
     dispatch: {
@@ -198,9 +198,7 @@ test("triage renders unassigned and assigned current-fold sections in P0-first t
   await expect(rows.nth(1)).toContainText("P0 newer canonical issue");
   await expect(rows.nth(2)).toContainText("P1 older than second P0");
   await expect(
-    page.getByText(
-      /Escalation thresholds and auto-routing arrive with the P2 dispatcher/,
-    ),
+    page.getByText(/Use Automation to preview routing/),
   ).toBeVisible();
 });
 
@@ -219,14 +217,8 @@ test("detail renders markdown, chronological comments, relations, and linked tas
   const relationIdentifier = page.getByTitle(RELATED_LONG_IDENTIFIER);
   await expect(breadcrumbIdentifier).toBeVisible();
   await expect(relationIdentifier).toBeVisible();
-  for (const identifier of [breadcrumbIdentifier, relationIdentifier]) {
-    await expect(identifier).toHaveCSS("text-overflow", "ellipsis");
-    expect(
-      await identifier.evaluate(
-        (element) => element.scrollWidth > element.clientWidth,
-      ),
-    ).toBe(true);
-  }
+  await expect(breadcrumbIdentifier).toHaveText("D-AAAAAA");
+  await expect(relationIdentifier).toHaveCSS("text-overflow", "ellipsis");
   await expect(page.getByText("Investigate canonical issue")).toBeVisible();
 });
 
@@ -282,9 +274,7 @@ test("detail does not keep an optimistic status when the fold rejects the revisi
   await page.getByTestId("dispatch-status-reason").fill("Execution started");
   const status = page.getByLabel("Issue status");
   await status.selectOption("in_progress");
-  await expect(
-    page.getByText(/Canonical fold rejected the revision/),
-  ).toBeVisible();
+  await expect(page.getByText(/The update was not applied/)).toBeVisible();
   await expect(status).toHaveValue("triage");
   await expect(page.getByText("Issue updated")).toHaveCount(0);
   await expect(page.getByText("Triage → In Progress")).toHaveCount(0);
@@ -622,9 +612,11 @@ test("Dispatch avatars load through the media proxy and take the app theme", asy
   const railAvatar = page.getByTestId("dispatch-assignee").locator("img");
   await expect(railAvatar).toHaveAttribute("src", PROXIED_AVATAR);
   // A broken `<img>` still renders "an avatar" — assert the pixels decoded.
-  expect(
-    await railAvatar.evaluate((img: HTMLImageElement) => img.naturalWidth),
-  ).toBeGreaterThan(0);
+  await expect
+    .poll(() =>
+      railAvatar.evaluate((img: HTMLImageElement) => img.naturalWidth),
+    )
+    .toBeGreaterThan(0);
 
   await page.getByTestId("dispatch-assignee").click();
   await expect(page.getByTestId("dispatch-assignee-picker")).toBeVisible();
@@ -632,9 +624,9 @@ test("Dispatch avatars load through the media proxy and take the app theme", asy
     .getByTestId(`dispatch-assignee-option-${SELF}`)
     .locator("img");
   await expect(rowAvatar).toHaveAttribute("src", PROXIED_AVATAR);
-  expect(
-    await rowAvatar.evaluate((img: HTMLImageElement) => img.naturalWidth),
-  ).toBeGreaterThan(0);
+  await expect
+    .poll(() => rowAvatar.evaluate((img: HTMLImageElement) => img.naturalWidth))
+    .toBeGreaterThan(0);
 
   // The popup surface is a theme token, not a hardcoded light panel. The exact
   // palette value is deliberately not pinned — only that a dark theme renders
@@ -664,4 +656,579 @@ test("detail never turns a non-http provenance source into a link", async ({
   await expect(
     page.getByRole("link", { name: /Imported from Linear/ }),
   ).toHaveCount(0);
+});
+
+test("human editor saves one complete revision and reads it back", async ({
+  page,
+}) => {
+  await openDispatch(page);
+  await openPrimaryIssue(page);
+  await page.getByRole("button", { name: "Edit issue", exact: true }).click();
+  const editor = page.getByRole("dialog");
+  await editor
+    .getByLabel("Title", { exact: true })
+    .fill("A clear human outcome");
+  await editor
+    .getByLabel("Description", { exact: true })
+    .fill("## Acceptance\n\nA person can understand this work.");
+  await editor.getByLabel("Due date", { exact: true }).fill("2026-09-30");
+  await editor.getByLabel(/Estimate/).fill("45");
+  await editor
+    .getByLabel("Labels", { exact: true })
+    .fill("customer, usability");
+  await editor.getByRole("button", { name: "Preview", exact: true }).click();
+  await expect(
+    editor.getByRole("heading", { name: "Acceptance", exact: true }),
+  ).toBeVisible();
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect(editor).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "A clear human outcome", exact: true }),
+  ).toBeVisible();
+  const revisions = await page.evaluate(() =>
+    (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? []).filter(
+      (event) => event.kind === 40021,
+    ),
+  );
+  expect(revisions).toHaveLength(1);
+  const wire = JSON.parse(revisions[0].content);
+  expect(wire.set.title).toBe("A clear human outcome");
+  expect(wire.set.estimate_minutes).toBe(45);
+  expect(wire.set.due.precision).toBe("date");
+  await page.getByRole("button", { name: "Edit issue", exact: true }).click();
+  await expect(
+    page.getByRole("dialog").getByLabel("Title", { exact: true }),
+  ).toHaveValue("A clear human outcome");
+  await expect(
+    page.getByText("Keep my draft on the latest version"),
+  ).toHaveCount(0);
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Close", exact: true })
+    .first()
+    .click();
+  await page.screenshot({
+    path: "/Users/titusclaw/.buzz/RESEARCH/DISPATCH_ASSESSMENT_2026_09_10/implementation-detail.png",
+  });
+});
+
+test("rejected human edit keeps the draft and exposes recovery", async ({
+  page,
+}) => {
+  await openDispatch(page, context(), { rejectNextRevision: true });
+  await openPrimaryIssue(page);
+  await page.getByRole("button", { name: "Edit issue", exact: true }).click();
+  const editor = page.getByRole("dialog");
+  await editor.getByLabel("Title", { exact: true }).fill("Preserve this draft");
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect(editor.getByRole("alert")).toBeVisible();
+  await expect(editor.getByLabel("Title", { exact: true })).toHaveValue(
+    "Preserve this draft",
+  );
+  await expect(
+    editor.getByRole("button", { name: "Save changes", exact: true }),
+  ).toBeEnabled();
+});
+
+test("shared decision records preserve the named choice and the issue status", async ({
+  page,
+}) => {
+  await openDispatch(page);
+  await openPrimaryIssue(page);
+  await page.getByRole("button", { name: "Ask for a decision" }).click();
+  const dialog = page.getByRole("dialog", { name: "Ask for a decision" });
+  await dialog
+    .getByLabel("Question", { exact: true })
+    .fill("Should we release this version?");
+  await dialog
+    .getByLabel("Consequence", { exact: true })
+    .nth(0)
+    .fill("Install after acceptance");
+  await dialog
+    .getByLabel("Consequence", { exact: true })
+    .nth(1)
+    .fill("Keep the current version");
+  await dialog.getByRole("button", { name: "Create decision" }).click();
+  await expect(dialog).not.toBeVisible();
+  await page.getByRole("button", { name: "Choose Hold", exact: true }).click();
+  await page
+    .getByLabel("Reason for this decision")
+    .fill("We need an installed acceptance check.");
+  await page
+    .getByRole("button", { name: "Record decision", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Record decision", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("dispatch-decision-resolution")
+      .getByText("We need an installed acceptance check.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Issue status")).toHaveValue("triage");
+  const events = await page.evaluate(
+    () => window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [],
+  );
+  const records = events
+    .filter((event) => event.kind === 40026)
+    .map((event) => JSON.parse(event.content));
+  expect(records).toHaveLength(2);
+  expect(records[1].parent_event).toBe(
+    events.find((event) => event.kind === 40026)?.id,
+  );
+  expect(
+    records[1].payload.options.find(
+      (option: { id: string }) =>
+        option.id === records[1].payload.selected_option,
+    ).label,
+  ).toBe("Hold");
+  await page.getByTestId("dispatch-detail-back").click();
+  await page.getByLabel("Attention view").selectOption("decision");
+  await expect(page.getByTestId("dispatch-list-row")).toHaveCount(0);
+});
+
+test("lost shared-save acknowledgement recovers the accepted event without a second publication", async ({
+  page,
+}) => {
+  await openDispatch(page);
+  await page.getByRole("button", { name: "Save or manage views" }).click();
+  const dialog = page.getByRole("dialog", { name: "Saved views" });
+  await dialog.getByLabel("View name").fill("Team focus");
+  await dialog.getByLabel("Share with this workspace").check();
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_FAIL_DISPATCH_ACKS__ = 1;
+  });
+  await dialog
+    .getByRole("button", { name: "Save current view", exact: true })
+    .click();
+  await expect(dialog.getByRole("alert")).toBeVisible();
+  await dialog
+    .getByRole("button", { name: "Save current view", exact: true })
+    .click();
+  await expect(dialog).not.toBeVisible();
+  await expect(
+    page.getByLabel("Saved view").getByRole("option", { name: "Team focus" }),
+  ).toHaveCount(1);
+  expect(
+    await page.evaluate(() =>
+      (window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? []).filter(
+        (event) => event.kind === 40026,
+      ),
+    ),
+  ).toHaveLength(1);
+});
+
+test("project outcome and milestone survive navigation through linked issues", async ({
+  page,
+}) => {
+  const fixture = context();
+  const project = "10000000-0000-4000-8000-000000000001";
+  fixture.projects[0].projectId = project;
+  for (const issue of fixture.issues) issue.projectId = project;
+  await openDispatch(page, fixture);
+  await page
+    .getByRole("navigation", { name: "Dispatch views" })
+    .getByRole("button", { name: "Projects", exact: true })
+    .click();
+  await page
+    .getByTestId("dispatch-projects")
+    .getByRole("button", { name: /Dispatch Desktop/ })
+    .click();
+  await page.getByRole("button", { name: "Edit project plan" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog
+    .getByLabel("Target outcome", { exact: true })
+    .fill("Make human handoffs dependable");
+  await dialog.getByRole("button", { name: "Add milestone" }).click();
+  await dialog
+    .getByLabel("Milestone 1", { exact: true })
+    .fill("Installed acceptance");
+  await dialog.getByText(/Contributing issues/).click();
+  await dialog.getByRole("checkbox", { name: /P0 oldest canonical/ }).check();
+  await dialog.getByRole("button", { name: "Save project plan" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByText("Make human handoffs dependable")).toBeVisible();
+  await expect(
+    page.getByRole("progressbar", { name: "Installed acceptance progress" }),
+  ).toHaveAttribute("max", "1");
+  await page
+    .getByRole("button", { name: /D-AAAAAA · P0 oldest canonical/ })
+    .first()
+    .click();
+  await expect(page.getByTestId("dispatch-issue-detail")).toBeVisible();
+  await page.getByTestId("dispatch-detail-back").click();
+  await expect(page.getByTestId("dispatch-project-home")).toBeVisible();
+  await expect(page.getByText("Make human handoffs dependable")).toBeVisible();
+});
+
+test("bulk edit previews two issues and confirms each change", async ({
+  page,
+}) => {
+  await openDispatch(page);
+  await page.getByTestId("dispatch-tab-list").click();
+  await page
+    .getByRole("checkbox", {
+      name: "Select P0 oldest canonical triage issue",
+      exact: true,
+    })
+    .check();
+  await page
+    .getByRole("checkbox", {
+      name: "Select P1 older than second P0",
+      exact: true,
+    })
+    .check();
+  await page.getByRole("button", { name: "Edit selected issues" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit 2 selected issues" });
+  await dialog.getByLabel("Status", { exact: true }).selectOption("todo");
+  await dialog.getByRole("button", { name: "Apply reviewed changes" }).click();
+  await expect(dialog.getByText("2 of 2 confirmed")).toBeVisible();
+  const changes = await page.evaluate(() =>
+    (window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [])
+      .filter((event) => event.kind === 40021)
+      .map((event) => JSON.parse(event.content)),
+  );
+  expect(changes).toHaveLength(2);
+  expect(new Set(changes.map((change) => change.issue_id)).size).toBe(2);
+  expect(changes.every((change) => change.set.status === "todo")).toBe(true);
+});
+
+test("import activation is explicit and delivery evidence does not close or verify work", async ({
+  page,
+}) => {
+  await openDispatch(page);
+  await openPrimaryIssue(page);
+  await expect(page.getByText("Imported history · parked")).toBeVisible();
+  await page.getByRole("button", { name: "Accept into current work" }).click();
+  await page
+    .getByLabel("Reason", { exact: true })
+    .fill("Accepted for the current release");
+  await page.getByRole("button", { name: "Confirm activation change" }).click();
+  await expect(page.getByText("Imported work · activated")).toBeVisible();
+  await page.getByRole("button", { name: "Record evidence" }).click();
+  const dialog = page.getByRole("dialog", { name: "Record delivery evidence" });
+  await dialog
+    .getByLabel("Artifact, commit, report or environment")
+    .fill("commit:abc123 / test report");
+  await dialog
+    .getByLabel("What was checked and what happened")
+    .fill("Ran the behavior check; installation is still pending.");
+  await dialog.getByRole("button", { name: "Save observation" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Delivery evidence" }),
+  ).toContainText("Tests · Passed / confirmed");
+  await expect(page.getByLabel("Issue status")).toHaveValue("triage");
+  await expect(page.getByTestId("dispatch-task-attempt")).toContainText(
+    "Working",
+  );
+});
+
+test("a message can create linked work without copying its source text", async ({
+  page,
+}) => {
+  await openDispatch(page);
+  await page.getByTestId("channel-general").click();
+  const id = "f".repeat(64);
+  await page.evaluate(
+    (id) =>
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: "Sensitive source detail stays in the conversation",
+        id,
+      }),
+    id,
+  );
+  const row = page.locator(`[data-message-id="${id}"]`).first();
+  await expect(row).toContainText("Sensitive source detail");
+  await row.hover();
+  await row.getByTestId(`more-actions-${id}`).click();
+  await page.getByTestId(`dispatch-message-${id}`).click();
+  const dialog = page.getByTestId("conversation-dispatch-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog
+    .getByLabel("Outcome or next step")
+    .fill("Investigate the customer concern");
+  await dialog.getByRole("button", { name: "Create linked issue" }).click();
+  await expect(
+    dialog.getByRole("button", { name: "Open issue" }),
+  ).toBeVisible();
+  const roots = await page.evaluate(() =>
+    (window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [])
+      .filter((event) => event.kind === 40020)
+      .map((event) => JSON.parse(event.content)),
+  );
+  expect(roots).toHaveLength(1);
+  expect(roots[0].source_event_id).toBe(id);
+  expect(roots[0].body).not.toContain("Sensitive source detail");
+  expect(roots[0].external_refs[0].ref).toContain(id);
+  await dialog.getByRole("button", { name: "Open issue" }).click();
+  await expect(
+    page.getByRole("heading", {
+      name: "Investigate the customer concern",
+      exact: true,
+    }),
+  ).toBeVisible();
+});
+
+test("automation stays in preview until a configured service acknowledges it", async ({
+  page,
+}) => {
+  await openDispatch(page);
+  await page
+    .getByRole("navigation", { name: "Dispatch views" })
+    .getByRole("button", { name: "Automation", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Create preview", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Preview bounded automation",
+  });
+  await dialog
+    .getByLabel("Expected service public key", { exact: true })
+    .fill("b".repeat(64));
+  await dialog
+    .getByLabel("P0 oldest canonical triage issue", { exact: true })
+    .check();
+  await dialog
+    .getByRole("button", { name: "Save preview", exact: true })
+    .click();
+  await expect(dialog).not.toBeVisible();
+  await expect(
+    page.getByText("Preview only · No service observed", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Activate for 1 hour", exact: true }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  await expect(
+    page.getByText("Paused · No service observed", { exact: true }),
+  ).toBeVisible();
+  const events = await page.evaluate(
+    () => window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [],
+  );
+  expect(events.filter((event) => event.kind === 9)).toHaveLength(0);
+  const settings = events
+    .filter((event) => event.kind === 40026)
+    .map((event) => JSON.parse(event.content));
+  expect(settings.map((record) => record.payload.controls.mode)).toEqual([
+    "preview",
+    "paused",
+  ]);
+  expect(settings[1].record_id).toBe(settings[0].record_id);
+});
+
+test("human assignment confirms its issue link before notifying the executor and retains its owner", async ({
+  page,
+}) => {
+  const fixture = context({ linkedTasks: [] });
+  const primary = fixture.issues.find(
+    (issue) => issue.issueId === PRIMARY_ISSUE,
+  );
+  if (!primary) throw new Error("Primary fixture issue is missing");
+  primary.assignee = SELF;
+  await openDispatch(page, fixture, { members: [SELF, OTHER] });
+  await openPrimaryIssue(page);
+  await page
+    .getByRole("button", { name: "Assign execution", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Assign execution",
+    exact: true,
+  });
+  await dialog
+    .getByRole("button", { name: "Choose a person", exact: true })
+    .click();
+  const picker = page.getByTestId("dispatch-assignee-picker");
+  await page.getByTestId("dispatch-assignee-search").fill("Helm");
+  await picker
+    .getByTestId(`dispatch-assignee-option-${OTHER}`)
+    .getByRole("button", { name: "Assign", exact: true })
+    .click();
+  await dialog
+    .getByLabel("Reason to proceed with this human override")
+    .fill("Explicit small test; the human owner will verify the result.");
+  await dialog
+    .getByRole("button", {
+      name: "Confirm assignment and notify executor",
+      exact: true,
+    })
+    .click();
+  await expect(dialog).not.toBeVisible();
+  await expect(
+    page.getByText(
+      "Assignment confirmed in accepted task history. The issue owner is unchanged.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  const events = await page.evaluate(
+    () => window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [],
+  );
+  const linkIndex = events.findIndex((event) => event.kind === 40021),
+    assignmentIndex = events.findIndex((event) => event.kind === 9);
+  expect(linkIndex).toBeGreaterThanOrEqual(0);
+  expect(assignmentIndex).toBeGreaterThan(linkIndex);
+  expect(events.filter((event) => event.kind === 9)).toHaveLength(1);
+  const revision = JSON.parse(events[linkIndex].content);
+  expect(revision.set.assignee).toBeUndefined();
+  expect(
+    revision.external_refs.add.some(
+      (ref: { type: string; ref: string }) =>
+        ref.type === "task_event" && ref.ref === events[assignmentIndex].id,
+    ),
+  ).toBe(true);
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: "/Users/titusclaw/.buzz/RESEARCH/DISPATCH_ASSESSMENT_2026_09_10/implementation-assignment.png",
+  });
+});
+
+test("independent human review binds the reported result and never closes its issue", async ({
+  page,
+}) => {
+  const fixture = context({
+    linkedTasks: [
+      {
+        issueId: PRIMARY_ISSUE,
+        taskId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        title: "Completed scoped attempt",
+        status: "done",
+        assignee: OTHER,
+        assigner: "deadbeef".repeat(8),
+        reviewer: "deadbeef".repeat(8),
+        assignmentEventId: "a".repeat(64),
+        eventId: "b".repeat(64),
+        channelId: WORKSPACE,
+        createdAt: 1720000300,
+        dispatchRequestId: null,
+        verification: {
+          method: "Inspect the delivered artifact",
+          evidence_ref: "https://example.test/result",
+        },
+        history: [],
+      },
+    ],
+  });
+  await openDispatch(page, fixture, { members: [SELF, OTHER] });
+  await openPrimaryIssue(page);
+  await page
+    .getByRole("navigation", { name: "Issue sections" })
+    .getByRole("button", { name: "Execution", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Review reported result", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Review the reported result",
+  });
+  await expect(
+    dialog.getByRole("button", { name: "Accept reviewed result", exact: true }),
+  ).toBeDisabled();
+  await dialog
+    .getByLabel("Review evidence", { exact: true })
+    .fill("https://example.test/independent-review");
+  await dialog
+    .getByLabel("What did you check?", { exact: true })
+    .fill(
+      "Checked the artifact and its negative control against the agreed scope.",
+    );
+  await dialog
+    .getByRole("button", { name: "Accept reviewed result", exact: true })
+    .click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByTestId("dispatch-task-attempt")).toContainText(
+    "Independently verified",
+  );
+  const events = await page.evaluate(
+    () => window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [],
+  );
+  expect(events.filter((event) => event.kind === 40021)).toHaveLength(0);
+  const review = events.find((event) => event.kind === 9);
+  expect(review).toBeTruthy();
+  expect(review?.content).toContain(
+    '"previous_event_id":"' + "b".repeat(64) + '"',
+  );
+  expect(review?.tags.some((tag) => tag[0] === "p")).toBe(false);
+});
+
+test("conversation updates recover a lost acknowledgement and deduplicate repeat shares", async ({
+  page,
+}) => {
+  await openDispatch(page, context(), { members: [SELF, OTHER] });
+  await openPrimaryIssue(page);
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_FAIL_DISPATCH_ACKS__ = 1;
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await page
+      .getByRole("button", { name: "Share an update", exact: true })
+      .click();
+    const dialog = page.getByRole("dialog");
+    await expect(
+      dialog.getByRole("textbox", { name: "Message", exact: true }),
+    ).toHaveValue(/Current issue status/);
+    await dialog
+      .getByRole("button", { name: "Share reviewed update", exact: true })
+      .click();
+    await expect(dialog).not.toBeVisible();
+    await expect(
+      page.getByText("Shared in the conversation.", { exact: false }),
+    ).toBeVisible();
+  }
+  const events = await page.evaluate(
+    () => window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [],
+  );
+  expect(
+    events.filter(
+      (event) =>
+        event.kind === 9 &&
+        event.tags.some(
+          (tag) => tag[0] === "t" && tag[1] === "dispatch-update",
+        ),
+    ),
+  ).toHaveLength(1);
+  expect(events.some((event) => event.kind === 40021)).toBe(false);
+});
+
+test("a rejected issue edit can become a durable draft without changing accepted work", async ({
+  page,
+}) => {
+  await openDispatch(page, context(), { rejectNextRevision: true });
+  await openPrimaryIssue(page);
+  await page.getByRole("button", { name: "Edit issue", exact: true }).click();
+  const editor = page.getByRole("dialog");
+  await editor
+    .getByLabel("Title", { exact: true })
+    .fill("Retain the rejected edit");
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect(editor.getByRole("alert")).toBeVisible();
+  await editor
+    .getByRole("button", { name: "Close and keep draft", exact: true })
+    .click();
+  await page.getByText(/issue change\(s\) awaiting confirmation/).click();
+  await page
+    .getByRole("button", { name: "Keep as draft", exact: true })
+    .click();
+  await page
+    .getByText("Saved drafts on this device (1)", { exact: true })
+    .click();
+  await expect(page.getByText(/title: Retain the rejected edit/)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Copy draft", exact: true }),
+  ).toBeVisible();
+  const events = await page.evaluate(
+    () => window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [],
+  );
+  expect(events.filter((event) => event.kind === 40021)).toHaveLength(1);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(
+    page.getByText("Saved drafts on this device (1)", { exact: true }),
+  ).toBeVisible();
 });

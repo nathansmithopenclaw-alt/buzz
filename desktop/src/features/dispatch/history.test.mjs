@@ -92,6 +92,26 @@ test("a saturated timestamp boundary is a typed cursor gap", async () => {
   );
 });
 
+test("a dense timestamp uses the relay composite cursor and preserves every event", async () => {
+  const dense = Array.from({ length: 1203 }, (_, index) =>
+    event(index + 1, 200),
+  );
+  const seen = [];
+  const history = client({
+    fetchEvents: async (filter) => {
+      seen.push(filter);
+      if (filter.until !== undefined && filter.until < 200) return [];
+      return dense
+        .filter((value) => !filter.before_id || value.id > filter.before_id)
+        .slice(0, filter.limit);
+    },
+  });
+  const result = await history.fetchExhaustively({ kinds: [40020] });
+  assert.equal(result.length, dense.length);
+  assert.equal(new Set(result.map((event) => event.id)).size, dense.length);
+  assert.ok(seen.some((filter) => filter.before_id));
+});
+
 test("cursor pagination stops before constructing an inverted since/until range", async () => {
   const firstPage = Array.from({ length: 500 }, (_, index) =>
     event(index + 1, index === 499 ? 100 : 200),

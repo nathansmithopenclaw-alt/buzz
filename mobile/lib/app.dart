@@ -15,6 +15,7 @@ import 'features/channels/channel_management_provider.dart';
 import 'features/channels/channels_provider.dart';
 import 'features/channels/unread_badge/unread_badge_provider.dart';
 import 'features/home/home_page.dart';
+import 'features/dispatch/dispatch_page.dart';
 import 'features/invites/invite_create_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'features/pairing/pairing_page.dart';
@@ -385,6 +386,7 @@ class App extends HookConsumerWidget {
           AuthStatus.authenticated => DeepLinkDispatcher(
             child: HomePage(
               settingsPageBuilder: _buildSettingsPage,
+              dispatchPageBuilder: (_) => const DispatchPage(),
               hasUnreadInbox: hasUnreadInbox,
             ),
           ),

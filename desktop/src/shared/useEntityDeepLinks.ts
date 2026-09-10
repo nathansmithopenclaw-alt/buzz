@@ -1,3 +1,4 @@
+import { useOpenDispatchLink } from "@/features/dispatch/ui/DispatchLinkAnchor";
 import { useOpenSummaryLink } from "@/features/pulse/lib/useOpenSummaryLink";
 import * as React from "react";
 
@@ -17,6 +18,7 @@ import { useOpenEntityLink } from "@/shared/ui/markdown/entityLinks";
 export function useEntityDeepLinks(enabled = true) {
   const openEntityLink = useOpenEntityLink();
   const openSummary = useOpenSummaryLink();
+  const openDispatch = useOpenDispatchLink();
 
   React.useEffect(() => {
     if (!enabled) return;
@@ -24,7 +26,7 @@ export function useEntityDeepLinks(enabled = true) {
     let cancelled = false;
     const unlistenPromise = listenForEntityDeepLinks((href) => {
       if (cancelled) return false;
-      if (openSummary(href)) return true;
+      if (openDispatch(href) || openSummary(href)) return true;
       const parsed = parseEntityLink(href);
       // Ack-and-drop unparseable links: leaving one queued would wedge every
       // later link behind the bad head forever. Unmount (`cancelled`) keeps
@@ -37,5 +39,5 @@ export function useEntityDeepLinks(enabled = true) {
       cancelled = true;
       void unlistenPromise.then((fn) => fn());
     };
-  }, [enabled, openEntityLink, openSummary]);
+  }, [enabled, openEntityLink, openSummary, openDispatch]);
 }

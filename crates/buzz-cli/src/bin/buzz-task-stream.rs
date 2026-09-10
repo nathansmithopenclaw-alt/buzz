@@ -85,7 +85,7 @@ struct StreamRejectionRecord {
 
 #[derive(Debug)]
 enum BufferedRecord {
-    Task(TaskEnvelopeEvent),
+    Task(Box<TaskEnvelopeEvent>),
     Rejection(StreamRejectionRecord),
 }
 
@@ -350,7 +350,9 @@ async fn stream_once(args: &Args, keys: &Keys) -> Result<(), String> {
                         if state.backfill_complete {
                             emit_event(&task_event, &bridge_pubkey)?;
                         } else {
-                            state.backfill.push(BufferedRecord::Task(task_event));
+                            state
+                                .backfill
+                                .push(BufferedRecord::Task(Box::new(task_event)));
                         }
                     }
                     Err(error) => {
@@ -454,6 +456,7 @@ mod tests {
             created_at,
             envelope: TaskEnvelope {
                 v: 2,
+                authority: None,
                 task_id: Uuid::nil(),
                 status: TaskStatus::Assigned,
                 assignee: "22".repeat(32),
@@ -561,8 +564,12 @@ mod tests {
         let now = Instant::now();
         let mut first = TaskSubscriptionState::new(now);
         let mut second = TaskSubscriptionState::new(now);
-        first.backfill.push(BufferedRecord::Task(event(101, "b")));
-        first.backfill.push(BufferedRecord::Task(event(100, "a")));
+        first
+            .backfill
+            .push(BufferedRecord::Task(Box::new(event(101, "b"))));
+        first
+            .backfill
+            .push(BufferedRecord::Task(Box::new(event(100, "a"))));
         first
             .backfill
             .push(BufferedRecord::Rejection(StreamRejectionRecord {
@@ -574,7 +581,9 @@ mod tests {
                 bridge_pubkey: "bb".repeat(32),
                 error: "malformed envelope".to_string(),
             }));
-        second.backfill.push(BufferedRecord::Task(event(99, "z")));
+        second
+            .backfill
+            .push(BufferedRecord::Task(Box::new(event(99, "z"))));
 
         let emitted = complete_channel_backfill(&mut first);
 
@@ -601,7 +610,7 @@ mod tests {
         subscriptions.insert(
             "expired".to_string(),
             TaskSubscriptionState {
-                backfill: vec![BufferedRecord::Task(event(100, "a"))],
+                backfill: vec![BufferedRecord::Task(Box::new(event(100, "a")))],
                 backfill_complete: false,
                 backfill_deadline: now,
             },
@@ -622,7 +631,7 @@ mod tests {
         let mut stalled = TaskSubscriptionState::new(now);
         stalled
             .backfill
-            .push(BufferedRecord::Task(event(100, "stalled")));
+            .push(BufferedRecord::Task(Box::new(event(100, "stalled"))));
         subscriptions.insert("stalled".to_string(), stalled);
 
         let mut chatty = TaskSubscriptionState::new(now);

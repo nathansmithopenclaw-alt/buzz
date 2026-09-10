@@ -14,6 +14,7 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { publishDispatchIssueCreate } from "../mutations";
+import { dueFromDateInput } from "../issueEditing";
 import type {
   DispatchContext,
   DispatchPriority,
@@ -48,6 +49,8 @@ export function NewIssueDialog({
   const [projectId, setProjectId] = React.useState("");
   const [labels, setLabels] = React.useState("");
   const [assignee, setAssignee] = React.useState("");
+  const [due, setDue] = React.useState("");
+  const [estimate, setEstimate] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
 
@@ -60,11 +63,12 @@ export function NewIssueDialog({
     setProjectId("");
     setLabels("");
     setAssignee("");
+    setDue("");
+    setEstimate("");
     setError(null);
   };
   const changeOpen = (next: boolean) => {
     if (submitting) return;
-    if (!next) reset();
     onOpenChange(next);
   };
   const submit = async (event: React.FormEvent) => {
@@ -84,6 +88,8 @@ export function NewIssueDialog({
           projectId: projectId || null,
           labels: labels.split(","),
           assignee: assignee || null,
+          due: dueFromDateInput(due),
+          estimateMinutes: estimate ? Number(estimate) : null,
         },
         refresh,
       });
@@ -102,7 +108,7 @@ export function NewIssueDialog({
         <DialogHeader>
           <DialogTitle>New issue</DialogTitle>
           <DialogDescription>
-            Create a revision-zero Tracker issue in this workspace.
+            Capture the outcome, context and next step in one place.
           </DialogDescription>
         </DialogHeader>
         <form className="grid gap-4" onSubmit={submit}>
@@ -125,7 +131,7 @@ export function NewIssueDialog({
             className="grid gap-1 text-xs font-medium"
             htmlFor="dispatch-new-issue-body"
           >
-            Body
+            Description
             <Textarea
               data-testid="dispatch-new-issue-body"
               id="dispatch-new-issue-body"
@@ -135,6 +141,33 @@ export function NewIssueDialog({
             />
           </label>
           <div className="grid grid-cols-2 gap-3">
+            <label
+              className="grid gap-1 text-xs font-medium"
+              htmlFor="dispatch-new-due"
+            >
+              Due date
+              <Input
+                id="dispatch-new-due"
+                type="date"
+                value={due}
+                onChange={(event) => setDue(event.target.value)}
+              />
+            </label>
+            <label
+              className="grid gap-1 text-xs font-medium"
+              htmlFor="dispatch-new-estimate"
+            >
+              Estimate in minutes
+              <Input
+                id="dispatch-new-estimate"
+                type="number"
+                min={0}
+                step={1}
+                value={estimate}
+                placeholder="Optional"
+                onChange={(event) => setEstimate(event.target.value)}
+              />
+            </label>
             <label className="grid gap-1 text-xs font-medium">
               Status
               <select
@@ -236,7 +269,7 @@ export function NewIssueDialog({
               type="button"
               variant="ghost"
             >
-              Cancel
+              {title || body ? "Close and keep draft" : "Cancel"}
             </Button>
             <Button
               data-testid="dispatch-new-issue-submit"

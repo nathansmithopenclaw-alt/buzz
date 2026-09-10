@@ -16,19 +16,19 @@ use buzz_core::kind::{
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_HOST, KIND_AGENT_HOST_STATUS,
     KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH,
     KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_BRIEF_CONFIG, KIND_BRIEF_REPORT,
-    KIND_BRIEF_WATERMARK, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
-    KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
-    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
-    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
-    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
-    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
-    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
-    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
-    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
-    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
-    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_BRIEF_WATERMARK, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DISPATCH_CLIENT,
+    KIND_DISPATCH_RECORD, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST,
+    KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST,
+    KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE,
+    KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED,
+    KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED,
+    KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT,
+    KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM,
+    KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
+    KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP,
+    KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA,
+    KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
     KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
     KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
     KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
@@ -543,6 +543,7 @@ async fn validate_brief_report_binding(
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
+        KIND_DISPATCH_CLIENT => Ok(Scope::MessagesRead),
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
@@ -594,7 +595,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_TRACKER_COMMENT
         | KIND_TRACKER_DISPATCH_ACTION
         | KIND_TRACKER_SERVICE_HEARTBEAT
-        | KIND_TRACKER_PROJECT_ACTIVITY => Ok(Scope::MessagesWrite),
+        | KIND_TRACKER_PROJECT_ACTIVITY | KIND_DISPATCH_RECORD => Ok(Scope::MessagesWrite),
         KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
             Ok(Scope::AdminChannels)
         }
@@ -850,6 +851,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_TRACKER_DISPATCH_ACTION
             | KIND_TRACKER_SERVICE_HEARTBEAT
             | KIND_TRACKER_PROJECT_ACTIVITY
+            | KIND_DISPATCH_RECORD
             // NIP-29 admin kinds (except CREATE_GROUP which creates the channel)
             | KIND_NIP29_PUT_USER
             | KIND_NIP29_REMOVE_USER
@@ -3343,83 +3345,115 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if crate::summary::is_named_report(&event) {
-        state
-            .db
-            .publish_summary_report(tenant.community(), &event)
-            .await
-            .map_err(|e| IngestError::Rejected(format!("restricted: {e}")))?
-    } else if buzz_core::kind::is_replaceable(kind_u32) {
-        // NIP-16 replaceable event — atomic replace with stale-write protection.
-        // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
-        state
-            .db
-            .replace_addressable_event(tenant.community(), &event, channel_id)
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-    } else if is_parameterized_replaceable(kind_u32) {
-        // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
-        let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
-        if d_tag.len() > buzz_db::event::D_TAG_MAX_LEN {
-            return Err(IngestError::Rejected(format!(
-                "invalid: d tag too long ({} bytes, max {})",
-                d_tag.len(),
-                buzz_db::event::D_TAG_MAX_LEN,
-            )));
-        }
-        if kind_u32 == KIND_BRIEF_CONFIG
-            && serde_json::from_str::<serde_json::Value>(&event.content)
-                .ok()
-                .is_some_and(|v| v["v"] == 2)
+    let mut dispatch_admission = None;
+    let (stored_event, was_inserted) =
+        if buzz_sdk::dispatch_admission::requires_dispatch_event_admission(&event)
+            && !buzz_sdk::dispatch_notice::is_dispatch_notice(&event)
         {
-            let (stored, inserted) = state
-                .db
-                .replace_summary_definition(tenant.community(), &event, &d_tag)
-                .await
-                .map_err(|e| IngestError::Rejected(format!("invalid Summary: {e}")))?;
-            (stored, inserted)
-        } else {
-            state
-                .db
-                .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
-                .await
-                .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-        }
-    } else {
-        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
-        match state
-            .db
-            .insert_event_with_thread_metadata(
+            let workspace = channel_id.ok_or_else(|| {
+                IngestError::Rejected("invalid: Dispatch requires workspace".into())
+            })?;
+            let result = super::dispatch_admission::insert(
+                state,
                 tenant.community(),
                 &event,
-                channel_id,
-                thread_params,
+                workspace,
+                thread_meta.as_ref().map(|m| m.as_params()),
             )
-            .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                // Compensate: if we pre-created a channel for kind:9007,
-                // soft-delete it so no orphaned channel row remains.
-                if let Some(ch_id) = pre_created_channel {
-                    if let Err(re) = state
-                        .db
-                        .soft_delete_channel(tenant.community(), ch_id)
-                        .await
-                    {
-                        warn!(event_id = %event_id_hex, "channel compensation failed: {re}");
-                    }
-                    state.invalidate_channel_deleted(tenant);
-                }
-                return Err(match e {
-                    buzz_db::DbError::AuthEventRejected => {
-                        IngestError::Rejected("invalid: AUTH events cannot be stored".into())
-                    }
-                    other => IngestError::Internal(format!("error: database error: {other}")),
-                });
+            .await?;
+            dispatch_admission = result.2;
+            (result.0, result.1)
+        } else if buzz_sdk::dispatch_notice::is_dispatch_notice(&event) {
+            let (channel, _, key) = buzz_sdk::dispatch_notice::parse_dispatch_notice(&event)
+                .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+            state
+                .db
+                .insert_dispatch_notice(
+                    tenant.community(),
+                    &event,
+                    channel,
+                    &key,
+                    thread_meta.as_ref().map(|m| m.as_params()),
+                )
+                .await
+                .map_err(|error| IngestError::Rejected(format!("restricted: {error}")))?
+        } else if crate::summary::is_named_report(&event) {
+            state
+                .db
+                .publish_summary_report(tenant.community(), &event)
+                .await
+                .map_err(|e| IngestError::Rejected(format!("restricted: {e}")))?
+        } else if buzz_core::kind::is_replaceable(kind_u32) {
+            // NIP-16 replaceable event — atomic replace with stale-write protection.
+            // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
+            state
+                .db
+                .replace_addressable_event(tenant.community(), &event, channel_id)
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+        } else if is_parameterized_replaceable(kind_u32) {
+            // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
+            let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
+            if d_tag.len() > buzz_db::event::D_TAG_MAX_LEN {
+                return Err(IngestError::Rejected(format!(
+                    "invalid: d tag too long ({} bytes, max {})",
+                    d_tag.len(),
+                    buzz_db::event::D_TAG_MAX_LEN,
+                )));
             }
-        }
-    };
+            if kind_u32 == KIND_BRIEF_CONFIG
+                && serde_json::from_str::<serde_json::Value>(&event.content)
+                    .ok()
+                    .is_some_and(|v| v["v"] == 2)
+            {
+                let (stored, inserted) = state
+                    .db
+                    .replace_summary_definition(tenant.community(), &event, &d_tag)
+                    .await
+                    .map_err(|e| IngestError::Rejected(format!("invalid Summary: {e}")))?;
+                (stored, inserted)
+            } else {
+                state
+                    .db
+                    .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
+                    .await
+                    .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            }
+        } else {
+            let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+            match state
+                .db
+                .insert_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    channel_id,
+                    thread_params,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    // Compensate: if we pre-created a channel for kind:9007,
+                    // soft-delete it so no orphaned channel row remains.
+                    if let Some(ch_id) = pre_created_channel {
+                        if let Err(re) = state
+                            .db
+                            .soft_delete_channel(tenant.community(), ch_id)
+                            .await
+                        {
+                            warn!(event_id = %event_id_hex, "channel compensation failed: {re}");
+                        }
+                        state.invalidate_channel_deleted(tenant);
+                    }
+                    return Err(match e {
+                        buzz_db::DbError::AuthEventRejected => {
+                            IngestError::Rejected("invalid: AUTH events cannot be stored".into())
+                        }
+                        other => IngestError::Internal(format!("error: database error: {other}")),
+                    });
+                }
+            }
+        };
 
     if !was_inserted {
         return Ok(IngestResult {
@@ -3486,6 +3520,19 @@ async fn ingest_event_inner(
             },
         };
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
+    }
+    // Publish evidence first so live consumers can authorize the source event as
+    // soon as it arrives. Both are already durable in the same transaction.
+    if let Some(admission) = dispatch_admission {
+        dispatch_persistent_event(
+            tenant,
+            state,
+            &admission,
+            buzz_core::kind::KIND_DISPATCH_ADMISSION,
+            &state.relay_keypair.public_key().to_hex(),
+            None,
+        )
+        .await;
     }
     dispatch_persistent_event(
         tenant,
@@ -3916,6 +3963,7 @@ mod postgres_tests {
             KIND_TRACKER_DISPATCH_ACTION,
             KIND_TRACKER_SERVICE_HEARTBEAT,
             KIND_TRACKER_PROJECT_ACTIVITY,
+            KIND_DISPATCH_RECORD,
         ] {
             assert_eq!(
                 required_scope_for_kind(kind, &dummy).expect("registered Tracker kind"),

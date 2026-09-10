@@ -147,15 +147,37 @@ export function createDispatchHistoryClient({
       for (const event of page) events.set(event.id, event);
       if (page.length < PAGE_SIZE) return [...events.values()];
       const oldest = Math.min(...page.map((event) => event.created_at));
-      const boundary = await fetch({
+      let boundary = await fetch({
         ...filter,
         limit: PAGE_SIZE,
         since: oldest,
         until: oldest,
       });
       for (const event of boundary) events.set(event.id, event);
-      if (boundary.length >= PAGE_SIZE) {
-        throw new DispatchHistoryGapError();
+      let beforeId = "";
+      while (boundary.length >= PAGE_SIZE) {
+        const nextId =
+          boundary
+            .map((event) => event.id)
+            .sort()
+            .at(-1) ?? "";
+        if (!/^[a-f0-9]{64}$/.test(nextId) || nextId <= beforeId)
+          throw new DispatchHistoryGapError();
+        beforeId = nextId;
+        boundary = await fetch({
+          ...filter,
+          limit: PAGE_SIZE,
+          since: oldest,
+          until: oldest,
+          before_id: beforeId,
+        });
+        if (
+          boundary.some(
+            (event) => event.created_at !== oldest || event.id <= beforeId,
+          )
+        )
+          throw new DispatchHistoryGapError();
+        for (const event of boundary) events.set(event.id, event);
       }
       if (filter.since !== undefined && oldest <= filter.since) {
         return [...events.values()];

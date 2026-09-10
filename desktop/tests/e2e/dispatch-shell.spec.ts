@@ -480,7 +480,8 @@ for (const theme of ["catppuccin-latte", "catppuccin-mocha"] as const) {
       "dispatch",
     );
     await expect(page.getByTestId("dispatch-board")).toBeVisible();
-    await expect(page.getByTestId("dispatch-issue-card")).toHaveCount(6);
+    await expect(page.getByTestId("dispatch-issue-card")).toHaveCount(5);
+    await expect(page.getByTestId("dispatch-group-done")).toHaveCount(0);
     await expect(page.getByTestId("dispatch-group-todo")).toBeVisible();
     await page.getByTestId("dispatch-filter-status").selectOption("todo");
     await expect(page.getByTestId("dispatch-issue-card")).toHaveCount(1);
@@ -515,25 +516,25 @@ for (const theme of ["catppuccin-latte", "catppuccin-mocha"] as const) {
     await expect(page.getByTestId("dispatch-list-row")).toHaveCount(6);
     const longIdentifierRow = page
       .getByTestId("dispatch-list-row")
-      .filter({ hasText: longIdentifier });
+      .filter({ hasText: "Long native identifier remains render safe" });
     const listIdentifier = longIdentifierRow.getByTestId(
       "dispatch-issue-identifier",
     );
     await expect(listIdentifier).toHaveAttribute("title", longIdentifier);
     const identifierGeometry = await longIdentifierRow.evaluate((row) => {
       const cells = row.querySelectorAll("td");
-      const identifier = cells[0]?.querySelector<HTMLElement>(
+      const identifier = row.querySelector<HTMLElement>(
         '[data-testid="dispatch-issue-identifier"]',
       );
-      if (!identifier || !cells[1])
+      if (!identifier || !cells[2])
         throw new Error("List cells are unavailable");
       return {
         isTruncated: identifier.scrollWidth > identifier.clientWidth,
         identifierRight: identifier.getBoundingClientRect().right,
-        titleLeft: cells[1].getBoundingClientRect().left,
+        titleLeft: cells[2].getBoundingClientRect().left,
       };
     });
-    expect(identifierGeometry.isTruncated).toBe(true);
+    expect(identifierGeometry.isTruncated).toBe(false);
     expect(identifierGeometry.identifierRight).toBeLessThanOrEqual(
       identifierGeometry.titleLeft + 1,
     );
@@ -675,34 +676,32 @@ test("Board cards are ordered by priority then most-recently-updated", async ({
   const cards = page
     .getByTestId("dispatch-group-backlog")
     .getByTestId("dispatch-issue-card");
-  await expect(cards).toHaveCount(3);
+  await expect(cards).toHaveCount(6);
   await expect(cards.nth(0)).toContainText("Lane P0 newest");
   await expect(cards.nth(1)).toContainText("Lane P0 older");
   await expect(cards.nth(2)).toContainText("Lane P1 newest");
 });
 
-test("+N more opens List with the Board filters and exactly the overflow items", async ({
+test("Board expands within the column and preserves filters", async ({
   page,
 }) => {
-  await openAcceptanceDispatch(page);
+  const issues = Array.from({ length: 24 }, (_, index) =>
+    acceptanceIssue({
+      issueId: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      identifier: `D-${index}`,
+      title: `Lane ${index}`,
+    }),
+  );
+  await openAcceptanceDispatch(page, issues);
   await page.getByTestId("dispatch-filter-query").fill("lane");
   await page.getByTestId("dispatch-filter-label").selectOption("acceptance");
-
-  await page.getByTestId("dispatch-more-backlog").click();
-
-  await expect(page.getByTestId("dispatch-list-row")).toHaveCount(3);
-  await expect(page.getByTestId("dispatch-overflow-context")).toBeVisible();
-  await expect(page.getByText("Lane P1 older")).toBeVisible();
-  await expect(page.getByText("Lane P2 newest")).toBeVisible();
-  await expect(page.getByText("Lane no priority")).toBeVisible();
-  await expect(page.getByText("Lane P0 newest")).toHaveCount(0);
-  const search = routeSearch(page.url());
-  expect(search.get("view")).toBe("list");
-  expect(search.get("status")).toBe("backlog");
-  expect(search.get("label")).toBe("acceptance");
-  expect(search.get("query")).toBe("lane");
-  expect(search.get("sort")).toBe("priority");
-  expect(search.get("exclude")?.split(",")).toHaveLength(3);
+  const column = page.getByTestId("dispatch-group-backlog");
+  await expect(column.getByTestId("dispatch-issue-card")).toHaveCount(20);
+  await column.getByRole("button", { name: "Show 4 more" }).click();
+  await expect(column.getByTestId("dispatch-issue-card")).toHaveCount(24);
+  await expect(page.getByTestId("dispatch-board")).toBeVisible();
+  expect(routeSearch(page.url()).get("label")).toBe("acceptance");
+  expect(routeSearch(page.url()).get("query")).toBe("lane");
 });
 
 test("workspace control collapses one populated workspace and separates empty initialization", async ({

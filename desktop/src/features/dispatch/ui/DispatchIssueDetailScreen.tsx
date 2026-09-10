@@ -65,6 +65,16 @@ export function DispatchIssueDetailScreen({
   const authors = [
     ...new Set([
       ...(issue?.assignee ? [issue.assignee] : []),
+      ...context.linkedTasks
+        .filter((task) => task.issueId === issueId)
+        .flatMap((task) =>
+          [
+            task.assignee,
+            task.assigner,
+            task.reviewer,
+            task.authorPubkey,
+          ].filter((value): value is string => Boolean(value)),
+        ),
       ...context.activity
         .filter((entry) => entry.issueId === issueId)
         .map((entry) => entry.authorPubkey),
@@ -96,7 +106,7 @@ export function DispatchIssueDetailScreen({
   ) => {
     setIsMutating(true);
     try {
-      await publishDispatchIssueMutation({
+      const updated = await publishDispatchIssueMutation({
         issue,
         mutation,
         viewerRole: context.viewerRole,
@@ -106,6 +116,7 @@ export function DispatchIssueDetailScreen({
       });
       setOptimisticIssue(null);
       toast.success("Issue updated");
+      return updated;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Issue update failed",
@@ -140,6 +151,9 @@ export function DispatchIssueDetailScreen({
 
   return (
     <IssueDetail
+      context={context}
+      refresh={context.refresh}
+      diagnostics={context.diagnostics}
       activity={context.activity.filter((entry) => entry.issueId === issueId)}
       comments={selectVisibleComments(
         context.comments,

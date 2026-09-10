@@ -19,6 +19,12 @@ abstract final class EventKind {
   /// Kind:13534 event containing the current relay-community membership.
   static const relayMembership = 13534;
   static const streamMessage = 9;
+  static const trackerIssue = 40020;
+  static const trackerRevision = 40021;
+  static const trackerComment = 40022;
+  static const dispatchRecord = 40026;
+  static const dispatchAdmission = 40027;
+  static const dispatchClient = 40028;
   static const nip29DeleteEvent = 9005;
   static const presenceUpdate = 20001;
   static const typingIndicator = 20002;

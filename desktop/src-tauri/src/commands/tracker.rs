@@ -1,4 +1,3 @@
-use buzz_sdk_pkg::task_envelope::{fold_task_events, TaskEnvelopeEvent};
 use buzz_sdk_pkg::tracker::{
     fold_tracker_events, fold_tracker_projects_at, parse_tracker_event, IssueProjection,
     RelationType, TrackerAuthorization, TrackerRole,
@@ -42,7 +41,7 @@ fn persist_cache_best_effort(
     }
 }
 
-fn authorization_from_membership(event: &Event, managed_signer: &str) -> TrackerAuthorization {
+fn authorization_from_membership(event: &Event) -> TrackerAuthorization {
     let mut roles = vec![(event.pubkey.to_hex(), TrackerRole::Maintainer)];
     for tag in event.tags.iter().map(|tag| tag.as_slice()) {
         if tag.first().map(String::as_str) != Some("p") {
@@ -57,10 +56,7 @@ fn authorization_from_membership(event: &Event, managed_signer: &str) -> Tracker
         };
         roles.push((pubkey.clone(), role));
     }
-    // TrackerAuthorization is last-write-wins for duplicate pubkeys. Match the
-    // CLI's auth-tag-owner semantics by applying the Desktop identity override
-    // after membership rows so a `member` tag cannot downgrade the owner.
-    roles.push((managed_signer.to_string(), TrackerRole::Maintainer));
+    // Being the current local signer does not grant a workspace role.
     TrackerAuthorization::new(roles)
 }
 
@@ -182,7 +178,7 @@ fn fold_tracker_context_values(
         .map_err(|error| format!("invalid Tracker managed signer: {error}"))?
         .to_hex();
     let project_signer = project_signer_from_membership(&membership_event)?;
-    let authorization = authorization_from_membership(&membership_event, &managed_signer);
+    let mut authorization = authorization_from_membership(&membership_event);
     let mut signed_events = Vec::new();
     let mut parsed_tracker_events = Vec::new();
     let mut diagnostics = Vec::new();
@@ -208,17 +204,75 @@ fn fold_tracker_context_values(
         signed_events.push(event);
     }
 
+    let admission = buzz_sdk_pkg::dispatch_admission::apply_dispatch_admissions(
+        &signed_events,
+        workspace_id,
+        membership_event.pubkey,
+        &mut authorization,
+        snapshot_at,
+    );
+    diagnostics.extend(
+        admission
+            .diagnostics
+            .iter()
+            .map(|message| json!({"kind":"AdmissionDiagnostic","message":message})),
+    );
+    let tracker_claims = parsed_tracker_events.clone();
     let folded = fold_tracker_events(parsed_tracker_events, &authorization);
-    let projects =
-        fold_tracker_projects_at(signed_events, workspace_id, &project_signer, snapshot_at);
+    let planning = buzz_sdk_pkg::dispatch_record::fold_dispatch_records(
+        signed_events.clone(),
+        workspace_id,
+        &authorization,
+        snapshot_at,
+    );
+    diagnostics.extend(
+        planning
+            .diagnostics
+            .iter()
+            .map(|message| json!({"kind":"PlanningConflict","message":message})),
+    );
+    let memberships = signed_events
+        .iter()
+        .filter(|event| event.kind.as_u16() == 39002)
+        .cloned()
+        .collect::<Vec<_>>();
+    let automation = super::tracker_automation::observations(
+        &signed_events,
+        &planning,
+        workspace_id,
+        snapshot_at,
+    );
+    let projects = fold_tracker_projects_at(
+        signed_events.iter().cloned(),
+        workspace_id,
+        &project_signer,
+        snapshot_at,
+    );
     diagnostics.extend(folded.diagnostics.iter().map(|diagnostic| {
-        json!({"kind": format!("{diagnostic:?}").split_whitespace().next().unwrap_or("FoldDiagnostic"), "message": format!("{diagnostic:?}")})
+        super::tracker_diagnostics::diagnostic_json(diagnostic, &tracker_claims)
     }));
     diagnostics.extend(projects.diagnostics.iter().map(
         |diagnostic| json!({"kind": "ProjectDiagnostic", "message": format!("{diagnostic:?}")}),
     ));
 
-    let issues = folded.issues.values().map(issue_json).collect::<Vec<_>>();
+    let issues = folded
+        .issues
+        .values()
+        .map(|issue| {
+            let mut value = issue_json(issue);
+            let source = tracker_claims
+                .iter()
+                .find(|claim| claim.event_id == issue.root_event)
+                .and_then(|claim| match &claim.payload {
+                    buzz_sdk_pkg::tracker::TrackerPayload::Root(root) => {
+                        root.source_event_id.clone()
+                    }
+                    _ => None,
+                });
+            value["sourceEventId"] = json!(source);
+            value
+        })
+        .collect::<Vec<_>>();
     let activity = folded
         .activity
         .iter()
@@ -257,60 +311,21 @@ fn fold_tracker_context_values(
             })
         })
         .collect::<Vec<_>>();
-    let mut task_diagnostics = Vec::new();
-    let mut task_events = Vec::new();
-    for raw in raw_task_events {
-        let event: Event = match serde_json::from_value(raw) {
-            Ok(event) => event,
-            Err(error) => {
-                task_diagnostics.push(error.to_string());
-                continue;
-            }
-        };
-        if let Err(error) = event.verify() {
-            task_diagnostics.push(format!("{}: {error}", event.id.to_hex()));
-            continue;
-        }
-        match TaskEnvelopeEvent::from_event(&event) {
-            Ok(event) if event.channel_id != workspace_id => {
-                task_diagnostics.push(format!(
-                    "{}: task channel is outside the Tracker workspace",
-                    event.event_id
-                ));
-            }
-            Ok(event) if authorization.role(&event.author_pubkey).is_none() => {
-                task_diagnostics.push(format!(
-                    "{}: task author is not a workspace member",
-                    event.event_id
-                ));
-            }
-            Ok(event) => task_events.push(event),
-            Err(error) => task_diagnostics.push(format!("{}: {error}", event.id.to_hex())),
-        }
-    }
-    let linked_tasks = fold_task_events(task_events)
-        .into_values()
-        .filter_map(|event| {
-            let issue_id = event.envelope.tracker_issue_id?;
-            folded
-                .issues
-                .keys()
-                .any(|(_, candidate)| *candidate == issue_id)
-                .then(|| {
-                    json!({
-                        "issueId": issue_id,
-                        "taskId": event.envelope.task_id,
-                        "title": event.envelope.title,
-                        "status": event.envelope.status,
-                        "assignee": event.envelope.assignee,
-                        "eventId": event.event_id,
-                        "channelId": event.channel_id,
-                        "createdAt": event.created_at,
-                        "dispatchRequestId": event.envelope.dispatch_request_id,
-                    })
-                })
-        })
-        .collect::<Vec<_>>();
+    let (linked_tasks, task_diagnostics) = super::tracker_tasks::fold_linked_tasks(
+        raw_task_events
+            .into_iter()
+            .chain(
+                signed_events
+                    .iter()
+                    .filter(|event| matches!(event.kind.as_u16(), 9 | 40027))
+                    .map(|event| json!(event)),
+            )
+            .collect(),
+        &memberships,
+        &membership_event,
+        &managed_signer,
+        &folded.issues,
+    );
     let projects = projects
         .projects
         .values()
@@ -329,6 +344,9 @@ fn fold_tracker_context_values(
         "comments": comments,
         "linkedTasks": linked_tasks,
         "projects": projects,
+        "automation": automation,
+        "admission": admission,
+        "records": planning.records.into_values().collect::<Vec<_>>(),
         "diagnostics": diagnostics,
         "taskDiagnostics": task_diagnostics,
         "viewerRole": match authorization.role(&managed_signer) {
@@ -500,6 +518,24 @@ mod tests {
     }
 
     #[test]
+    fn local_signer_does_not_gain_workspace_maintainer_authority() {
+        let member = Keys::generate();
+        let owner = Keys::generate();
+        let outsider = Keys::generate();
+        let event = membership(Uuid::new_v4(), &member, &owner);
+        let auth = authorization_from_membership(&event);
+        assert_eq!(
+            auth.role(&member.public_key().to_hex()),
+            Some(TrackerRole::Member)
+        );
+        assert_eq!(
+            auth.role(&owner.public_key().to_hex()),
+            Some(TrackerRole::Maintainer)
+        );
+        assert_eq!(auth.role(&outsider.public_key().to_hex()), None);
+    }
+
+    #[test]
     fn fold_tracker_context_matches_the_sdk_issue_and_project_projections() {
         let workspace_id = Uuid::new_v4();
         let issue_id = Uuid::new_v4();
@@ -514,10 +550,7 @@ mod tests {
             identifier: "DSP-123".to_string(),
             title: "Canonical fold fixture".to_string(),
             body: "Fixture body".to_string(),
-            // A terminal root requires Maintainer authorization. The fixture's
-            // managed signer is also tagged as a member, proving the final
-            // identity override wins over the membership row.
-            status: IssueStatus::Done,
+            status: IssueStatus::Todo,
             priority: Some(Priority::P1),
             assignee: Some(member.public_key().to_hex()),
             project_id: None,
@@ -599,8 +632,9 @@ mod tests {
             "Dispatch fixture",
             &TaskEnvelope {
                 v: TASK_ENVELOPE_VERSION,
+                authority: Some(Default::default()),
                 task_id,
-                status: TaskStatus::PickedUp,
+                status: TaskStatus::Assigned,
                 assignee: member.public_key().to_hex(),
                 assigner: member.public_key().to_hex(),
                 title: "Canonical linked task".to_string(),
@@ -627,8 +661,9 @@ mod tests {
             "Untrusted replacement",
             &TaskEnvelope {
                 v: TASK_ENVELOPE_VERSION,
+                authority: Some(Default::default()),
                 task_id,
-                status: TaskStatus::Done,
+                status: TaskStatus::Assigned,
                 assignee: outsider.public_key().to_hex(),
                 assigner: outsider.public_key().to_hex(),
                 title: "Untrusted linked task".to_string(),
@@ -654,8 +689,9 @@ mod tests {
             "Foreign workspace task",
             &TaskEnvelope {
                 v: TASK_ENVELOPE_VERSION,
+                authority: Some(Default::default()),
                 task_id: Uuid::new_v4(),
-                status: TaskStatus::PickedUp,
+                status: TaskStatus::Assigned,
                 assignee: member.public_key().to_hex(),
                 assigner: member.public_key().to_hex(),
                 title: "Foreign linked task".to_string(),
@@ -700,10 +736,7 @@ mod tests {
         let parsed = [event.clone(), revision.clone(), comment.clone()]
             .into_iter()
             .map(|event| parse_tracker_event(&event, snapshot_at).expect("SDK parse"));
-        let expected = fold_tracker_events(
-            parsed,
-            &authorization_from_membership(&membership, &managed_signer),
-        );
+        let expected = fold_tracker_events(parsed, &authorization_from_membership(&membership));
         let expected_projects = fold_tracker_projects_at(
             [project],
             workspace_id,
@@ -739,18 +772,18 @@ mod tests {
         assert_eq!(actual["comments"][0]["body"], "Canonical comment");
         assert_eq!(actual["linkedTasks"][0]["taskId"], task_id.to_string());
         assert_eq!(actual["linkedTasks"][0]["title"], "Canonical linked task");
-        assert_eq!(actual["linkedTasks"][0]["status"], "picked_up");
-        assert_eq!(actual["viewerRole"], "maintainer");
+        assert_eq!(actual["linkedTasks"][0]["status"], "assigned");
+        assert_eq!(actual["viewerRole"], "member");
         let task_diagnostics = actual["taskDiagnostics"]
             .as_array()
             .expect("task diagnostics");
         assert_eq!(task_diagnostics.len(), 2);
         assert!(task_diagnostics.iter().any(|message| message
             .as_str()
-            .is_some_and(|message| message.contains("not a workspace member"))));
+            .is_some_and(|message| message.contains("does not authorize"))));
         assert!(task_diagnostics.iter().any(|message| message
             .as_str()
-            .is_some_and(|message| message.contains("outside the Tracker workspace"))));
+            .is_some_and(|message| message.contains("no explicit link"))));
         assert_eq!(actual["diagnostics"], json!([]));
     }
 

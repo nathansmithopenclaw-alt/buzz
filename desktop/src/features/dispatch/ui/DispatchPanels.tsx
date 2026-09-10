@@ -1,3 +1,4 @@
+import { useIssueAlias } from "./DispatchAliases";
 import type * as React from "react";
 import {
   AlertTriangle,
@@ -27,10 +28,8 @@ import {
   assigneeLabel,
   blockedIssueIds,
   filterDispatchIssues,
-  groupDispatchIssues,
   projectLabel,
   shortPubkey,
-  sortDispatchBoardIssues,
   sortDispatchIssues,
   statusLabel,
   type DispatchFilters,
@@ -39,15 +38,6 @@ import {
   type DispatchSort,
   type DispatchSortKey,
 } from "../viewModel";
-
-const BOARD_STATUSES: DispatchStatus[] = [
-  "triage",
-  "backlog",
-  "in_progress",
-  "in_review",
-  "done",
-];
-const CARD_LIMIT = 3;
 
 const selectClassName =
   "h-8 rounded-lg border border-input/40 bg-background px-2 text-xs text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring";
@@ -150,7 +140,14 @@ function AssigneeAvatar({
   );
 }
 
-function IssueIdentifier({ issue }: { issue: DispatchIssue }) {
+function IssueIdentifier({
+  issue,
+  identifier,
+}: {
+  issue: DispatchIssue;
+  identifier?: string;
+}) {
+  const alias = useIssueAlias(issue);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -159,7 +156,7 @@ function IssueIdentifier({ issue }: { issue: DispatchIssue }) {
           data-testid="dispatch-issue-identifier"
           title={issue.identifier}
         >
-          {issue.identifier}
+          {identifier ?? alias}
         </span>
       </TooltipTrigger>
       <TooltipContent className="max-w-sm break-all">
@@ -169,14 +166,22 @@ function IssueIdentifier({ issue }: { issue: DispatchIssue }) {
   );
 }
 
-function IssueCard({
+export function IssueCard({
   issue,
+  identifier,
   project,
   profiles,
   blocked,
   onOpenIssue,
+  draggable,
+  onDragStart,
+  onDragEnd,
 }: {
   issue: DispatchIssue;
+  identifier?: string;
+  draggable?: boolean;
+  onDragStart?: React.DragEventHandler<HTMLButtonElement>;
+  onDragEnd?: React.DragEventHandler<HTMLButtonElement>;
   project: DispatchProject | undefined;
   profiles: DispatchProfileMap;
   blocked: boolean;
@@ -188,13 +193,16 @@ function IssueCard({
         "flex w-full flex-col gap-2 rounded-lg border border-border/55 bg-card p-2.5 text-left shadow-xs transition-colors hover:bg-accent/45 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
         issue.status === "done" && "opacity-60",
       )}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
       data-testid="dispatch-issue-card"
       onClick={() => onOpenIssue(issue.issueId)}
       type="button"
     >
       <span className="flex w-full min-w-0 items-center gap-1.5">
         <StatusGlyph status={issue.status} />
-        <IssueIdentifier issue={issue} />
+        <IssueIdentifier issue={issue} identifier={identifier} />
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
           {blocked ? (
             <Tooltip>
@@ -235,7 +243,7 @@ function IssueCard({
   );
 }
 
-function DispatchFiltersBar({
+export function DispatchFiltersBar({
   filters,
   issues,
   projects,
@@ -388,138 +396,12 @@ function DispatchFiltersBar({
   );
 }
 
-export function DispatchBoardPanel({
-  filters,
-  groupBy,
-  issues,
-  onFiltersChange,
-  onGroupByChange,
-  projects,
-  profiles,
-  onOpenIssue,
-  onShowMore,
-}: {
-  filters: DispatchFilters;
-  groupBy: DispatchGroupBy;
-  issues: DispatchIssue[];
-  onFiltersChange: (filters: DispatchFilters) => void;
-  onGroupByChange: (groupBy: DispatchGroupBy) => void;
-  projects: DispatchProject[];
-  profiles: DispatchProfileMap;
-  onOpenIssue: (issueId: string) => void;
-  onShowMore: (input: {
-    excludedIssueIds: string[];
-    groupBy: DispatchGroupBy;
-    groupId: string;
-  }) => void;
-}) {
-  const filtered = filterDispatchIssues(issues, filters);
-  const ordered = sortDispatchBoardIssues(filtered, projects, profiles);
-  const grouped = groupDispatchIssues(ordered, groupBy, projects, profiles);
-  const groups =
-    groupBy === "status"
-      ? filtered.length === 0
-        ? []
-        : [
-            ...BOARD_STATUSES.map(
-              (status) =>
-                grouped.find((group) => group.id === status) ?? {
-                  id: status,
-                  label: statusLabel(status),
-                  issues: [],
-                },
-            ),
-            ...grouped.filter(
-              (group) =>
-                !BOARD_STATUSES.includes(group.id as DispatchStatus) &&
-                group.issues.length > 0,
-            ),
-          ]
-      : grouped;
-  const blocked = blockedIssueIds(issues);
-  return (
-    <div
-      className="flex min-h-0 flex-1 flex-col"
-      data-testid="dispatch-board-mount"
-    >
-      <DispatchFiltersBar
-        filters={filters}
-        groupBy={groupBy}
-        issues={issues}
-        onChange={onFiltersChange}
-        onGroupByChange={onGroupByChange}
-        projects={projects}
-      />
-      <div
-        className="flex min-h-0 flex-1 items-start gap-3 overflow-x-auto p-4"
-        data-testid="dispatch-board"
-      >
-        {groups.map((group) => (
-          <section
-            className="w-[262px] shrink-0"
-            data-testid={`dispatch-group-${group.id}`}
-            key={group.id}
-          >
-            <header className="flex items-center gap-2 px-1.5 pb-2.5 text-xs font-semibold">
-              {groupBy === "status" ? (
-                <StatusGlyph status={group.id as DispatchStatus} />
-              ) : null}
-              <span className="truncate">{group.label}</span>
-              <span className="font-normal text-muted-foreground">
-                {group.issues.length}
-              </span>
-            </header>
-            <div className="flex flex-col gap-2">
-              {group.issues.slice(0, CARD_LIMIT).map((issue) => (
-                <IssueCard
-                  blocked={blocked.has(issue.issueId)}
-                  issue={issue}
-                  key={issue.issueId}
-                  onOpenIssue={onOpenIssue}
-                  profiles={profiles}
-                  project={projects.find(
-                    (project) => project.projectId === issue.projectId,
-                  )}
-                />
-              ))}
-              {group.issues.length > CARD_LIMIT ? (
-                <button
-                  aria-label={`View ${group.issues.length - CARD_LIMIT} more ${group.label} issues in List`}
-                  className="rounded-md py-1 text-center text-2xs text-muted-foreground transition-colors hover:bg-accent/45 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-                  data-testid={`dispatch-more-${group.id}`}
-                  onClick={() =>
-                    onShowMore({
-                      excludedIssueIds: group.issues
-                        .slice(0, CARD_LIMIT)
-                        .map((issue) => issue.issueId),
-                      groupBy,
-                      groupId: group.id,
-                    })
-                  }
-                  type="button"
-                >
-                  + {group.issues.length - CARD_LIMIT} more
-                </button>
-              ) : null}
-            </div>
-          </section>
-        ))}
-        {groups.length === 0 ? (
-          <div className="m-auto text-sm text-muted-foreground">
-            No issues match these filters.
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
 const LIST_COLUMNS: Array<{ key: DispatchSortKey; label: string }> = [
   { key: "identifier", label: "Issue" },
   { key: "title", label: "Title" },
   { key: "status", label: "Status" },
   { key: "priority", label: "Priority" },
-  { key: "assignee", label: "Assignee" },
+  { key: "assignee", label: "Owner" },
   { key: "project", label: "Project" },
   { key: "due", label: "Due" },
 ];
@@ -546,6 +428,8 @@ export function DispatchListPanel({
   onOpenIssue,
   onSortChange,
   sort,
+  selected = [],
+  onSelection,
 }: {
   excludedIssueIds: string[];
   filters: DispatchFilters;
@@ -557,6 +441,8 @@ export function DispatchListPanel({
   onOpenIssue: (issueId: string) => void;
   onSortChange: (sort: DispatchSort) => void;
   sort: DispatchSort;
+  selected?: string[];
+  onSelection?: (ids: string[]) => void;
 }) {
   const filtered = filterDispatchIssues(issues, filters);
   const excluded = new Set(excludedIssueIds);
@@ -605,6 +491,27 @@ export function DispatchListPanel({
         >
           <thead className="sticky top-0 z-10 bg-background">
             <tr className="border-b border-border/55 text-left text-muted-foreground">
+              {onSelection ? (
+                <th className="w-10 px-3">
+                  <input
+                    type="checkbox"
+                    aria-label="Select up to 50 matching issues"
+                    checked={
+                      sorted.length > 0 &&
+                      sorted
+                        .slice(0, 50)
+                        .every((issue) => selected.includes(issue.issueId))
+                    }
+                    onChange={(event) =>
+                      onSelection(
+                        event.target.checked
+                          ? sorted.slice(0, 50).map((issue) => issue.issueId)
+                          : [],
+                      )
+                    }
+                  />
+                </th>
+              ) : null}
               {LIST_COLUMNS.map((column) => (
                 <th className="px-3 py-2 font-medium" key={column.key}>
                   <button
@@ -637,14 +544,44 @@ export function DispatchListPanel({
                 key={issue.issueId}
                 onClick={() => onOpenIssue(issue.issueId)}
               >
-                <td className="w-40 max-w-40 px-3 py-2">
+                {onSelection ? (
+                  <td className="w-10 px-3">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${issue.title}`}
+                      checked={selected.includes(issue.issueId)}
+                      disabled={
+                        selected.length >= 50 &&
+                        !selected.includes(issue.issueId)
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) =>
+                        onSelection(
+                          event.target.checked
+                            ? [...selected, issue.issueId]
+                            : selected.filter((id) => id !== issue.issueId),
+                        )
+                      }
+                    />
+                  </td>
+                ) : null}
+                <td className="w-28 max-w-28 px-3 py-2">
                   <IssueIdentifier issue={issue} />
                 </td>
                 <td
                   className="max-w-sm truncate px-3 py-2 font-medium"
                   title={issue.title}
                 >
-                  {issue.title}
+                  <button
+                    type="button"
+                    className="w-full truncate text-left focus-visible:underline"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenIssue(issue.issueId);
+                    }}
+                  >
+                    {issue.title}
+                  </button>
                 </td>
                 <td className="px-3 py-2">
                   <span className="flex items-center gap-1.5">

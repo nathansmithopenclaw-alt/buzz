@@ -1,3 +1,5 @@
+import { parseDispatchLink } from "@/features/dispatch/dispatchLink";
+import { DispatchLinkAnchor } from "@/features/dispatch/ui/DispatchLinkAnchor";
 import { parseSummaryLink } from "@/features/pulse/lib/summaryLink";
 import { SummaryLinkAnchor } from "@/features/pulse/ui/SummaryLinkAnchor";
 import { ImageZoomOverlay } from "./markdown/ImageZoomOverlay";
@@ -476,6 +478,12 @@ export function createMarkdownComponents(
       // Malformed message deep links fall through to external handling.
     }
 
+    if (href && parseDispatchLink(href))
+      return interactive ? (
+        <DispatchLinkAnchor href={href}>{children}</DispatchLinkAnchor>
+      ) : (
+        <span>{children}</span>
+      );
     if (href && parseSummaryLink(href))
       return <SummaryLinkAnchor href={href}>{children}</SummaryLinkAnchor>;
 

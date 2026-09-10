@@ -78,7 +78,11 @@ mod team_snapshot;
 mod teams;
 mod tracker;
 mod tracker_cache;
+mod tracker_diagnostics;
 mod tracker_mutations;
+mod tracker_tasks;
+#[cfg(test)]
+mod tracker_tasks_tests;
 mod updater;
 mod window_chrome;
 mod window_vibrancy;
@@ -154,3 +158,5 @@ pub use workspace::*;
 
 mod summary;
 pub use summary::*;
+
+mod tracker_automation;

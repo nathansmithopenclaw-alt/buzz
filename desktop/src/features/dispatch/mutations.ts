@@ -1,13 +1,21 @@
-import { relayClient } from "@/shared/api/relayClient";
+import {
+  retainIssueWrite,
+  acknowledgeIssueWrite,
+  publishRetainedIssueWrite,
+} from "./issueWriteRecovery";
+import { dispatchHistoryClient } from "./relayHistory";
 import type { RelayEvent } from "@/shared/api/types";
-import { invokeTauri, signRelayEvent } from "@/shared/api/tauri";
+import { getRelayWsUrl, invokeTauri, signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
+import { editRevisionFields, type DispatchIssueEdit } from "./issueEditing";
 import type {
   DispatchComment,
   DispatchContext,
   DispatchIssue,
   DispatchPriority,
   DispatchStatus,
+  DispatchDue,
+  DispatchExternalRef,
 } from "./types";
 
 type TrackerUnsignedEvent = {
@@ -28,13 +36,13 @@ type TrackerIssueWire = {
   priority: DispatchPriority | null;
   assignee: string | null;
   project_id: string | null;
-  due: null;
-  estimate_minutes: null;
+  due: DispatchDue | null;
+  estimate_minutes: number | null;
   home_channel_id: string;
-  source_event_id: null;
+  source_event_id: string | null;
   workflow: "default-v1";
   labels: string[];
-  external_refs: never[];
+  external_refs: DispatchExternalRef[];
   request_id: string;
   import: null;
 };
@@ -50,6 +58,11 @@ export type DispatchIssueCreateInput = {
   projectId: string | null;
   labels: string[];
   assignee: string | null;
+  due?: DispatchDue | null;
+  estimateMinutes?: number | null;
+  homeChannelId?: string;
+  sourceEventId?: string | null;
+  externalRefs?: DispatchExternalRef[];
 };
 
 type TrackerRevisionWire = {
@@ -61,8 +74,8 @@ type TrackerRevisionWire = {
   revision: number;
   set: Record<string, unknown>;
   clear: string[];
-  relations: { add: never[]; remove: never[] };
-  external_refs: { add: never[]; remove: never[] };
+  relations: ReturnType<typeof editRevisionFields>["relations"];
+  external_refs: { add: DispatchExternalRef[]; remove: DispatchExternalRef[] };
   reason: string | null;
   request_id: string;
   import: null;
@@ -79,10 +92,19 @@ type TrackerCommentWire = {
 export type DispatchIssueMutation =
   | { type: "status"; status: DispatchStatus; reason: string | null }
   | { type: "assignee"; assignee: string | null }
-  | { type: "priority"; priority: DispatchPriority | null };
+  | { type: "priority"; priority: DispatchPriority | null }
+  | {
+      type: "edit";
+      fields: DispatchIssueEdit;
+      expectedTip: string;
+      reason?: string;
+    };
 
 type MutationDependencies = {
   identity: () => Promise<{ pubkey: string }>;
+  relay?: () => Promise<string>;
+  retain?: (event: RelayEvent, relay: string) => Promise<RelayEvent>;
+  acknowledge?: (event: RelayEvent, relay?: string) => Promise<void>;
   buildIssue: (input: {
     streamId: string;
     root: TrackerIssueWire;
@@ -106,6 +128,7 @@ type MutationDependencies = {
     event: RelayEvent,
     timeoutMessage: string,
     failureMessage: string,
+    relay?: string,
   ) => Promise<unknown>;
   fetchRequestEvents: (streamId: string) => Promise<RelayEvent[]>;
 };
@@ -115,38 +138,17 @@ type MutationDependencies = {
 export const TRACKER_REQUEST_MATCH_KINDS = [40020, 40021, 40022, 40025, 30621];
 
 async function fetchRequestEvents(streamId: string): Promise<RelayEvent[]> {
-  const events = new Map<string, RelayEvent>();
-  let until: number | undefined;
-  for (;;) {
-    const page = await relayClient.fetchEvents({
-      kinds: TRACKER_REQUEST_MATCH_KINDS,
-      "#h": [streamId],
-      limit: 500,
-      ...(until === undefined ? {} : { until }),
-    });
-    for (const event of page) events.set(event.id, event);
-    if (page.length < 500) return [...events.values()];
-    const oldest = Math.min(...page.map((event) => event.created_at));
-    const boundary = await relayClient.fetchEvents({
-      kinds: TRACKER_REQUEST_MATCH_KINDS,
-      "#h": [streamId],
-      since: oldest,
-      until: oldest,
-      limit: 500,
-    });
-    for (const event of boundary) events.set(event.id, event);
-    if (boundary.length >= 500) {
-      throw new Error(
-        "Tracker create idempotency cannot exhaust a timestamp boundary.",
-      );
-    }
-    if (oldest <= 0) return [...events.values()];
-    until = oldest - 1;
-  }
+  return dispatchHistoryClient().fetchExhaustively({
+    kinds: TRACKER_REQUEST_MATCH_KINDS,
+    "#h": [streamId],
+  });
 }
 
 const defaultDependencies: MutationDependencies = {
   identity: getIdentity,
+  relay: getRelayWsUrl,
+  retain: retainIssueWrite,
+  acknowledge: acknowledgeIssueWrite,
   buildIssue: (input) =>
     invokeTauri<TrackerUnsignedEvent>("build_tracker_issue_event", input),
   buildRevision: (input) =>
@@ -161,8 +163,8 @@ const defaultDependencies: MutationDependencies = {
       tags: shape.tags,
       allowSelfTagging: true,
     }),
-  publish: (event, timeoutMessage, failureMessage) =>
-    relayClient.publishEvent(event, timeoutMessage, failureMessage),
+  publish: (event, timeoutMessage, failureMessage, relay) =>
+    publishRetainedIssueWrite(event, timeoutMessage, failureMessage, relay),
   fetchRequestEvents,
 };
 
@@ -183,6 +185,7 @@ function sameCreateRequest(
 ): boolean {
   return (
     existing.kind === candidate.kind &&
+    existing.pubkey === candidate.pubkey &&
     existing.content === candidate.content &&
     JSON.stringify(semanticTags(existing.tags)) ===
       JSON.stringify(semanticTags(candidate.tags))
@@ -218,6 +221,7 @@ export async function publishDispatchIssueCreate(
   const title = input.title.trim();
   if (!title) throw new Error("Issue title cannot be empty.");
   const labels = normalizeLabels(input.labels);
+  const relayScope = await dependencies.relay?.();
   const identity = await dependencies.identity();
   const issueId = input.requestId;
   const root: TrackerIssueWire = {
@@ -231,13 +235,13 @@ export async function publishDispatchIssueCreate(
     priority: input.priority,
     assignee: input.assignee,
     project_id: input.projectId,
-    due: null,
-    estimate_minutes: null,
-    home_channel_id: input.streamId,
-    source_event_id: null,
+    due: input.due ?? null,
+    estimate_minutes: input.estimateMinutes ?? null,
+    home_channel_id: input.homeChannelId ?? input.streamId,
+    source_event_id: input.sourceEventId ?? null,
     workflow: "default-v1",
     labels,
-    external_refs: [],
+    external_refs: input.externalRefs ?? [],
     request_id: input.requestId,
     import: null,
   };
@@ -247,6 +251,8 @@ export async function publishDispatchIssueCreate(
     authorPubkey: identity.pubkey,
   });
   const candidate = await dependencies.sign(shape);
+  if (candidate.pubkey !== identity.pubkey)
+    throw new Error("Identity changed while signing. Your draft was retained.");
   const matches = (
     await dependencies.fetchRequestEvents(input.streamId)
   ).filter((event) => hasRequestTag(event, input.requestId));
@@ -267,10 +273,15 @@ export async function publishDispatchIssueCreate(
     event = existing;
     replayed = true;
   } else {
+    event =
+      dependencies.retain && relayScope
+        ? await dependencies.retain(candidate, relayScope)
+        : candidate;
     await dependencies.publish(
-      candidate,
+      event,
       "Timed out creating issue. Retry keeps the same request ID.",
       "Failed to create issue.",
+      relayScope,
     );
   }
   const context = await refresh();
@@ -282,6 +293,7 @@ export async function publishDispatchIssueCreate(
       "Issue reached the relay but is not visible in the canonical fold yet. Retry to reconcile it.",
     );
   }
+  await dependencies.acknowledge?.(event, relayScope);
   return { issue, replayed };
 }
 
@@ -297,7 +309,7 @@ export class TrackerMutationConflictError extends Error {
 export class TrackerRevisionRejectedError extends Error {
   constructor(reason: string) {
     super(
-      `The status change was not applied. Canonical fold rejected the revision: ${reason}`,
+      `The update was not applied. The issue history rejected the revision: ${reason}`,
     );
     this.name = "TrackerRevisionRejectedError";
   }
@@ -319,20 +331,46 @@ export function canApplyDispatchMutation(
   viewerRole: DispatchContext["viewerRole"],
 ): boolean {
   if (viewerRole === "none") return false;
-  if (mutation.type !== "status") return true;
+  if (
+    mutation.type === "edit" &&
+    mutation.fields.identifier !== undefined &&
+    mutation.fields.identifier !== issue.identifier &&
+    viewerRole !== "maintainer"
+  )
+    return false;
+  const nextStatus =
+    mutation.type === "status"
+      ? mutation.status
+      : mutation.type === "edit"
+        ? mutation.fields.status
+        : undefined;
+  if (nextStatus === undefined) return true;
   const terminal = (status: DispatchStatus) =>
     status === "done" || status === "cancelled";
-  return !terminal(issue.status) && !terminal(mutation.status)
+  return !terminal(issue.status) && !terminal(nextStatus)
     ? true
     : viewerRole === "maintainer";
 }
 
-function mutationFields(mutation: DispatchIssueMutation): {
+function mutationFields(
+  mutation: DispatchIssueMutation,
+  issue: DispatchIssue,
+): {
   set: Record<string, unknown>;
   clear: string[];
   reason: string | null;
 } {
   switch (mutation.type) {
+    case "edit": {
+      if (mutation.expectedTip !== issue.tipEvent)
+        throw new TrackerMutationConflictError();
+      const fields = editRevisionFields(issue, mutation.fields);
+      return {
+        set: fields.set,
+        clear: fields.clear,
+        reason: mutation.reason?.trim() || null,
+      };
+    }
     case "status": {
       if (mutation.reason !== null && !mutation.reason.trim()) {
         throw new Error("Status change reason must be non-empty when present.");
@@ -366,6 +404,8 @@ function optimisticIssue(
     revision: issue.revision + 1,
   };
   switch (mutation.type) {
+    case "edit":
+      return { ...base, ...mutation.fields };
     case "status":
       return {
         ...base,
@@ -403,8 +443,13 @@ export async function publishDispatchIssueMutation(
   if (!canApplyDispatchMutation(issue, mutation, viewerRole)) {
     throw new Error("Your Tracker role does not allow this issue transition.");
   }
+  const relayScope = await dependencies.relay?.();
   const identity = await dependencies.identity();
-  const fields = mutationFields(mutation);
+  const fields = mutationFields(mutation, issue);
+  const edits =
+    mutation.type === "edit"
+      ? editRevisionFields(issue, mutation.fields)
+      : null;
   const revision: TrackerRevisionWire = {
     v: 1,
     op: "revise",
@@ -414,8 +459,8 @@ export async function publishDispatchIssueMutation(
     revision: issue.revision + 1,
     set: fields.set,
     clear: fields.clear,
-    relations: { add: [], remove: [] },
-    external_refs: { add: [], remove: [] },
+    relations: edits?.relations ?? { add: [], remove: [] },
+    external_refs: edits?.external_refs ?? { add: [], remove: [] },
     reason: fields.reason,
     request_id: crypto.randomUUID(),
     import: null,
@@ -425,7 +470,13 @@ export async function publishDispatchIssueMutation(
     revision,
     authorPubkey: identity.pubkey,
   });
-  const event = await dependencies.sign(shape);
+  const signed = await dependencies.sign(shape);
+  if (signed.pubkey !== identity.pubkey)
+    throw new Error("Identity changed while signing. Your draft was retained.");
+  const event =
+    dependencies.retain && relayScope
+      ? await dependencies.retain(signed, relayScope)
+      : signed;
   const optimistic = optimisticIssue(issue, mutation, event);
   onOptimistic(optimistic);
   try {
@@ -433,6 +484,7 @@ export async function publishDispatchIssueMutation(
       event,
       "Timed out updating issue.",
       "Failed to update issue.",
+      relayScope,
     );
     const context = await refresh();
     const canonical = context.issues.find(
@@ -451,6 +503,7 @@ export async function publishDispatchIssueMutation(
       await refresh();
       throw new TrackerMutationConflictError();
     }
+    await dependencies.acknowledge?.(event, relayScope);
     return canonical;
   } catch (error) {
     if (
@@ -483,6 +536,7 @@ export async function publishDispatchComment(
 ): Promise<string> {
   const trimmedBody = body.trim();
   if (!trimmedBody) throw new Error("Comment cannot be empty.");
+  const relayScope = await dependencies.relay?.();
   const identity = await dependencies.identity();
   const comment: TrackerCommentWire = {
     v: 1,
@@ -499,7 +553,13 @@ export async function publishDispatchComment(
     mentions,
     authorPubkey: identity.pubkey,
   });
-  const event = await dependencies.sign(shape);
+  const signed = await dependencies.sign(shape);
+  if (signed.pubkey !== identity.pubkey)
+    throw new Error("Identity changed while signing. Your draft was retained.");
+  const event =
+    dependencies.retain && relayScope
+      ? await dependencies.retain(signed, relayScope)
+      : signed;
   onOptimistic({
     issueId: issue.issueId,
     eventId: event.id,
@@ -516,8 +576,19 @@ export async function publishDispatchComment(
       event,
       "Timed out adding comment.",
       "Failed to add comment.",
+      relayScope,
     );
-    await refresh();
+    const context = await refresh();
+    if (
+      !context.comments.some(
+        (comment) =>
+          comment.eventId === event.id && comment.issueId === issue.issueId,
+      )
+    )
+      throw new Error(
+        "The comment was sent but is not yet confirmed in accepted history. Your exact comment is saved for retry.",
+      );
+    await dependencies.acknowledge?.(event, relayScope);
     return event.id;
   } catch (error) {
     onRollback(event.id);
