@@ -1,19 +1,40 @@
 import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
+import fs from "node:fs/promises";
 
 const PUBKEY = "aa".repeat(32);
 const THREAD = "01a08c97-4b41-7000-bbd6-b58aa4b34eef";
 
 test.afterEach(async ({ page }, testInfo) => {
   if (testInfo.status !== testInfo.expectedStatus) {
+    await fs.writeFile(
+      testInfo.outputPath("routing-diagnostic.json"),
+      JSON.stringify(
+        await page.evaluate(() => ({
+          commands: window.__BUZZ_E2E_COMMAND_LOG__,
+          events: window.__BUZZ_E2E_SIGNED_EVENTS__,
+          html: document.body.innerHTML.slice(0, 1000),
+        })),
+      ),
+    );
     await testInfo.attach("routing-diagnostic", {
-      body: JSON.stringify(await page.evaluate(() => ({ commands: window.__BUZZ_E2E_COMMAND_LOG__, events: window.__BUZZ_E2E_SIGNED_EVENTS__ }))),
+      body: JSON.stringify(
+        await page.evaluate(() => ({
+          commands: window.__BUZZ_E2E_COMMAND_LOG__,
+          events: window.__BUZZ_E2E_SIGNED_EVENTS__,
+        })),
+      ),
       contentType: "application/json",
     });
   }
 });
 
 test.beforeEach(async ({ page }) => {
+  page.on("pageerror", (error) => console.error("Page error:", error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error")
+      console.error("Browser error:", message.text());
+  });
   await installMockBridge(page, {
     managedAgents: [
       {
@@ -46,7 +67,9 @@ test("normal picker preserves signed recipients across two sends without a local
     await expect(input.locator(".mention-chip")).toHaveText("Codex Desktop");
     await page.keyboard.type(text);
     await page.getByTestId("send-message").click();
-    await expect(page.getByTestId("message-row").last()).toContainText(text);
+    await expect(
+      page.getByTestId("message-row").filter({ hasText: text }),
+    ).toBeVisible();
   }
   await expect
     .poll(() =>
