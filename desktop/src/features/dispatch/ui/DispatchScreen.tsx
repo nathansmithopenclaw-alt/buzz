@@ -144,6 +144,12 @@ export function DispatchScreen() {
     workspaceQuery.workspaces.find(
       (workspace) => workspace.id === workspaceId,
     ) ?? null;
+  React.useEffect(() => {
+    // Automatic and deep-linked selections must warm the next launch too.
+    // Persist only an id confirmed by this community's current discovery.
+    if (activeWorkspace?.id)
+      setStorageItem(LAST_WORKSPACE_KEY, activeWorkspace.id);
+  }, [activeWorkspace?.id]);
   const view = (values.view as DispatchView | null) ?? "board";
   const filters = dispatchFiltersFromSearch(values);
   const groupBy = (values.group as DispatchGroupBy | null) ?? "status";

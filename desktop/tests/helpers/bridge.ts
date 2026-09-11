@@ -157,6 +157,7 @@ type MockBridgeOptions = {
   windowLabel?: string;
   /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */
   dispatch?: {
+    assignmentAckDelayMs?: number;
     workspace: { id: string; name: string };
     workspaces?: Array<{ id: string; name: string; populated: boolean }>;
     context: DispatchContext;

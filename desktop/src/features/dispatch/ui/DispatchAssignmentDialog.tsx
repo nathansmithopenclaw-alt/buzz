@@ -327,7 +327,7 @@ export function DispatchAssignmentDialog({
                   </label>
                 </div>
               ) : null}
-              {base.tipEvent !== issue.tipEvent ? (
+              {!busy && base.tipEvent !== issue.tipEvent ? (
                 <p role="status" className="text-sm text-warning">
                   The issue changed during this preview. Close and reopen to
                   review the latest scope.

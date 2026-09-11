@@ -239,6 +239,7 @@ type E2eConfig = {
     windowLabel?: string;
     /** Canonical-fold projection plus relay discovery fixture for Dispatch E2E. */
     dispatch?: {
+      assignmentAckDelayMs?: number;
       workspace: { id: string; name: string };
       workspaces?: Array<{ id: string; name: string; populated: boolean }>;
       context: DispatchContext;
@@ -11665,7 +11666,18 @@ function sendToMockSocket(args: {
         ]);
         return;
       }
-      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      const assignmentDelay =
+        event.kind === 9
+          ? (getConfig()?.mock?.dispatch?.assignmentAckDelayMs ?? 0)
+          : 0;
+      if (assignmentDelay) {
+        setTimeout(
+          () => sendWsText(socket.handler, ["OK", event.id, true, ""]),
+          assignmentDelay,
+        );
+      } else {
+        sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      }
       return;
     }
     if (event.kind === KIND_AGENT_OBSERVER_FRAME) {

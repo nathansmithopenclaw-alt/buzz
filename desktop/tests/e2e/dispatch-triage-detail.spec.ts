@@ -158,7 +158,11 @@ function context(overrides: Partial<DispatchContext> = {}): DispatchContext {
 async function openDispatch(
   page: import("@playwright/test").Page,
   dispatchContext = context(),
-  dispatchOptions: { rejectNextRevision?: boolean; members?: string[] } = {},
+  dispatchOptions: {
+    rejectNextRevision?: boolean;
+    members?: string[];
+    assignmentAckDelayMs?: number;
+  } = {},
 ) {
   await installMockBridge(page, {
     dispatch: {
@@ -1032,7 +1036,10 @@ test("human assignment confirms its issue link before notifying the executor and
   );
   if (!primary) throw new Error("Primary fixture issue is missing");
   primary.assignee = SELF;
-  await openDispatch(page, fixture, { members: [SELF, OTHER] });
+  await openDispatch(page, fixture, {
+    members: [SELF, OTHER],
+    assignmentAckDelayMs: 2500,
+  });
   await openPrimaryIssue(page);
   await page
     .getByRole("button", { name: "Assign execution", exact: true })
@@ -1059,7 +1066,27 @@ test("human assignment confirms its issue link before notifying the executor and
       exact: true,
     })
     .click();
-  await expect(dialog).not.toBeVisible();
+  // Hold the assignment acknowledgement after the issue link is accepted.
+  // That expected link update must not appear as an unrelated stale edit.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() =>
+          (window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? []).some(
+            (event) => event.kind === 9,
+          ),
+        ),
+      { timeout: 15000 },
+    )
+    .toBe(true);
+  expect(
+    await dialog
+      .getByText("The issue changed during this preview.", { exact: false })
+      .count(),
+  ).toBe(0);
+  // The transaction reads current authority, links the issue, then confirms
+  // accepted task history; allow those reads plus the delayed acknowledgement.
+  await expect(dialog).not.toBeVisible({ timeout: 15000 });
   await expect(
     page.getByText(
       "Assignment confirmed in accepted task history. The issue owner is unchanged.",

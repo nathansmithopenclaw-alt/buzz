@@ -101,3 +101,24 @@ test("saved issues paint before slow synchronization and then become current", a
     page.getByRole("button", { name: /Current issue after synchronization/ }),
   ).toBeVisible({ timeout: 1000 });
 });
+
+test("an automatically selected workspace is remembered for the next launch", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    dispatch: {
+      workspace: { id: workspace, name: "Remembered workspace" },
+      context: { ...preview, viewerRole: "maintainer" },
+    },
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-dispatch-view").click();
+  await expect(page.getByTestId("dispatch-new-issue")).toBeEnabled();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        localStorage.getItem("buzz-dispatch-last-workspace-v1"),
+      ),
+    )
+    .toBe(workspace);
+});
