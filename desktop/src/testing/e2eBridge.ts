@@ -227,6 +227,8 @@ type E2eConfig = {
   mock?: {
     /** Critical root/history failure raised by the Dispatch fold command. */
     dispatchFoldError?: string;
+    dispatchCachedPreview?: DispatchContext;
+    dispatchResumeDelayMs?: number;
     /** Number of canonical Dispatch history REQs rejected once with a 1s hint. */
     dispatchHistoryRateLimitCount?: number;
     /** Persisted Rust-owned Dispatch cache cursor exposed on warm start. */
@@ -13247,9 +13249,17 @@ export function maybeInstallE2eTauriMocks() {
         }
         return structuredClone(mockDispatchContext);
       }
+      case "read_tracker_context_cache":
+        return activeConfig?.mock?.dispatchCachedPreview
+          ? structuredClone(activeConfig.mock.dispatchCachedPreview)
+          : null;
       case "tracker_fold_cursor":
         return activeConfig?.mock?.dispatchWarmCursor ?? null;
       case "resume_tracker_context": {
+        if (activeConfig?.mock?.dispatchResumeDelayMs)
+          await new Promise((resolve) =>
+            setTimeout(resolve, activeConfig.mock?.dispatchResumeDelayMs),
+          );
         if (!mockDispatchContext) {
           throw new Error("No mocked Dispatch fold is configured.");
         }

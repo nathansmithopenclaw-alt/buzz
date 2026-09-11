@@ -39,3 +39,12 @@ export function resumeTrackerContext<T>(
 ): Promise<T> {
   return invokeTauri<T>("resume_tracker_context", input);
 }
+
+/** Reconstruct a read-only local preview after current workspace membership is checked. */
+export function readTrackerContextCache<T>(input: {
+  workspaceId: string;
+  managedSigner: string;
+  membershipEvent: RelayEvent;
+}): Promise<T | null> {
+  return invokeTauri<T | null>("read_tracker_context_cache", input);
+}

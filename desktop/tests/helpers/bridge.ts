@@ -149,6 +149,8 @@ type MockInstallRuntimeResult = {
 
 type MockBridgeOptions = {
   dispatchFoldError?: string;
+  dispatchCachedPreview?: DispatchContext;
+  dispatchResumeDelayMs?: number;
   /** Number of canonical Dispatch history REQs rejected once with a 1s hint. */
   dispatchHistoryRateLimitCount?: number;
   /** Tauri window label exposed to the app. Defaults to the main window. */

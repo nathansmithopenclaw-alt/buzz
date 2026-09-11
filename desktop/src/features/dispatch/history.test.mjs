@@ -300,3 +300,28 @@ test("rate-limited page retry is bounded", async () => {
   assert.equal(attempts, 3);
   assert.deepEqual(retryStates, [true, false]);
 });
+
+test("cancelled history does not issue a queued request after its scope closes", async () => {
+  const controller = new AbortController();
+  let release;
+  const waiting = new Promise((resolve) => {
+    release = resolve;
+  });
+  let requests = 0;
+  const history = createDispatchHistoryClient({
+    signal: controller.signal,
+    fetchEvents: async () => {
+      requests++;
+      return [];
+    },
+    fetchEventsMulti: async () => [],
+    waitForRateLimit: async () => waiting,
+    isRateLimited: () => false,
+    activateRateLimit: () => {},
+  });
+  const pending = history.fetch({ kinds: [40020] });
+  controller.abort();
+  release();
+  await assert.rejects(pending, /abort/i);
+  assert.equal(requests, 0);
+});

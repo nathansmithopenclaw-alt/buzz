@@ -9,8 +9,10 @@ import { createDispatchHistoryClient } from "./history";
 
 export function dispatchHistoryClient(
   onRetryingChange?: (value: boolean) => void,
+  signal?: AbortSignal,
 ) {
   return createDispatchHistoryClient({
+    signal,
     fetchEvents: (filter) => relayClient.fetchEvents(filter),
     fetchEventsMulti: (filters) => relayClient.fetchEventsMulti(filters),
     waitForRateLimit,

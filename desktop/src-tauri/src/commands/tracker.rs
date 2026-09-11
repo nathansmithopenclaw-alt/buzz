@@ -14,6 +14,10 @@ use super::tracker_cache::{
 };
 use crate::app_state::AppState;
 
+#[path = "tracker_preview.rs"]
+mod preview;
+pub use preview::read_tracker_context_cache;
+
 fn active_cache_key(
     state: &AppState,
     workspace_id: &str,
@@ -405,7 +409,7 @@ pub fn tracker_fold_cursor(
 ) -> Result<Option<u64>, String> {
     let key = active_cache_key(&state, &workspace_id, &managed_signer)?;
     if let Some(entry) = cache.get(&key)? {
-        return Ok(entry.cursor);
+        return Ok(entry.cursor.filter(|_| entry.complete_records));
     }
     let root = match app.path().app_data_dir() {
         Ok(root) => root,
@@ -424,7 +428,7 @@ pub fn tracker_fold_cursor(
     let Some(entry) = entry else {
         return Ok(None);
     };
-    let cursor = entry.cursor;
+    let cursor = entry.cursor.filter(|_| entry.complete_records);
     cache.seed(key, entry)?;
     Ok(cursor)
 }
@@ -455,6 +459,7 @@ pub fn resume_tracker_context(
     )?;
     if advance_cursor {
         merged.cursor = Some(snapshot_at);
+        merged.complete_records = true;
     }
     cache.seed(key.clone(), merged.clone())?;
     persist_cache_best_effort(&app, &key, &merged);

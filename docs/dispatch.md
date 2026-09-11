@@ -14,6 +14,17 @@ work and recent delivery. Save a personal view on this device or a shared worksp
 view for the team. Routing suggestions explain capacity, capabilities and dependencies.
 Suggestions do not assign work by themselves.
 
+## Open Dispatch quickly
+
+After launch, Buzz prepares your last Dispatch workspace in the background.
+Previously synchronized issues can appear while current history is still loading.
+The saved view is labeled, and editing becomes available after synchronization.
+Opening Dispatch again reuses the current view while checking for updates.
+
+The saved view requires a current workspace membership check. A first visit, a
+changed community or identity, or an unavailable relay can still require loading.
+Use Refresh Dispatch to check for new workspaces and current changes explicitly.
+
 ## Make a clear issue
 
 Edit the title and description directly, or use Edit issue for owner, project,

@@ -1,3 +1,4 @@
+import { DispatchSyncNotice } from "./DispatchSyncNotice";
 import * as React from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -86,8 +87,9 @@ export function DispatchIssueDetailScreen({
   const profiles = useUsersBatchQuery(authors);
   const goBack = () => void navigate({ to: "/dispatch", search: returnSearch });
 
-  if (context.isLoading || workspaces.isLoading) return <IssueDetailSkeleton />;
-  if (context.error)
+  if (context.isLoading || (workspaces.isLoading && !context.isPreview))
+    return <IssueDetailSkeleton />;
+  if (context.error && !context.isPreview)
     return <IssueDetailUnavailable error={context.error} onBack={goBack} />;
   if (!resolvedWorkspace || !issue)
     return (
@@ -150,38 +152,47 @@ export function DispatchIssueDetailScreen({
   };
 
   return (
-    <IssueDetail
-      context={context}
-      refresh={context.refresh}
-      diagnostics={context.diagnostics}
-      activity={context.activity.filter((entry) => entry.issueId === issueId)}
-      comments={selectVisibleComments(
-        context.comments,
-        optimisticComments,
-        issueId,
-      )}
-      currentPubkey={identity.data?.pubkey}
-      issue={issue}
-      issues={context.issues}
-      isMutating={isMutating}
-      onAddComment={addComment}
-      onBack={goBack}
-      onMutate={runMutation}
-      onOpenIssue={(target) =>
-        void navigate({
-          to: "/dispatch/issue/$issueId",
-          params: { issueId: target },
-          search: { ...returnSearch, workspace: resolvedWorkspace },
-        })
-      }
-      profiles={profiles.data?.profiles}
-      profilesError={
-        profiles.error instanceof Error ? profiles.error.message : null
-      }
-      projects={context.projects}
-      role={context.viewerRole}
-      sectionErrors={context.sectionErrors}
-      taskLinks={context.linkedTasks.filter((task) => task.issueId === issueId)}
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      {context.isPreview ? <DispatchSyncNotice error={context.error} /> : null}
+      <div className="min-h-0 flex-1">
+        <IssueDetail
+          context={context}
+          refresh={context.refresh}
+          diagnostics={context.diagnostics}
+          activity={context.activity.filter(
+            (entry) => entry.issueId === issueId,
+          )}
+          comments={selectVisibleComments(
+            context.comments,
+            optimisticComments,
+            issueId,
+          )}
+          currentPubkey={identity.data?.pubkey}
+          issue={issue}
+          issues={context.issues}
+          isMutating={isMutating}
+          onAddComment={addComment}
+          onBack={goBack}
+          onMutate={runMutation}
+          onOpenIssue={(target) =>
+            void navigate({
+              to: "/dispatch/issue/$issueId",
+              params: { issueId: target },
+              search: { ...returnSearch, workspace: resolvedWorkspace },
+            })
+          }
+          profiles={profiles.data?.profiles}
+          profilesError={
+            profiles.error instanceof Error ? profiles.error.message : null
+          }
+          projects={context.projects}
+          role={context.viewerRole}
+          sectionErrors={context.sectionErrors}
+          taskLinks={context.linkedTasks.filter(
+            (task) => task.issueId === issueId,
+          )}
+        />
+      </div>
+    </div>
   );
 }

@@ -599,6 +599,7 @@ pub fn run() {
             get_project_repo_snapshot,
             fold_tracker_context,
             tracker_fold_cursor,
+            read_tracker_context_cache,
             resume_tracker_context,
             fold_tracker_context_incremental,
             get_project_repo_file_content,

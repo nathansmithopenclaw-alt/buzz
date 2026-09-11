@@ -1,3 +1,4 @@
+import { DispatchSyncNotice } from "./DispatchSyncNotice";
 import { DispatchAutomationPanel } from "./DispatchAutomationPanel";
 import { DispatchBulkActions } from "./DispatchBulkActions";
 import { DispatchInsights } from "./DispatchInsights";
@@ -258,7 +259,11 @@ export function DispatchScreen() {
                 >
                   {context.isRetrying
                     ? "Relay busy · retrying…"
-                    : syncedLabel(context.snapshotAt)}
+                    : context.isPreview
+                      ? "Saved issues · updating…"
+                      : context.isRefreshing
+                        ? "Checking for updates…"
+                        : syncedLabel(context.snapshotAt)}
                 </span>
                 <Button
                   aria-label="Refresh Dispatch"
@@ -446,7 +451,10 @@ export function DispatchScreen() {
             </details>
           ) : null}
 
-          {workspaceQuery.isLoading ? (
+          {context.isPreview ? (
+            <DispatchSyncNotice error={context.error} />
+          ) : null}
+          {workspaceQuery.isLoading && !context.isPreview ? (
             <div className="m-auto text-sm text-muted-foreground">
               Discovering Tracker workspaces…
             </div>
@@ -454,11 +462,14 @@ export function DispatchScreen() {
             <div className="m-auto max-w-md text-center text-sm text-destructive">
               {workspaceQuery.error.message}
             </div>
-          ) : workspaceQuery.workspaces.length === 0 ? (
+          ) : !workspaceQuery.isLoading &&
+            workspaceQuery.workspaces.length === 0 ? (
             <div className="m-auto max-w-md text-center text-sm text-muted-foreground">
               No Tracker-enabled member workspaces were found for this identity.
             </div>
-          ) : populatedWorkspaces.length === 0 && !workspaceId ? (
+          ) : !workspaceQuery.isLoading &&
+            populatedWorkspaces.length === 0 &&
+            !workspaceId ? (
             <div className="m-auto max-w-md text-center text-sm text-muted-foreground">
               No populated Dispatch workspaces yet. Use Start Dispatch above to
               choose where new issues will live.
@@ -475,7 +486,7 @@ export function DispatchScreen() {
             >
               Relay is busy; retrying Tracker history…
             </div>
-          ) : context.error ? (
+          ) : context.error && !context.isPreview ? (
             <div className="m-auto max-w-md text-center text-sm text-destructive">
               {context.error.message}
             </div>

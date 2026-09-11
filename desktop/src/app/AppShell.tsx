@@ -218,7 +218,7 @@ export function AppShell() {
   // startup frames can be replayed, so there's no ordering constraint.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useAgentMetricArchiveSeed(deferredPubkey);
-  // Warm Dispatch's workspace list so the first click doesn't pay discovery.
+  // Warm Dispatch's workspace, saved context, and route after first paint.
   // Deferred: it is speculative, and boot already spends the relay's frame
   // budget on channel re-subscription.
   useDispatchWorkspacePrefetch(deferredPubkey);

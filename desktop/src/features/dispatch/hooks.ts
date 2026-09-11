@@ -6,14 +6,11 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { relayClient } from "@/shared/api/relayClient";
 import { MAX_FILTERS_PER_REQ } from "@/shared/api/relayClientShared";
 
-import {
-  foldTrackerContext,
-  foldTrackerContextIncremental,
-  resumeTrackerContext,
-  trackerFoldCursor,
-} from "@/shared/api/tracker";
+import { foldTrackerContextIncremental } from "@/shared/api/tracker";
 import type { RelayEvent } from "@/shared/api/types";
-import { isDispatchHistoryGap, type DispatchHistoryClient } from "./history";
+import type { DispatchHistoryClient } from "./history";
+import { loadDispatchContext } from "./contextLoader";
+import { getStorageItem } from "@/shared/lib/safeStorage";
 import { dispatchHistoryClient } from "./relayHistory";
 import { createDispatchLiveMerge, type DispatchLiveMerge } from "./liveMerge";
 import {
@@ -27,7 +24,6 @@ import type { DispatchContext, DispatchWorkspace } from "./types";
 // live sub and populated-workspace probe must not fetch it.
 export const TRACKER_KINDS = [40020, 40021, 40022];
 export const TRACKER_HISTORY_KINDS = [40020, 40021];
-const TRACKER_COMMENT_KIND = 40022;
 const PROJECT_KIND = 30621;
 const TASK_KIND = 9;
 const TASK_DISCOVERY_TAG = "buzz-task";
@@ -121,151 +117,6 @@ async function loadWorkspaces(pubkey: string): Promise<DispatchWorkspace[]> {
   });
 }
 
-async function loadContext(
-  workspaceId: string,
-  managedSigner: string,
-  onRetryingChange: (value: boolean) => void,
-): Promise<DispatchContext> {
-  const history = dispatchHistoryClient(onRetryingChange);
-  const snapshotAt = Math.floor(Date.now() / 1000);
-  const memberships = await history.fetch({
-    kinds: [39002],
-    "#d": [workspaceId],
-    limit: 1,
-  });
-  const membershipEvent = memberships[0];
-  if (!membershipEvent)
-    throw new Error("Tracker workspace membership snapshot is unavailable.");
-  const cursor = await trackerFoldCursor({ workspaceId, managedSigner }).catch(
-    () => null,
-  );
-  const fetchStreams = (since: number | null) =>
-    Promise.allSettled([
-      history.fetchExhaustively({
-        kinds: TRACKER_HISTORY_KINDS,
-        "#h": [workspaceId],
-        ...(since === null ? {} : { since }),
-      }),
-      history.fetchExhaustively({
-        kinds: [TRACKER_COMMENT_KIND],
-        "#h": [workspaceId],
-        ...(since === null ? {} : { since }),
-      }),
-      history.fetchExhaustively({
-        kinds: [PROJECT_KIND],
-        "#buzz-workspace": [workspaceId],
-        ...(since === null ? {} : { since }),
-      }),
-      history.fetchExhaustively({
-        kinds: [TASK_KIND],
-        "#t": [TASK_DISCOVERY_TAG],
-        "#h": [workspaceId],
-        ...(since === null ? {} : { since }),
-      }),
-    ]);
-  let warm = cursor !== null;
-  let [trackerHistory, comments, projects, tasks] = await fetchStreams(cursor);
-  if (
-    warm &&
-    [trackerHistory, comments, projects, tasks].some(
-      (result) =>
-        result.status === "rejected" && isDispatchHistoryGap(result.reason),
-    )
-  ) {
-    warm = false;
-    [trackerHistory, comments, projects, tasks] = await fetchStreams(null);
-  }
-  if (trackerHistory.status === "rejected") throw trackerHistory.reason;
-  const [records] = await Promise.allSettled([
-    history.fetchExhaustively({
-      kinds: [40026, 40023, 40024, 40027],
-      "#h": [workspaceId],
-    }),
-  ]);
-  const events = [
-    ...trackerHistory.value,
-    ...(records.status === "fulfilled" ? records.value : []),
-    ...(comments.status === "fulfilled" ? comments.value : []),
-    ...(projects.status === "fulfilled" ? projects.value : []),
-  ];
-  if (records.status === "fulfilled") {
-    events.push(
-      ...(await loadAdmissionSources(
-        history,
-        records.value.filter(
-          (event) => !warm || event.created_at >= (cursor ?? 0),
-        ),
-        workspaceId,
-        new Set(events.map((event) => event.id)),
-      )),
-    );
-  }
-  const taskEvents = [
-    ...(tasks.status === "fulfilled" ? tasks.value : []),
-    ...events.filter((event) => event.kind === TASK_KIND),
-  ];
-  let folded = warm
-    ? await resumeTrackerContext<Omit<DispatchContext, "sectionErrors">>({
-        events,
-        taskEvents,
-        membershipEvent,
-        workspaceId,
-        managedSigner,
-        snapshotAt,
-        advanceCursor: [comments, projects, tasks].every(
-          (result) => result.status === "fulfilled",
-        ),
-      })
-    : await foldTrackerContext<Omit<DispatchContext, "sectionErrors">>({
-        events,
-        taskEvents,
-        membershipEvent,
-        workspaceId,
-        managedSigner,
-        snapshotAt,
-        advanceCursor: [comments, projects, tasks].every(
-          (result) => result.status === "fulfilled",
-        ),
-      });
-  let relatedError: string | null = null;
-  try {
-    const related = await loadLinkedTaskHistory(
-      history,
-      folded.issues,
-      workspaceId,
-      managedSigner,
-    );
-    if (related.events.length || related.taskEvents.length) {
-      folded = await foldTrackerContextIncremental<
-        Omit<DispatchContext, "sectionErrors">
-      >({
-        events: related.events,
-        taskEvents: related.taskEvents,
-        workspaceId,
-        managedSigner,
-        snapshotAt,
-      });
-    }
-  } catch (error) {
-    relatedError = error instanceof Error ? error.message : String(error);
-  }
-  const errorMessage = (result: PromiseSettledResult<unknown>) =>
-    result.status === "rejected"
-      ? result.reason instanceof Error
-        ? result.reason.message
-        : String(result.reason)
-      : null;
-  return {
-    ...folded,
-    sectionErrors: {
-      records: errorMessage(records),
-      comments: errorMessage(comments),
-      projects: errorMessage(projects),
-      tasks: errorMessage(tasks) ?? relatedError,
-    },
-  };
-}
-
 /**
  * Workspace membership changes rarely, and the list is re-read every time
  * Dispatch mounts. Without this the default `staleTime: 0` means every remount
@@ -300,14 +151,69 @@ function dispatchWorkspacesQuery(pubkey: string | undefined) {
  * when channel re-subscription is spending the relay's per-pubkey frame
  * budget, and this is speculative work for a screen the user may never visit.
  */
+function dispatchContextQuery(
+  workspaceId: string,
+  managedSigner: string,
+  queryClient: ReturnType<typeof useQueryClient>,
+  onRetryingChange: (value: boolean) => void = () => {},
+) {
+  const queryKey = ["dispatch", "context", workspaceId, managedSigner] as const;
+  return {
+    queryKey,
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      loadDispatchContext(
+        workspaceId,
+        managedSigner,
+        onRetryingChange,
+        (preview) => {
+          queryClient.setQueryData([...queryKey, "preview"], preview);
+        },
+        { signal, includePreview: !queryClient.getQueryData(queryKey) },
+      ),
+    // Returning to Dispatch paints cached data immediately and revalidates.
+    gcTime: 30 * 60 * 1000,
+  };
+}
+
+function prefetchDispatchContext(
+  queryClient: ReturnType<typeof useQueryClient>,
+  workspace: string,
+  pubkey: string,
+) {
+  const options = dispatchContextQuery(workspace, pubkey, queryClient);
+  if (!queryClient.getQueryState(options.queryKey))
+    void queryClient.prefetchQuery(options);
+}
+
 export function useDispatchWorkspacePrefetch(pubkey: string | undefined) {
   const queryClient = useQueryClient();
   React.useEffect(() => {
     if (!pubkey) return;
+    let cancelled = false;
+    const preferred = getStorageItem("buzz-dispatch-last-workspace-v1");
+    // Route data and its JS chunk warm after first paint, using the same query
+    // as the screen. Relay membership still gates every cached preview.
+    void import("./ui/DispatchScreen").catch(() => undefined);
+    if (preferred) prefetchDispatchContext(queryClient, preferred, pubkey);
     void queryClient
-      .prefetchQuery(dispatchWorkspacesQuery(pubkey))
-      // Prefetch is best-effort: the screen's own query reports failures.
+      .fetchQuery(dispatchWorkspacesQuery(pubkey))
+      .then((workspaces) => {
+        if (
+          cancelled ||
+          workspaces.some((workspace) => workspace.id === preferred)
+        )
+          return;
+        const populated = workspaces.filter(
+          (workspace) => workspace.trackerEventCount > 0,
+        );
+        if (populated.length === 1)
+          prefetchDispatchContext(queryClient, populated[0].id, pubkey);
+      })
       .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      void queryClient.cancelQueries({ queryKey: ["dispatch"] });
+    };
   }, [pubkey, queryClient]);
 }
 
@@ -338,14 +244,17 @@ export function useDispatchContext(workspaceId: string | null) {
     identity.data?.pubkey,
   ] as const;
   const query = useQuery({
-    queryKey,
-    queryFn: () =>
-      loadContext(
-        workspaceId ?? "",
-        identity.data?.pubkey ?? "",
-        setIsRetrying,
-      ),
+    ...dispatchContextQuery(
+      workspaceId ?? "",
+      identity.data?.pubkey ?? "",
+      queryClient,
+      setIsRetrying,
+    ),
     enabled: Boolean(workspaceId && identity.data?.pubkey),
+  });
+  const preview = useQuery<DispatchContext>({
+    queryKey: [...queryKey, "preview"],
+    enabled: false,
   });
   const liveMergeRef = React.useRef<DispatchLiveMerge | null>(null);
   React.useEffect(() => {
@@ -493,13 +402,22 @@ export function useDispatchContext(workspaceId: string | null) {
     const disposers: (() => void)[] = [];
     const history = dispatchHistoryClient();
     const issues = relatedIssuesRef.current;
+    const activeContextKey = [
+      "dispatch",
+      "context",
+      workspaceId,
+      managedSigner,
+    ] as const;
     const start = async () => {
-      const initial = await loadLinkedTaskHistory(
-        history,
-        issues,
-        workspaceId,
-        managedSigner,
-      );
+      const initial =
+        queryClient.getQueryData<DispatchContext>(activeContextKey)
+          ?.linkedTaskScope ??
+        (await loadLinkedTaskHistory(
+          history,
+          issues,
+          workspaceId,
+          managedSigner,
+        ));
       if (cancelled) return;
       for (const channelId of initial.channelIds) {
         for (let index = 0; index < initial.taskIds.length; index += 50) {
@@ -573,19 +491,20 @@ export function useDispatchContext(workspaceId: string | null) {
         dispose();
       });
     };
-  }, [identity.data?.pubkey, relatedKey, workspaceId]);
-  const data = query.data ?? {
-    issues: [],
-    activity: [],
-    comments: [],
-    linkedTasks: [],
-    projects: [],
-    diagnostics: [],
-    taskDiagnostics: [],
-    viewerRole: "none" as const,
-    sectionErrors: { comments: null, projects: null, tasks: null },
-    snapshotAt: new Date(0).toISOString(),
-  };
+  }, [identity.data?.pubkey, relatedKey, workspaceId, queryClient]);
+  const data = query.data ??
+    preview.data ?? {
+      issues: [],
+      activity: [],
+      comments: [],
+      linkedTasks: [],
+      projects: [],
+      diagnostics: [],
+      taskDiagnostics: [],
+      viewerRole: "none" as const,
+      sectionErrors: { comments: null, projects: null, tasks: null },
+      snapshotAt: new Date(0).toISOString(),
+    };
   return {
     ...data,
     sectionErrors: {
@@ -593,7 +512,9 @@ export function useDispatchContext(workspaceId: string | null) {
       tasks: relatedError?.message ?? data.sectionErrors.tasks,
     },
     isRetrying,
-    isLoading: identity.isLoading || query.isLoading,
+    isLoading: identity.isLoading || (query.isLoading && !preview.data),
+    isRefreshing: query.isFetching,
+    isPreview: !query.data && Boolean(preview.data),
     error: (identity.error ?? query.error ?? liveError) as Error | null,
     refresh: async () => {
       const result = await query.refetch({ cancelRefetch: false });

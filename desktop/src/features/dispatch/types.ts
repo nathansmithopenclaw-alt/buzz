@@ -178,6 +178,7 @@ export type DispatchAutomationObservations = {
   }[];
 };
 export type DispatchContext = {
+  linkedTaskScope?: { channelIds: string[]; taskIds: string[] };
   admission?: {
     sealed: string[];
     legacyBaselines: number;

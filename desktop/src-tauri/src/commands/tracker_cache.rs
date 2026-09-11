@@ -24,6 +24,8 @@ pub(crate) struct TrackerFoldCacheEntry {
     workspace_id: String,
     managed_signer: String,
     pub(crate) cursor: Option<u64>,
+    #[serde(default)]
+    pub(crate) complete_records: bool,
     pub(crate) events: BTreeMap<String, Value>,
     pub(crate) task_events: BTreeMap<String, Value>,
     pub(crate) membership_event: Value,
@@ -74,6 +76,7 @@ impl TrackerFoldCacheEntry {
             workspace_id: key.workspace_id.clone(),
             managed_signer: key.managed_signer.clone(),
             cursor,
+            complete_records: cursor.is_some(),
             events: index_raw_events(events),
             task_events: index_raw_events(task_events),
             membership_event,
@@ -265,6 +268,28 @@ mod tests {
         assert!(load_entry(root.path(), &other_relay)
             .expect("other scope")
             .is_none());
+    }
+
+    #[test]
+    fn legacy_cursors_do_not_claim_complete_records_history() {
+        let key = key("wss://relay.example");
+        let entry = TrackerFoldCacheEntry::new(
+            &key,
+            Some(123),
+            Vec::new(),
+            Vec::new(),
+            serde_json::json!({}),
+        );
+        let mut legacy = serde_json::to_value(&entry).unwrap();
+        legacy.as_object_mut().unwrap().remove("completeRecords");
+        let restored: TrackerFoldCacheEntry = serde_json::from_value(legacy).unwrap();
+        assert!(!restored.complete_records);
+        assert_eq!(
+            restored.cursor,
+            Some(123),
+            "legacy history remains available for the read-only preview"
+        );
+        assert!(entry.complete_records);
     }
 
     #[test]

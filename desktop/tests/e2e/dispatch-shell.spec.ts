@@ -242,7 +242,7 @@ test("Dispatch warm start fetches only the persisted-cursor delta", async ({
   expect(
     proof.commands?.filter((command) => command === "resume_tracker_context"),
   ).toHaveLength(1);
-  expect(proof.deltaFilters).toHaveLength(4);
+  expect(proof.deltaFilters).toHaveLength(5);
   expect(proof.resumePayload).toMatchObject({ advanceCursor: true });
 });
 
