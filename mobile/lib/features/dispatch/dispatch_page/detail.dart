@@ -25,7 +25,7 @@ class _IssuePage extends HookConsumerWidget {
     final issue = _objects(value?['issues']).firstOrNull;
     Future<void> edit() async {
       if (issue == null || value == null) return;
-      await Navigator.of(context).push<void>(
+      final saved = await Navigator.of(context).push<bool>(
         MaterialPageRoute(
           builder: (_) => _TriageEditor(
             repository: repository,
@@ -35,7 +35,14 @@ class _IssuePage extends HookConsumerWidget {
           ),
         ),
       );
-      if (context.mounted) refresh.value++;
+      if (context.mounted) {
+        refresh.value++;
+        if (saved == true) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Changes saved to Buzz')),
+          );
+        }
+      }
     }
 
     return FrostedScaffold(
@@ -187,7 +194,7 @@ class _DecisionCard extends HookConsumerWidget {
     final options = _objects(payload['options']);
     final archived = record['record']['archived'] == true;
     Future<void> decide() async {
-      await Navigator.of(context).push<void>(
+      final saved = await Navigator.of(context).push<bool>(
         MaterialPageRoute(
           builder: (_) => _DecisionEditor(
             repository: repository,
@@ -197,7 +204,14 @@ class _DecisionCard extends HookConsumerWidget {
           ),
         ),
       );
-      if (context.mounted) onChanged();
+      if (context.mounted) {
+        onChanged();
+        if (saved == true) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Decision recorded in Buzz')),
+          );
+        }
+      }
     }
 
     return Card(

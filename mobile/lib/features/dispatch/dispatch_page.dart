@@ -15,6 +15,7 @@ import 'dispatch_repository.dart';
 part 'dispatch_page/workspace.dart';
 part 'dispatch_page/detail.dart';
 part 'dispatch_page/editors.dart';
+part 'dispatch_page/editor_scaffold.dart';
 part 'dispatch_page/saved_drafts.dart';
 
 /// Focused mobile work inbox: triage, ownership and explicit decisions.

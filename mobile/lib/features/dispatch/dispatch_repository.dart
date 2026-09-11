@@ -456,8 +456,23 @@ void validatePreparedDispatchEvent(
         payload['reason'] != request['reason'] ||
         set.entries.any(
           (entry) =>
-              !['status', 'priority', 'assignee'].contains(entry.key) ||
-              wanted[entry.key] != entry.value,
+              !const {
+                'identifier',
+                'title',
+                'body',
+                'status',
+                'priority',
+                'assignee',
+                'project_id',
+                'due',
+                'estimate_minutes',
+                'home_channel_id',
+                'workflow',
+                'labels',
+              }.contains(entry.key) ||
+              (entry.value != null &&
+                  (!['status', 'priority', 'assignee'].contains(entry.key) ||
+                      wanted[entry.key] != entry.value)),
         ) ||
         wanted.entries.any(
           (entry) => entry.value != null && set[entry.key] != entry.value,

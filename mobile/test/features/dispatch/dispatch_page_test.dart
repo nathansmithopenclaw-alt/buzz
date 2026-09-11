@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:buzz/features/dispatch/dispatch_page.dart';
 import 'package:buzz/features/dispatch/dispatch_repository.dart';
@@ -26,6 +28,8 @@ class _Repository extends Fake implements DispatchRepository {
       () => true;
   Map<String, dynamic>? lastIntent;
   bool fail = false;
+  Completer<void>? completion;
+  int edits = 0;
   Map<String, dynamic> issue = {
     'issueId': _issue,
     'identifier': 'D-69024291',
@@ -103,6 +107,8 @@ class _Repository extends Fake implements DispatchRepository {
     Map<String, dynamic>? decisionPayload,
   }) async {
     lastIntent = intent;
+    edits++;
+    await completion?.future;
     if (fail) {
       throw StateError('Connection interrupted. Your edit is saved.');
     }
@@ -245,6 +251,121 @@ void main() {
       matchesGoldenFile('goldens/queue-large-text.png'),
     );
   });
+  testWidgets('a saved triage change returns to the item with confirmation', (
+    tester,
+  ) async {
+    final repository = await pump(tester);
+    await tester.tap(find.text('Review the Summary release'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Triage this item'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('P1 · High'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('P2 · Normal').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Phone acceptance');
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+    expect(repository.lastIntent?['set']['priority'], 'P2');
+    expect(find.text('Triage this item'), findsOneWidget);
+    expect(find.text('Changes saved to Buzz'), findsOneWidget);
+    expect(find.text('P2'), findsOneWidget);
+    expect(find.text('Save changes'), findsNothing);
+  });
+  testWidgets(
+    'save remains visible above the keyboard and confirms only after completion',
+    (tester) async {
+      final repository = await pump(tester);
+      repository.completion = Completer<void>();
+      await tester.tap(find.text('Review the Summary release'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Triage this item'));
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = FakeViewPadding(
+        bottom: 300 * tester.view.devicePixelRatio,
+      );
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pumpAndSettle();
+      expect(find.text('Save changes').hitTestable(), findsOneWidget);
+      await tester.tap(find.text('Save changes'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.text('Saving to Buzz…').hitTestable(), findsOneWidget);
+      expect(find.text('Changes saved to Buzz'), findsNothing);
+      await tester.tap(find.text('Saving to Buzz…'));
+      expect(repository.edits, 1);
+      repository.completion!.complete();
+      tester.view.resetViewInsets();
+      await tester.pumpAndSettle();
+      expect(find.text('Changes saved to Buzz'), findsOneWidget);
+      expect(find.text('Triage this item'), findsOneWidget);
+    },
+  );
+  testWidgets('save failures remain visible and keep the change reason', (
+    tester,
+  ) async {
+    final repository = await pump(tester);
+    repository.fail = true;
+    await tester.tap(find.text('Review the Summary release'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Triage this item'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Phone acceptance');
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+    expect(find.text('Save not confirmed'), findsOneWidget);
+    expect(find.text('Save not confirmed').hitTestable(), findsOneWidget);
+    expect(
+      find.text('Connection interrupted. Your edit is saved.').hitTestable(),
+      findsOneWidget,
+    );
+    expect(find.text('Phone acceptance'), findsOneWidget);
+    expect(find.text('Changes saved to Buzz'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+  test(
+    'standard relay preparation accepts null fields without permitting extra changes',
+    () {
+      // Captured from the actual SDK-backed relay preparation response. Only
+      // identity, event IDs and the request ID are replaced with test values.
+      final event =
+          jsonDecode(
+                File(
+                  'test/features/dispatch/fixtures/prepared-issue.json',
+                ).readAsStringSync(),
+              )
+              as Map<String, dynamic>;
+      final request = {
+        'operation': 'prepare_issue',
+        'issue_id': _issue,
+        'expected_tip': '2' * 64,
+        'request_id': '11111111-1111-4111-8111-111111111111',
+        'reason': 'Phone acceptance',
+        'set': {'status': 'todo', 'priority': 'P2'},
+        'clear_assignee': false,
+        'clear_priority': false,
+      };
+      validatePreparedDispatchEvent(event, request, _workspace, _actor);
+      for (final extra in [
+        {'title': 'Unrequested change'},
+        {'assignee': 'b' * 64},
+        {'future_field': null},
+      ]) {
+        final changed =
+            jsonDecode(event['content'] as String) as Map<String, dynamic>;
+        (changed['set'] as Map).addAll(extra);
+        expect(
+          () => validatePreparedDispatchEvent(
+            {...event, 'content': jsonEncode(changed)},
+            request,
+            _workspace,
+            _actor,
+          ),
+          throwsFormatException,
+        );
+      }
+    },
+  );
   test('prepared issue bytes cannot silently change scope or extra fields', () {
     final request = {
       'operation': 'prepare_issue',

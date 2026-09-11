@@ -32,6 +32,7 @@ class _TriageEditor extends HookConsumerWidget {
     ];
     if (!statuses.contains(status.value)) statuses.add(status.value);
     Future<void> save() async {
+      FocusScope.of(context).unfocus();
       busy.value = true;
       error.value = null;
       try {
@@ -57,7 +58,7 @@ class _TriageEditor extends HookConsumerWidget {
               ? 'Updated from mobile triage'
               : reason.text.trim(),
         });
-        if (context.mounted) Navigator.of(context).pop();
+        if (context.mounted) Navigator.of(context).pop(true);
       } catch (e) {
         if (context.mounted) error.value = e;
       } finally {
@@ -65,95 +66,84 @@ class _TriageEditor extends HookConsumerWidget {
       }
     }
 
-    return FrostedScaffold(
-      appBar: FrostedAppBar(title: const Text('Triage item')),
-      body: ListView(
-        padding: EdgeInsets.fromLTRB(
-          Grid.gutter,
-          frostedAppBarHeight(context) + Grid.xs,
-          Grid.gutter,
-          Grid.lg,
+    return _DispatchEditorScaffold(
+      title: 'Triage item',
+      busy: busy.value,
+      error: error.value,
+      saveLabel: 'Save changes',
+      savingLabel: 'Saving to Buzz…',
+      onSave: save,
+      children: [
+        Text(issue['title'] as String, style: context.textTheme.titleLarge),
+        const SizedBox(height: Grid.sm),
+        DropdownButtonFormField<String>(
+          initialValue: status.value,
+          decoration: const InputDecoration(
+            labelText: 'Status',
+            border: OutlineInputBorder(),
+          ),
+          items: statuses
+              .map(
+                (item) =>
+                    DropdownMenuItem(value: item, child: Text(_status(item))),
+              )
+              .toList(),
+          onChanged: busy.value || (terminal && role != 'maintainer')
+              ? null
+              : (value) => status.value = value!,
         ),
-        children: [
-          Text(issue['title'] as String, style: context.textTheme.titleLarge),
-          const SizedBox(height: Grid.sm),
-          DropdownButtonFormField<String>(
-            initialValue: status.value,
-            decoration: const InputDecoration(
-              labelText: 'Status',
-              border: OutlineInputBorder(),
+        const SizedBox(height: Grid.xs),
+        DropdownButtonFormField<String>(
+          initialValue: priority.value ?? 'none',
+          decoration: const InputDecoration(
+            labelText: 'Priority',
+            border: OutlineInputBorder(),
+          ),
+          items: const [
+            DropdownMenuItem(value: 'none', child: Text('No priority')),
+            DropdownMenuItem(value: 'P0', child: Text('P0 · Urgent')),
+            DropdownMenuItem(value: 'P1', child: Text('P1 · High')),
+            DropdownMenuItem(value: 'P2', child: Text('P2 · Normal')),
+            DropdownMenuItem(value: 'P3', child: Text('P3 · Low')),
+          ],
+          onChanged: busy.value
+              ? null
+              : (value) => priority.value = value == 'none' ? null : value,
+        ),
+        const SizedBox(height: Grid.xs),
+        Text(
+          'Owner: ${_person(ref, owner.text.isEmpty ? null : owner.text, repository.pubkey)}',
+        ),
+        Wrap(
+          spacing: Grid.xxs,
+          children: [
+            TextButton(
+              onPressed: busy.value
+                  ? null
+                  : () => owner.text = repository.pubkey,
+              child: const Text('Assign to me'),
             ),
-            items: statuses
-                .map(
-                  (item) =>
-                      DropdownMenuItem(value: item, child: Text(_status(item))),
-                )
-                .toList(),
-            onChanged: busy.value || (terminal && role != 'maintainer')
-                ? null
-                : (value) => status.value = value!,
-          ),
-          const SizedBox(height: Grid.xs),
-          DropdownButtonFormField<String>(
-            initialValue: priority.value ?? 'none',
-            decoration: const InputDecoration(
-              labelText: 'Priority',
-              border: OutlineInputBorder(),
+            TextButton(
+              onPressed: busy.value ? null : () => owner.clear(),
+              child: const Text('Leave unassigned'),
             ),
-            items: const [
-              DropdownMenuItem(value: 'none', child: Text('No priority')),
-              DropdownMenuItem(value: 'P0', child: Text('P0 · Urgent')),
-              DropdownMenuItem(value: 'P1', child: Text('P1 · High')),
-              DropdownMenuItem(value: 'P2', child: Text('P2 · Normal')),
-              DropdownMenuItem(value: 'P3', child: Text('P3 · Low')),
-            ],
-            onChanged: busy.value
-                ? null
-                : (value) => priority.value = value == 'none' ? null : value,
+          ],
+        ),
+        const Text(
+          'Ownership identifies the person responsible. It does not start an agent.',
+        ),
+        const SizedBox(height: Grid.xs),
+        TextField(
+          controller: reason,
+          maxLength: 2000,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            labelText: 'Reason for this change',
+            hintText: 'Add context for your teammates',
+            border: OutlineInputBorder(),
           ),
-          const SizedBox(height: Grid.xs),
-          Text(
-            'Owner: ${_person(ref, owner.text.isEmpty ? null : owner.text, repository.pubkey)}',
-          ),
-          Wrap(
-            spacing: Grid.xxs,
-            children: [
-              TextButton(
-                onPressed: busy.value
-                    ? null
-                    : () => owner.text = repository.pubkey,
-                child: const Text('Assign to me'),
-              ),
-              TextButton(
-                onPressed: busy.value ? null : () => owner.clear(),
-                child: const Text('Leave unassigned'),
-              ),
-            ],
-          ),
-          const Text(
-            'Ownership identifies the person responsible. It does not start an agent.',
-          ),
-          const SizedBox(height: Grid.xs),
-          TextField(
-            controller: reason,
-            maxLength: 2000,
-            maxLines: 3,
-            decoration: const InputDecoration(
-              labelText: 'Reason for this change',
-              hintText: 'Add context for your teammates',
-              border: OutlineInputBorder(),
-            ),
-          ),
-          if (error.value != null) _error(error.value!),
-          const SizedBox(height: Grid.xs),
-          FilledButton(
-            onPressed: busy.value ? null : save,
-            child: Text(
-              busy.value ? 'Checking accepted history…' : 'Save changes',
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -177,6 +167,7 @@ class _DecisionEditor extends HookConsumerWidget {
     final rationale = useTextEditingController();
     final active = ref.watch(dispatchRepositoryProvider);
     Future<void> choose() async {
+      FocusScope.of(context).unfocus();
       if (selected.value == null || rationale.text.trim().isEmpty) {
         error.value = 'Choose an option and explain your decision.';
         return;
@@ -196,7 +187,7 @@ class _DecisionEditor extends HookConsumerWidget {
           'option': selected.value,
           'rationale': rationale.text.trim(),
         }, decisionPayload: payload);
-        if (context.mounted) Navigator.of(context).pop();
+        if (context.mounted) Navigator.of(context).pop(true);
       } catch (e) {
         if (context.mounted) error.value = e;
       } finally {
@@ -204,75 +195,64 @@ class _DecisionEditor extends HookConsumerWidget {
       }
     }
 
-    return FrostedScaffold(
-      appBar: FrostedAppBar(title: const Text('Your decision')),
-      body: ListView(
-        padding: EdgeInsets.fromLTRB(
-          Grid.gutter,
-          frostedAppBarHeight(context) + Grid.xs,
-          Grid.gutter,
-          Grid.lg,
+    return _DispatchEditorScaffold(
+      title: 'Your decision',
+      busy: busy.value,
+      error: error.value,
+      saveLabel: 'Record decision',
+      savingLabel: 'Recording your decision…',
+      onSave: choose,
+      children: [
+        Text(
+          payload['question'] as String,
+          style: context.textTheme.headlineSmall,
         ),
-        children: [
-          Text(
-            payload['question'] as String,
-            style: context.textTheme.headlineSmall,
-          ),
-          const SizedBox(height: Grid.xs),
-          if ((payload['context'] as String).isNotEmpty)
-            Text(payload['context'] as String),
-          const SizedBox(height: Grid.xs),
-          RadioGroup<String>(
-            groupValue: selected.value,
-            onChanged: (value) {
-              if (!busy.value) selected.value = value;
-            },
-            child: Column(
-              children: [
-                for (final option in _objects(payload['options']))
-                  Card(
-                    child: RadioListTile<String>(
-                      value: option['id'] as String,
-                      title: Text(option['label'] as String),
-                      subtitle: Text(option['consequence'] as String),
-                      enabled: !busy.value,
-                    ),
+        const SizedBox(height: Grid.xs),
+        if ((payload['context'] as String).isNotEmpty)
+          Text(payload['context'] as String),
+        const SizedBox(height: Grid.xs),
+        RadioGroup<String>(
+          groupValue: selected.value,
+          onChanged: (value) {
+            if (!busy.value) selected.value = value;
+          },
+          child: Column(
+            children: [
+              for (final option in _objects(payload['options']))
+                Card(
+                  child: RadioListTile<String>(
+                    value: option['id'] as String,
+                    title: Text(option['label'] as String),
+                    subtitle: Text(option['consequence'] as String),
+                    enabled: !busy.value,
                   ),
-              ],
+                ),
+            ],
+          ),
+        ),
+        if (_objects(payload['evidence']).isNotEmpty) ...[
+          Text('Evidence to review', style: context.textTheme.titleMedium),
+          for (final reference in _objects(payload['evidence']))
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+              child: SelectableText(reference['ref'] as String),
             ),
-          ),
-          if (_objects(payload['evidence']).isNotEmpty) ...[
-            Text('Evidence to review', style: context.textTheme.titleMedium),
-            for (final reference in _objects(payload['evidence']))
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-                child: SelectableText(reference['ref'] as String),
-              ),
-          ],
-          const SizedBox(height: Grid.xs),
-          TextField(
-            controller: rationale,
-            maxLines: 4,
-            maxLength: 4000,
-            decoration: const InputDecoration(
-              labelText: 'Why this option?',
-              border: OutlineInputBorder(),
-            ),
-          ),
-          if (error.value != null) _error(error.value!),
-          const SizedBox(height: Grid.xs),
-          FilledButton(
-            onPressed: busy.value ? null : choose,
-            child: Text(
-              busy.value ? 'Confirming your decision…' : 'Record decision',
-            ),
-          ),
-          const SizedBox(height: Grid.xxs),
-          const Text(
-            'This records your choice. It does not automatically close the work or mark delivery as verified.',
-          ),
         ],
-      ),
+        const SizedBox(height: Grid.xs),
+        TextField(
+          controller: rationale,
+          maxLines: 4,
+          maxLength: 4000,
+          decoration: const InputDecoration(
+            labelText: 'Why this option?',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: Grid.xxs),
+        const Text(
+          'This records your choice. It does not automatically close the work or mark delivery as verified.',
+        ),
+      ],
     );
   }
 }
