@@ -1,5 +1,7 @@
 #include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
 #include "Generated.xcconfig"
+// Keep the SwiftPM C dependency visible when importing BuzzPushKit.
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc "-fmodule-map-file=$(OBJROOT)/GeneratedModuleMaps-$(PLATFORM_NAME)/libsecp256k1.modulemap"
 
 // Defaults for the iOS Release build. Internal/custom builds (e.g. an
 // enterprise-signed distribution) override these without patching tracked

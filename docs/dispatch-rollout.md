@@ -65,6 +65,21 @@ relay, dispatcher or executor has upgraded.
 
 ## Representative acceptance
 
+For iOS builds, enable the reviewed `SharedSourcesPlugin` from the exact pinned
+`swift-secp256k1` version through Xcode's normal trust prompt. The application
+and notification extension both need the generated `libsecp256k1` module map
+when importing BuzzPushKit; Debug and Release xcconfigs supply it explicitly.
+Do not hide the dependency with an implementation-only import or disable package
+validation to get past a native build failure.
+
+When selecting Xcode with `DEVELOPER_DIR`, run Flutter through
+`scripts/with-ios-toolchain.sh` (for example, from `mobile`,
+`../scripts/with-ios-toolchain.sh flutter build ios --release --no-codesign`).
+Flutter's native-asset hooks retain PATH but strip DEVELOPER_DIR, so this wrapper
+keeps their xcrun calls on the same Xcode. It makes no global toolchain changes.
+An unsigned build still requires the correct Apple team, app and extension
+provisioning profiles, and a connected unlocked device before device acceptance.
+
 Use disposable test work and identities on an isolated relay first. Do not wake a
 production executor merely to satisfy a UI screenshot.
 
