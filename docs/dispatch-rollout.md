@@ -116,6 +116,17 @@ change. A draft may describe a write already accepted remotely. Compare accepted
 history before manually reapplying it. Reconcile an unresolved assignment link before
 starting another attempt.
 
+The CLI `track dispatch` command saves the exact signed issue link and task before
+publishing either. It reads the accepted issue link back before releasing the task
+message. If publication is interrupted, retry with the same `--request-id` and input;
+the relay history and local recovery record determine which step remains. Recovery
+records live under the CLI Tracker cache in `dispatch-assignments-v1`, scoped to the
+relay, workspace and signer. Do not delete them to get past a conflict. A different
+request cannot bypass an unresolved task link. If another client changed the issue
+after its link was saved, inspect the latest issue, then explicitly supply that
+reviewed `--if-revision` when retrying the original request. Changed assignment
+content requires reconciliation instead of silently replacing the retained task.
+
 A binary rollback does not undo appended events. An older relay will not issue new
 admission receipts and an older harness may reject v3, so keep automation paused and
 limit old clients to compatible operations while recovering. Record the actual

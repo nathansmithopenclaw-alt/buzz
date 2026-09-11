@@ -998,6 +998,7 @@ dependencies = [
  "clap",
  "diffy",
  "dirs",
+ "fs2",
  "hex",
  "infer",
  "keyring",
