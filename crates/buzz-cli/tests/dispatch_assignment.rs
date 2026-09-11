@@ -108,6 +108,7 @@ struct Fixture {
     cache: tempfile::TempDir,
     owner: Keys,
     executor: Keys,
+    relay: Keys,
     workspace: Uuid,
     request: Uuid,
     issue: String,
@@ -148,6 +149,7 @@ impl Fixture {
             cache: tempfile::tempdir().unwrap(),
             owner,
             executor,
+            relay,
             workspace,
             request: Uuid::new_v4(),
             issue: String::new(),
@@ -234,6 +236,149 @@ impl Fixture {
 fn success(output: &Output) -> Value {
     assert!(output.status.success(), "{output:?}");
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn workspace_task_admission_hydrates_its_message_without_blocking_issue_reads() {
+    use buzz_sdk::dispatch_admission::{
+        build_dispatch_admission, AdmissionBasis, DispatchAdmission,
+    };
+    let fixture = Fixture::start().await;
+    let assignment = success(&fixture.assign("same-workspace execution").await);
+    let task = fixture.tasks().pop().unwrap();
+    let receipt = build_dispatch_admission(&DispatchAdmission {
+        v: 1,
+        workspace: fixture.workspace,
+        event_id: task.id.to_hex(),
+        author: task.pubkey.to_hex(),
+        role: "maintainer".into(),
+        observed_at: nostr::Timestamp::now().as_secs(),
+        basis: AdmissionBasis::Admission,
+    })
+    .unwrap()
+    .sign_with_keys(&fixture.relay)
+    .unwrap();
+    fixture.history.lock().unwrap().events.push(receipt);
+    let issue = success(
+        &fixture
+            .run(&["track", "get", "--issue", &fixture.issue])
+            .await,
+    );
+    assert_eq!(issue["issue"]["active_task_id"], assignment["task_id"]);
+    // Retained source hydration also keeps a subsequent mutation usable.
+    success(
+        &fixture
+            .run(&[
+                "track",
+                "comment",
+                "--issue",
+                &fixture.issue,
+                "--content",
+                "readback confirmed",
+            ])
+            .await,
+    );
+}
+
+#[tokio::test]
+async fn rapid_revisions_follow_parent_time_without_skipping_other_incoming_work() {
+    use buzz_sdk::tracker::{
+        build_tracker_issue, build_tracker_revision, IssueRevision, IssueRoot, RevisionSet,
+        SetOperations, TRACKER_VERSION,
+    };
+    let f = Fixture::start().await;
+    let root = f
+        .history
+        .lock()
+        .unwrap()
+        .events
+        .iter()
+        .find(|e| e.kind.as_u16() == 40020)
+        .unwrap()
+        .clone();
+    let mut issue: IssueRoot = serde_json::from_str(&root.content).unwrap();
+    let revision = IssueRevision {
+        v: TRACKER_VERSION,
+        op: "revise".into(),
+        issue_id: issue.issue_id,
+        root_event: root.id.to_hex(),
+        parent_event: root.id.to_hex(),
+        revision: 1,
+        set: RevisionSet {
+            body: Some("A reviewed parent slightly ahead of the local clock".into()),
+            ..Default::default()
+        },
+        clear: vec![],
+        relations: SetOperations::default(),
+        external_refs: SetOperations::default(),
+        reason: None,
+        request_id: Some(Uuid::new_v4()),
+        import: None,
+    };
+    let parent = build_tracker_revision(f.workspace, &revision)
+        .unwrap()
+        .custom_created_at(nostr::Timestamp::from(
+            nostr::Timestamp::now().as_secs() + 10,
+        ))
+        .sign_with_keys(&f.owner)
+        .unwrap();
+    f.history.lock().unwrap().events.push(parent.clone());
+    success(
+        &f.run(&[
+            "track",
+            "update",
+            "--issue",
+            &f.issue,
+            "--body",
+            "Rapid next edit",
+        ])
+        .await,
+    );
+    success(
+        &f.run(&[
+            "track",
+            "link",
+            "--issue",
+            &f.issue,
+            "--type",
+            "url",
+            "--ref",
+            "https://example.com/acceptance",
+        ])
+        .await,
+    );
+    success(&f.assign("after reviewed parent").await);
+    let revisions: Vec<_> = f
+        .history
+        .lock()
+        .unwrap()
+        .writes
+        .iter()
+        .filter(|e| e.kind.as_u16() == 40021)
+        .cloned()
+        .collect();
+    assert_eq!(revisions.len(), 3);
+    let mut previous = parent.created_at;
+    for revision in revisions {
+        assert!(revision.created_at > previous);
+        previous = revision.created_at;
+    }
+    // Advancing a signed revision must not move the read checkpoint into the
+    // future and hide unrelated work arriving at the relay's current clock.
+    issue.issue_id = Uuid::new_v4();
+    issue.request_id = Some(Uuid::new_v4());
+    issue.title = "Different incoming issue at current time".into();
+    issue.identifier = "TEST-999".into();
+    let incoming = build_tracker_issue(f.workspace, &issue)
+        .unwrap()
+        .sign_with_keys(&f.owner)
+        .unwrap();
+    f.history.lock().unwrap().events.push(incoming);
+    let read = success(
+        &f.run(&["track", "get", "--issue", &issue.issue_id.to_string()])
+            .await,
+    );
+    assert_eq!(read["issue"]["title"], issue.title);
 }
 
 #[tokio::test]

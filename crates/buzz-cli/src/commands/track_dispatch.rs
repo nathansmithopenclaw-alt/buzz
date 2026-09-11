@@ -303,7 +303,8 @@ pub(super) async fn cmd_dispatch(
             Some(saved) => saved.link.clone(),
             None => client.sign_event(
                 build_tracker_revision(workspace_id, &revision)
-                    .map_err(|error| usage("build assignment link", error))?,
+                    .map_err(|error| usage("build assignment link", error))?
+                    .custom_created_at(context.revision_timestamp(&revision.parent_event)),
             )?,
         };
         validate_candidate(&context, &authorization, &event, issue.issue_id)?;

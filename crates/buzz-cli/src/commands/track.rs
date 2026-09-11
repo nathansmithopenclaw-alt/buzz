@@ -171,6 +171,16 @@ impl TrackerContext {
             .unwrap_or(0)
     }
 
+    fn revision_timestamp(&self, parent: &str) -> Timestamp {
+        // Revision tips use (created_at, event_id) ordering. A rapid edit must
+        // sort after its reviewed parent even within the same clock second.
+        Timestamp::from(
+            Timestamp::now()
+                .as_secs()
+                .max(self.event_time(parent).saturating_add(1)),
+        )
+    }
+
     fn add_event(&mut self, event: Event, authorization: &TrackerAuthorization) {
         merge_events(&mut self.cache.events, [event]);
         self.cache.cursor = max_cursor(&self.cache.events);
@@ -615,8 +625,12 @@ async fn load_context(
         "#h": [workspace_id.to_string()],
     });
     if let Some(cursor) = &cache.cursor {
-        // Inclusive same-second replay plus ID dedupe prevents cursor gaps.
-        filter["since"] = json!(cursor.created_at);
+        // Include the allowed clock-skew window: sequential edits can be signed
+        // after a slightly future-dated parent. That must not hide other work
+        // arriving at the current relay clock. Exact ID dedupe absorbs overlap.
+        filter["since"] = json!(cursor
+            .created_at
+            .saturating_sub(buzz_sdk::tracker::MAX_FUTURE_SKEW_SECONDS));
     }
     let incoming: Vec<Event> = client
         .query_all(filter)
@@ -652,7 +666,9 @@ async fn load_context(
         .into_iter()
         .collect::<Vec<_>>();
     for batch in needed.chunks(50) {
-        let sources=client.query_all(json!({"ids":batch,"kinds":[40020,40021,40022,40026],"#h":[workspace_id.to_string()]})).await?
+        // A workspace may also be an execution conversation. Its relay receipts
+        // then reference task messages as well as issue/planning edits.
+        let sources=client.query_all(json!({"ids":batch,"kinds":[9,40020,40021,40022,40026],"#h":[workspace_id.to_string()]})).await?
             .into_iter().map(|value|serde_json::from_value::<Event>(value).map_err(|error|CliError::Other(error.to_string()))).collect::<Result<Vec<_>,_>>()?;
         if batch
             .iter()
@@ -1398,7 +1414,8 @@ async fn cmd_update(
     };
     let event = client.sign_event(
         build_tracker_revision(workspace_id, &revision)
-            .map_err(|error| usage("build Tracker revision", error))?,
+            .map_err(|error| usage("build Tracker revision", error))?
+            .custom_created_at(context.revision_timestamp(&revision.parent_event)),
     )?;
     validate_candidate(&context, &authorization, &event, current.issue_id)?;
     let (event_id, replayed) =
@@ -1944,7 +1961,8 @@ async fn publish_revision(
         .ok_or_else(|| CliError::Other("Tracker CLI revision lacks request_id".into()))?;
     let event = client.sign_event(
         build_tracker_revision(context.workspace_id, revision)
-            .map_err(|error| usage("build Tracker revision", error))?,
+            .map_err(|error| usage("build Tracker revision", error))?
+            .custom_created_at(context.revision_timestamp(&revision.parent_event)),
     )?;
     if existing_request_event(client, context.workspace_id, request_id)
         .await?
