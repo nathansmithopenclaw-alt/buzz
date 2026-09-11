@@ -135,7 +135,11 @@ void main() {
       }
     }
   });
-  Future<_Repository> pump(WidgetTester tester, {double textScale = 1}) async {
+  Future<_Repository> pump(
+    WidgetTester tester, {
+    double textScale = 1,
+    bool dark = false,
+  }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final repository = _Repository();
@@ -148,7 +152,7 @@ void main() {
           savedPrefsProvider.overrideWithValue(prefs),
         ],
         child: MaterialApp(
-          theme: AppTheme.light(),
+          theme: dark ? AppTheme.dark() : AppTheme.light(),
           builder: (context, child) => MediaQuery(
             data: MediaQuery.of(
               context,
@@ -174,6 +178,19 @@ void main() {
     await expectLater(
       find.byKey(const ValueKey('mobile-dispatch')),
       matchesGoldenFile('goldens/queue.png'),
+    );
+  });
+  testWidgets('issue metadata is readable in dark mode', (tester) async {
+    await pump(tester, dark: true);
+    await tester.tap(find.text('Review the Summary release'));
+    await tester.pumpAndSettle();
+    expect(find.text('In review'), findsOneWidget);
+    expect(find.text('P1'), findsOneWidget);
+    expect(find.text('release'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await expectLater(
+      find.byType(Scaffold),
+      matchesGoldenFile('goldens/issue-dark.png'),
     );
   });
   testWidgets(

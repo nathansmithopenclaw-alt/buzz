@@ -82,9 +82,17 @@ class _IssuePage extends HookConsumerWidget {
                     spacing: Grid.xxs,
                     runSpacing: Grid.half,
                     children: [
-                      Chip(label: Text(_status(issue['status'] as String))),
+                      Chip(
+                        label: Text(_status(issue['status'] as String)),
+                        labelStyle: TextStyle(color: context.colors.onSurface),
+                      ),
                       if (issue['priority'] != null)
-                        Chip(label: Text(issue['priority'] as String)),
+                        Chip(
+                          label: Text(issue['priority'] as String),
+                          labelStyle: TextStyle(
+                            color: context.colors.onSurface,
+                          ),
+                        ),
                     ],
                   ),
                   Text(
@@ -108,7 +116,12 @@ class _IssuePage extends HookConsumerWidget {
                         spacing: Grid.xxs,
                         children: [
                           for (final label in issue['labels'] as List)
-                            Chip(label: Text(label as String)),
+                            Chip(
+                              label: Text(label as String),
+                              labelStyle: TextStyle(
+                                color: context.colors.onSurface,
+                              ),
+                            ),
                         ],
                       ),
                     ),

@@ -251,3 +251,67 @@ fn mobile_snapshot_pages_have_stable_ids_and_never_invent_historical_proof() {
         .iter()
         .any(|issue| issue["issueId"] == next["issues"][0]["issueId"]));
 }
+
+#[test]
+fn mobile_aliases_match_desktop_and_preserve_imported_identifiers() {
+    let author = Keys::generate();
+    let workspace = Uuid::new_v4();
+    let issuer = Keys::generate().public_key();
+    let id = Uuid::new_v4();
+    let closed_id = Uuid::new_v4();
+    let imported_id = Uuid::new_v4();
+    let events = [
+        (
+            id,
+            "smi-aac99c4d66694089ada46b611e4096c2",
+            IssueStatus::Todo,
+        ),
+        (
+            closed_id,
+            "SMI-aac99c5a66694089ada46b611e4096c2",
+            IssueStatus::Done,
+        ),
+        (imported_id, "BUG-42", IssueStatus::Todo),
+    ]
+    .into_iter()
+    .map(|(id, identifier, status)| {
+        let source = root(workspace, id, &author);
+        let mut payload: IssueRoot = serde_json::from_str(&source.content).unwrap();
+        payload.identifier = identifier.into();
+        payload.status = status;
+        build_tracker_issue(workspace, &payload)
+            .unwrap()
+            .custom_created_at(Timestamp::from(10))
+            .sign_with_keys(&author)
+            .unwrap()
+    })
+    .collect::<Vec<_>>();
+    let roles =
+        TrackerAuthorization::new([(author.public_key().to_hex(), TrackerRole::Maintainer)]);
+    for detail in [None, Some(id), Some(imported_id)] {
+        let response = dispatch_client_response(
+            &events,
+            workspace,
+            issuer,
+            author.public_key(),
+            roles.clone(),
+            request(DispatchClientOperation::Snapshot {
+                issue_id: detail,
+                after: None,
+                include_closed: false,
+            }),
+            20,
+        )
+        .unwrap();
+        let issues = response["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), if detail.is_some() { 1 } else { 2 });
+        for issue in issues {
+            if issue["issueId"] == id.to_string() {
+                assert_eq!(issue["identifier"], "SMI-AAC99C4D");
+            } else {
+                assert_eq!(issue["issueId"], imported_id.to_string());
+                assert_eq!(issue["identifier"], "BUG-42");
+            }
+        }
+    }
+}

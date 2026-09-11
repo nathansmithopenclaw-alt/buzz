@@ -100,6 +100,34 @@ pub fn build_dispatch_client_request(
     )
     .tags([Tag::parse(["h", &workspace.to_string()]).map_err(|error| error.to_string())?]))
 }
+// Match Desktop's human alias policy using the durable identifier. Include all
+// folded issues when detecting collisions, even when paging or hiding closed work.
+fn issue_alias(issue: &IssueProjection, tracker: &TrackerFold) -> String {
+    let Some((prefix, hex)) = issue.identifier.split_once('-') else {
+        return issue.identifier.clone();
+    };
+    if prefix.is_empty()
+        || prefix.len() > 12
+        || !prefix.as_bytes()[0].is_ascii_alphabetic()
+        || !prefix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        || hex.len() != 32
+        || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return issue.identifier.clone();
+    }
+    let hex = hex.to_ascii_uppercase();
+    for length in (6..=32).step_by(2) {
+        let alias = format!("{}-{}", prefix.to_ascii_uppercase(), &hex[..length]);
+        if !tracker.issues.values().any(|other| {
+            other.issue_id != issue.issue_id
+                && other.identifier.to_ascii_uppercase().starts_with(&alias)
+        }) {
+            return alias;
+        }
+    }
+    issue.identifier.clone()
+}
+
 /// Compute a bounded response using the exact SDK folds used on Desktop and CLI.
 /// The host must independently enforce current community/workspace read access.
 pub fn dispatch_client_response(
@@ -183,10 +211,8 @@ pub fn dispatch_client_response(
                 None
             };
             let issues=page.iter().map(|issue|{
-                let compact=issue.issue_id.simple().to_string();let mut length=8;
-                while length<32 && tracker.issues.values().any(|other|other.issue_id!=issue.issue_id && other.issue_id.simple().to_string().starts_with(&compact[..length])){length+=1;}
                 let accepted=tracker.activity.get(&(workspace,issue.issue_id)).into_iter().flatten().map(|item|item.event_id.clone()).collect::<Vec<_>>();
-                json!({"issueId":issue.issue_id,"identifier":format!("D-{}",&compact[..length]),"title":issue.title,"body":if issue_id.is_some(){&issue.body}else{""},"rootEvent":issue.root_event,"tipEvent":issue.tip_event,"status":issue.status.to_string(),"priority":issue.priority.map(|p|p.to_string()),"assignee":issue.assignee,"labels":issue.labels,"projectId":issue.project_id,"due":issue.due,"externalRefs":if issue_id.is_some(){issue.external_refs.iter().cloned().collect::<Vec<_>>()}else{vec![]},"acceptedEvents":if issue_id.is_some(){accepted}else{vec![]}})
+                json!({"issueId":issue.issue_id,"identifier":issue_alias(issue, &tracker),"title":issue.title,"body":if issue_id.is_some(){&issue.body}else{""},"rootEvent":issue.root_event,"tipEvent":issue.tip_event,"status":issue.status.to_string(),"priority":issue.priority.map(|p|p.to_string()),"assignee":issue.assignee,"labels":issue.labels,"projectId":issue.project_id,"due":issue.due,"externalRefs":if issue_id.is_some(){issue.external_refs.iter().cloned().collect::<Vec<_>>()}else{vec![]},"acceptedEvents":if issue_id.is_some(){accepted}else{vec![]}})
             }).collect::<Vec<_>>();
             let candidates = if issue_id.is_some() {
                 records.records.values().collect::<Vec<_>>()
