@@ -138,7 +138,7 @@ export function DispatchScreen() {
   );
   const workspaceId =
     workspaceQuery.workspaces.find(
-      (workspace) => workspace.id === values.workspace,
+      (workspace) => workspace.id === unconfirmedWorkspaceId,
     )?.id ?? (workspaceQuery.isLoading ? unconfirmedWorkspaceId : null);
   const activeWorkspace =
     workspaceQuery.workspaces.find(
@@ -168,10 +168,17 @@ export function DispatchScreen() {
     selection.workspace === selectionScope ? selection.ids : [];
 
   React.useEffect(() => {
-    if (workspaceQuery.isLoading || workspaceId) return;
-    const initial = initialWorkspaceId(populatedWorkspaces);
-    if (initial) applyPatch({ workspace: initial }, { replace: true });
-  }, [applyPatch, populatedWorkspaces, workspaceId, workspaceQuery.isLoading]);
+    if (workspaceQuery.isLoading) return;
+    const initial = workspaceId ?? initialWorkspaceId(populatedWorkspaces);
+    if (initial && values.workspace !== initial)
+      applyPatch({ workspace: initial }, { replace: true });
+  }, [
+    applyPatch,
+    populatedWorkspaces,
+    workspaceId,
+    workspaceQuery.isLoading,
+    values.workspace,
+  ]);
 
   const selectWorkspace = (next: string) => {
     applyPatch({ workspace: next, exclude: null }, { replace: true });

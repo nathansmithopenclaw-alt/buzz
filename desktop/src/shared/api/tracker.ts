@@ -1,6 +1,13 @@
 import { invokeTauri } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
 
+export function readTrackerMembership(input: {
+  workspaceId: string;
+  managedSigner: string;
+}): Promise<RelayEvent> {
+  return invokeTauri<RelayEvent>("read_tracker_membership", input);
+}
+
 type TrackerFoldInput = {
   events: RelayEvent[];
   taskEvents: RelayEvent[];

@@ -17,6 +17,9 @@ use crate::app_state::AppState;
 #[path = "tracker_preview.rs"]
 mod preview;
 pub use preview::read_tracker_context_cache;
+#[path = "tracker_membership.rs"]
+mod membership;
+pub use membership::read_tracker_membership;
 
 fn active_cache_key(
     state: &AppState,

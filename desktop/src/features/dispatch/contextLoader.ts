@@ -5,6 +5,7 @@ import {
   resumeTrackerContext,
   trackerFoldCursor,
   readTrackerContextCache,
+  readTrackerMembership,
 } from "@/shared/api/tracker";
 import { isDispatchHistoryGap, type DispatchHistoryClient } from "./history";
 import { dispatchHistoryClient } from "./relayHistory";
@@ -18,6 +19,7 @@ const TASK_DISCOVERY_TAG = "buzz-task";
 
 type FoldedContext = Omit<DispatchContext, "sectionErrors">;
 const nativeReads = {
+  membership: readTrackerMembership,
   cursor: trackerFoldCursor,
   preview: readTrackerContextCache<DispatchContext>,
   fold: foldTrackerContext<FoldedContext>,
@@ -54,17 +56,14 @@ export async function loadDispatchContext(
     fetchExhaustively: (filter) => run(() => source.fetchExhaustively(filter)),
   };
   const snapshotAt = Math.floor(Date.now() / 1000);
-  const memberships = await history.fetch({
-    kinds: [39002],
-    "#d": [workspaceId],
-    limit: 1,
-  });
-  const membershipEvent = memberships[0];
+  // Membership and local cache loading do not depend on the renderer's
+  // startup subscription replay. Current membership still gates the preview.
+  const [membershipEvent, cursor] = await Promise.all([
+    run(() => native.membership({ workspaceId, managedSigner })),
+    native.cursor({ workspaceId, managedSigner }).catch(() => null),
+  ]);
   if (!membershipEvent)
     throw new Error("Tracker workspace membership snapshot is unavailable.");
-  const cursor = await native
-    .cursor({ workspaceId, managedSigner })
-    .catch(() => null);
   if (options.includePreview !== false) {
     // Older caches can still supply a read-only preview while their first
     // complete records sync starts from the beginning.

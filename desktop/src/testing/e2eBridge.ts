@@ -229,6 +229,7 @@ type E2eConfig = {
     dispatchFoldError?: string;
     dispatchCachedPreview?: DispatchContext;
     dispatchResumeDelayMs?: number;
+    dispatchMembershipDelayMs?: number;
     /** Number of canonical Dispatch history REQs rejected once with a 1s hint. */
     dispatchHistoryRateLimitCount?: number;
     /** Persisted Rust-owned Dispatch cache cursor exposed on warm start. */
@@ -11270,10 +11271,17 @@ function emitMockDispatchFixture(
   } else {
     return false;
   }
-  for (const event of matching.slice(0, filter.limit ?? matching.length)) {
-    sendWsText(socket.handler, ["EVENT", subId, event]);
-  }
-  sendWsText(socket.handler, ["EOSE", subId]);
+  const deliver = () => {
+    for (const event of matching.slice(0, filter.limit ?? matching.length)) {
+      sendWsText(socket.handler, ["EVENT", subId, event]);
+    }
+    sendWsText(socket.handler, ["EOSE", subId]);
+  };
+  const membershipDelay = kinds.has(39002)
+    ? getConfig()?.mock?.dispatchMembershipDelayMs
+    : 0;
+  if (membershipDelay) setTimeout(deliver, membershipDelay);
+  else deliver();
   return true;
 }
 
@@ -13260,6 +13268,23 @@ export function maybeInstallE2eTauriMocks() {
           };
         }
         return structuredClone(mockDispatchContext);
+      }
+      case "read_tracker_membership": {
+        const fixture = activeConfig?.mock?.dispatch;
+        const workspaceId = (payload as { workspaceId: string }).workspaceId;
+        const workspaces =
+          fixture?.workspaces ?? (fixture ? [fixture.workspace] : []);
+        if (!workspaces.some((value) => value.id === workspaceId))
+          throw new Error(
+            "Tracker workspace membership snapshot is unavailable.",
+          );
+        return dispatchFixtureEvent("1", 39002, [
+          ["d", workspaceId],
+          ["p", MOCK_IDENTITY_PUBKEY, "", "owner"],
+          ...(fixture?.members ?? [])
+            .filter((key) => key !== MOCK_IDENTITY_PUBKEY)
+            .map((key) => ["p", key, "", "member"]),
+        ]);
       }
       case "read_tracker_context_cache":
         return activeConfig?.mock?.dispatchCachedPreview

@@ -57,6 +57,7 @@ test("saved issues paint before slow synchronization and then become current", a
       dispatchWarmCursor: 100,
       dispatchCachedPreview: preview,
       dispatchResumeDelayMs: 5000,
+      dispatchMembershipDelayMs: 5000,
       dispatch: {
         workspace: { id: workspace, name: "Loading acceptance" },
         context: {

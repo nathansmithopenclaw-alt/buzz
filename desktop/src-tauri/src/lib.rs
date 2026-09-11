@@ -600,6 +600,7 @@ pub fn run() {
             fold_tracker_context,
             tracker_fold_cursor,
             read_tracker_context_cache,
+            read_tracker_membership,
             resume_tracker_context,
             fold_tracker_context_incremental,
             get_project_repo_file_content,

@@ -30,6 +30,10 @@ function fixture() {
     },
   };
   const native = {
+    membership: async () => {
+      calls.push("membership");
+      return membership;
+    },
     cursor: async () => 100,
     preview: async (input) => {
       assert.equal(input.membershipEvent, membership);
@@ -101,6 +105,7 @@ test("verified local preview arrives before slow relay history and stays read-on
 test("missing or revoked membership cannot fall back to cached private issues", async () => {
   const f = fixture();
   f.history.fetch = async () => [];
+  f.native.membership = async () => null;
   await assert.rejects(
     loadDispatchContext(
       workspace,
@@ -112,6 +117,24 @@ test("missing or revoked membership cannot fall back to cached private issues", 
     /membership snapshot is unavailable/,
   );
   assert.equal(f.calls.includes("preview"), false);
+});
+
+test("saved preview does not wait for the startup WebSocket history queue", async () => {
+  const f = fixture();
+  f.history.fetch = async () => {
+    throw new Error("WebSocket startup history is still restoring");
+  };
+  let preview;
+  await loadDispatchContext(
+    workspace,
+    viewer,
+    () => {},
+    (value) => {
+      preview = value;
+    },
+    f,
+  );
+  assert.equal(preview.viewerRole, "none");
 });
 test("failed records history must not advance the shared warm cursor", async () => {
   const f = fixture();
