@@ -109,17 +109,6 @@
       "expires": "2026-09-28"
     },
     {
-      "file": "tests/e2e/onboarding-agent-defaults.spec.ts",
-      "title": "concurrent installs each keep their own state — one fails, one succeeds",
-      "line": 910,
-      "class": "quarantined-flake",
-      "reason": "toHaveCount mismatch; red in the baseline arm, green in the fixed arm.",
-      "owner": "anvil",
-      "issue": "D-6880b42e",
-      "added": "2026-08-29",
-      "expires": "2026-09-28"
-    },
-    {
       "file": "tests/e2e/thread-unread.spec.ts",
       "title": "13-thread-badge-clears-on-read-without-reentry",
       "line": 810,
