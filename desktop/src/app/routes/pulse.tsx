@@ -16,6 +16,7 @@ const PulseScreen = React.lazy(async () => {
 });
 
 type PulseRouteSearch = {
+  summaryReport?: string;
   profile?: string;
   profileTab?: ProfilePanelTab;
   profileView?: ProfilePanelView;
@@ -25,6 +26,11 @@ function validatePulseSearch(
   search: Record<string, unknown>,
 ): PulseRouteSearch {
   return {
+    summaryReport:
+      typeof search.summaryReport === "string" &&
+      /^[a-f0-9]{64}$/i.test(search.summaryReport)
+        ? search.summaryReport.toLowerCase()
+        : undefined,
     profile:
       typeof search.profile === "string" && search.profile.length > 0
         ? search.profile

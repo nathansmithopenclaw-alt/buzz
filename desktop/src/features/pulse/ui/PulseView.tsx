@@ -1,3 +1,4 @@
+import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { Search } from "lucide-react";
 import * as React from "react";
 
@@ -42,6 +43,7 @@ export type PulseTab =
   | "mine"
   | "summary";
 
+const SUMMARY_LINK_KEYS = ["summaryReport"] as const;
 const pulsePanelId = (tab: PulseTab) => `pulse-panel-${tab}`;
 const pulseTabId = (tab: PulseTab) => `pulse-tab-${tab}`;
 
@@ -82,7 +84,13 @@ function TimelineSkeleton() {
 
 export function PulseView({ currentPubkey }: PulseViewProps) {
   const summaryEnabled = useFeatureEnabled("summary");
-  const [activeTab, setActiveTab] = React.useState<PulseTab>("everyone");
+  const { values: summaryLink } = useHistorySearchState(SUMMARY_LINK_KEYS);
+  const [activeTab, setActiveTab] = React.useState<PulseTab>(
+    summaryLink.summaryReport ? "summary" : "everyone",
+  );
+  React.useEffect(() => {
+    if (summaryLink.summaryReport && summaryEnabled) setActiveTab("summary");
+  }, [summaryLink.summaryReport, summaryEnabled]);
   React.useEffect(() => {
     if (!summaryEnabled && activeTab === "summary") {
       setActiveTab("everyone");
@@ -356,7 +364,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
       <div className="mt-0 min-h-0 flex-1 overflow-y-auto" ref={scrollRef}>
         <div
           aria-labelledby={pulseTabId(activeTab)}
-          className={`mx-auto flex w-full max-w-2xl flex-col px-4 pb-10 sm:px-6 ${
+          className={`mx-auto flex w-full flex-col px-4 pb-10 sm:px-6 ${activeTab === "summary" ? "max-w-5xl" : "max-w-2xl"} ${
             activeTab !== "search" &&
             activeTab !== "agents" &&
             activeTab !== "summary"

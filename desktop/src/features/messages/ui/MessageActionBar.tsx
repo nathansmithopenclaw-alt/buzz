@@ -1,3 +1,4 @@
+import { FeatureGate } from "@/shared/features";
 import {
   BellOff,
   BellRing,
@@ -12,6 +13,7 @@ import {
   Pencil,
   SmilePlus,
   Trash2,
+  Waypoints,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -53,6 +55,11 @@ import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ProtectedMessageAction } from "@protected-feature-components";
+
+const ConversationDispatchDialog = React.lazy(async () => ({
+  default: (await import("@/features/dispatch/ui/ConversationDispatchDialog"))
+    .ConversationDispatchDialog,
+}));
 
 const ACTION_BUTTON_CLASS = "h-8 w-8 rounded-full p-0";
 const ACTION_ICON_CLASS = "!h-4 !w-4";
@@ -120,6 +127,7 @@ function MoreActionsMenu({
   isUnread?: boolean;
 }) {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
+  const [dispatchOpen, setDispatchOpen] = React.useState(false);
   const [isReportDialogOpen, setIsReportDialogOpen] = React.useState(false);
   // Transfer focus ownership only after the menu has finished closing.
   // During its exit animation Radix's pointer-leave handler can still focus
@@ -292,6 +300,18 @@ function MoreActionsMenu({
             </DropdownMenuItem>
           ) : null}
 
+          {canCopyMessageLink(message, channelId) ? (
+            <FeatureGate feature="dispatch">
+              <DropdownMenuItem
+                data-testid={`dispatch-message-${message.id}`}
+                onSelect={() => {
+                  pendingEditRef.current = () => setDispatchOpen(true);
+                }}
+              >
+                <Waypoints className="h-4 w-4" /> Track in Dispatch
+              </DropdownMenuItem>
+            </FeatureGate>
+          ) : null}
           {canReport || onDelete ? <DropdownMenuSeparator /> : null}
 
           {canReport ? (
@@ -328,6 +348,15 @@ function MoreActionsMenu({
         </DropdownMenuContent>
       </DropdownMenu>
 
+      {dispatchOpen && channelId ? (
+        <React.Suspense fallback={null}>
+          <ConversationDispatchDialog
+            message={message}
+            channel={channelId}
+            onClose={() => setDispatchOpen(false)}
+          />
+        </React.Suspense>
+      ) : null}
       {onDelete ? (
         <DeleteMessageConfirmDialog
           onConfirm={() => onDelete(message)}

@@ -38,6 +38,13 @@
 //! it at startup.  We do not evaluate it here; it is exposed for future
 //! UI display only.
 
+#[cfg(test)]
+#[path = "readiness_test_support.rs"]
+mod test_support;
+
+#[path = "readiness_dsh.rs"]
+mod dsh;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -442,6 +449,7 @@ fn collect_missing_requirements(
 
     match rt.id {
         "buzz-agent" => buzz_agent_requirements(effective),
+        "deepseek" => dsh::requirements(effective),
         "goose" => {
             // Read the file config once at the call site so the inner fn is
             // pure and unit-testable by injection.
@@ -670,24 +678,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::managed_agents::discovery::known_acp_runtime_exact;
 
-    /// Build a minimal `EffectiveAgentEnv` with the given env map and command.
-    fn make_env(command: &str, env: BTreeMap<String, String>) -> EffectiveAgentEnv {
-        let runtime = known_acp_runtime_exact(command);
-        EffectiveAgentEnv {
-            env,
-            config_file_path: runtime.and_then(|r| r.config_file_path),
-            effective_command: command.to_string(),
-        }
-    }
-
-    fn env_with(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    }
+    use super::test_support::{env_with, make_env};
 
     // ── buzz-agent tests ──────────────────────────────────────────────────
 

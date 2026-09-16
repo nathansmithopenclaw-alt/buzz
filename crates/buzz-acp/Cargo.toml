@@ -41,6 +41,8 @@ reqwest = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
 
 # IDs
 uuid = { workspace = true }

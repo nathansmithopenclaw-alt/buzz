@@ -250,6 +250,11 @@ fn match_job(
     context: &MatchContext,
 ) -> anyhow::Result<Vec<buzz_db::push::WakeRequest>> {
     let mut wakes = Vec::new();
+    // Summary notifications are opt-in future work. Do not leak frozen audience
+    // metadata through a wake after membership or sharing has been revoked.
+    if crate::summary::is_named_report(&job.event.event) {
+        return Ok(wakes);
+    }
     for lease in &context.leases {
         let author_hex = hex::encode(&lease.author);
         if !reader_authorized_for_event(&job.event.event, &author_hex) {

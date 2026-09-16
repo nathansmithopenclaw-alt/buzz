@@ -125,6 +125,21 @@ impl<'a> Emitter<'a> {
         {
             return Ok(());
         }
+        self.emit_capture_with_context(store, plan, "").await
+    }
+
+    /// Capture authorized source text with a stable source link and useful title.
+    pub async fn emit_capture_with_context(
+        &self,
+        store: &mut ProjectionStore,
+        plan: &CapturePlan,
+        source: &str,
+    ) -> Result<(), DispatchError> {
+        if store.request_fired(&plan.request_id)
+            || store.has_root_with_source(&plan.source_event_id)
+        {
+            return Ok(());
+        }
         let root = IssueRoot {
             v: TRACKER_VERSION,
             op: "create".to_string(),
@@ -137,8 +152,8 @@ impl<'a> Emitter<'a> {
             ),
             title: plan.title.clone(),
             body: format!(
-                "Captured from a pin reaction. Source event: `{}`.",
-                plan.source_event_id
+                "{source}\n\nCaptured from a [pinned conversation](buzz://message?channel={}&id={}).",
+                plan.channel_id, plan.source_event_id
             ),
             status: IssueStatus::Triage,
             priority: None,
@@ -150,7 +165,13 @@ impl<'a> Emitter<'a> {
             source_event_id: Some(plan.source_event_id.clone()),
             workflow: "default".to_string(),
             labels: Vec::new(),
-            external_refs: Vec::new(),
+            external_refs: vec![buzz_sdk::tracker::ExternalRef {
+                kind: "conversation".into(),
+                reference: format!(
+                    "buzz://message?channel={}&id={}",
+                    plan.channel_id, plan.source_event_id
+                ),
+            }],
             request_id: Some(plan.request_id),
             import: None,
         };
@@ -300,6 +321,7 @@ impl<'a> Emitter<'a> {
     ) -> Result<Vec<EventBuilder>, DispatchError> {
         let envelope = task_envelope::TaskEnvelope {
             v: task_envelope::TASK_ENVELOPE_VERSION,
+            authority: Some(Default::default()),
             task_id: route_task_id(&request_id),
             status: task_envelope::TaskStatus::Assigned,
             assignee: owner.to_string(),
@@ -336,6 +358,92 @@ impl<'a> Emitter<'a> {
         Ok(vec![envelope_builder, action_builder])
     }
 
+    /// Sign an assignment bundle whose issue link must be canonical before the
+    /// task message is published. The human owner is also the independent reviewer.
+    pub fn bounded_route_events(
+        &self,
+        issue: &buzz_sdk::tracker::IssueProjection,
+        action: &RuleAction,
+    ) -> Result<Vec<Event>, DispatchError> {
+        use buzz_sdk::tracker::{
+            build_tracker_revision, ExternalRef, IssueRevision, RevisionSet, SetOperations,
+        };
+        let RuleAction::RouteAssign {
+            owner: executor,
+            channel_id,
+            request_id,
+            label,
+            ..
+        } = action
+        else {
+            return Err(DispatchError::Other("expected route action".into()));
+        };
+        let reviewer = issue
+            .assignee
+            .clone()
+            .filter(|owner| owner != executor)
+            .ok_or_else(|| {
+                DispatchError::Other("Choose an independent issue owner before routing".into())
+            })?;
+        let task_id = route_task_id(request_id);
+        let envelope=task_envelope::TaskEnvelope {
+            v:task_envelope::TASK_ENVELOPE_VERSION,
+            authority:Some(task_envelope::TaskAuthority {reviewer:Some(reviewer), ..Default::default()}),
+            task_id,status:task_envelope::TaskStatus::Assigned,
+            assignee:executor.clone(),assigner:self.relay.pubkey_hex(),title:issue.title.clone(),
+            deliverables:vec![],verification:task_envelope::TaskVerification {method:"Report exact artifacts and checks; the named issue owner independently reviews the result.".into(),evidence_ref:None},
+            blocked_on:None,notes:Some(format!("Accepted issue revision {}. Routed by capability `{label}`.",issue.revision)),tracker_issue_id:Some(issue.issue_id),dispatch_request_id:Some(*request_id),
+        };
+        let context = issue.body.chars().take(12000).collect::<String>();
+        let message=task_envelope::build_task_message(*channel_id,&format!("**{}** — {}\n\n{}\n\nWork is scoped to the linked Dispatch issue; report blockers and evidence there.",issue.identifier,issue.title,context),&envelope,None,&[executor.as_str()])?.sign_with_keys(self.relay.keys()).map_err(|error|DispatchError::Identity(error.to_string()))?;
+        let revision = IssueRevision {
+            v: TRACKER_VERSION,
+            op: "revise".into(),
+            issue_id: issue.issue_id,
+            root_event: issue.root_event.clone(),
+            parent_event: issue.tip_event.clone(),
+            revision: issue.revision + 1,
+            set: RevisionSet::default(),
+            clear: vec![],
+            relations: SetOperations::default(),
+            external_refs: SetOperations {
+                add: vec![
+                    ExternalRef {
+                        kind: "task".into(),
+                        reference: task_id.to_string(),
+                    },
+                    ExternalRef {
+                        kind: "task_event".into(),
+                        reference: message.id.to_hex(),
+                    },
+                ],
+                remove: vec![],
+            },
+            reason: Some(format!(
+                "Prepare bounded execution by capability `{label}`; owner remains accountable"
+            )),
+            request_id: Some(*request_id),
+            import: None,
+        };
+        let link = build_tracker_revision(self.config.stream_id, &revision)?
+            .sign_with_keys(self.relay.keys())
+            .map_err(|error| DispatchError::Identity(error.to_string()))?;
+        let action = DispatchAction {
+            v: TRACKER_VERSION,
+            issue_id: issue.issue_id,
+            root_event: issue.root_event.clone(),
+            request_id: *request_id,
+            action: DispatchActionKind::Assign,
+            threshold_id: None,
+            observed_tip: Some(issue.tip_event.clone()),
+            result: format!("Executor assigned by capability {label}; owner retained"),
+        };
+        let receipt = build_dispatch_action(self.config.stream_id, &action)?
+            .sign_with_keys(self.relay.keys())
+            .map_err(|error| DispatchError::Identity(error.to_string()))?;
+        Ok(vec![link, message, receipt])
+    }
+
     /// Kind-40024 heartbeat carrying the composite cursor. `degraded` names
     /// emission failures observed this tick — the heartbeat reports them
     /// instead of a hardcoded Healthy, so liveness consumers see impairment.
@@ -344,18 +452,33 @@ impl<'a> Emitter<'a> {
         store: &ProjectionStore,
         degraded: Option<String>,
     ) -> Result<(), DispatchError> {
-        let health = match degraded {
-            Some(mut detail) => {
-                detail.truncate(MAX_HEARTBEAT_DETAIL_LEN);
-                ServiceHealth {
-                    status: ServiceHealthStatus::Degraded,
-                    detail: Some(detail),
-                }
-            }
-            None => ServiceHealth {
-                status: ServiceHealthStatus::Healthy,
-                detail: None,
+        let impaired = degraded.is_some();
+        self.emit_heartbeat_detail(store, impaired, degraded).await
+    }
+
+    /// Report healthy paused/preview states separately from actual impairment.
+    pub async fn emit_heartbeat_detail(
+        &self,
+        store: &ProjectionStore,
+        impaired: bool,
+        detail: Option<String>,
+    ) -> Result<(), DispatchError> {
+        let detail = detail.map(|detail| {
+            detail
+                .chars()
+                .scan(0usize, |bytes, ch| {
+                    *bytes += ch.len_utf8();
+                    (*bytes <= MAX_HEARTBEAT_DETAIL_LEN).then_some(ch)
+                })
+                .collect()
+        });
+        let health = ServiceHealth {
+            status: if impaired {
+                ServiceHealthStatus::Degraded
+            } else {
+                ServiceHealthStatus::Healthy
             },
+            detail,
         };
         let heartbeat = ServiceHeartbeat {
             v: TRACKER_VERSION,

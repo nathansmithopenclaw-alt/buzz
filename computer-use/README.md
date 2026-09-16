@@ -25,6 +25,16 @@ pages across the host registry. Closing the final page shuts down its engine.
 Idle expiry is 15 minutes, absolute expiry is two hours, and MCP EOF closes all
 owned contexts. Browser contexts isolate web storage, not hostile OS processes.
 
+Copy browser generations exactly from observations; observing does not advance
+the generation. Element actions also require the latest observation token. Every
+action consumes that observation. Guard refusals explain which fresh tokens are
+needed and send no input.
+
+Cancelling a provider turn is not rollback. Replacement prompts distinguish the
+prior request from unavailable tool history and require uncertainty when prior
+outcomes cannot be established. An empty resource list in a replacement session
+does not prove that the cancelled turn performed no actions.
+
 Native control is a separate opt-in, initially macOS only. Buzz directly launches
 the pinned CuaDriver daemon with embedded attribution, standard permission mode,
 a private socket and a parent-liveness pipe. MCP proxies do not launch a daemon

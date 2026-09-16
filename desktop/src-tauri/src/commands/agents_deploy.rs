@@ -192,6 +192,9 @@ pub(super) fn build_launch_block(
 }
 
 pub(super) fn ensure_remote_provider_supported(provider: Option<&str>) -> Result<(), String> {
+    if provider.map(str::trim) == Some("buzz-local") {
+        return Err("Saved model connections are local to this computer. Run this agent locally or configure its remote host explicitly.".into());
+    }
     if provider.map(str::trim) == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID) {
         return Err(
             "shared-compute agents cannot be deployed remotely because the mesh endpoint is local to the desktop"
@@ -308,6 +311,12 @@ pub(super) fn deploy_payload_json(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saved_model_connections_cannot_silently_deploy_to_another_host() {
+        assert!(super::ensure_remote_provider_supported(Some("buzz-local")).is_err());
+        assert!(super::ensure_remote_provider_supported(Some("deepseek-hosted")).is_ok());
+    }
+
     use super::*;
     use crate::managed_agents::{readiness::EffectiveHarnessDescriptor, RespondTo, TeamRecord};
 

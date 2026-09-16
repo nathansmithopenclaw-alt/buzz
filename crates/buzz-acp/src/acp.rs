@@ -18,6 +18,8 @@ use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 #[path = "codex_model_config.rs"]
 mod codex_model_config;
 pub use codex_model_config::resolve_model_switch_method;
+#[path = "acp_session_close.rs"]
+mod session_close;
 mod subscription_token;
 
 use crate::observer::{ObserverContext, ObserverHandle};
@@ -151,6 +153,8 @@ impl TurnDeliveryEvidence {
             Some(existing) => format!("{existing} {text}"),
             None => text.to_owned(),
         };
+        // Retain the latest terminal output, not an initial adapter warning.
+        // Detect goose's failure prefix before trimming the bounded excerpt.
         self.final_answer_snippet = normalized_snippet(&combined, FINAL_ANSWER_SNIPPET_CHARS);
         if from_goose
             && self
@@ -159,6 +163,17 @@ impl TurnDeliveryEvidence {
                 .is_some_and(|snippet| snippet.starts_with(GOOSE_RUNTIME_FAILURE_PREFIX))
         {
             self.adapter_runtime_failure_present = true;
+        }
+        let normalized = combined.split_whitespace().collect::<Vec<_>>().join(" ");
+        let count = normalized.chars().count();
+        if count > FINAL_ANSWER_SNIPPET_CHARS {
+            self.final_answer_snippet = Some(format!(
+                "…{}",
+                normalized
+                    .chars()
+                    .skip(count - FINAL_ANSWER_SNIPPET_CHARS)
+                    .collect::<String>()
+            ));
         }
     }
 
@@ -1540,7 +1555,32 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
-        self.turn_delivery_evidence = TurnDeliveryEvidence::default();
+        self.prompt_blocks(session_id, prompt_blocks, idle_timeout, max_duration, true)
+            .await
+    }
+
+    /// Continue the same host turn without losing its delivery or usage evidence.
+    pub(crate) async fn session_report_completion(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        budget: std::time::Duration,
+    ) -> Result<StopReason, AcpError> {
+        self.prompt_blocks(session_id, &[text], budget, budget, false)
+            .await
+    }
+
+    async fn prompt_blocks(
+        &mut self,
+        session_id: &str,
+        prompt_blocks: &[&str],
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+        new_turn: bool,
+    ) -> Result<StopReason, AcpError> {
+        if new_turn {
+            self.turn_delivery_evidence = TurnDeliveryEvidence::default();
+        }
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1548,8 +1588,10 @@ impl AcpClient {
         // Mark the usage tracker as in-flight for this turn BEFORE sending the
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
-        self.goose_usage.begin_turn(session_id);
-        self.standard_usage.begin_turn(session_id);
+        if new_turn {
+            self.goose_usage.begin_turn(session_id);
+            self.standard_usage.begin_turn(session_id);
+        }
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -1617,9 +1659,7 @@ impl AcpClient {
     ///
     /// Session invalidation is a local state transition: callers must be able to
     /// requeue the interrupted Buzz turn even if the adapter is wedged. The pool
-    /// therefore bounds only this request's write and treats the eventual response
-    /// as stale. [`read_until_response`](Self::read_until_response) already ignores
-    /// responses whose IDs do not match the next awaited request.
+    /// bounds this write; unmatched responses are ignored. Owned dsh uses acknowledged close.
     pub(crate) async fn session_close_fire_and_forget(
         &mut self,
         session_id: &str,
@@ -5531,6 +5571,23 @@ printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
         assert_eq!(evidence.publish_failure_count, 1);
         assert!(!evidence.final_answer_present);
         assert!(evidence.final_answer_snippet.is_none());
+    }
+
+    #[test]
+    fn terminal_excerpt_retains_the_failure_after_startup_warnings() {
+        let mut evidence = TurnDeliveryEvidence::default();
+        evidence.record_final_answer_chunk(
+            &"Warning: Skill descriptions were shortened. ".repeat(10),
+            false,
+        );
+        evidence.record_final_answer_chunk(
+            "Automatic approval review rejected Summary publication. No cursors advanced.",
+            false,
+        );
+        let text = evidence.final_answer_snippet.unwrap();
+        assert!(text.ends_with("No cursors advanced."));
+        assert!(text.contains("rejected Summary publication"));
+        assert!(text.chars().count() <= FINAL_ANSWER_SNIPPET_CHARS + 1);
     }
 
     #[test]

@@ -2367,35 +2367,30 @@ mod postgres_tests {
     /// `FOR UPDATE` on the channel tuple before testing `ttl_seconds`, so
     /// concurrent commits into one hot permanent channel queued at commit
     /// time (deferred trigger) — invisible to any single-connection test.
-    /// Hold a channel-row lock that blocks TTL updates but permits FK reads,
-    /// then prove N concurrent insert-and-commit tasks complete within a
-    /// deadline while that lock remains held. The channel stays untouched
-    /// (permanent ⇒ no deadline write).
+    /// Hold the permanent channel row against updates while N full event
+    /// transactions commit. The journal may serialize those transactions, but
+    /// none may require a channel-row update. A timeout bounds either regression.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn permanent_channel_event_commits_do_not_lock_the_channel_row() {
         const N: usize = 8;
-        // setup_pool's default cap (10) covers N writers and the channel guard.
         let pool = setup_pool().await;
         let community_uuid = make_test_community(&pool).await;
         let channel = make_test_channel(&pool, community_uuid, None).await;
-
-        // Hold the channel row in a mode compatible with FK key-share reads
-        // but conflicting with a TTL UPDATE. The journal legitimately
-        // serializes writes per community, so inserting serially while holding
-        // every transaction open would deadlock on the journal before COMMIT.
-        let mut channel_guard = pool.begin().await.expect("begin channel guard");
+        let mut channel_guard = pool.begin().await.expect("begin channel row guard");
         sqlx::query(
             "SELECT id FROM channels WHERE community_id = $1 AND id = $2 FOR NO KEY UPDATE",
         )
         .bind(community_uuid)
         .bind(channel)
-        .fetch_one(&mut *channel_guard)
+        .execute(&mut *channel_guard)
         .await
-        .unwrap();
-        let commits = (0..N).map(|i| {
+        .expect("hold channel row against deadline updates");
+
+        let mut inserts = Vec::new();
+        for i in 0..N {
             let pool = pool.clone();
-            tokio::spawn(async move {
+            inserts.push(tokio::spawn(async move {
                 let mut tx = pool.begin().await.expect("begin insert txn");
                 let event = make_text_event(&format!("hot channel event {i}"));
                 sqlx::query(
@@ -2410,19 +2405,30 @@ mod postgres_tests {
                 .bind(&event.content)
                 .bind(event.sig.serialize().as_slice())
                 .bind(channel)
-                .execute(&mut *tx).await.expect("insert permanent-channel event");
-                tx.commit().await.expect("commit succeeds");
-            })
-        }).collect::<Vec<_>>();
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            for commit in commits {
-                commit.await.expect("join commit task");
+                .execute(&mut *tx)
+                .await
+                .expect("insert event inside txn");
+                tx.commit().await.expect("commit event without channel update");
+            }));
+        }
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            for task in &mut inserts {
+                task.await.expect("join insert task");
             }
         })
-        .await
-        .expect("permanent-channel inserts and commits must not need the channel row lock");
-        channel_guard.rollback().await.unwrap();
-
+        .await;
+        // Release and abort before asserting, so a negative control cannot
+        // leave transactions waiting forever in the test database.
+        channel_guard
+            .rollback()
+            .await
+            .expect("release channel guard");
+        if outcome.is_err() {
+            for task in &inserts {
+                task.abort();
+            }
+        }
+        outcome.expect("permanent-channel writes must finish while its row is locked");
         let deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
             "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
         )

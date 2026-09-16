@@ -53,8 +53,10 @@ export function WorkflowScheduleFields({
   disabled,
   onUpdate,
   trigger,
+  timezone = "UTC",
 }: {
   disabled?: boolean;
+  timezone?: string;
   onUpdate: (trigger: TriggerConfig) => void;
   trigger: TriggerConfig;
 }) {
@@ -213,7 +215,9 @@ export function WorkflowScheduleFields({
 
       {usesTime ? (
         <div className="space-y-1.5">
-          <FieldLabel htmlFor="wf-trigger-time">Run time (UTC)</FieldLabel>
+          <FieldLabel htmlFor="wf-trigger-time">
+            Run time ({timezone})
+          </FieldLabel>
           <Input
             disabled={disabled}
             id="wf-trigger-time"
@@ -226,6 +230,7 @@ export function WorkflowScheduleFields({
 
       {schedule.frequency === "custom_cron" ? (
         <CronExpressionInput
+          timezone={timezone}
           disabled={disabled}
           onChange={(customCron) => updateSchedule({ customCron })}
           value={schedule.customCron}
@@ -249,7 +254,7 @@ export function WorkflowScheduleFields({
           />
           <p className="text-xs text-muted-foreground">
             Keep this legacy interval or choose a repeat option above. All
-            schedules use UTC.
+            schedules use {timezone}.
           </p>
         </div>
       ) : null}

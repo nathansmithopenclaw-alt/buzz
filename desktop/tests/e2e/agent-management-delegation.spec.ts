@@ -8,6 +8,110 @@ const FIRST = "11".repeat(32);
 const SECOND = "22".repeat(32);
 const GENERAL_CHANNEL = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
+test("recipient target steps preserve separate field limits across Back and save together", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      { pubkey: FIRST, name: "Alpha" },
+      { pubkey: SECOND, name: "Beta" },
+    ],
+  });
+  await openAgentDefaults(page);
+  await page
+    .getByRole("button", { name: "Choose agents for update existing agents" })
+    .click();
+  const picker = page.getByTestId("agent-management-picker");
+  await picker.getByTestId("agent-management-picker-all").check();
+  const advance = picker.getByTestId("agent-management-picker-confirm");
+  await expect(advance).toHaveText("Next");
+  await advance.click();
+  await picker
+    .getByTestId(`agent-management-picker-agent-${SECOND}`)
+    .getByRole("checkbox")
+    .check();
+  await advance.click();
+  await picker
+    .getByTestId(`agent-management-picker-agent-${FIRST}`)
+    .getByRole("checkbox")
+    .check();
+  await picker.getByTestId("agent-management-field-displayName").uncheck();
+  await expect(advance).toBeDisabled();
+  await picker.getByTestId("agent-management-field-systemPrompt").check();
+  await picker.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(
+    picker.getByRole("heading", { name: "Which agents can Alpha modify?" }),
+  ).toBeVisible();
+  await expect(
+    picker
+      .getByTestId(`agent-management-picker-agent-${SECOND}`)
+      .getByRole("checkbox"),
+  ).toBeChecked();
+  await expect(
+    picker.getByTestId("agent-management-field-displayName"),
+  ).toBeChecked();
+  await advance.click();
+  await expect(
+    picker.getByTestId("agent-management-field-displayName"),
+  ).not.toBeChecked();
+  await expect(
+    picker.getByTestId("agent-management-field-systemPrompt"),
+  ).toBeChecked();
+  expect(
+    await invokeMock(page, "get_agent_management_delegation_set_call_count"),
+  ).toBe(0);
+  await advance.click();
+  await expect(picker).not.toBeVisible();
+  expect(
+    await invokeMock(page, "get_agent_management_delegation_set_call_count"),
+  ).toBe(1);
+  const stored = await invokeMock<{
+    agent_management_delegations: Record<
+      string,
+      { version: number; agentEdit: unknown }
+    >;
+  }>(page, "get_global_agent_config");
+  expect(stored?.agent_management_delegations[FIRST]).toMatchObject({
+    version: 4,
+    agentEdit: {
+      targetPubkeys: [SECOND],
+      allowedFields: ["displayName"],
+      allowSelfEdit: false,
+    },
+  });
+  expect(stored?.agent_management_delegations[SECOND]).toMatchObject({
+    version: 4,
+    agentEdit: {
+      targetPubkeys: [FIRST],
+      allowedFields: ["systemPrompt"],
+      allowSelfEdit: false,
+    },
+  });
+});
+
+test("canceling target selection does not grant the chosen recipient", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [{ pubkey: FIRST, name: "Alpha" }],
+  });
+  await openAgentDefaults(page);
+  await page
+    .getByRole("button", { name: "Choose agents for update existing agents" })
+    .click();
+  const picker = page.getByTestId("agent-management-picker");
+  await picker.getByTestId("agent-management-picker-all").check();
+  await picker.getByTestId("agent-management-picker-confirm").click();
+  await picker
+    .getByRole("button", { name: "Select all agents", exact: true })
+    .click();
+  await picker.getByTestId("agent-management-self-edit").check();
+  await picker.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(
+    await invokeMock(page, "get_agent_management_delegation_set_call_count"),
+  ).toBe(0);
+});
+
 async function openAgentDefaults(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
@@ -34,6 +138,89 @@ async function invokeMock<T>(
     ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.(cmd, null);
   }, command);
 }
+
+test("owner review completes an update request after saving instead of leaving a pending draft", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    globalAgentConfig: {
+      env_vars: { ANTHROPIC_API_KEY: "sk-ant-test-key" },
+      provider: "anthropic",
+      model: "claude-opus-4-5",
+      preferred_runtime: "goose",
+    },
+    personas: [
+      {
+        id: "reviewed-worker",
+        displayName: "Worker",
+        systemPrompt: "Original instructions",
+        runtime: "goose",
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+      },
+    ],
+    managedAgents: [
+      { pubkey: FIRST, name: "Manager", channelNames: ["general"] },
+    ],
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() =>
+    (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+      (entry) => entry.command === "agent_management_ledger",
+    ),
+  );
+  await page.evaluate(
+    ({ agentPubkey, channelId }) => {
+      window.__BUZZ_E2E_SEED_LIVE_OBSERVER_EVENTS__?.({
+        agentPubkey,
+        events: [
+          {
+            seq: 1,
+            timestamp: new Date().toISOString(),
+            kind: "agent_management_request",
+            agentIndex: 0,
+            channelId,
+            sessionId: null,
+            turnId: null,
+            payload: {
+              type: "agent_management_request",
+              action: "update",
+              requestId: "bb72977f-b6ce-46d0-a659-8896119b0344",
+              intent: "apply",
+              request: {
+                channelId,
+                agentName: "Worker",
+                displayName: "Reviewed worker",
+              },
+            },
+          },
+        ],
+      });
+    },
+    { agentPubkey: FIRST, channelId: GENERAL_CHANNEL },
+  );
+  await expect(page.locator("#persona-display-name")).toHaveValue(
+    "Reviewed worker",
+  );
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Edit agent", exact: true }),
+  ).not.toBeVisible();
+  const commands = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).map((entry) => ({
+      name: entry.command,
+      action: (entry.payload as { command?: { action?: string } }).command
+        ?.action,
+    })),
+  );
+  const begin = commands.findIndex((c) => c.action === "begin_owner_review");
+  const update = commands.findIndex((c) => c.name === "update_persona");
+  const complete = commands.findIndex((c) => c.action === "complete");
+  expect(begin).toBeGreaterThanOrEqual(0);
+  expect(update).toBeGreaterThan(begin);
+  expect(complete).toBeGreaterThan(update);
+  expect(commands.filter((c) => c.action === "complete")).toHaveLength(1);
+});
 
 test("saving the first queued agent draft presents the second without dismissing it", async ({
   page,
@@ -201,6 +388,15 @@ test("grant all permissions to current agents writes five explicit sets", async 
   await openAgentDefaults(page);
   await page.getByTestId("agent-management-grant-all").click();
   await page.getByTestId("agent-management-grant-all-confirm").click();
+  for (const name of ["Alpha", "Beta"]) {
+    await expect(
+      page.getByRole("heading", { name: `Which agents can ${name} modify?` }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Select all agents", exact: true })
+      .click();
+    await page.getByTestId("agent-management-picker-confirm").click();
+  }
   await expect(
     page.getByTestId("agent-management-capability-agent_creation-summary"),
   ).toHaveText("2 agents");
@@ -232,8 +428,8 @@ test("adding and revoking a second grantee preserves the legacy proof", async ({
     granteePubkey: FIRST,
     auditChannelId: "7c07e659-3610-42f4-9a5e-1e9973c09da9",
     capabilities: {
-      agent_config: true,
-      agent_creation: false,
+      agent_config: false,
+      agent_creation: true,
       env_vars: false,
       global_config: false,
       teams: false,
@@ -255,7 +451,7 @@ test("adding and revoking a second grantee preserves the legacy proof", async ({
   });
   await openAgentDefaults(page);
   await page
-    .getByTestId("agent-management-capability-agent_config")
+    .getByTestId("agent-management-capability-agent_creation")
     .getByRole("button")
     .click();
   await expect(page.getByTestId("agent-management-picker")).toBeVisible();
@@ -265,7 +461,7 @@ test("adding and revoking a second grantee preserves the legacy proof", async ({
     .click();
   await page.getByTestId("agent-management-picker-confirm").click();
   await expect(
-    page.getByTestId("agent-management-capability-agent_config-summary"),
+    page.getByTestId("agent-management-capability-agent_creation-summary"),
   ).toHaveText("2 agents");
 
   let stored = await invokeMock<{
@@ -282,7 +478,7 @@ test("adding and revoking a second grantee preserves the legacy proof", async ({
 
   await page.getByTestId(`agent-management-revoke-${SECOND}`).click();
   await expect(
-    page.getByTestId("agent-management-capability-agent_config-summary"),
+    page.getByTestId("agent-management-capability-agent_creation-summary"),
   ).toHaveText("1 agent");
   stored = await invokeMock(page, "get_global_agent_config");
   expect(stored?.agent_management_delegation).toEqual(legacyGrant);
@@ -401,6 +597,21 @@ test("permission pickers are explicit, keyboard accessible, and persist on reope
     .getByRole("checkbox")
     .check();
   await page.getByTestId("agent-management-picker-confirm").click();
+  await expect(
+    picker.getByRole("heading", { name: "Which agents can Beta modify?" }),
+  ).toBeVisible();
+  expect(
+    await invokeMock(page, "get_agent_management_delegation_set_call_count"),
+  ).toBe(0);
+  await expect(
+    picker.getByTestId("agent-management-picker-confirm"),
+  ).toBeDisabled();
+  await picker
+    .getByTestId(`agent-management-picker-agent-${FIRST}`)
+    .getByRole("checkbox")
+    .check();
+  await picker.getByTestId("agent-management-field-systemPrompt").check();
+  await picker.getByTestId("agent-management-picker-confirm").click();
   await expect(picker).not.toBeVisible();
   await expect(
     card.getByTestId("agent-management-capability-agent_config-summary"),
@@ -417,6 +628,23 @@ test("permission pickers are explicit, keyboard accessible, and persist on reope
       .getByTestId(`agent-management-picker-agent-${FIRST}`)
       .getByRole("checkbox"),
   ).not.toBeChecked();
+  await picker.getByRole("button", { name: "Cancel", exact: true }).click();
+  await card
+    .getByRole("button", { name: "Edit agent scope for Beta", exact: true })
+    .click();
+  await expect(
+    picker
+      .getByTestId(`agent-management-picker-agent-${FIRST}`)
+      .getByRole("checkbox"),
+  ).toBeChecked();
+  await expect(
+    picker
+      .getByTestId(`agent-management-picker-agent-${SECOND}`)
+      .getByRole("checkbox"),
+  ).not.toBeChecked();
+  await expect(
+    picker.getByTestId("agent-management-field-systemPrompt"),
+  ).toBeChecked();
   await waitForAnimations(page);
   await picker.screenshot({
     path: testInfo.outputPath("delegation-agent-picker.png"),
@@ -476,3 +704,96 @@ test("save errors remain in the picker with the draft intact for retry", async (
     page.getByRole("switch", { name: "Create agents", exact: true }),
   ).not.toBeChecked();
 });
+
+for (const version of [1, 4]) {
+  test(`adding an edit recipient preserves an existing v${version} grant`, async ({
+    page,
+  }) => {
+    const existing = {
+      granteePubkey: FIRST,
+      auditChannelId: "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+      capabilities: {
+        agent_config: true,
+        agent_creation: true,
+        env_vars: false,
+        global_config: false,
+        teams: false,
+      },
+      signedEvent: "unchanged-existing-proof",
+      ...(version === 4
+        ? {
+            version: 4,
+            relayScope: "wss://relay.example.test",
+            agentEdit: {
+              targetPubkeys: [SECOND],
+              allowedFields: ["systemPrompt"],
+              allowSelfEdit: false,
+            },
+          }
+        : {}),
+    };
+    await installMockBridge(page, {
+      managedAgents: [
+        { pubkey: FIRST, name: "Alpha" },
+        { pubkey: SECOND, name: "Beta" },
+      ],
+      globalAgentConfig: {
+        env_vars: {},
+        provider: null,
+        model: null,
+        agent_management_delegation: null,
+        agent_management_delegations: { [FIRST]: existing },
+      },
+    });
+    await openAgentDefaults(page);
+    await page
+      .getByRole("button", { name: "Choose agents for update existing agents" })
+      .click();
+    const picker = page.getByTestId("agent-management-picker");
+    await picker
+      .getByTestId(`agent-management-picker-agent-${SECOND}`)
+      .getByRole("checkbox")
+      .check();
+    await picker.getByTestId("agent-management-picker-confirm").click();
+    await expect(
+      picker.getByRole("heading", { name: "Which agents can Beta modify?" }),
+    ).toBeVisible();
+    await picker
+      .getByTestId(`agent-management-picker-agent-${FIRST}`)
+      .getByRole("checkbox")
+      .check();
+    await picker.getByTestId("agent-management-picker-confirm").click();
+    await expect(picker).not.toBeVisible();
+    const stored = await invokeMock<{
+      agent_management_delegations: Record<string, unknown>;
+    }>(page, "get_global_agent_config");
+    expect(stored?.agent_management_delegations[FIRST]).toEqual(existing);
+    await page
+      .getByRole("button", { name: "Edit agent scope for Beta", exact: true })
+      .click();
+    await expect(
+      picker.getByRole("heading", { name: "Which agents can Beta modify?" }),
+    ).toBeVisible();
+    await picker.getByTestId("agent-management-field-systemPrompt").check();
+    await picker.getByTestId("agent-management-picker-confirm").click();
+    await expect(picker).not.toBeVisible();
+    expect(
+      (
+        await invokeMock<{
+          agent_management_delegations: Record<string, unknown>;
+        }>(page, "get_global_agent_config")
+      )?.agent_management_delegations[FIRST],
+    ).toEqual(existing);
+    await page.getByTestId(`agent-management-revoke-${SECOND}`).click();
+    await expect(
+      page.getByTestId(`agent-management-revoke-${SECOND}`),
+    ).not.toBeVisible();
+    expect(
+      (
+        await invokeMock<{
+          agent_management_delegations: Record<string, unknown>;
+        }>(page, "get_global_agent_config")
+      )?.agent_management_delegations[FIRST],
+    ).toEqual(existing);
+  });
+}

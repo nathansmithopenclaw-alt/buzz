@@ -1,6 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+test("external execution describes its real application instead of an unused local model", () => {
+  assert.equal(
+    resolveAgentCardModelLabel({
+      agent: {
+        externalExecution: { type: "codex_desktop", threadId: "task" },
+        model: "unused-local-model",
+        modelSource: "instance",
+      },
+      personaModel: "unused-persona",
+      defaultModel: "unused-default",
+    }),
+    "Runs in Codex Desktop",
+  );
+});
+
 import { resolveAgentCardModelLabel } from "./agentCardModelLabel.ts";
 
 test("resolveAgentCardModelLabel — unspawned definition with explicit model renders the model, not inherited", () => {

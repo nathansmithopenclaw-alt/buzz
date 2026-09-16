@@ -1037,3 +1037,68 @@ fn draft_agent_model_discovery_env_layers_all_three_tiers_in_order() {
         );
     }
 }
+
+#[test]
+fn dsh_saved_model_provider_and_endpoint_match_launch_descriptor() {
+    let record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "name": "test-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "dsh",
+            "agent_command_override": "dsh",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "model": "Qwen/Qwen3.8-27B",
+            "provider": "deepseek-compatible",
+            "env_vars": {
+                "DSH_LLM_BASE_URL": "http://localhost:8010/v1",
+                "BUZZ_PRIVATE_KEY": "must-not-leak"
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("sample managed agent record");
+
+    let discovery =
+        agent_model_discovery_config(&record, &[], &Default::default()).expect("dsh discovery");
+    let launch = crate::managed_agents::resolve_effective_harness_descriptor(
+        &record,
+        &[],
+        &Default::default(),
+    )
+    .expect("launch descriptor");
+    assert_eq!(discovery.env, launch.env);
+    assert_eq!(
+        discovery.env.get("DSH_MODEL").map(String::as_str),
+        Some("Qwen/Qwen3.8-27B")
+    );
+    assert_eq!(
+        discovery.env.get("DSH_PROVIDER").map(String::as_str),
+        Some("deepseek-compatible")
+    );
+    assert_eq!(
+        discovery.env.get("DSH_LLM_BASE_URL").map(String::as_str),
+        Some("http://localhost:8010/v1")
+    );
+    assert_eq!(discovery.args, vec!["--profile", "buzz-acp"]);
+    let draft = draft_agent_model_discovery_env(
+        "dsh",
+        Some("deepseek-hosted"),
+        &BTreeMap::new(),
+        &BTreeMap::from([("DSH_PROVIDER".into(), "deepseek-compatible".into())]),
+    );
+    assert_eq!(
+        draft.get("DSH_PROVIDER").map(String::as_str),
+        Some("deepseek-compatible")
+    );
+}

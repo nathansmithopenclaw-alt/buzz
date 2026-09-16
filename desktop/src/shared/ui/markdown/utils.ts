@@ -1,3 +1,4 @@
+import { parseDispatchLink } from "@/features/dispatch/dispatchLink";
 import * as React from "react";
 import { defaultUrlTransform } from "react-markdown";
 
@@ -184,7 +185,7 @@ export function isInsideHiddenSpoiler(element: Element): boolean {
 export function buzzDeepLinkUrlTransform(value: string, key: string): string {
   if (key !== "href") return defaultUrlTransform(value);
   if (isMessageLink(value) || isChannelLink(value)) return value;
-  if (parseEntityLink(value).ok) return value;
+  if (parseEntityLink(value).ok || parseDispatchLink(value)) return value;
   return defaultUrlTransform(value);
 }
 

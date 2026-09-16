@@ -1,0 +1,8 @@
+{
+  "name": "@buzz/dsh-acp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "description": "Owned ACP composition with session-scoped MCP on dsh 0.1.1-rc.2"
+}

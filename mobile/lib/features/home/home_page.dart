@@ -18,10 +18,12 @@ class HomePage extends HookConsumerWidget {
   const HomePage({
     required this.settingsPageBuilder,
     required this.hasUnreadInbox,
+    this.dispatchPageBuilder,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
+  final WidgetBuilder? dispatchPageBuilder;
   final bool hasUnreadInbox;
 
   static const double _tabBarHeight = mobileTabBarHeight;
@@ -63,6 +65,15 @@ class HomePage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final destinations = [
+      ..._destinations,
+      if (dispatchPageBuilder != null)
+        const _HomeDestination(
+          icon: LucideIcons.clipboardList300,
+          selectedIcon: LucideIcons.clipboardList500,
+          label: 'Work',
+        ),
+    ];
     final tabIndex = useState(0);
     final visitedTabs = useRef(<int>{0});
     final tabContentTransitionDirection = useRef(1.0);
@@ -84,7 +95,7 @@ class HomePage extends HookConsumerWidget {
     final systemBottomInset = MediaQuery.paddingOf(context).bottom;
     final navigationBarWidth = _floatingTabBarWidth(
       MediaQuery.sizeOf(context).width,
-      _destinations.length,
+      destinations.length,
     );
 
     final pages = [
@@ -105,6 +116,10 @@ class HomePage extends HookConsumerWidget {
         SearchPage(tabReselection: searchReselection)
       else
         const SizedBox.shrink(),
+      if (dispatchPageBuilder != null)
+        visitedTabs.value.contains(3)
+            ? dispatchPageBuilder!(context)
+            : const SizedBox.shrink(),
     ];
 
     final settingsTransitionGradient = tabIndex.value == 0
@@ -214,7 +229,7 @@ class HomePage extends HookConsumerWidget {
                   unawaited(tabContentTransitionController.forward(from: 0));
                 }
               },
-              destinations: _destinations,
+              destinations: destinations,
             ),
           ),
           builder: (context, progress, child) {

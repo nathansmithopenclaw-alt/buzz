@@ -1,3 +1,4 @@
+import { InputRefused } from "./refusal.mjs";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -54,7 +55,12 @@ const tools = [
     inputSchema: schema(
       {
         session,
-        generation: { type: "integer", minimum: 1 },
+        generation: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Copy generation exactly from the latest browser_observe result. Never increment or guess it; observing does not advance generation.",
+        },
         kind: {
           type: "string",
           enum: [
@@ -73,7 +79,11 @@ const tools = [
         },
         width: { type: "integer", minimum: 320, maximum: 1920 },
         height: { type: "integer", minimum: 200, maximum: 1200 },
-        observation: { type: "string" },
+        observation: {
+          type: "string",
+          description:
+            "Required whenever ref is supplied. Copy observation exactly from the latest browser_observe result; obtain a new observation after each action.",
+        },
         ref: { type: "integer", minimum: 0 },
         url: { type: "string" },
         text: { type: "string", maxLength: 24000 },
@@ -103,7 +113,7 @@ const validators = new Map(
 );
 
 /** Standard MCP surface, shared by ACP adapters; images are native content blocks. */
-export function computerServer(browser, native) {
+export function computerServer(browser, native, evidence = null) {
   const server = new Server(
     { name: "buzz-computer-use", version: "0.1.0" },
     {
@@ -140,12 +150,14 @@ export function computerServer(browser, native) {
       ],
     };
   });
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  const execute = async (request, extra) => {
     const args = request.params.arguments ?? {};
     try {
       const validation = validators.get(request.params.name)?.(args);
       if (validation && !validation.valid)
-        throw new Error(`Invalid tool arguments: ${validation.errorMessage}`);
+        throw new InputRefused(
+          `Invalid tool arguments: ${validation.errorMessage}`,
+        );
       let result;
       switch (request.params.name) {
         case "native_acquire":
@@ -201,7 +213,7 @@ export function computerServer(browser, native) {
         }
         case "browser_action": {
           if (extra.signal.aborted)
-            throw new Error("Request cancelled before action");
+            throw new InputRefused("Request cancelled before action");
           const cancel = () => {
             void browser
               .close(args.session)
@@ -249,6 +261,10 @@ export function computerServer(browser, native) {
     } catch (error) {
       return {
         isError: true,
+        _meta: {
+          "buzz/execution-effect":
+            error instanceof InputRefused ? "refused" : "unknown",
+        },
         content: [
           { type: "text", text: error.message },
           ...(request.params.name.startsWith("native_") && native
@@ -262,6 +278,11 @@ export function computerServer(browser, native) {
         ],
       };
     }
-  });
+  };
+  server.setRequestHandler(CallToolRequestSchema, (request, extra) =>
+    evidence
+      ? evidence.run(request, () => execute(request, extra))
+      : execute(request, extra),
+  );
   return server;
 }

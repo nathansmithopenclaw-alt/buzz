@@ -165,6 +165,22 @@ pub(crate) struct KnownAcpRuntime {
 }
 
 impl KnownAcpRuntime {
+    pub(crate) fn provider_options(&self) -> Option<Vec<(String, String)>> {
+        if self.id == "prime" {
+            return Some(vec![("buzz-local".into(), "Saved model connection".into())]);
+        }
+        (self.id == "deepseek").then(|| {
+            vec![
+                ("buzz-local".into(), "Saved model connection".into()),
+                ("deepseek-hosted".into(), "DeepSeek API".into()),
+                (
+                    "deepseek-compatible".into(),
+                    "Local / OpenAI-compatible endpoint".into(),
+                ),
+            ]
+        })
+    }
+
     /// Return the CLI install commands for the current platform.
     ///
     /// On Windows, returns `cli_install_commands_windows` when non-empty,

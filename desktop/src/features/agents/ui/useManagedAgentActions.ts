@@ -108,6 +108,7 @@ export function useManagedAgentActions() {
     useAgentAvailabilityLookup(managedPubkeyList);
 
   function assertStartNotBlockedByPresence(agent: ManagedAgent) {
+    if (agent.externalExecution) return;
     const reason = agentPresenceStartBlockReason(
       isManagedAgentActive(agent),
       getAvailability(agent.pubkey),

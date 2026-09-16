@@ -217,12 +217,21 @@ pub async fn get_workflow_runs(
 pub async fn create_workflow(
     channel_id: String,
     yaml_definition: String,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<WorkflowSaveWire, String> {
+    let base = crate::relay::relay_api_base_url_with_override(&state);
+    let keys = state.signing_keys()?;
+    crate::relay::assert_expected_relay_scope(expected_relay_url.as_deref(), &base)?;
+    crate::relay::assert_expected_signer(
+        expected_signer_pubkey.as_deref(),
+        &keys.public_key().to_hex(),
+    )?;
     let workflow_id = uuid::Uuid::new_v4().to_string();
     let builder =
         events::build_workflow_definition(&workflow_id, &channel_id, &yaml_definition, None)?;
-    let result = submit_event(builder, &state).await?;
+    let result = crate::relay::submit_event_at_with_keys(builder, &state, &base, &keys).await?;
 
     // The relay returns `webhook_secret` in the OK response message for
     // webhook-triggered workflows. Everything else in the save record is built
@@ -241,7 +250,7 @@ pub async fn create_workflow(
         workflow_id,
         result.event_id,
         Some(channel_id),
-        current_pubkey_hex(&state)?,
+        keys.public_key().to_hex(),
         &yaml_definition,
         now,
         now,
@@ -258,18 +267,30 @@ pub async fn update_workflow(
     workflow_id: String,
     yaml_definition: String,
     expected_revision: String,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<WorkflowSaveWire, String> {
+    let base = crate::relay::relay_api_base_url_with_override(&state);
+    let keys = state.signing_keys()?;
+    crate::relay::assert_expected_relay_scope(expected_relay_url.as_deref(), &base)?;
+    crate::relay::assert_expected_signer(
+        expected_signer_pubkey.as_deref(),
+        &keys.public_key().to_hex(),
+    )?;
     // Find the channel id (and creation time) from the existing workflow event
     // so the new event carries the same `h` tag — kind:30620 is replaceable by
     // (pubkey, d-tag).
-    let prior = query_relay(
+    let prior = crate::relay::query_relay_at_with_keys(
         &state,
+        &base,
         &[serde_json::json!({
             "kinds": [30620],
             "#d": [workflow_id.clone()],
             "limit": 1
         })],
+        &keys,
+        None,
     )
     .await?;
 
@@ -288,14 +309,14 @@ pub async fn update_workflow(
         &yaml_definition,
         Some(&expected_revision),
     )?;
-    let result = submit_event(builder, &state).await?;
+    let result = crate::relay::submit_event_at_with_keys(builder, &state, &base, &keys).await?;
 
     let updated_at = now_secs();
     let workflow = workflow_record(
         workflow_id,
         result.event_id,
         Some(channel_id),
-        current_pubkey_hex(&state)?,
+        keys.public_key().to_hex(),
         &yaml_definition,
         created_at,
         updated_at,
@@ -311,10 +332,19 @@ pub async fn update_workflow(
 #[tauri::command]
 pub async fn delete_workflow(
     workflow_id: String,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let builder = events::build_workflow_delete(&workflow_id, &current_pubkey_hex(&state)?)?;
-    submit_event(builder, &state).await?;
+    let base = crate::relay::relay_api_base_url_with_override(&state);
+    let keys = state.signing_keys()?;
+    crate::relay::assert_expected_relay_scope(expected_relay_url.as_deref(), &base)?;
+    crate::relay::assert_expected_signer(
+        expected_signer_pubkey.as_deref(),
+        &keys.public_key().to_hex(),
+    )?;
+    let builder = events::build_workflow_delete(&workflow_id, &keys.public_key().to_hex())?;
+    crate::relay::submit_event_at_with_keys(builder, &state, &base, &keys).await?;
     Ok(())
 }
 
@@ -427,11 +457,6 @@ fn trigger_wire_from_message(
         workflow_id,
         status: "pending".to_string(),
     })
-}
-
-fn current_pubkey_hex(state: &AppState) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
-    Ok(keys.public_key().to_hex())
 }
 
 fn now_secs() -> i64 {

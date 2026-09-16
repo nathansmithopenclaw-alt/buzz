@@ -214,3 +214,28 @@ function personaRecord(overrides) {
     ...overrides,
   };
 }
+
+test("Nectar creation persists the selected model and tuning on the instance", async () => {
+  let saved;
+  const envVars = {
+    BUZZ_ACP_FAST_MODE: "true",
+    CLAUDE_CODE_EFFORT_LEVEL: "high",
+  };
+  await ensureNectarReporter({
+    agents: [],
+    personas: [],
+    runtime: availableRuntime(),
+    model: "opus",
+    envVars,
+    avatarDataUrl: "data:image/png;base64,abc",
+    createPersona: async (input) =>
+      personaRecord({ ...input, id: NECTAR_PERSONA_ID }),
+    createManagedAgent: async (input) => {
+      saved = input;
+      return { agent: { pubkey: "reporter" } };
+    },
+    toInstanceInput: async () => ({ name: "Nectar", envVars: {} }),
+  });
+  assert.equal(saved.model, "opus");
+  assert.deepEqual(saved.envVars, envVars);
+});

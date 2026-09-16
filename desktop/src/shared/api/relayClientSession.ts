@@ -748,6 +748,41 @@ export class RelayClient {
     timeoutMessage: string,
     sendErrorMessage: string,
   ) {
+    return this.publishWithAcknowledgement(
+      event,
+      timeoutMessage,
+      sendErrorMessage,
+    );
+  }
+
+  /** Read-only Dispatch commands return the relay ACK payload, never the outgoing signed content. */
+  async readDispatchCommand(
+    event: RelayEvent,
+    timeoutMessage: string,
+    sendErrorMessage: string,
+  ): Promise<string> {
+    if (event.kind !== 40028)
+      throw new Error("Expected a read-only Dispatch command.");
+    let response: string | undefined;
+    await this.publishWithAcknowledgement(
+      event,
+      timeoutMessage,
+      sendErrorMessage,
+      (message) => {
+        response = message;
+      },
+    );
+    if (response === undefined)
+      throw new Error("The relay did not return a command response.");
+    return response;
+  }
+
+  private async publishWithAcknowledgement(
+    event: RelayEvent,
+    timeoutMessage: string,
+    sendErrorMessage: string,
+    onAcknowledged?: (message: string) => void,
+  ) {
     return publishSessionEvent(
       {
         generation: () => this.connectionGeneration,
@@ -764,6 +799,7 @@ export class RelayClient {
       event,
       timeoutMessage,
       sendErrorMessage,
+      onAcknowledged,
     );
   }
 
@@ -929,6 +965,7 @@ export class RelayClient {
     this.pendingEvents.delete(eventId);
 
     if (success) {
+      pendingEvent.onAcknowledged?.(message);
       pendingEvent.resolve(pendingEvent.event);
     } else {
       // Back-pressure now arrives here rather than as a NOTICE: the relay

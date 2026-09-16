@@ -15,8 +15,14 @@
 pub mod brief;
 pub mod broker;
 pub mod builders;
+pub mod dispatch_audience;
+pub mod dispatch_automation;
+pub mod dispatch_record;
 pub mod mentions;
 pub mod nip_oa;
+pub mod task_authority;
+#[cfg(test)]
+mod task_authority_tests;
 pub mod task_envelope;
 pub mod tracker;
 
@@ -115,3 +121,13 @@ pub enum SdkError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
 }
+
+#[cfg(test)]
+mod dispatch_record_tests;
+
+/// Relay-attested historical Dispatch authorization.
+pub mod dispatch_admission;
+pub mod dispatch_notice;
+
+/// Shared projection and preparation for constrained Dispatch clients.
+pub mod dispatch_client;

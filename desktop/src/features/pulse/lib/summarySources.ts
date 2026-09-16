@@ -67,7 +67,9 @@ export function listsFromChecked(
   return {
     channels,
     dms,
-    exclude: [...config.exclude],
+    exclude: (config.autoInclude ? [...new Set(config.exclude)] : []).filter(
+      (id) => conversations.some((c) => c.id === id && !c.archived),
+    ),
   };
 }
 

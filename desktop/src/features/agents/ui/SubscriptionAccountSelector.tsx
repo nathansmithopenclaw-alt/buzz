@@ -38,7 +38,15 @@ import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 
 /** Shared by the agent profile, Edit Agent and DM header; changes apply agent-wide. */
-export function SubscriptionAccountSelector({
+export function SubscriptionAccountSelector(props: {
+  agent: ManagedAgent;
+  compact?: boolean;
+}) {
+  if (props.agent.externalExecution) return null;
+  return <LocalSubscriptionAccountSelector {...props} />;
+}
+
+function LocalSubscriptionAccountSelector({
   agent,
   compact = false,
 }: {

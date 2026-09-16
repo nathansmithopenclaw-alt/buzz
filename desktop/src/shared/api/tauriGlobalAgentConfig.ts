@@ -57,9 +57,13 @@ export async function applyDelegatedGlobalAgentConfig(
  */
 export async function setAgentManagementDelegation(
   capabilities: AgentManagementDelegationSubjects | null,
+  editScopes?: Record<
+    string,
+    import("./agentManagementDelegation").AgentEditScope
+  >,
 ): Promise<GlobalAgentConfigSaveResult> {
   return invokeTauri<GlobalAgentConfigSaveResult>(
     "set_agent_management_delegation",
-    { capabilities },
+    { capabilities, ...(editScopes ? { editScopes } : {}) },
   );
 }

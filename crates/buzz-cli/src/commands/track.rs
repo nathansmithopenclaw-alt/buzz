@@ -8,8 +8,8 @@ use std::str::FromStr;
 
 use base64::Engine;
 use buzz_core::kind::{
-    KIND_NIP29_GROUP_MEMBERS, KIND_PROJECT, KIND_TRACKER_COMMENT, KIND_TRACKER_ISSUE,
-    KIND_TRACKER_PROJECT_ACTIVITY, KIND_TRACKER_REVISION,
+    KIND_DISPATCH_ADMISSION, KIND_DISPATCH_RECORD, KIND_NIP29_GROUP_MEMBERS, KIND_PROJECT,
+    KIND_TRACKER_COMMENT, KIND_TRACKER_ISSUE, KIND_TRACKER_PROJECT_ACTIVITY, KIND_TRACKER_REVISION,
 };
 use buzz_sdk::task_envelope::{
     fold_task_events, TaskEnvelope, TaskEnvelopeEvent, TaskStatus, TaskVerification,
@@ -38,6 +38,12 @@ use crate::commands::tasks::{parse_deliverables, query_task_events, resolve_assi
 use crate::error::CliError;
 use crate::validate::read_or_stdin;
 use crate::{OutputFormat, TrackCmd, TrackFilterArgs, TrackMutationArgs, TrackProjectCmd};
+
+#[path = "track_dispatch.rs"]
+mod dispatch_assignment;
+#[path = "track_records.rs"]
+mod records;
+use dispatch_assignment::cmd_dispatch;
 
 const TRACKER_CACHE_ENV: &str = "BUZZ_TRACKER_CACHE_DIR";
 const DEFAULT_TIMEZONE: &str = "America/New_York";
@@ -91,11 +97,31 @@ fn project_slug_matches(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
+fn issue_alias_matches(identifier: &str, query: &str) -> bool {
+    if identifier.eq_ignore_ascii_case(query) {
+        return true;
+    }
+    let Some((prefix, suffix)) = identifier.rsplit_once('-') else {
+        return false;
+    };
+    let Some((query_prefix, query_suffix)) = query.rsplit_once('-') else {
+        return false;
+    };
+    suffix.len() == 32
+        && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && query_suffix.len() >= 6
+        && query_suffix.len() <= 32
+        && prefix.eq_ignore_ascii_case(query_prefix)
+        && suffix
+            .to_ascii_lowercase()
+            .starts_with(&query_suffix.to_ascii_lowercase())
+}
+
 impl TrackerContext {
     fn issue(&self, value: &str) -> Result<&IssueProjection, CliError> {
         let parsed_uuid = Uuid::parse_str(value).ok();
         let mut matches = self.fold.issues.values().filter(|issue| {
-            parsed_uuid == Some(issue.issue_id) || issue.identifier.eq_ignore_ascii_case(value)
+            parsed_uuid == Some(issue.issue_id) || issue_alias_matches(&issue.identifier, value)
         });
         let found = matches
             .next()
@@ -143,6 +169,16 @@ impl TrackerContext {
                 TrackerPayload::Comment(_) => None,
             })
             .unwrap_or(0)
+    }
+
+    fn revision_timestamp(&self, parent: &str) -> Timestamp {
+        // Revision tips use (created_at, event_id) ordering. A rapid edit must
+        // sort after its reviewed parent even within the same clock second.
+        Timestamp::from(
+            Timestamp::now()
+                .as_secs()
+                .max(self.event_time(parent).saturating_add(1)),
+        )
     }
 
     fn add_event(&mut self, event: Event, authorization: &TrackerAuthorization) {
@@ -541,7 +577,7 @@ fn fold_workspace_projects(
 }
 
 fn tracker_authorization_from_membership(
-    client: &BuzzClient,
+    _client: &BuzzClient,
     event: &Value,
 ) -> TrackerAuthorization {
     let mut roles = Vec::new();
@@ -568,9 +604,6 @@ fn tracker_authorization_from_membership(
         };
         roles.push((pubkey.to_string(), role));
     }
-    if let Some(owner) = client.auth_tag_owner_hex() {
-        roles.push((owner, TrackerRole::Maintainer));
-    }
     TrackerAuthorization::new(roles)
 }
 
@@ -586,12 +619,18 @@ async fn load_context(
             KIND_TRACKER_REVISION,
             KIND_TRACKER_COMMENT,
             KIND_TRACKER_PROJECT_ACTIVITY,
+            KIND_DISPATCH_RECORD,
+            KIND_DISPATCH_ADMISSION,
         ],
         "#h": [workspace_id.to_string()],
     });
     if let Some(cursor) = &cache.cursor {
-        // Inclusive same-second replay plus ID dedupe prevents cursor gaps.
-        filter["since"] = json!(cursor.created_at);
+        // Include the allowed clock-skew window: sequential edits can be signed
+        // after a slightly future-dated parent. That must not hide other work
+        // arriving at the current relay clock. Exact ID dedupe absorbs overlap.
+        filter["since"] = json!(cursor
+            .created_at
+            .saturating_sub(buzz_sdk::tracker::MAX_FUTURE_SKEW_SECONDS));
     }
     let incoming: Vec<Event> = client
         .query_all(filter)
@@ -603,12 +642,64 @@ async fn load_context(
         })
         .collect::<Result<_, _>>()?;
     merge_events(&mut cache.events, incoming);
+    // Admission timestamps belong to the relay; exact source hydration also
+    // covers an edit signed before the warm cursor and delivered only now.
+    let known = cache
+        .events
+        .iter()
+        .map(|event| event.id.to_hex())
+        .collect::<std::collections::HashSet<_>>();
+    let needed = cache
+        .events
+        .iter()
+        .filter(|event| event.kind.as_u16() as u32 == KIND_DISPATCH_ADMISSION)
+        .flat_map(|event| event.tags.iter())
+        .filter_map(|tag| {
+            let tag = tag.as_slice();
+            (tag.first().map(String::as_str) == Some("e"))
+                .then(|| tag.get(1))
+                .flatten()
+                .filter(|id| !known.contains(*id) && nostr::EventId::from_hex(id.as_str()).is_ok())
+                .cloned()
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    for batch in needed.chunks(50) {
+        // A workspace may also be an execution conversation. Its relay receipts
+        // then reference task messages as well as issue/planning edits.
+        let sources=client.query_all(json!({"ids":batch,"kinds":[9,40020,40021,40022,40026],"#h":[workspace_id.to_string()]})).await?
+            .into_iter().map(|value|serde_json::from_value::<Event>(value).map_err(|error|CliError::Other(error.to_string()))).collect::<Result<Vec<_>,_>>()?;
+        if batch
+            .iter()
+            .any(|id| !sources.iter().any(|event| event.id.to_hex() == *id))
+        {
+            return Err(CliError::Other(
+                "An admitted Dispatch edit is unavailable; the history cursor was not advanced"
+                    .into(),
+            ));
+        }
+        merge_events(&mut cache.events, sources);
+    }
     cache.cursor = max_cursor(&cache.events);
     write_cache(&path, &cache)?;
 
     let membership = workspace_membership(client, workspace_id).await?;
-    let authorization = tracker_authorization_from_membership(client, &membership);
+    let mut authorization = tracker_authorization_from_membership(client, &membership);
     let (parsed, mut warnings) = parse_cached_events(&cache.events);
+    let admission = buzz_sdk::dispatch_admission::apply_dispatch_admissions(
+        &cache.events,
+        workspace_id,
+        serde_json::from_value::<Event>(membership.clone())
+            .map_err(|error| CliError::Other(format!("invalid membership: {error}")))?
+            .pubkey,
+        &mut authorization,
+        nostr::Timestamp::now().as_secs(),
+    );
+    warnings.extend(admission.diagnostics);
+    if admission.unsealed > 0 {
+        warnings.push(format!("{} Dispatch events have no admission evidence; legacy history uses current membership until explicitly baselined", admission.unsealed));
+    }
     let fold = fold_tracker_events(parsed.clone(), &authorization);
     warnings.extend(
         fold.diagnostics
@@ -888,6 +979,7 @@ async fn existing_request_event(
                 KIND_TRACKER_REVISION,
                 KIND_TRACKER_COMMENT,
                 KIND_TRACKER_PROJECT_ACTIVITY,
+            KIND_DISPATCH_RECORD,
                 KIND_PROJECT,
             ],
             "#h": [workspace_id.to_string()],
@@ -1322,7 +1414,8 @@ async fn cmd_update(
     };
     let event = client.sign_event(
         build_tracker_revision(workspace_id, &revision)
-            .map_err(|error| usage("build Tracker revision", error))?,
+            .map_err(|error| usage("build Tracker revision", error))?
+            .custom_created_at(context.revision_timestamp(&revision.parent_event)),
     )?;
     validate_candidate(&context, &authorization, &event, current.issue_id)?;
     let (event_id, replayed) =
@@ -1868,7 +1961,8 @@ async fn publish_revision(
         .ok_or_else(|| CliError::Other("Tracker CLI revision lacks request_id".into()))?;
     let event = client.sign_event(
         build_tracker_revision(context.workspace_id, revision)
-            .map_err(|error| usage("build Tracker revision", error))?,
+            .map_err(|error| usage("build Tracker revision", error))?
+            .custom_created_at(context.revision_timestamp(&revision.parent_event)),
     )?;
     if existing_request_event(client, context.workspace_id, request_id)
         .await?
@@ -2167,260 +2261,6 @@ async fn cmd_link(
             "replayed": replayed,
             "link": {"type": link_type, "ref": reference, "title": title, "active": !remove},
             "warnings": warnings,
-        })
-    );
-    Ok(())
-}
-
-async fn task_for_dispatch_request(
-    client: &BuzzClient,
-    request_id: Uuid,
-) -> Result<Option<TaskEnvelopeEvent>, CliError> {
-    let current = fold_task_events(query_task_events(client, None).await?);
-    let mut matches = current
-        .into_values()
-        .filter(|event| event.envelope.dispatch_request_id == Some(request_id));
-    let found = matches.next();
-    if matches.next().is_some() {
-        return Err(CliError::Conflict(format!(
-            "dispatch request {request_id} names multiple tasks"
-        )));
-    }
-    Ok(found)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn cmd_dispatch(
-    client: &BuzzClient,
-    workspace: Option<String>,
-    issue_key: String,
-    assignee: String,
-    channel: Option<String>,
-    title: Option<String>,
-    deliverables: Vec<String>,
-    verification: Option<String>,
-    content: Option<String>,
-    allow_active: bool,
-    set_status: String,
-    mutation: TrackMutationArgs,
-) -> Result<(), CliError> {
-    let workspace_id = parse_workspace(workspace)?;
-    let import = parse_import_json(mutation.import_json.as_deref())?;
-    let reason = read_optional_stdin(mutation.reason.clone())?;
-    let (mut context, authorization) = load_context(client, workspace_id).await?;
-    let issue = context.issue(&issue_key)?.clone();
-    if issue.status.is_terminal() {
-        return Err(CliError::Conflict(
-            "terminal issues must be reopened before dispatch".into(),
-        ));
-    }
-    if mutation
-        .if_revision
-        .as_ref()
-        .is_some_and(|expected| expected != &issue.tip_event)
-    {
-        return Err(CliError::Conflict(format!(
-            "current revision is {}; expected {}",
-            issue.tip_event,
-            mutation.if_revision.as_deref().unwrap_or_default()
-        )));
-    }
-    let request_id = parse_request_id(mutation.request_id.as_deref())?;
-    let channel_id = match channel {
-        Some(value) => Uuid::parse_str(&value)
-            .map_err(|_| CliError::Usage(format!("invalid channel UUID: {value}")))?,
-        None => issue.home_channel_id.ok_or_else(|| {
-            CliError::Usage("--channel is required when the issue has no home channel".into())
-        })?,
-    };
-    let assignee = resolve_issue_assignee(client, channel_id, &assignee).await?;
-    let set_status = parse_status(&set_status)?;
-    if set_status.is_terminal() {
-        return Err(CliError::Usage(
-            "dispatch --set-status cannot set a terminal state".into(),
-        ));
-    }
-    let project_default = issue
-        .project_id
-        .and_then(|id| context.projects.projects.get(&id))
-        .and_then(|project| project.default_verify.clone());
-    let verification = verification.or(project_default).ok_or_else(|| {
-        CliError::Usage("--verify is required unless the project supplies --default-verify".into())
-    })?;
-    let deliverables = parse_deliverables(&deliverables)?;
-    let task_title = title
-        .clone()
-        .unwrap_or_else(|| format!("{}: {}", issue.identifier, issue.title));
-    let existing_task = task_for_dispatch_request(client, request_id).await?;
-    let current_tasks = fold_task_events(query_task_events(client, None).await?);
-    let active: Vec<_> = current_tasks
-        .values()
-        .filter(|event| event.envelope.tracker_issue_id == Some(issue.issue_id))
-        .filter(|event| event.envelope.dispatch_request_id != Some(request_id))
-        .filter(|event| {
-            !matches!(
-                event.envelope.status,
-                TaskStatus::Done | TaskStatus::Failed | TaskStatus::Verified
-            )
-        })
-        .collect();
-    if !active.is_empty() && !allow_active {
-        return Err(CliError::Conflict(format!(
-            "issue has {} active linked task(s); pass --allow-active to create another without superseding them",
-            active.len()
-        )));
-    }
-    if !active.is_empty() {
-        context.warnings.push(format!(
-            "{} existing active linked task(s) remain active; --allow-active does not supersede them",
-            active.len()
-        ));
-    }
-
-    let (task_event_id, task_id, task_replayed) = if let Some(existing) = existing_task {
-        if existing.envelope.tracker_issue_id != Some(issue.issue_id)
-            || existing.envelope.assignee != assignee
-            || existing.envelope.verification.method != verification
-            || existing.envelope.deliverables != deliverables
-            || existing.envelope.title != task_title
-            || existing.channel_id != channel_id
-        {
-            return Err(CliError::Conflict(format!(
-                "dispatch request {request_id} was already used with different semantic input"
-            )));
-        }
-        (existing.event_id, existing.envelope.task_id, true)
-    } else {
-        let task_id = Uuid::new_v4();
-        let envelope = TaskEnvelope {
-            v: TASK_ENVELOPE_VERSION,
-            task_id,
-            status: TaskStatus::Assigned,
-            assignee: assignee.clone(),
-            assigner: client.keys().public_key().to_hex(),
-            title: task_title,
-            deliverables,
-            verification: TaskVerification {
-                method: verification,
-                evidence_ref: None,
-            },
-            blocked_on: None,
-            notes: None,
-            tracker_issue_id: Some(issue.issue_id),
-            dispatch_request_id: Some(request_id),
-        }
-        .validate()
-        .map_err(|error| usage("invalid dispatch task", error))?;
-        let human = match content {
-            Some(value) => read_or_stdin(&value)?,
-            None => format!("Dispatch {} for execution.", issue.identifier),
-        };
-        let builder = buzz_sdk::task_envelope::build_task_message(
-            channel_id,
-            &human,
-            &envelope,
-            None,
-            &[assignee.as_str()],
-        )
-        .map_err(|error| usage("build task assignment", error))?;
-        let event = client.sign_event(builder)?;
-        let raw = client.submit_event(event.clone()).await?;
-        let response: Value = serde_json::from_str(&normalize_write_response(&raw))
-            .map_err(|error| CliError::Other(format!("invalid task receipt: {error}")))?;
-        if response.get("accepted").and_then(Value::as_bool) != Some(true) {
-            return Err(CliError::Other(format!(
-                "relay rejected task assignment: {}",
-                response
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown reason")
-            )));
-        }
-        (event.id.to_hex(), task_id, false)
-    };
-
-    let already_linked = issue
-        .external_refs
-        .iter()
-        .any(|value| value.kind == "task" && value.reference == task_id.to_string());
-    let (link_event_id, link_replayed) = if already_linked {
-        (issue.tip_event.clone(), true)
-    } else {
-        let mut set = RevisionSet {
-            assignee: Some(assignee.clone()),
-            ..RevisionSet::default()
-        };
-        if set_status != issue.status {
-            set.status = Some(set_status);
-        }
-        let revision = IssueRevision {
-            v: TRACKER_VERSION,
-            op: "revise".into(),
-            issue_id: issue.issue_id,
-            root_event: issue.root_event.clone(),
-            parent_event: issue.tip_event.clone(),
-            revision: context.revision_number(&issue) + 1,
-            set,
-            clear: vec![],
-            relations: SetOperations::default(),
-            external_refs: SetOperations {
-                add: vec![
-                    ExternalRef {
-                        kind: "task".into(),
-                        reference: task_id.to_string(),
-                    },
-                    ExternalRef {
-                        kind: "task_event".into(),
-                        reference: task_event_id.clone(),
-                    },
-                ],
-                remove: vec![],
-            },
-            reason: if set_status != issue.status {
-                Some(reason.unwrap_or_else(|| "dispatched for execution".into()))
-            } else {
-                reason
-            },
-            request_id: Some(request_id),
-            import,
-        };
-        match publish_revision(client, &mut context, &authorization, &revision).await {
-            Ok(result) => result,
-            Err(error) => {
-                println!(
-                    "{}",
-                    json!({
-                        "accepted": false,
-                        "partial": true,
-                        "operation": "track.dispatch",
-                        "request_id": request_id,
-                        "completed": [{"role": "task_assignment", "event_id": task_event_id}],
-                        "pending": ["issue_task_link"],
-                        "issue_id": issue.issue_id,
-                        "task_id": task_id,
-                        "retryable": true,
-                        "message": "task assigned; reciprocal issue link was not accepted; retry with the same --request-id",
-                    })
-                );
-                return Err(error);
-            }
-        }
-    };
-    println!(
-        "{}",
-        json!({
-            "accepted": true,
-            "operation": "track.dispatch",
-            "request_id": request_id,
-            "event_ids": [task_event_id, link_event_id],
-            "issue_id": issue.issue_id,
-            "task_id": task_id,
-            "task_event_id": task_event_id,
-            "issue_link_event_id": link_event_id,
-            "assignee_pubkey": assignee,
-            "issue_revision_event_id": link_event_id,
-            "replayed": task_replayed && link_replayed,
-            "warnings": context.warnings,
         })
     );
     Ok(())
@@ -3580,6 +3420,7 @@ pub async fn dispatch(
     format: &OutputFormat,
 ) -> Result<(), CliError> {
     match command {
+        TrackCmd::Records(command) => records::dispatch(client, command).await,
         TrackCmd::Create {
             workspace,
             issue_id,
@@ -3764,6 +3605,7 @@ pub async fn dispatch(
             title,
             deliverables,
             verification,
+            reviewer,
             content,
             allow_active,
             set_status,
@@ -3778,6 +3620,7 @@ pub async fn dispatch(
                 title,
                 deliverables,
                 verification,
+                reviewer,
                 content,
                 allow_active,
                 set_status,
@@ -3860,6 +3703,23 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn short_aliases_require_a_native_identifier_and_at_least_six_characters() {
+        assert!(issue_alias_matches(
+            "DSP-aabbcc11223344556677889900112233",
+            "dsp-aabbcc"
+        ));
+        assert!(!issue_alias_matches(
+            "DSP-aabbcc11223344556677889900112233",
+            "DSP-aabbc"
+        ));
+        assert!(!issue_alias_matches("IMPORTED-aabbcc12", "IMPORTED-aabbcc"));
+        assert!(!issue_alias_matches(
+            "DSP-aabbcc11223344556677889900112233",
+            "OTHER-aabbcc"
+        ));
+    }
 
     #[test]
     fn estimates_are_duration_strings_not_points() {
@@ -4140,6 +4000,7 @@ mod tests {
             created_at,
             envelope: TaskEnvelope {
                 v: TASK_ENVELOPE_VERSION,
+                authority: Some(Default::default()),
                 task_id,
                 status,
                 assignee: "dd".repeat(32),

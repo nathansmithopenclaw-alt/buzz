@@ -21,6 +21,8 @@
 
 #[path = "pool_fast_mode.rs"]
 mod fast_mode;
+#[path = "pool_session_close.rs"]
+mod session_close;
 use fast_mode::apply_fast_mode;
 #[cfg(test)]
 use fast_mode::resolve_fast_mode_config_option;
@@ -562,13 +564,11 @@ impl OwnedAgent {
         )
     }
 
-    /// Hand every invalidated provider session to the adapter's teardown path.
-    ///
-    /// The request is intentionally not awaited past its write. `try_claim`
-    /// keeps this worker from opening a replacement session until the bounded
-    /// attempt finishes. A write error or timeout drops the remaining cleanup
-    /// queue so a wedged adapter cannot block the requeued turn.
+    /// Owned dsh sessions require cleanup receipts; legacy adapters retain bounded writes.
     async fn flush_pending_session_closes(&mut self) -> usize {
+        if self.agent_name == "buzz-dsh-acp" {
+            return self.flush_acknowledged_session_closes().await;
+        }
         let mut sent = 0;
         while let Some(session_id) = self.state.pending_session_closes.pop_front() {
             match timeout(
@@ -2340,6 +2340,8 @@ async fn create_session_and_apply_model(
         channel.channel_type,
         ctx.session_title.as_deref(),
     );
+    let mcp_servers = crate::execution_evidence::session_servers(ctx, channel.scope, mcp_servers)
+        .map_err(|error| AcpError::Protocol(error.to_string()))?;
 
     if ctx.prefix_budget_warnings {
         let report = prefix_budget_report(
@@ -2448,9 +2450,11 @@ async fn create_session_and_apply_model(
     //                   model. Effort resolution and the Desktop capture both
     //                   read it so they converge on the model the session is
     //                   actually running, not the pre-switch default.
-    //   `None`        → no switch, or the adapter rejected/does-not-know the
-    //                   model; the session/new snapshot is cached as-is and
-    //                   `switch_succeeded` stays false.
+    //   `None`        → no switch, or a live pick was rejected; the session/new
+    //                   snapshot is cached as-is and `switch_succeeded` stays
+    //                   false. Rejected configured models return an error
+    //                   before the caller can send any prompt. Catalog-less
+    //                   runtimes retain their spawn-selected model.
     let post_switch_snapshot: Option<serde_json::Value> = if let Some(ref desired) =
         agent.desired_model
     {
@@ -2522,6 +2526,11 @@ async fn create_session_and_apply_model(
                                 "requestId": agent.desired_model_request_id,
                             }),
                         );
+                        if !agent.model_overridden {
+                            return Err(AcpError::Protocol(format!(
+                                "configured model {desired:?} was rejected by the agent; select a supported model before retrying"
+                            )));
+                        }
                         None
                     }
                 }
@@ -2530,7 +2539,7 @@ async fn create_session_and_apply_model(
                 if session_advertises_model_catalog(&resp.raw) {
                     tracing::error!(
                         target: "pool::model",
-                        "desired model {desired} not found in agent's available models — refusing silent fallback"
+                        "desired model {desired} not found in agent's available models"
                     );
                     agent.acp.observe(
                         "control_result",
@@ -2542,6 +2551,11 @@ async fn create_session_and_apply_model(
                             "requestId": agent.desired_model_request_id,
                         }),
                     );
+                    if !agent.model_overridden {
+                        return Err(AcpError::Protocol(format!(
+                            "configured model {desired:?} is not in the agent's model catalog; select a supported model before retrying"
+                        )));
+                    }
                 } else {
                     // Prime (and other exclusive ACP servers) return only
                     // `{sessionId}`. The spawn command / nest settings already
@@ -2818,7 +2832,7 @@ async fn apply_model_switch(
         Ok(Err(e)) => {
             tracing::error!(
                 target: "pool::model",
-                "failed to set model {desired} via {method_label}: {e} — refusing silent fallback"
+                "failed to set model {desired} via {method_label}: {e}"
             );
             Ok(ModelSwitchOutcome::Rejected)
         }
@@ -4458,6 +4472,36 @@ pub async fn run_prompt_task(
     };
 
     let mut prompt_sections = prompt_sections;
+    let execution_turn = match crate::execution_evidence::begin(&ctx, batch.as_ref(), &turn_id) {
+        Ok(turn) => turn,
+        Err(error) => {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::Protocol(error.to_string())),
+                batch,
+            );
+            return;
+        }
+    };
+    if let Some(turn) = &execution_turn {
+        match crate::execution_evidence::prompt(turn) {
+            Ok(section) => prompt_sections.push(section),
+            Err(error) => {
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(AcpError::Protocol(error.to_string())),
+                    batch,
+                );
+                return;
+            }
+        }
+    }
     let continuation = match &source {
         PromptSource::Channel(scope) => crate::account_handoff::unfinished(scope),
         PromptSource::Heartbeat => Ok(false),
@@ -4479,6 +4523,16 @@ pub async fn run_prompt_task(
     if continuation {
         slash_command = None;
         prompt_sections.insert(0, "<account-switch-continuation>Continue the unfinished work in this existing session after the owner's account change. The following request is retained context, not an instruction to repeat completed actions. Inspect existing results first. Never repeat completed writes or external actions. Reconcile uncertain outcomes before proceeding; if reconciliation is impossible, explain the specific uncertainty and stop.</account-switch-continuation>".into());
+    }
+
+    let summary_requests =
+        crate::summary_execution::prepare(batch.as_ref(), &ctx.rest_client).await;
+    let summary_only = !summary_requests.is_empty()
+        && batch.as_ref().is_some_and(|b| {
+            summary_requests.len() == b.events.len() && b.cancelled_events.is_empty()
+        });
+    for (_, instruction) in summary_requests.iter().rev() {
+        prompt_sections.insert(0, instruction.clone());
     }
 
     // 💬 — fire-and-forget so the prompt fires immediately.
@@ -4565,24 +4619,23 @@ pub async fn run_prompt_task(
             // Heartbeat / non-cancellable path.
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
-                    &session_id,
-                    &prompt_blocks,
-                    ctx.idle_timeout,
-                    ctx.max_turn_duration,
+                result = crate::report_completion::prompt(
+                    &mut agent.acp, &session_id, &prompt_blocks, execution_turn.as_ref().filter(|_| !summary_only), &ctx,
                 ) => result,
             }
         }
         Some(rx) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
-                    &session_id,
-                    &prompt_blocks,
-                    ctx.idle_timeout,
-                    ctx.max_turn_duration,
+                result = crate::report_completion::prompt(
+                    &mut agent.acp, &session_id, &prompt_blocks, execution_turn.as_ref().filter(|_| !summary_only), &ctx,
                 ) => result,
                 mode = rx => {
+                    if let Some(turn) = &execution_turn {
+                        if let Err(error) = turn.revoke() {
+                            tracing::error!(%error, "execution grant revocation failed during cancellation");
+                        }
+                    }
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
                     // Land the model switch before any cancel/requeue work: setting
                     // `desired_model` here means the fresh session created by the
@@ -4836,6 +4889,11 @@ pub async fn run_prompt_task(
                 return;
             }
         }
+    }
+    if crate::summary_execution::finish(&summary_requests, &ctx.rest_client).await && summary_only {
+        // A committed kind-40030 receipt delivers a Summary-only turn. Requiring
+        // an additional chat publication here produces a false delivery alarm.
+        publication_watch = None;
     }
     match prompt_result {
         Ok(stop_reason) => {
@@ -7345,6 +7403,10 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    mod execution_evidence_tests {
+        include!("execution_evidence_tests.rs");
+    }
 
     /// Conversation scope for a channel — the scope these pool tests exercise
     /// (equivalent to the pre-thread-scoping channel key).
@@ -14481,7 +14543,7 @@ mod model_switch_tests {
     /// A protocol-v2 agent with a live `desired_model` override and no startup
     /// effort. `model_overridden` is set so the capture's `modelOverridden`
     /// reflects only whether the switch actually landed.
-    fn switching_agent(acp: AcpClient, desired_model: &str) -> OwnedAgent {
+    pub(super) fn switching_agent(acp: AcpClient, desired_model: &str) -> OwnedAgent {
         OwnedAgent {
             index: 0,
             acp,
@@ -15293,6 +15355,9 @@ done"#
     }
 }
 
+#[cfg(test)]
+#[path = "pool/configured_model_tests.rs"]
+mod configured_model_tests;
 #[cfg(all(test, unix))]
 #[path = "pool/pi_prompt_tests.rs"]
 mod pi_prompt_tests;

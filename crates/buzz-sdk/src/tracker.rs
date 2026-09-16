@@ -660,6 +660,7 @@ pub enum TrackerRole {
 #[derive(Debug, Clone, Default)]
 pub struct TrackerAuthorization {
     roles: HashMap<String, TrackerRole>,
+    event_roles: HashMap<String, (String, Option<TrackerRole>)>,
 }
 
 impl TrackerAuthorization {
@@ -667,6 +668,27 @@ impl TrackerAuthorization {
     pub fn new(roles: impl IntoIterator<Item = (String, TrackerRole)>) -> Self {
         Self {
             roles: roles.into_iter().collect(),
+            event_roles: HashMap::new(),
+        }
+    }
+
+    /// Pin a relay-attested event role without granting any present-day authority.
+    pub(crate) fn admit_event(
+        &mut self,
+        event_id: String,
+        author: String,
+        role: Option<TrackerRole>,
+    ) {
+        self.event_roles.insert(event_id, (author, role));
+    }
+
+    /// Use immutable admission evidence when present; unsealed legacy history
+    /// retains the explicitly reported current-membership compatibility policy.
+    pub fn event_role(&self, event_id: &str, author: &str) -> Option<TrackerRole> {
+        match self.event_roles.get(event_id) {
+            Some((expected, role)) if expected == author => *role,
+            Some(_) => None,
+            None => self.role(author),
         }
     }
 
@@ -1744,7 +1766,11 @@ fn fold_one_issue(
     for event in events
         .iter()
         .filter(|event| matches!(event.payload, TrackerPayload::Root(_)))
-        .filter(|event| authorization.role(&event.author_pubkey).is_none())
+        .filter(|event| {
+            authorization
+                .event_role(&event.event_id, &event.author_pubkey)
+                .is_none()
+        })
     {
         result.diagnostics.push(FoldDiagnostic::InvalidEvent {
             event_id: event.event_id.clone(),
@@ -1754,7 +1780,11 @@ fn fold_one_issue(
     let mut roots: Vec<&TrackerEvent> = events
         .iter()
         .filter(|event| matches!(event.payload, TrackerPayload::Root(_)))
-        .filter(|event| authorization.role(&event.author_pubkey).is_some())
+        .filter(|event| {
+            authorization
+                .event_role(&event.event_id, &event.author_pubkey)
+                .is_some()
+        })
         .collect();
     roots.sort_by_key(|event| (event.created_at, event.event_id.as_str()));
     let Some(root_event) = roots.first().copied() else {
@@ -1777,7 +1807,8 @@ fn fold_one_issue(
         return;
     };
     if root.status.is_terminal()
-        && authorization.role(&root_event.author_pubkey) != Some(TrackerRole::Maintainer)
+        && authorization.event_role(&root_event.event_id, &root_event.author_pubkey)
+            != Some(TrackerRole::Maintainer)
     {
         result.diagnostics.push(FoldDiagnostic::InvalidEvent {
             event_id: root_event.event_id.clone(),
@@ -1986,7 +2017,7 @@ fn evaluate_revision(
         return Err("revision integer does not equal parent revision plus one".into());
     }
     let role = authorization
-        .role(&event.author_pubkey)
+        .event_role(&event.event_id, &event.author_pubkey)
         .ok_or_else(|| "revision author is not a workspace member".to_string())?;
     let renumber = revision
         .set
@@ -2026,7 +2057,9 @@ fn fold_comments(
         .iter()
         .filter_map(|event| match &event.payload {
             TrackerPayload::Comment(comment)
-                if authorization.role(&event.author_pubkey).is_some()
+                if authorization
+                    .event_role(&event.event_id, &event.author_pubkey)
+                    .is_some()
                     && comment.root_event == root_event.event_id =>
             {
                 Some(event.event_id.as_str())
@@ -2039,7 +2072,10 @@ fn fold_comments(
         let TrackerPayload::Comment(comment) = &event.payload else {
             continue;
         };
-        let reason = if authorization.role(&event.author_pubkey).is_none() {
+        let reason = if authorization
+            .event_role(&event.event_id, &event.author_pubkey)
+            .is_none()
+        {
             Some("comment author is not a workspace member")
         } else if comment.root_event != root_event.event_id {
             Some("comment names a non-canonical root")
@@ -3131,6 +3167,53 @@ mod tests {
     const MEMBER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const MAINTAINER: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const OTHER: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn accepted_terminal_history_survives_demoted_author_and_later_writes_do_not() {
+        let stream = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let initial = root(stream, issue, "root", 1, MAINTAINER);
+        let closed = revision(
+            stream,
+            issue,
+            "closed",
+            "root",
+            1,
+            2,
+            MAINTAINER,
+            RevisionSet {
+                status: Some(IssueStatus::Done),
+                ..Default::default()
+            },
+        );
+        let reopened = revision(
+            stream,
+            issue,
+            "reopened",
+            "closed",
+            2,
+            3,
+            MAINTAINER,
+            RevisionSet {
+                status: Some(IssueStatus::Todo),
+                ..Default::default()
+            },
+        );
+        let mut historical = TrackerAuthorization::new([(MAINTAINER.into(), TrackerRole::Member)]);
+        historical.admit_event(
+            "root".into(),
+            MAINTAINER.into(),
+            Some(TrackerRole::Maintainer),
+        );
+        historical.admit_event(
+            "closed".into(),
+            MAINTAINER.into(),
+            Some(TrackerRole::Maintainer),
+        );
+        let folded = fold_tracker_events([initial, closed, reopened], &historical);
+        assert_eq!(folded.issues[&(stream, issue)].status, IssueStatus::Done);
+        assert_eq!(folded.issues[&(stream, issue)].tip_event, "closed");
+    }
 
     fn auth() -> TrackerAuthorization {
         TrackerAuthorization::new([

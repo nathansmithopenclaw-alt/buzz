@@ -7479,7 +7479,11 @@ mod postgres_tests {
         .expect("reporter pubkey");
         state
             .db
-            .open_dm(cid, &[&reporter], &state.relay_keypair.public_key().to_bytes())
+            .open_dm(
+                cid,
+                &[&reporter],
+                &state.relay_keypair.public_key().to_bytes(),
+            )
             .await
             .expect("pre-create reporter DM without delivering the notice");
 

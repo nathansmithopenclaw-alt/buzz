@@ -17,11 +17,11 @@ export const NECTAR_DISPLAY_NAME = "Nectar";
 /** Stable persona id, same shape as `builtin:fizz` — not a display-name match. */
 export const NECTAR_PERSONA_ID = "nectar";
 export const NECTAR_AVATAR_PATH = "/onboarding/starter-team/nectar.png";
-export const NECTAR_DESCRIPTION = "Concentrated daily digest of your rooms.";
+export const NECTAR_DESCRIPTION = "Concentrated digest of your rooms.";
 
 /** Same voice as Fizz / Honey / Pollen: job first, then a little bee charm. */
 export const NECTAR_SYSTEM_PROMPT =
-  "You are Nectar, a concentrated daily digest. When your scheduled Summary run fires, or when someone asks, write a well-formatted easy-language report of what happened in the rooms you can read since the last watermark. Lead with what needs attention, then what moved, then what is parked. Pair the human markdown with a structured JSON status object other agents can query. Be calm, candid, and concise. Add occasional bee wordplay or 🐝 — keep it charming, never distracting. Do not invent work, assign tasks, or write to trackers. Summarize deltas only.";
+  "You are Nectar, a concentrated digest. When your scheduled Summary run fires, or when someone asks, write a well-formatted easy-language report of what happened in the conversations selected in the saved Summary definition. For a named Summary run, follow the authenticated execution request and its exact owner, Summary and run IDs. Read every selected conversation and every page, including empty sources. Use buzz briefs run publish; never use legacy separate report or watermark writes for a named run. Compose title, markdown and optional status; the CLI supplies coverage counts and cursor metadata from observed reads. Lead with what needs attention, then what moved, then what is parked. Pair the human markdown with a structured JSON status object other agents can query. Be calm, candid, and concise. Add occasional bee wordplay or 🐝 — keep it charming, never distracting. Do not invent work, assign tasks, or write to trackers. Summarize deltas only.";
 
 export function isNectarPersonaId(id: string | null | undefined): boolean {
   return id === NECTAR_PERSONA_ID;
@@ -86,6 +86,7 @@ export type EnsureNectarReporterInput = {
   runtime: AcpRuntime;
   model?: string | null;
   provider?: string | null;
+  envVars?: Record<string, string>;
   avatarDataUrl: string;
   createPersona: (input: CreatePersonaInput) => Promise<AgentPersona>;
   updatePersona?: (input: UpdatePersonaInput) => Promise<AgentPersona>;
@@ -142,8 +143,11 @@ export async function ensureNectarReporter(
     input.toInstanceInput ??
     ((nextPersona, runtime) =>
       buildInstanceInputForDefinition(nextPersona, runtime));
-  const created = await input.createManagedAgent(
-    await toInstanceInput(persona, input.runtime),
-  );
+  const created = await input.createManagedAgent({
+    ...(await toInstanceInput(persona, input.runtime)),
+    model: model ?? undefined,
+    provider: provider ?? undefined,
+    envVars: input.envVars,
+  });
   return created.agent.pubkey;
 }

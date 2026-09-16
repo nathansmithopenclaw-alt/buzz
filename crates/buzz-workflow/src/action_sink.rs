@@ -65,6 +65,20 @@ impl From<ActionSinkError> for crate::WorkflowError {
     }
 }
 
+/// Distinguishes owner-requested runs from revision-bound scheduled work.
+pub enum SummaryInvocation {
+    /// A manual run may explicitly regenerate an earlier report period.
+    Manual {
+        /// Frozen historical interval, or ordinary unread reporting.
+        replay_period: Option<serde_json::Value>,
+    },
+    /// A schedule must still match the saved definition that projected it.
+    Scheduled {
+        /// Signed definition revision; absent only for legacy workflows.
+        config_revision: Option<String>,
+    },
+}
+
 /// Interface for workflow actions that produce side effects.
 ///
 /// Implemented by the relay to provide direct DB/event access to the executor.
@@ -74,6 +88,22 @@ impl From<ActionSinkError> for crate::WorkflowError {
 /// Returns `Pin<Box<dyn Future>>` for dyn-compatibility — required because
 /// `WorkflowEngine` stores `Arc<dyn ActionSink>`.
 pub trait ActionSink: Send + Sync {
+    /// Execute a literal named Summary on behalf of the stored workflow owner.
+    fn run_summary(
+        &self,
+        _community_id: CommunityId,
+        _channel_id: Uuid,
+        _owner: &str,
+        _summary_id: &str,
+        _invocation: SummaryInvocation,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, ActionSinkError>> + Send + '_>> {
+        Box::pin(async {
+            Err(ActionSinkError::InvalidInput(
+                "Summary execution is unavailable".into(),
+            ))
+        })
+    }
+
     /// Post a message to a channel on behalf of a workflow owner.
     ///
     /// - `community_id`: the server-resolved community that owns the workflow

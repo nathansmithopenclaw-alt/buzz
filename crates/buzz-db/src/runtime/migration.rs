@@ -1004,7 +1004,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 51);
+        assert_eq!(migrations.len(), 54);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -2202,6 +2202,19 @@ mod postgres_tests {
         expected_fences.insert("relay_event_journal".to_owned());
         expected_fences.insert("relay_journal_checkpoints".to_owned());
         expected_fences.insert("relay_journal_state".to_owned());
+        // 0051 adds durable Summary execution, observed reads and independent cursors.
+        expected_fences.extend(
+            [
+                "summary_runs",
+                "summary_run_reads",
+                "summary_run_sources",
+                "summary_schedule_state",
+                "summary_schedule_jobs",
+                "summary_report_archive",
+                "summary_cursors",
+            ]
+            .map(str::to_owned),
+        );
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -2695,14 +2708,21 @@ mod postgres_tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(43, &migrated)
+            .run(&migrated)
             .await
-            .expect("apply migrations 1-43");
+            .expect("apply all embedded migrations");
 
         for table in [
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "summary_runs",
+            "summary_run_reads",
+            "summary_cursors",
+            "summary_report_archive",
+            "summary_run_sources",
+            "summary_schedule_state",
+            "summary_schedule_jobs",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -3547,15 +3567,15 @@ mod postgres_tests {
         assert_t6_fold_objects(&pool).await;
     }
 
-    /// The upstream tombstone migration follows the fork's existing 1-50
+    /// The upstream tombstone migration follows the fork's installed 1-53
     /// ledger. A revoked identity may be replaced while live uniqueness stays
     /// enforced and the historical revocation remains queryable.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn migration_0051_preserves_revoked_installations_and_live_uniqueness() {
+    async fn migration_0054_preserves_revoked_installations_and_live_uniqueness() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        run_migrations_through(&pool, 50).await.unwrap();
+        run_migrations_through(&pool, 53).await.unwrap();
         let ledger_before: Vec<(i64, Vec<u8>)> =
             sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&pool)
@@ -3580,7 +3600,7 @@ mod postgres_tests {
             .unwrap();
         run_migrations(&pool).await.unwrap();
         let ledger_after: Vec<(i64, Vec<u8>)> = sqlx::query_as(
-            "SELECT version, checksum FROM _sqlx_migrations WHERE version <= 50 ORDER BY version",
+            "SELECT version, checksum FROM _sqlx_migrations WHERE version <= 53 ORDER BY version",
         )
         .fetch_all(&pool)
         .await
@@ -3739,7 +3759,8 @@ mod postgres_tests {
     /// alone must present a coherent catalog. Its five community-scoped ledger
     /// relations are immutable and durable, so they are registered in the
     /// write-fence exclusion — never counted as tenant-scoped drift, never
-    /// fence-attached — and the exact deletion catalog must still validate.
+    /// fence-attached. The current deletion catalog must identify only the
+    /// later Summary tables as missing from this historical schema.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn migration_0045_identity_foundation_is_durable_ledger_after_migration_a() {
@@ -3806,12 +3827,17 @@ mod postgres_tests {
             "identity ledger relations must be write-fence excluded, not scoped: {scoped_or_fenced:?}"
         );
 
-        // The exact deletion catalog validates: the excluded ledger relations
-        // do not perturb the scoped-table/fence equality check.
-        crate::deletion::DeletionStore::new(pool.clone())
+        // The current catalog correctly rejects this historical schema only
+        // for the later Summary tables. Identity ledger relations remain
+        // excluded; any additional missing/unknown relation fails this check.
+        let catalog_error = crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
-            .expect("deletion catalog validates after migration 0045");
+            .expect_err("the current deletion catalog requires later Summary migrations");
+        assert!(
+            matches!(catalog_error, crate::DbError::DeletionSafety(message)
+            if message == "community deletion catalog drift (missing=summary_cursors,summary_report_archive,summary_run_reads,summary_run_sources,summary_runs,summary_schedule_jobs,summary_schedule_state, unknown=)")
+        );
 
         // The immutability contract is enforced, not merely declared. TRUNCATE
         // fires the statement-level guard unconditionally, so this proves the
@@ -3906,10 +3932,14 @@ mod postgres_tests {
         );
 
         // The exact deletion catalog validates with the full ledger present.
-        crate::deletion::DeletionStore::new(pool.clone())
+        let catalog_error = crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
-            .expect("deletion catalog validates after migrations 0045 + 0046");
+            .expect_err("the current deletion catalog requires later Summary migrations");
+        assert!(
+            matches!(catalog_error, crate::DbError::DeletionSafety(message)
+            if message == "community deletion catalog drift (missing=summary_cursors,summary_report_archive,summary_run_reads,summary_run_sources,summary_runs,summary_schedule_jobs,summary_schedule_state, unknown=)")
+        );
 
         // A migration-B relation is immutable too. TRUNCATE fires the
         // statement-level guard unconditionally.

@@ -27,6 +27,7 @@ mod mesh_llm;
 #[cfg(not(feature = "mesh-llm"))]
 mod mesh_llm_stubs;
 mod migration;
+mod model_connections;
 #[cfg(test)]
 mod model_tests;
 mod models;
@@ -598,6 +599,8 @@ pub fn run() {
             get_project_repo_snapshot,
             fold_tracker_context,
             tracker_fold_cursor,
+            read_tracker_context_cache,
+            read_tracker_membership,
             resume_tracker_context,
             fold_tracker_context_incremental,
             get_project_repo_file_content,
@@ -647,6 +650,13 @@ pub fn run() {
             build_tracker_issue_event,
             build_tracker_revision_event,
             build_tracker_comment_event,
+            build_dispatch_record_event,
+            build_dispatch_assignment_event,
+            build_dispatch_task_review_event,
+            build_dispatch_notice_event,
+            validate_dispatch_notice_readback,
+            dispatch_capture_request_id,
+            validate_dispatch_audience,
             sign_nostr_identity_binding,
             sign_out,
             decrypt_observer_event,
@@ -750,6 +760,7 @@ pub fn run() {
             put_managed_agent_runtime_lifecycle,
             create_managed_agent,
             start_managed_agent,
+            open_external_agent_task,
             ensure_managed_agent_for_inbound,
             resurrect_stopped_active_instances,
             stop_managed_agent,
@@ -761,6 +772,12 @@ pub fn run() {
             set_managed_agent_session_residency_policy,
             delete_managed_agent,
             get_managed_agent_log,
+            model_connections::list_model_connections,
+            model_connections::save_model_connection,
+            model_connections::remove_model_connection,
+            model_connections::test_model_connection,
+            model_connections::check_model_connection,
+            model_connections::network::discover_model_servers,
             get_agent_models,
             discover_agent_models,
             agent_access_owner_only,
@@ -817,6 +834,7 @@ pub fn run() {
             create_persona,
             update_persona,
             apply_delegated_persona_env_vars,
+            apply_scoped_agent_update,
             update_persona_and_publish,
             delete_persona,
             set_persona_active,
@@ -850,6 +868,8 @@ pub fn run() {
             get_channel_workflows,
             get_channels_workflows,
             get_workflow,
+            summary_operation,
+            publish_summary_definition,
             create_workflow,
             update_workflow,
             delete_workflow,

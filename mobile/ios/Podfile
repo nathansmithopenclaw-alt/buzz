@@ -38,6 +38,14 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    # The app already requires iOS 16. Older podspec defaults (iOS 9-13) are
+    # rejected by current Simulator SDKs; align only those lower pod targets.
+    target.build_configurations.each do |config|
+      declared = config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'].to_s
+      if declared.empty? || (Gem::Version.correct?(declared) && Gem::Version.new(declared) < Gem::Version.new('16.0'))
+        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '16.0'
+      end
+    end
   end
   # Flutter creates plugin symlinks during installation, so load the upstream
   # helper here rather than requiring an existing Pods install at parse time.

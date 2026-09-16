@@ -15,6 +15,25 @@ tracker stream locally and converts queue state into deterministic actions:
 All decisions are deterministic (no LLM judgment in the rule path), and all
 effects are idempotent via UUIDv5 request ids plus a fired-request ledger.
 
+## Human-controlled Dispatch mode
+
+The Desktop Automation panel uses the opt-in `remote_controls: true` mode.
+See [Dispatch rollout and recovery](dispatch-rollout.md) before enabling it.
+With this mode, the host configuration is the outer allowlist and signed workspace
+controls can only narrow it. Missing controls, preview, pause, expiry, incomplete
+history or uncertain authorization hold all task/capture/notification effects.
+The older configuration-only mode remains available for compatibility; the UI
+cannot pause a service that has not opted into remote controls.
+
+Assignments in the controlled mode use task envelope v3, preserve the issue's
+human owner, and link their exact signed assignment into accepted issue history
+before publishing to the executor. Review requires a different person and evidence.
+Per-tick and durable total-action reservations prevent restart from refreshing an
+allowance. Import activation, capacity, dependencies, source audiences and current
+approval are checked again before execution or replay. A signed heartbeat reports
+preview/action status and the current allowance. A relay capability advertisement
+alone does not establish executor harness compatibility.
+
 ## Upgrade notes (release-relevant)
 
 - **BREAKING config change:** `liveness.signer_allowlist` is now REQUIRED

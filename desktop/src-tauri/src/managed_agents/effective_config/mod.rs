@@ -249,7 +249,7 @@ pub fn resolve_effective_config(
     definitions: &[AgentDefinition],
     global: &GlobalAgentConfig,
 ) -> EffectiveConfigResult {
-    match &record.persona_id {
+    let result = match &record.persona_id {
         Some(pid) => match definitions.iter().find(|d| d.id == *pid) {
             Some(def) => EffectiveConfigResult::Resolved(resolve_linked(def, global)),
             None => EffectiveConfigResult::OrphanedInstance {
@@ -258,6 +258,43 @@ pub fn resolve_effective_config(
             },
         },
         None => EffectiveConfigResult::Resolved(resolve_definition_less(record, global)),
+    };
+    // Global model/provider identifiers belong to the preferred runtime, not
+    // every adapter. Compare the actual spawn command (including instance pins)
+    // through the same catalog used by spawn; never guess from model spelling.
+    // With no preference, the defaults belong to Buzz's built-in runtime.
+    let preferred_command = non_blank(global.preferred_runtime.as_deref())
+        .and_then(super::discovery::command_for_runtime_id)
+        .or_else(|| {
+            non_blank(global.preferred_runtime.as_deref())
+                .is_none()
+                .then(super::discovery::default_agent_command)
+        });
+    let inherits_global = super::discovery::try_record_agent_command(record, definitions)
+        .ok()
+        .zip(preferred_command)
+        .is_some_and(|(actual, preferred)| {
+            match (
+                super::discovery::known_acp_runtime(&actual),
+                super::discovery::known_acp_runtime(&preferred),
+            ) {
+                (Some(actual), Some(preferred)) => actual.id == preferred.id,
+                _ => actual == preferred,
+            }
+        });
+    match result {
+        EffectiveConfigResult::Resolved(mut config) => {
+            if !inherits_global {
+                if config.model.source == ConfigSource::Global {
+                    config.model.value = None;
+                }
+                if config.provider.source == ConfigSource::Global {
+                    config.provider.value = None;
+                }
+            }
+            EffectiveConfigResult::Resolved(config)
+        }
+        orphan => orphan,
     }
 }
 

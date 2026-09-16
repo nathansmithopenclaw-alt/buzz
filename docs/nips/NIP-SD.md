@@ -76,7 +76,7 @@ coupled, not orthogonal:
 | Slot | Valid payloads |
 | --- | --- |
 | legacy `agent_management_delegation` | v1 singular (no `version` field), v2 aggregate (`version: 2`, compatibility) |
-| keyed `agent_management_delegations` | v1-shape singular (no `version` field), v3 singular (`version: 3`) |
+| keyed `agent_management_delegations` | v1-shape singular (no `version` field), v3 singular (`version: 3`), scoped singular (`version: 4`) |
 
 A v2 aggregate is defined only in the legacy slot; a v3 proof is
 defined only as a keyed singular. The next owner save re-signs as the current
@@ -85,7 +85,7 @@ the legacy slot as v2; v3 builds write keyed entries as `version: 3`.
 
 ### Unknown versions
 
-A grant whose `version` field is present and not `2` or `3` fails validation
+A grant whose `version` field is present and not `2`, `3`, or `4` fails validation
 loud. It is not treated as "no grant" and must not fall back to owner-review. A
 v1 grant has no `version` field. A known version in the wrong shape fails the
 same way: a `version: 3` proof in the aggregate shape is an unknown-shape
@@ -155,7 +155,9 @@ v1 grants keep their current audit channel until re-saved. Grantees are not
 auto-added as members.
 
 If a `kind:39000` already exists for that UUID, Desktop reuses it only when
-`metadata.pubkey` equals the current Desktop owner. Otherwise grant persist
+the relay-signed discovery metadata and admin-role event have valid matching
+signatures, and the admin-role event (`kind:39001`) identifies the Desktop
+owner as the channel owner. Otherwise grant persist
 fails closed and nothing is signed — the UUID inputs are public, so a
 pre-created channel on a multi-tenant relay is otherwise a squat. Desktop
 must not join that channel or post receipts into it.
@@ -434,3 +436,56 @@ buzz agents apply-global-config \
   --preferred-runtime codex \
   --effort high
 ```
+
+
+## Scoped existing-agent edits (Desktop v4)
+
+The first bounded edit consumer accepts `displayName` and `systemPrompt` only.
+These are independent allowed fields: granting a display-name edit does not
+permit changing instructions. Other fields in an update request require owner
+review, even when the requester has other broad legacy capabilities.
+
+A keyed v4 grant extends the singular grant with `version: 4`, `relayScope`, and
+`agentEdit: { targetPubkeys, allowedFields, allowSelfEdit }`. All three edit
+limits and the canonical relay scope are covered by the owner signature.
+`targetPubkeys` and `allowedFields` are nonempty, sorted, deduplicated arrays;
+unknown edit fields are rejected. A target is an exact managed public key, not
+a display name or a future-agent wildcard. Old v1/v2 grants remain readable but
+do not automatically authorize this scoped edit consumer. The owner must select
+targets and fields. Other legacy capabilities retain their existing behavior.
+Older Desktop builds that do not support v4 must not administer these grants.
+
+The picker first selects recipients, then reuses the agent-selection modal for
+each recipient's targets and fields. Select all agents snapshots the current
+roster; future agents are not included. Self-editing is separately opt-in and
+still requires the recipient to be selected as a target. Explicitly selecting
+another manager permits editing that manager only within the chosen fields;
+there is no inferred manager hierarchy. Back and Cancel do not write. Confirm
+persists all completed recipient selections together, preserving unrelated
+signed proofs. Grant-all goes through the same target/field selection.
+
+Registration resolves a unique editable definition and pins its ID. Since
+multiple instances can share a definition, every linked instance must be an
+allowed target in the current relay scope. Built-in and team-owned definitions
+are not editable through this consumer. Unresolvable, ungranted, and out-of-scope
+valid requests remain owner-review drafts.
+
+At execution, `apply_scoped_agent_update` accepts only the durable request ID.
+It loads the current grant and definition under the same store mutex used for
+grant revocation and the persona save. It verifies owner/community identity,
+targets, fields, and self-edit permission again. A revocation or scope change
+before this boundary returns the request to owner review without a mutation.
+Once the mutation has begun under that lock, revocation applies to later work;
+it does not attempt to undo a committed edit.
+
+The native command constructs the edit from the durable request and current
+definition, preserving unrelated fields rather than trusting a frontend form
+snapshot. An execution-started marker is durable before the first side effect;
+replay cannot execute it again. A crash after that marker is an uncertain result
+handled by the existing interrupted-request recovery, not an automatic retry.
+Owner-reviewed drafts remain separate from standing grants: approval of one
+request does not widen future authority.
+
+Creation, environment variables, global defaults, teams, and secret return need
+separate acceptance cases. This scoped consumer does not establish an operating
+system security boundary against a process with the same user's file access.

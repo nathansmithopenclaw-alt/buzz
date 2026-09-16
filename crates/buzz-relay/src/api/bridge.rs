@@ -1126,6 +1126,18 @@ async fn query_events_authed(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if raw_filters
+        .iter()
+        .any(|filter| filter.get("summary_operation").is_some())
+    {
+        return super::summary_runs::handle(state, tenant, &pubkey.to_hex(), &raw_filters).await;
+    }
+    if raw_filters
+        .iter()
+        .any(|filter| filter.get("summary_owner").is_some())
+    {
+        return super::summary_read::read(state, tenant, &pubkey.to_hex(), &raw_filters).await;
+    }
     let filters: Vec<nostr::Filter> = raw_filters
         .iter()
         .map(|v| serde_json::from_value(v.clone()))
@@ -1297,7 +1309,14 @@ async fn query_events_authed(
                 // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
                 // or kind:30622) to a non-owner via the feed path, even though feed SQL
                 // kind allowlists already exclude these kinds.
-                if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
+                if !crate::handlers::req::event_visible_to_reader_with_policy(
+                    state,
+                    tenant.community(),
+                    &se.event,
+                    &pubkey_bytes,
+                )
+                .await
+                {
                     continue;
                 }
                 if let Ok(v) = serde_json::to_value(&se.event) {
@@ -1365,7 +1384,14 @@ async fn query_events_authed(
             // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
             // or kind:30622) to a non-owner via the thread path, even though
             // requires_h_channel_scope already excludes these kinds from thread metadata.
-            if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
+            if !crate::handlers::req::event_visible_to_reader_with_policy(
+                state,
+                tenant.community(),
+                &se.event,
+                &pubkey_bytes,
+            )
+            .await
+            {
                 continue;
             }
             thread_row_ids.push(se.event.id.to_hex());
@@ -1390,10 +1416,13 @@ async fn query_events_authed(
                 for se in aux_events {
                     if !seen_aux.insert(se.event.id)
                         || !event_in_accessible_channel(&se, &accessible_channels)
-                        || !buzz_core::filter::reader_authorized_for_event(
+                        || !crate::handlers::req::event_visible_to_reader_with_policy(
+                            state,
+                            tenant.community(),
                             &se.event,
-                            &authed_pubkey_hex,
+                            &pubkey_bytes,
                         )
+                        .await
                     {
                         continue;
                     }
@@ -1510,7 +1539,14 @@ async fn query_events_authed(
                     // Also enforces author-only kinds (30300/30350) and the persona
                     // shared-gate (kind:30175 without ["shared","true"]). Single call
                     // covers all three gated event classes.
-                    if !crate::handlers::req::event_visible_to_reader(&se.event, &pubkey_bytes) {
+                    if !crate::handlers::req::event_visible_to_reader_with_policy(
+                        state,
+                        tenant.community(),
+                        &se.event,
+                        &pubkey_bytes,
+                    )
+                    .await
+                    {
                         continue;
                     }
                     if let Ok(v) = serde_json::to_value(&se.event) {
@@ -1796,10 +1832,14 @@ async fn count_events_authed(
                             {
                                 continue;
                             }
-                            if !crate::handlers::req::event_visible_to_reader(
+                            if !crate::handlers::req::event_visible_to_reader_with_policy(
+                                state,
+                                tenant.community(),
                                 &se.event,
                                 &pubkey_bytes,
-                            ) {
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -1866,10 +1906,14 @@ async fn count_events_authed(
                             {
                                 continue;
                             }
-                            if !crate::handlers::req::event_visible_to_reader(
+                            if !crate::handlers::req::event_visible_to_reader_with_policy(
+                                state,
+                                tenant.community(),
                                 &se.event,
                                 &pubkey_bytes,
-                            ) {
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -2050,7 +2094,14 @@ async fn handle_bridge_search(
             // branch cannot currently return unshared persona content — but the
             // check here ensures that a future FTS allowlist change cannot silently
             // reopen the bypass.
-            if !crate::handlers::req::event_visible_to_reader(&stored.event, pubkey_bytes) {
+            if !crate::handlers::req::event_visible_to_reader_with_policy(
+                state,
+                tenant.community(),
+                &stored.event,
+                pubkey_bytes,
+            )
+            .await
+            {
                 continue;
             }
             // Dedup across filters.
@@ -3991,7 +4042,7 @@ mod postgres_tests {
     /// - Redis pool points at the local dev instance for the admission check.
     ///
     /// Returns `None` when local Postgres is not reachable.
-    async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+    pub(super) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.
@@ -4391,3 +4442,11 @@ mod postgres_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "summary_read_tests.rs"]
+mod summary_read_postgres_tests;
+
+#[cfg(test)]
+#[path = "bridge/summary_tests.rs"]
+mod summary_postgres_tests;

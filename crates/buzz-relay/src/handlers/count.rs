@@ -7,7 +7,7 @@ use tracing::warn;
 
 use crate::connection::{AuthState, ConnectionState};
 use crate::handlers::req::{
-    event_visible_to_reader, filter_can_match_result_gated_kinds,
+    event_visible_to_reader_with_policy, filter_can_match_result_gated_kinds,
     filter_can_match_shared_gated_kinds, result_gated_count_safe_for_pushdown,
 };
 use crate::protocol::RelayMessage;
@@ -226,7 +226,14 @@ pub async fn handle_count(
                             {
                                 continue;
                             }
-                            if !event_visible_to_reader(&se.event, &pubkey_bytes) {
+                            if !event_visible_to_reader_with_policy(
+                                &state,
+                                conn.tenant.community(),
+                                &se.event,
+                                &pubkey_bytes,
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -299,7 +306,14 @@ pub async fn handle_count(
                             {
                                 continue;
                             }
-                            if !event_visible_to_reader(&se.event, &pubkey_bytes) {
+                            if !event_visible_to_reader_with_policy(
+                                &state,
+                                conn.tenant.community(),
+                                &se.event,
+                                &pubkey_bytes,
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;

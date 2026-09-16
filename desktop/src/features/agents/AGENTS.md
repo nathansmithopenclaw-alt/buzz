@@ -53,6 +53,15 @@ that frontend inventory.
 
 ## Rules
 
+Global model/provider defaults are scoped to the configured preferred runtime
+(the bundled buzz-agent runtime when unset). Explicit definition/legacy model
+authority is unchanged. Dialogs pass their prospective runtime to
+`getInheritedAgentDefaults`; backend resolution compares the actual spawn
+command through the runtime catalog, including instance pins. Global env and
+account selection keep their existing independent precedence. A configured ACP
+model rejected by a nonempty catalog must block prompts; rejection of an
+explicit live pick keeps the existing recovery path and correlated failure.
+
 1. **No hardcoded harness-ID checks in render code.** `runtime.id === "claude"`
    belongs in `deriveAgentConfigFieldModel` (once, with a named reason), never
    in a component. Components ask the field model what exists
@@ -506,3 +515,59 @@ picture is a removal tombstone and must block fallback to a definition or relay
 picture. Fleet selectors prefer the saved selection and preserve its revision
 across later settings projections. Pending publication must remain visible;
 saving locally is not proof of relay acceptance. See `docs/agent-profile-identity.md`.
+
+## Summary setup
+
+Summary uses `ManagedAgentPickerDialog`, the same managed roster and confirmation
+surface as agent delegation. Its new-agent runtime controls reuse Edit Agent's
+model discovery, catalog merge, dropdown, effort, and native fast-mode controls.
+Saved preferred harness and inherited model seed Nectar; explicit choices are
+local to this setup. Existing agents open the canonical instance editor.
+Summary reads are snapshot-only grants from the owner's signed config, not channel
+membership changes. See `docs/summary-read-delegation.md` for the relay boundary.
+
+## Saved model connections
+
+The device-local Model connections store owns endpoint URLs and model catalogs.
+API keys use the desktop SecretStore and never appear in catalog IPC responses
+or agent snapshots. Agents persist only BUZZ_MODEL_CONNECTION_ID and their model.
+The Rust runtime catalog advertises the `buzz-local` provider for supported
+harnesses; frontend components do not infer support from harness IDs. Runtime
+switches preserve a connection/model only when the destination advertises that
+provider. Local spawn resolves the connection and applies the harness projection;
+remote deployment rejects device-local connections rather than falling back.
+DeepSeek uses native endpoint environment variables. Prime receives a managed,
+agent-specific models.json/settings.json with an environment reference for its key.
+Legacy manual DeepSeek endpoints remain supported.
+
+Opening Connect a model server starts bounded local discovery. Discovery sends
+catalog GET requests only, without credentials; it never invokes a model or
+installs software. Authentication-required results remain unverified until the
+user connects them. Test a model is explicit and reports text-response proof
+only, not tool or harness compatibility. Existing connections remain saved when
+unavailable. Connection edits apply on next start; removal must not silently
+substitute a different server. Secrets are not forwarded when editing an address
+without re-entering or explicitly clearing the key.
+
+The Summary recipient picker reuses `ManagedAgentPickerDialog` through its explicit
+people-directory input. That input replaces the agent roster; it must never merge
+people and managed agents. Membership and identity classification come from the
+relay, including incomplete-directory status. This changes picker reuse only;
+agent runtime configuration rules are unchanged.
+
+## External execution ownership
+
+An agent may have a host-local, community-scoped external execution binding.
+It is projected as `ManagedAgent.externalExecution`; it is not a persona field,
+relay presence claim, model choice, or credential. The native binding is read
+from `agents/external-execution/<pubkey>.json` and must name the exact community
+and a supported target. Unknown or malformed bindings refuse local execution.
+
+Mention preparation still performs access and membership checks and preserves
+the exact recipient key. It skips queued local wakes and local starts during
+channel attachment. Inbound resurrection and the common native spawn boundary
+also respect the binding, so stale frontend state cannot start a duplicate.
+Cards and profiles name the external app and offer Open Codex Desktop; opening
+uses a native validated task target and does not submit a turn. Keep local model,
+autostart, log and restart controls out of the external runtime presentation.
+See `docs/external-agent-execution.md` for installation and rollback.

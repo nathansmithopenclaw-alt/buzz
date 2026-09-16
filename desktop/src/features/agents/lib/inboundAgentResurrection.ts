@@ -65,6 +65,7 @@ const EXPECTED_WAKE_SKIPS = new Set([
   "SkipSelfAuthored",
   "SkipAuthorGated",
   "unknown_agent",
+  "external_execution",
 ]);
 
 const OBSERVER_REFUSAL =

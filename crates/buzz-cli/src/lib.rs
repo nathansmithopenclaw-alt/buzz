@@ -815,6 +815,9 @@ pub enum TasksCmd {
         /// Verification method
         #[arg(long = "verify", default_value = "not specified")]
         verification: String,
+        /// Independent reviewer delegated in the signed assignment (defaults to assigner)
+        #[arg(long)]
+        reviewer: Option<String>,
         /// Correlated Tracker issue UUID (task-envelope v2)
         #[arg(long)]
         tracker_issue_id: Option<String>,
@@ -1131,6 +1134,9 @@ pub enum TrackCmd {
         deliverables: Vec<String>,
         #[arg(long = "verify")]
         verification: Option<String>,
+        /// Independent reviewer delegated in the signed assignment (defaults to assigner)
+        #[arg(long)]
+        reviewer: Option<String>,
         #[arg(long)]
         content: Option<String>,
         /// Allow another task while existing linked tasks remain active
@@ -1157,6 +1163,26 @@ pub enum TrackCmd {
     /// Manage Tracker metadata on NIP-MP project heads
     #[command(subcommand)]
     Project(TrackProjectCmd),
+    /// Read or publish signed shared views, decisions, plans and evidence
+    #[command(subcommand)]
+    Records(TrackRecordCmd),
+}
+
+#[derive(Subcommand)]
+pub enum TrackRecordCmd {
+    /// Read current records with rejected-history diagnostics
+    List {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+    },
+    /// Validate, publish once and verify a complete record JSON document
+    Put {
+        #[arg(long, env = "BUZZ_WORKSPACE_ID")]
+        workspace: Option<String>,
+        /// JSON file, or - for stdin; maximum 64 KiB
+        #[arg(long)]
+        input: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1865,6 +1891,37 @@ pub enum NotesCmd {
 
 #[derive(Subcommand)]
 pub enum BriefsCmd {
+    /// Durable named Summary execution and dedicated publication
+    #[command(subcommand)]
+    Run(BriefsRunCmd),
+    /// Read a selected conversation using the owner's read-only Summary grant
+    Read {
+        /// Owner of the Summary configuration
+        #[arg(long)]
+        owner: String,
+        /// Named Summary identity; requires its durable run
+        #[arg(long = "summary", requires = "run")]
+        summary: Option<String>,
+        /// Durable run UUID; requires --summary
+        #[arg(long, requires = "summary")]
+        run: Option<String>,
+        /// Selected channel or DM UUID
+        #[arg(long)]
+        channel: String,
+        /// Inclusive lower timestamp (unix seconds)
+        #[arg(long)]
+        since: Option<u64>,
+        /// Inclusive upper timestamp (unix seconds)
+        #[arg(long)]
+        until: Option<u64>,
+        /// Stable paging cursor; requires --until
+        #[arg(long, requires = "until")]
+        before_id: Option<String>,
+        /// Maximum messages (1–200)
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+
     /// List published briefing reports recency-first
     List {
         /// Maximum number of reports to return
@@ -1913,6 +1970,49 @@ pub enum BriefsCmd {
     /// Reporter watermarks
     #[command(subcommand)]
     Watermarks(BriefsWatermarksCmd),
+}
+
+#[derive(Subcommand)]
+pub enum BriefsRunCmd {
+    /// Claim a run as the Summary owner (manual and scheduled runs share one slot)
+    Start {
+        #[arg(long)]
+        summary: String,
+    },
+    /// Inspect an exact run, saved definition and independent cursors
+    Status {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        run: String,
+    },
+    /// Record running, needs_approval or failed without moving cursors
+    Progress {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        run: String,
+        #[arg(long, value_parser = ["running", "needs_approval", "failed"])]
+        state: String,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    /// Publish composition JSON through the dedicated Summary transaction
+    Publish {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        run: String,
+        /// JSON file or '-' containing title, markdown, status, sources, watermarks
+        #[arg(long)]
+        input: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3394,6 +3494,7 @@ mod tests {
                 "link",
                 "list",
                 "project",
+                "records",
                 "relate",
                 "repair-cache",
                 "update",
@@ -3428,7 +3529,15 @@ mod tests {
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
         assert_eq!(
             names(&cmd, "briefs"),
-            vec!["config", "get", "list", "publish", "watermarks"]
+            vec![
+                "config",
+                "get",
+                "list",
+                "publish",
+                "read",
+                "run",
+                "watermarks"
+            ]
         );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(

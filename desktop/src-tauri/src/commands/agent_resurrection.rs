@@ -100,6 +100,15 @@ pub async fn ensure_managed_agent_for_inbound(
             });
         };
         let running = agent_is_running(&mut runtimes, &pubkey);
+        if let Some(key) = crate::managed_agents::workspace_pair_key(&app, record) {
+            if crate::managed_agents::external_execution::load(&app, &key)?.is_some() {
+                return Ok(InboundRespawnResult {
+                    pubkey,
+                    spawned: false,
+                    reason: "external_execution".into(),
+                });
+            }
+        }
         let siblings = local_sibling_pubkeys(&records);
         let decision = decide_inbound_respawn(
             record,

@@ -19,6 +19,23 @@ fn parse_events(json: &str) -> Result<Vec<Event>, CliError> {
         .map_err(|e| CliError::Other(format!("failed to parse relay response: {e}")))
 }
 
+fn parse_report(event: &Event) -> Result<serde_json::Value, CliError> {
+    let content: serde_json::Value =
+        serde_json::from_str(&event.content).map_err(|e| CliError::Other(e.to_string()))?;
+    if content["v"] == 2 {
+        if event.kind.as_u16() != KIND_BRIEF_REPORT as u16 {
+            return Err(CliError::Other("Invalid Summary event kind".into()));
+        }
+        let report: buzz_core::summary::SummaryReport =
+            serde_json::from_value(content.clone()).map_err(|e| CliError::Other(e.to_string()))?;
+        report.validate().map_err(CliError::Other)?;
+        Ok(content)
+    } else {
+        serde_json::to_value(parse_brief_report(event).map_err(sdk_err)?)
+            .map_err(|e| CliError::Other(e.to_string()))
+    }
+}
+
 fn newest_first(mut events: Vec<Event>) -> Vec<Event> {
     events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
     events
@@ -41,6 +58,15 @@ pub(crate) fn watermarks_list_filter(reader: &str) -> serde_json::Value {
         "#p": [reader],
         "#t": [BRIEF_DISCOVERY_TAG],
         "limit": 200,
+    })
+}
+
+fn report_id_filter(id: &str, reader: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ids": [id.to_ascii_lowercase()],
+        "kinds": [KIND_BRIEF_REPORT],
+        "#p": [reader],
+        "limit": 1,
     })
 }
 
@@ -71,39 +97,50 @@ async fn fetch_own_config(client: &BuzzClient) -> Result<Option<Event>, CliError
     fetch_config(client, None).await
 }
 
-async fn expected_brief_reporter(client: &BuzzClient) -> Result<Option<String>, CliError> {
-    let Some(event) = fetch_own_config(client).await? else {
-        return Ok(None);
-    };
-    Ok(parse_brief_config(&event)
+fn config_reporter(event: &Event) -> Option<String> {
+    if let Ok(config) =
+        serde_json::from_str::<buzz_core::summary::SummaryDefinition>(&event.content)
+    {
+        if event.kind.as_u16() == KIND_BRIEF_CONFIG as u16 && config.validate().is_ok() {
+            return Some(config.reporter_pubkey);
+        }
+    }
+    parse_brief_config(event)
         .ok()
         .and_then(|config| config.reporter_pubkey)
-        .map(|pubkey| pubkey.to_ascii_lowercase()))
+        .map(|pubkey| pubkey.to_ascii_lowercase())
+}
+
+async fn expected_brief_reporter(client: &BuzzClient) -> Result<Option<String>, CliError> {
+    Ok(fetch_own_config(client)
+        .await?
+        .as_ref()
+        .and_then(config_reporter))
 }
 
 /// List published briefing reports recency-first.
 pub async fn cmd_list(client: &BuzzClient, limit: u32) -> Result<(), CliError> {
     let me = client.keys().public_key().to_hex();
-    let reporter = match fetch_own_config(client).await? {
-        Some(event) => parse_brief_config(&event)
-            .ok()
-            .and_then(|config| config.reporter_pubkey)
-            .unwrap_or_else(|| me.clone()),
-        None => me.clone(),
-    };
-    let filter = reports_list_filter(&me, &reporter, limit);
+    let reporter = expected_brief_reporter(client)
+        .await?
+        .unwrap_or_else(|| me.clone());
+    let mut filter = reports_list_filter(&me, &reporter, limit);
+    // Named reports can use different reporters; the relay enforces their live audience.
+    filter.as_object_mut().unwrap().remove("authors");
     let raw = client.query(&filter).await?;
     let mut rows = Vec::new();
     for event in newest_first(parse_events(&raw)?) {
-        match parse_brief_report(&event) {
-            Ok(report) => rows.push(serde_json::json!({
-                "id": event.id.to_hex(),
-                "pubkey": event.pubkey.to_hex(),
-                "created_at": event.created_at.as_secs(),
-                "run_id": report.run_id,
-                "title": report.title,
-            })),
-            Err(_) => continue,
+        match parse_report(&event) {
+            Ok(report) if report["v"] == 2 || event.pubkey.to_hex() == reporter => {
+                rows.push(serde_json::json!({
+                    "id": event.id.to_hex(),
+                    "pubkey": event.pubkey.to_hex(),
+                    "created_at": event.created_at.as_secs(),
+                    "run_id": report["run_id"],
+                    "title": report["title"],
+                }))
+            }
+            _ => continue,
         }
     }
     println!(
@@ -121,19 +158,16 @@ pub async fn cmd_get(
 ) -> Result<(), CliError> {
     let filter = if let Some(id) = event_id {
         validate_hex64(id)?;
-        serde_json::json!({ "ids": [id.to_ascii_lowercase()], "limit": 1 })
+        report_id_filter(id, &client.keys().public_key().to_hex())
     } else if let Some(run) = run_id {
         let uuid = parse_uuid(run)?;
         let me = client.keys().public_key().to_hex();
-        let mut filter = serde_json::json!({
+        let filter = serde_json::json!({
             "kinds": [KIND_BRIEF_REPORT],
             "#d": [uuid.to_string()],
             "#p": [me],
             "limit": 5,
         });
-        if let Some(reporter) = expected_brief_reporter(client).await? {
-            filter["authors"] = serde_json::json!([reporter]);
-        }
         filter
     } else {
         return Err(CliError::Usage("briefs get requires --id or --run".into()));
@@ -143,13 +177,15 @@ pub async fn cmd_get(
         println!("null");
         return Ok(());
     };
-    if let Some(reporter) = expected_brief_reporter(client).await? {
-        if event.pubkey.to_hex() != reporter {
-            println!("null");
-            return Ok(());
+    let report = parse_report(&event)?;
+    if report["v"] != 2 {
+        if let Some(reporter) = expected_brief_reporter(client).await? {
+            if event.pubkey.to_hex() != reporter {
+                println!("null");
+                return Ok(());
+            }
         }
     }
-    let report = parse_brief_report(&event).map_err(sdk_err)?;
     let output = serde_json::json!({
         "id": event.id.to_hex(),
         "pubkey": event.pubkey.to_hex(),
@@ -268,6 +304,7 @@ pub async fn cmd_config_set(
         minute: 0,
         timezone: "UTC".into(),
         auto_include: true,
+        read_delegation: false,
         channels: Vec::new(),
         dms: Vec::new(),
         exclude: Vec::new(),
@@ -366,6 +403,72 @@ pub async fn cmd_watermark_set(
 pub async fn dispatch(cmd: crate::BriefsCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::BriefsCmd;
     match cmd {
+        BriefsCmd::Run(cmd) => crate::commands::summary_run::dispatch(cmd, client).await,
+        BriefsCmd::Read {
+            owner,
+            summary,
+            run,
+            channel,
+            since,
+            until,
+            before_id,
+            limit,
+        } => {
+            validate_hex64(&owner)?;
+            validate_uuid(&channel)?;
+            if let Some(id) = before_id.as_deref() {
+                validate_hex64(id)?;
+            }
+            if !(1..=200).contains(&limit) {
+                return Err(CliError::Usage("limit must be 1–200".into()));
+            }
+            let mut filter =
+                serde_json::json!({"summary_owner": owner, "#h": [channel], "limit": limit});
+            if let (Some(summary), Some(run)) = (&summary, &run) {
+                if !buzz_core::summary::valid_summary_id(summary) {
+                    return Err(CliError::Usage("Invalid Summary identity".into()));
+                }
+                validate_uuid(run)?;
+                filter["summary_id"] = summary.clone().into();
+                filter["summary_run"] = run.clone().into();
+            }
+            if let Some(value) = since {
+                filter["since"] = value.into();
+            }
+            if let Some(value) = until {
+                filter["until"] = value.into();
+            }
+            if let Some(value) = before_id {
+                filter["before_id"] = value.into();
+            }
+            let raw = client.query(&filter).await?;
+            let response: serde_json::Value =
+                serde_json::from_str(&raw).map_err(|e| CliError::Other(e.to_string()))?;
+            if response
+                .get("summary_read")
+                .and_then(serde_json::Value::as_u64)
+                != Some(if summary.is_some() { 2 } else { 1 })
+            {
+                return Err(CliError::Other(
+                    "This relay does not support read-only Summary delegation".into(),
+                ));
+            }
+            let events = response
+                .get("events")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| CliError::Other("Invalid Summary read response".into()))?;
+            println!(
+                "{}",
+                if summary.is_some() {
+                    serde_json::to_string(&response)
+                } else {
+                    serde_json::to_string(events)
+                }
+                .map_err(|e| CliError::Other(e.to_string()))?
+            );
+            Ok(())
+        }
+
         BriefsCmd::List { limit } => cmd_list(client, limit).await,
         BriefsCmd::Get { id, run } => cmd_get(client, id.as_deref(), run.as_deref()).await,
         BriefsCmd::Publish {
@@ -445,6 +548,41 @@ mod tests {
     const OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const REPORTER: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+    #[test]
+    fn migrated_definition_preserves_legacy_reporter_lookup() {
+        let body = serde_json::json!({"v":2,"summary_id":"default","name":"Summary",
+            "reporter_pubkey":REPORTER,"audience":{"mode":"only_me"},"read_delegation":true,
+            "channels":[],"dms":[],"schedule":null,"timezone":"UTC"});
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(30623), body.to_string())
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        assert_eq!(config_reporter(&event).as_deref(), Some(REPORTER));
+    }
+
+    #[test]
+    fn report_reader_accepts_legacy_and_named_reports() {
+        let keys = nostr::Keys::generate();
+        let run = Uuid::new_v4();
+        for body in [
+            serde_json::json!({"v":1,"run_id":run,"title":"Legacy","markdown":"Old report",
+                "status":{},"period":{"since":1,"until":2},"sources":{"channels":[],"dms":[]}}),
+            serde_json::json!({"v":2,"owner_pubkey":OWNER,"summary_id":"default","run_id":run,
+                "config_event_id":"c".repeat(64),"title":"Named","markdown":"New report", "status":{},
+                "sources":[],"since":1,"until":2,"watermarks":[]}),
+        ] {
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(40030), body.to_string())
+                .sign_with_keys(&keys)
+                .unwrap();
+            let parsed = parse_report(&event).unwrap();
+            assert_eq!(parsed["run_id"], run.to_string());
+            assert_eq!(parsed["markdown"], body["markdown"]);
+            let wrong_kind = nostr::EventBuilder::new(nostr::Kind::Custom(1), body.to_string())
+                .sign_with_keys(&keys)
+                .unwrap();
+            assert!(parse_report(&wrong_kind).is_err());
+        }
+    }
+
     fn p_values(filter: &serde_json::Value) -> Vec<&str> {
         filter["#p"]
             .as_array()
@@ -452,6 +590,40 @@ mod tests {
             .iter()
             .map(|value| value.as_str().expect("#p values are strings"))
             .collect()
+    }
+
+    #[test]
+    fn report_id_read_filter_pins_authenticated_reader() {
+        let id = "c".repeat(64);
+        for reader in [OWNER, REPORTER] {
+            let filter = report_id_filter(&id.to_uppercase(), reader);
+            assert_eq!(filter["ids"], serde_json::json!([id]));
+            assert_eq!(filter["kinds"], serde_json::json!([KIND_BRIEF_REPORT]));
+            assert_eq!(p_values(&filter), vec![reader]);
+            assert_eq!(filter["limit"], 1);
+        }
+    }
+
+    #[test]
+    fn signed_watermark_matches_reporter_read_filter() {
+        let keys = nostr::Keys::generate();
+        let reporter = keys.public_key().to_hex();
+        let client = BuzzClient::new("https://test.relay".into(), keys, None, None).unwrap();
+        let watermark = BriefWatermark {
+            v: 1,
+            channel_id: "53f97470-aab9-43f7-87c0-8506c7208d73".into(),
+            last_event_id: "c".repeat(64),
+            last_created_at: 10,
+        };
+        let event = client
+            .sign_event(build_brief_watermark(&reporter, Some(OWNER), &watermark).unwrap())
+            .unwrap();
+        event.verify().unwrap();
+        let filter = watermarks_list_filter(&reporter);
+        for reader in p_values(&filter) {
+            assert!(event.tags.iter().any(|tag| tag.as_slice() == ["p", reader]));
+        }
+        assert_eq!(parse_brief_watermark(&event).unwrap(), watermark);
     }
 
     #[test]

@@ -80,6 +80,10 @@ enum GlobalConfigWrite {
     Delegation {
         subjects: Option<crate::managed_agents::global_config::AgentManagementDelegationSubjects>,
         audit_channel_id: Option<String>,
+        edit_scopes: std::collections::BTreeMap<
+            String,
+            crate::managed_agents::global_config::delegation_scope::AgentEditScope,
+        >,
     },
 }
 
@@ -162,17 +166,25 @@ async fn write_global_agent_config(
                 GlobalConfigWrite::Delegation {
                     subjects,
                     audit_channel_id,
+                    edit_scopes,
                 } => {
                     let managed_pubkeys = load_managed_agents(&app_for_write)?
                         .into_iter()
                         .map(|record| record.pubkey.to_lowercase())
                         .collect::<Vec<_>>();
-                    apply_delegation_subjects(
+                    let config = apply_delegation_subjects(
                         old_global.clone(),
                         subjects,
                         audit_channel_id,
                         &managed_pubkeys,
                         &owner_keys,
+                    )?;
+                    apply_edit_scopes(
+                        config,
+                        edit_scopes,
+                        &managed_pubkeys,
+                        &owner_keys,
+                        &crate::relay::relay_ws_url_with_override(&state),
                     )?
                 }
             };
@@ -245,12 +257,17 @@ fn preserve_durable_grant(
 
 /// Persist a v2 grant (or revoke) against the latest durable config.
 pub async fn write_agent_management_delegation(
+    edit_scopes: std::collections::BTreeMap<
+        String,
+        crate::managed_agents::global_config::delegation_scope::AgentEditScope,
+    >,
     subjects: Option<crate::managed_agents::global_config::AgentManagementDelegationSubjects>,
     audit_channel_id: Option<String>,
     app: AppHandle,
 ) -> Result<GlobalAgentConfigSaveResult, String> {
     write_global_agent_config(
         GlobalConfigWrite::Delegation {
+            edit_scopes,
             subjects,
             audit_channel_id,
         },
@@ -356,10 +373,82 @@ fn apply_delegation_subjects(
             }),
             signed_event: None,
         };
+        if let Some(AgentManagementDelegationGrant {
+            payload: AgentManagementDelegationPayload::V4(old),
+            ..
+        }) = existing
+        {
+            let AgentManagementDelegationPayload::V1(next) = grant.payload else {
+                return Err("Expected a singular delegation grant".into());
+            };
+            let mut scoped = old.clone();
+            scoped.grant = next;
+            grant.payload = AgentManagementDelegationPayload::V4(scoped);
+        }
         prepare_grant_signature(&mut grant, existing, owner_keys)?;
         grants.insert(grantee, grant);
     }
     config.agent_management_delegations = grants;
+    Ok(config)
+}
+
+fn apply_edit_scopes(
+    mut config: GlobalAgentConfig,
+    scopes: std::collections::BTreeMap<
+        String,
+        crate::managed_agents::global_config::delegation_scope::AgentEditScope,
+    >,
+    managed_pubkeys: &[String],
+    owner: &nostr::Keys,
+    relay: &str,
+) -> Result<GlobalAgentConfig, String> {
+    use crate::managed_agents::global_config::{
+        delegation_scope::ScopedDelegationPayload, AgentManagementDelegationPayload as Payload,
+    };
+    for (grantee, mut scope) in scopes {
+        scope.canonicalize()?;
+        if !managed_pubkeys.contains(&grantee)
+            || scope
+                .target_pubkeys
+                .iter()
+                .any(|key| !managed_pubkeys.contains(key))
+        {
+            return Err("Delegation recipients and targets must be current managed agents".into());
+        }
+        if config
+            .agent_management_delegation
+            .as_ref()
+            .is_some_and(|g| g.singular_grantee_pubkey() == Some(grantee.as_str()))
+        {
+            let grant = config
+                .agent_management_delegation
+                .take()
+                .ok_or("Legacy grant changed while applying scope")?;
+            config
+                .agent_management_delegations
+                .insert(grantee.clone(), grant);
+        }
+        let grant = config
+            .agent_management_delegations
+            .get_mut(&grantee)
+            .ok_or("Select a permission recipient before choosing targets")?;
+        let old = grant.clone();
+        let singular = match &grant.payload {
+            Payload::V1(p) => p.clone(),
+            Payload::V4(p) => p.grant.clone(),
+            Payload::V2(_) => return Err("Scoped grants must have one recipient".into()),
+        };
+        if !singular.capabilities.agent_config {
+            return Err("Recipient does not have the agent edit permission".into());
+        }
+        grant.payload = Payload::V4(ScopedDelegationPayload {
+            version: 4,
+            grant: singular,
+            relay_scope: crate::managed_agents::global_config::canonical_relay_scope(relay),
+            agent_edit: scope,
+        });
+        prepare_grant_signature(grant, Some(&old), owner)?;
+    }
     Ok(config)
 }
 
@@ -830,8 +919,8 @@ mod tests {
                     assert!(payload.capabilities.agent_creation);
                     assert!(payload.capabilities.env_vars);
                 }
-                AgentManagementDelegationPayload::V2(_) => {
-                    panic!("keyed grants must be singular")
+                _ => {
+                    panic!("expected legacy singular grants")
                 }
             }
         }
@@ -993,3 +1082,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "global_agent_config_scoped_tests.rs"]
+mod scoped_tests;

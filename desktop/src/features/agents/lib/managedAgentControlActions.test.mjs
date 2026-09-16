@@ -2,9 +2,51 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getManagedAgentPrimaryActionLabel,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
+
+test("external execution opens its bound task without starting or stopping a local process", async (t) => {
+  const prior = globalThis.window;
+  const calls = [];
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke: async (command, args) => {
+        calls.push([command, args]);
+      },
+    },
+  };
+  t.after(() => {
+    globalThis.window = prior;
+  });
+  const external = agent({
+    externalExecution: {
+      type: "codex_desktop",
+      threadId: "01a08c97-4b41-7000-bbd6-b58aa4b34eef",
+    },
+  });
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(external),
+    "Open Codex Desktop",
+  );
+  const startManagedAgent = async () => {
+    throw new Error("must not start");
+  };
+  const stopManagedAgent = async () => {
+    throw new Error("must not stop");
+  };
+  await startManagedAgentWithRules({ agent: external, startManagedAgent });
+  await respawnManagedAgentWithRules({
+    agent: external,
+    startManagedAgent,
+    stopManagedAgent,
+  });
+  assert.deepEqual(
+    calls,
+    Array(2).fill(["open_external_agent_task", { pubkey: external.pubkey }]),
+  );
+});
 
 function agent(overrides = {}) {
   return {

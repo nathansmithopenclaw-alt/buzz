@@ -212,10 +212,12 @@ export async function getWorkflow(workflowId: string): Promise<Workflow> {
 export async function createWorkflow(
   channelId: string,
   yamlDefinition: string,
+  scope?: { expectedRelayUrl: string; expectedSignerPubkey: string },
 ): Promise<WorkflowSaveResult> {
   const raw = await invokeTauri<RawWorkflowSaveResponse>("create_workflow", {
     channelId,
     yamlDefinition,
+    ...scope,
   });
   return fromRawWorkflowSave(raw);
 }
@@ -224,17 +226,22 @@ export async function updateWorkflow(
   workflowId: string,
   yamlDefinition: string,
   expectedRevision: string,
+  scope?: { expectedRelayUrl: string; expectedSignerPubkey: string },
 ): Promise<WorkflowSaveResult> {
   const raw = await invokeTauri<RawWorkflowSaveResponse>("update_workflow", {
     workflowId,
     yamlDefinition,
     expectedRevision,
+    ...scope,
   });
   return fromRawWorkflowSave(raw);
 }
 
-export async function deleteWorkflow(workflowId: string): Promise<void> {
-  await invokeTauri("delete_workflow", { workflowId });
+export async function deleteWorkflow(
+  workflowId: string,
+  scope?: { expectedRelayUrl: string; expectedSignerPubkey: string },
+): Promise<void> {
+  await invokeTauri("delete_workflow", { workflowId, ...scope });
 }
 
 export async function getWorkflowRuns(

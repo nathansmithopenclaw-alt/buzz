@@ -1,3 +1,4 @@
+import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import * as React from "react";
 
 import {
@@ -49,6 +50,7 @@ export interface RequiredCredentialState {
 export function useRequiredCredentialState(params: {
   open: boolean;
   prospectiveRuntimeId: string;
+  runtime?: AcpRuntimeCatalogEntry;
   provider: string;
   /** Global provider default; used as fallback when per-agent provider is empty. */
   globalProvider?: string;
@@ -73,6 +75,7 @@ export function useRequiredCredentialState(params: {
 
   const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
     prospectiveRuntimeId,
+    params.runtime,
   )
     ? provider.trim() || globalProvider.trim()
     : "";

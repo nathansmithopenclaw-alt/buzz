@@ -116,6 +116,7 @@ export type RawManagedAgent =
       persona_id: string | null;
       // Optional: pre-feature fixtures may omit it. The record's harness/runtime id.
       runtime?: string | null;
+      external_execution?: { type: "codex_desktop"; thread_id: string } | null;
       team_id?: string | null;
       relay_url: string;
       acp_command: string;
@@ -184,6 +185,7 @@ export type RawAcpRuntimeCatalogEntry = {
   mcp_command: string | null;
   model_env_var?: string | null;
   provider_env_var?: string | null;
+  provider_options?: [string, string][] | null;
   thinking_env_var?: string | null;
   effort_model_qualifier?: boolean;
   max_tokens_env_var?: string | null;
@@ -619,6 +621,12 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
 
 export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   return {
+    externalExecution: agent.external_execution
+      ? {
+          type: agent.external_execution.type,
+          threadId: agent.external_execution.thread_id,
+        }
+      : null,
     pubkey: agent.pubkey,
     name: agent.name,
     personaId: agent.persona_id,
@@ -684,6 +692,7 @@ export function fromRawAcpRuntimeCatalogEntry(
     mcpCommand: entry.mcp_command,
     modelEnvVar: entry.model_env_var ?? null,
     providerEnvVar: entry.provider_env_var ?? null,
+    providerOptions: entry.provider_options ?? null,
     thinkingEnvVar: entry.thinking_env_var ?? null,
     effortModelQualifier: entry.effort_model_qualifier ?? false,
     maxTokensEnvVar: entry.max_tokens_env_var ?? null,

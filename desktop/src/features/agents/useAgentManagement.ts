@@ -1,3 +1,5 @@
+import { publishAgentManagementDraftResult } from "@/shared/api/tauriManagedAgents";
+import { invokeTauri } from "@/shared/api/tauri";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -519,7 +521,27 @@ export function useAgentManagement() {
   }
 
   async function submitUpdate(input: CreatePersonaInput | UpdatePersonaInput) {
-    return performUpdate(input);
+    const requestId = pendingRequestId.current;
+    const sourcePubkey = sourceAgentPubkey.current;
+    if (
+      request?.action !== "update" ||
+      !("id" in input) ||
+      !requestId ||
+      !sourcePubkey
+    )
+      return false;
+    try {
+      await beginOwnerReviewedAgentManagementRequest(requestId);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
+    const context = updateCompletionContext(requestId, sourcePubkey, request);
+    return performUpdate(
+      input,
+      () => completeDelegatedAgentUpdateSuccess(context),
+      (cause) => completeDelegatedAgentUpdateFailure(context, cause),
+    );
   }
 
   function dismiss(expectedRequestId: string) {
@@ -781,19 +803,33 @@ export function useAgentManagement() {
         }
         return;
       }
-      const submitted = await performUpdate(
-        input,
-        () =>
-          completeDelegatedAgentUpdateSuccess(
-            updateCompletionContext(requestId, sourcePubkey, request),
-          ),
-        (cause) =>
-          completeDelegatedAgentUpdateFailure(
-            updateCompletionContext(requestId, sourcePubkey, request),
-            cause,
-          ),
-      );
-      if (!submitted && pendingRequestId.current === requestId) {
+      try {
+        assertAgentCanActFromOrigin(request.request.channelId);
+        const applied = await invokeTauri<{
+          status: "applied" | "needs_review";
+          reason?: string;
+        }>("apply_scoped_agent_update", { requestId });
+        if (applied.status === "needs_review") {
+          delegatedApplyIdsRef.current.delete(requestId);
+          setRequest({ ...request, intent: "draft" });
+          setError(applied.reason ?? "This edit now needs your review.");
+          await publishAgentManagementDraftResult({ requestId, sourcePubkey });
+          return;
+        }
+        await completeDelegatedAgentUpdateSuccess(
+          updateCompletionContext(requestId, sourcePubkey, request),
+        );
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: personasQueryKey }),
+          queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+        ]);
+        dismiss(requestId);
+      } catch (cause) {
+        await completeDelegatedAgentUpdateFailure(
+          updateCompletionContext(requestId, sourcePubkey, request),
+          cause,
+        ).catch(() => undefined);
+        setError(cause instanceof Error ? cause.message : String(cause));
         setFailedAutoApprovalRequestId(requestId);
       }
     },

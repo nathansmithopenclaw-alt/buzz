@@ -16,6 +16,7 @@ mod runtime_metadata;
 #[macro_use]
 mod windows_install;
 mod catalog;
+mod dsh;
 pub(crate) use catalog::KNOWN_ACP_RUNTIMES;
 pub use login_shell::{find_nvm_default_bin, login_shell_path};
 pub(crate) use login_shell::{find_via_login_shell, refresh_login_shell_path};
@@ -140,18 +141,24 @@ pub(crate) fn normalize_command_identity(command: &str) -> String {
 pub(crate) fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntime> {
     let normalized = normalize_command_identity(command);
 
-    KNOWN_ACP_RUNTIMES.iter().find(|runtime| {
-        normalized == runtime.id
-            || runtime
-                .commands
-                .iter()
-                .any(|command| normalized == normalize_command_identity(command))
-            || runtime.aliases.iter().any(|alias| normalized == *alias)
-    })
+    KNOWN_ACP_RUNTIMES
+        .iter()
+        .chain([&dsh::DSH_RUNTIME, &dsh::PRIME_RUNTIME])
+        .find(|runtime| {
+            normalized == runtime.id
+                || runtime
+                    .commands
+                    .iter()
+                    .any(|command| normalized == normalize_command_identity(command))
+                || runtime.aliases.iter().any(|alias| normalized == *alias)
+        })
 }
 
 pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRuntime> {
-    KNOWN_ACP_RUNTIMES.iter().find(|p| p.id == id)
+    KNOWN_ACP_RUNTIMES
+        .iter()
+        .chain([&dsh::DSH_RUNTIME, &dsh::PRIME_RUNTIME])
+        .find(|p| p.id == id)
 }
 
 /// The agent command a freshly-created agent defaults to when the create
@@ -330,6 +337,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
             "--always-approve".into(),
             "stdio".into(),
         ]),
+        "dsh" => Some(vec!["--profile".into(), "buzz-acp".into()]),
         "prime-agent" | "primeagent" => Some(vec!["--mode".to_string(), "acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
@@ -1081,6 +1089,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
             mcp_command: runtime.mcp_command.map(str::to_string),
             model_env_var: runtime.model_env_var.map(str::to_string),
             provider_env_var: runtime.provider_env_var.map(str::to_string),
+            provider_options: runtime.provider_options(),
             thinking_env_var: runtime.thinking_env_var.map(str::to_string),
             effort_model_qualifier: runtime.effort_model_qualifier,
             effort_canonical_values: runtime
@@ -1224,6 +1233,7 @@ pub fn discover_acp_runtimes_from(
                 mcp_command: None,
                 model_env_var: None,
                 provider_env_var: None,
+                provider_options: None,
                 thinking_env_var: None,
                 effort_model_qualifier: false,
                 effort_canonical_values: None,
@@ -1294,7 +1304,7 @@ pub(crate) mod pre_publish_test_hook {
 
 pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
     let runtime = known_acp_runtime(command)?;
-    Some(runtime.avatar_url.to_string())
+    (!runtime.avatar_url.is_empty()).then(|| runtime.avatar_url.to_string())
 }
 
 #[cfg(test)]

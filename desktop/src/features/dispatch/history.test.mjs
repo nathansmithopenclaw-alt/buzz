@@ -92,6 +92,26 @@ test("a saturated timestamp boundary is a typed cursor gap", async () => {
   );
 });
 
+test("a dense timestamp uses the relay composite cursor and preserves every event", async () => {
+  const dense = Array.from({ length: 1203 }, (_, index) =>
+    event(index + 1, 200),
+  );
+  const seen = [];
+  const history = client({
+    fetchEvents: async (filter) => {
+      seen.push(filter);
+      if (filter.until !== undefined && filter.until < 200) return [];
+      return dense
+        .filter((value) => !filter.before_id || value.id > filter.before_id)
+        .slice(0, filter.limit);
+    },
+  });
+  const result = await history.fetchExhaustively({ kinds: [40020] });
+  assert.equal(result.length, dense.length);
+  assert.equal(new Set(result.map((event) => event.id)).size, dense.length);
+  assert.ok(seen.some((filter) => filter.before_id));
+});
+
 test("cursor pagination stops before constructing an inverted since/until range", async () => {
   const firstPage = Array.from({ length: 500 }, (_, index) =>
     event(index + 1, index === 499 ? 100 : 200),
@@ -279,4 +299,29 @@ test("rate-limited page retry is bounded", async () => {
   );
   assert.equal(attempts, 3);
   assert.deepEqual(retryStates, [true, false]);
+});
+
+test("cancelled history does not issue a queued request after its scope closes", async () => {
+  const controller = new AbortController();
+  let release;
+  const waiting = new Promise((resolve) => {
+    release = resolve;
+  });
+  let requests = 0;
+  const history = createDispatchHistoryClient({
+    signal: controller.signal,
+    fetchEvents: async () => {
+      requests++;
+      return [];
+    },
+    fetchEventsMulti: async () => [],
+    waitForRateLimit: async () => waiting,
+    isRateLimited: () => false,
+    activateRateLimit: () => {},
+  });
+  const pending = history.fetch({ kinds: [40020] });
+  controller.abort();
+  release();
+  await assert.rejects(pending, /abort/i);
+  assert.equal(requests, 0);
 });

@@ -874,6 +874,7 @@ pub async fn start_managed_agent(
         let records = load_managed_agents(&app)?;
         if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
             if let Some(key) = crate::managed_agents::workspace_pair_key(&app, record) {
+                crate::managed_agents::external_execution::require_local(&app, &key)?;
                 crate::managed_agents::account_switch::set_running(&app, &key, true)?;
             }
         }

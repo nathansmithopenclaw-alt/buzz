@@ -95,6 +95,9 @@ pub struct BriefConfig {
     pub timezone: String,
     /// Newly joined member conversations are included until opted out.
     pub auto_include: bool,
+    /// Explicit consent for snapshot-only transcript reads by the selected reporter.
+    #[serde(default)]
+    pub read_delegation: bool,
     /// Included live channel UUIDs.
     #[serde(default)]
     pub channels: Vec<String>,
@@ -326,7 +329,12 @@ pub fn build_brief_config(
     }
     let content = serde_json::to_string(config)
         .map_err(|e| SdkError::InvalidInput(format!("serialize brief config: {e}")))?;
-    Ok(EventBuilder::new(Kind::Custom(KIND_BRIEF_CONFIG as u16), content).tags(tags))
+    // NIP-BR private reads require the author's own recipient tag after signing.
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_BRIEF_CONFIG as u16), content)
+            .tags(tags)
+            .allow_self_tagging(),
+    )
 }
 
 /// Build a reporter watermark event (kind 30624).
@@ -350,7 +358,12 @@ pub fn build_brief_watermark(
     }
     let content = serde_json::to_string(watermark)
         .map_err(|e| SdkError::InvalidInput(format!("serialize brief watermark: {e}")))?;
-    Ok(EventBuilder::new(Kind::Custom(KIND_BRIEF_WATERMARK as u16), content).tags(tags))
+    // NIP-BR private reads require the author's own recipient tag after signing.
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_BRIEF_WATERMARK as u16), content)
+            .tags(tags)
+            .allow_self_tagging(),
+    )
 }
 
 /// Build an immutable briefing report (kind 40030).
@@ -376,7 +389,46 @@ pub fn build_brief_report(
     }
     let content = serde_json::to_string(report)
         .map_err(|e| SdkError::InvalidInput(format!("serialize brief report: {e}")))?;
-    Ok(EventBuilder::new(Kind::Custom(KIND_BRIEF_REPORT as u16), content).tags(tags))
+    // NIP-BR private reads require the author's own recipient tag after signing.
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_BRIEF_REPORT as u16), content)
+            .tags(tags)
+            .allow_self_tagging(),
+    )
+}
+
+/// Build the dedicated named-Summary envelope with the relay-frozen audience.
+/// Callers obtain the audience and configuration revision from a run receipt.
+pub fn build_summary_report(
+    report: &buzz_core::summary::SummaryReport,
+    reporter: &str,
+    audience: &std::collections::BTreeSet<String>,
+) -> Result<EventBuilder, SdkError> {
+    report.validate().map_err(SdkError::InvalidInput)?;
+    if !audience.contains(&report.owner_pubkey) {
+        return Err(SdkError::InvalidInput(
+            "Summary owner must be a recipient".into(),
+        ));
+    }
+    let mut recipients = audience.clone();
+    recipients.insert(check_pubkey_hex(reporter, "reporter")?);
+    let mut tags = vec![
+        tag(&["d", &report.run_id.to_string()])?,
+        tag(&["t", BRIEF_DISCOVERY_TAG])?,
+        tag(&["owner", &report.owner_pubkey])?,
+        tag(&["summary", &report.summary_id])?,
+        tag(&["config", &report.config_event_id])?,
+    ];
+    for recipient in recipients {
+        tags.push(tag(&["p", &check_pubkey_hex(&recipient, "recipient")?])?);
+    }
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_BRIEF_REPORT as u16),
+        serde_json::to_string(report).map_err(|e| SdkError::InvalidInput(e.to_string()))?,
+    )
+    .tags(tags)
+    .allow_self_tagging()
+    .custom_created_at(nostr::Timestamp::from(report.until as u64)))
 }
 
 #[cfg(test)]
@@ -401,10 +453,97 @@ mod tests {
             minute: 0,
             timezone: "America/New_York".into(),
             auto_include: true,
+            read_delegation: false,
             channels: vec![CHANNEL.to_string()],
             dms: vec![],
             exclude: vec![],
         }
+    }
+
+    #[test]
+    fn signed_briefs_preserve_author_recipient_for_private_reads() {
+        let owner = Keys::generate();
+        let reporter = Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let reporter_hex = reporter.public_key().to_hex();
+        let mut config = sample_config();
+        config.reporter_pubkey = Some(reporter_hex.clone());
+        let watermark = BriefWatermark {
+            v: 1,
+            channel_id: CHANNEL.into(),
+            last_event_id: EVENT.into(),
+            last_created_at: 10,
+        };
+        let report = BriefReport {
+            v: 1,
+            run_id: "806e3534-99d8-4664-90a4-303ab1f28aea".into(),
+            title: "Summary".into(),
+            markdown: "Read one conversation.".into(),
+            status: serde_json::json!({}),
+            period: BriefPeriod {
+                since: 0,
+                until: 10,
+            },
+            sources: BriefSources::default(),
+        };
+        for (builder, signer, recipients) in [
+            (
+                build_brief_config(&owner_hex, &config).unwrap(),
+                &owner,
+                vec![owner_hex.as_str(), reporter_hex.as_str()],
+            ),
+            (
+                build_brief_watermark(&reporter_hex, Some(&owner_hex), &watermark).unwrap(),
+                &reporter,
+                vec![reporter_hex.as_str(), owner_hex.as_str()],
+            ),
+            (
+                build_brief_watermark(&reporter_hex, None, &watermark).unwrap(),
+                &reporter,
+                vec![reporter_hex.as_str()],
+            ),
+            (
+                build_brief_report(&owner_hex, Some(&reporter_hex), &report).unwrap(),
+                &reporter,
+                vec![owner_hex.as_str(), reporter_hex.as_str()],
+            ),
+            (
+                build_brief_report(&owner_hex, Some(&owner_hex), &report).unwrap(),
+                &owner,
+                vec![owner_hex.as_str()],
+            ),
+        ] {
+            let event = builder.sign_with_keys(signer).unwrap();
+            event.verify().unwrap();
+            let actual: Vec<&str> = event
+                .tags
+                .iter()
+                .filter_map(|tag| {
+                    let parts = tag.as_slice();
+                    (parts.first().map(String::as_str) == Some("p")).then(|| parts[1].as_str())
+                })
+                .collect();
+            assert_eq!(
+                actual, recipients,
+                "signed kind {} lost a private-read recipient",
+                event.kind
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_config_does_not_grant_transcript_reads() {
+        let mut json = serde_json::to_value(sample_config()).unwrap();
+        json.as_object_mut().unwrap().remove("read_delegation");
+        assert!(
+            !serde_json::from_value::<BriefConfig>(json)
+                .unwrap()
+                .read_delegation
+        );
+        let mut config = sample_config();
+        config.read_delegation = true;
+        let event = sign(build_brief_config(OWNER, &config).unwrap());
+        assert!(parse_brief_config(&event).unwrap().read_delegation);
     }
 
     #[test]

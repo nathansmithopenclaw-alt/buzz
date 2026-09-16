@@ -37,6 +37,7 @@ export function enqueueAgentWake(
   queue: QueuedAgentWake[],
   agent: ManagedAgent,
 ): void {
+  if (agent.externalExecution) return;
   queue.push({ agent, replayFloorUnix: Math.floor(Date.now() / 1000) });
 }
 
@@ -50,6 +51,7 @@ export function dedupeQueuedAgentWakes(
 ): QueuedAgentWake[] {
   const seen = new Set<string>();
   return wakes.filter((wake) => {
+    if (wake.agent.externalExecution) return false;
     const pubkey = normalizePubkey(wake.agent.pubkey);
     if (seen.has(pubkey)) return false;
     seen.add(pubkey);

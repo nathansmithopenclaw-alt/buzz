@@ -351,3 +351,29 @@ test("HTTP failure does not clear an existing WS backoff", async () => {
   await deliver(client, ["OK", event.id, true, ""]);
   assert.equal(await published, event);
 });
+
+test("read-only Dispatch commands return the matching relay response without mutating signed bytes", async () => {
+  reset();
+  const client = connectedClient();
+  const event = {
+    id: "d".repeat(64),
+    kind: 40028,
+    pubkey: "a".repeat(64),
+    sig: "b".repeat(128),
+    tags: [["h", "workspace"]],
+    content: '{"request":{"operation":"snapshot"}}',
+    created_at: 1,
+  };
+  const original = structuredClone(event);
+  const pending = client.readDispatchCommand(event, "timed out", "read failed");
+  await flushUntil(() => client.pendingEvents.has(event.id));
+  client.handleOk("other-command", true, 'response:{"wrong":true}');
+  assert.equal(client.pendingEvents.has(event.id), true);
+  client.handleOk(event.id, true, 'response:{"issues":[]}');
+  assert.equal(await pending, 'response:{"issues":[]}');
+  assert.deepEqual(event, original);
+  await assert.rejects(
+    client.readDispatchCommand({ ...event, kind: 40021 }, "timeout", "failed"),
+    /read-only/,
+  );
+});

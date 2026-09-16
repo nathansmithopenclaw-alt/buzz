@@ -535,6 +535,8 @@ pub struct ManagedAgentRecord {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentSummary {
+    /// Host-local execution ownership, scoped to the active community.
+    pub external_execution: Option<super::external_execution::ExternalExecution>,
     /// Canonical next-session effort, independent of the live session.
     pub effort_level: Option<String>,
     pub pubkey: String,
@@ -702,6 +704,7 @@ pub struct AcpRuntimeCatalogEntry {
     pub model_env_var: Option<String>,
     /// Environment variable used to apply the selected LLM provider, when supported.
     pub provider_env_var: Option<String>,
+    pub provider_options: Option<Vec<(String, String)>>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
     /// Whether effort is encoded as a model-id qualifier rather than an env var.

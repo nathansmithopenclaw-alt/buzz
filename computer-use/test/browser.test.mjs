@@ -204,7 +204,21 @@ test("standard MCP stdio discovers tools, returns real image blocks, and cleans 
   await client.connect(transport);
   const listed = await client.listTools();
   assert.ok(listed.tools.some((tool) => tool.name === "browser_observe"));
-  const opened = await client.callTool({ name: "browser_open", arguments: {} });
+  const actionTool = listed.tools.find(
+    (tool) => tool.name === "browser_action",
+  );
+  assert.match(
+    actionTool.inputSchema.properties.generation.description,
+    /Never increment/,
+  );
+  assert.match(
+    actionTool.inputSchema.properties.observation.description,
+    /Required whenever ref/,
+  );
+  const opened = await client.callTool({
+    name: "browser_open",
+    arguments: { url: await fixture(t) },
+  });
   const session = JSON.parse(opened.content[0].text).id;
   const observed = await client.callTool({
     name: "browser_observe",
@@ -214,6 +228,70 @@ test("standard MCP stdio discovers tools, returns real image blocks, and cleans 
   assert.equal(observed.content[1].type, "image");
   assert.equal(observed.content[1].mimeType, "image/jpeg");
   assert.equal(Buffer.from(observed.content[1].data, "base64")[0], 0xff);
+  const snapshot = JSON.parse(observed.content[0].text);
+  const ref = snapshot.elements.find((element) => element.tag === "input").ref;
+  const fill = {
+    session,
+    kind: "fill",
+    ref,
+    text: "recovered",
+    generation: snapshot.generation,
+    observation: snapshot.observation,
+  };
+  const wrongGeneration = await client.callTool({
+    name: "browser_action",
+    arguments: { ...fill, generation: snapshot.generation + 1 },
+  });
+  assert.equal(wrongGeneration.isError, true);
+  assert.match(
+    wrongGeneration.content[0].text,
+    /no input sent.*copy its generation exactly.*Never increment/,
+  );
+  const missingToken = { ...fill };
+  delete missingToken.observation;
+  const missing = await client.callTool({
+    name: "browser_action",
+    arguments: missingToken,
+  });
+  assert.equal(missing.isError, true);
+  assert.match(
+    missing.content[0].text,
+    /no input sent.*include its observation token/,
+  );
+  const freshResult = await client.callTool({
+    name: "browser_observe",
+    arguments: { session },
+  });
+  const fresh = JSON.parse(freshResult.content[0].text);
+  assert.equal(
+    fresh.generation,
+    snapshot.generation,
+    "observing never advances generation",
+  );
+  assert.equal(
+    fresh.elements.find((element) => element.ref === ref).value,
+    "",
+    "refused inputs must not change the page",
+  );
+  const recovered = await client.callTool({
+    name: "browser_action",
+    arguments: {
+      ...fill,
+      generation: fresh.generation,
+      observation: fresh.observation,
+    },
+  });
+  assert.notEqual(recovered.isError, true);
+  const verified = await client.callTool({
+    name: "browser_observe",
+    arguments: { session },
+  });
+  assert.equal(
+    JSON.parse(verified.content[0].text).elements.find(
+      (element) => element.ref === ref,
+    ).value,
+    "recovered",
+  );
   const entries = (await readdir(registry)).filter((name) =>
     name.endsWith(".json"),
   );

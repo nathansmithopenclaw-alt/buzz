@@ -22,8 +22,14 @@ pub mod emit;
 pub mod error;
 pub mod projection;
 pub mod relay_http;
+pub mod remote_control;
+pub mod remote_plan;
+pub mod rollout_budget;
 pub mod rules;
 pub mod run;
 pub mod watchdog;
 
 pub use error::DispatchError;
+
+#[cfg(test)]
+mod remote_tests;

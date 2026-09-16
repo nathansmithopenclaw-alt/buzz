@@ -66,6 +66,13 @@ pub async fn tick(
     authorization: &buzz_sdk::tracker::TrackerAuthorization,
     store: &mut ProjectionStore,
 ) -> Result<(), DispatchError> {
+    if config.remote_controls {
+        let result = crate::remote_control::tick(config, relay, emitter, store).await;
+        if let Err(error) = &result {
+            let _ = emitter.emit_heartbeat(store, Some(error.to_string())).await;
+        }
+        return result;
+    }
     // M2: replay anything that reached the outbox but not the fired ledger
     // before a crash. Duplicate-tolerant and idempotent; a permanently
     // rejected entry is retried a bounded number of times, then quarantined
@@ -318,15 +325,14 @@ const REFRESH_MAX_PAGES: usize = 200;
 /// termination would be a latent gap trap if a future filter gained
 /// post-processing.
 ///
-/// Hitting [`REFRESH_MAX_PAGES`] is deliberately NOT an error: the events
-/// already fetched still advance the committed cursor, so the next tick
-/// resumes where this one stopped. A huge first-boot backfill converges over
-/// successive ticks instead of re-erroring at the same cap every tick.
-async fn query_paginated_events(
+/// An incomplete refresh is an error. Its newest event cannot advance the
+/// inclusive high-water cursor: doing so would permanently skip the older pages.
+pub(crate) async fn query_paginated_events(
     relay: &RelayHttp,
     mut filter: Value,
 ) -> Result<Vec<Event>, DispatchError> {
     let mut events = Vec::new();
+    let mut previous_cursor = None;
     for _ in 0..REFRESH_MAX_PAGES {
         filter["limit"] = json!(REFRESH_PAGE_SIZE);
         let page = query_page(relay, &filter).await?;
@@ -334,14 +340,19 @@ async fn query_paginated_events(
             return Ok(events);
         }
         advance_refresh_cursor(&mut filter, &page)?;
+        let cursor = (filter["until"].clone(), filter["before_id"].clone());
+        if previous_cursor.as_ref() == Some(&cursor) {
+            return Err(DispatchError::Relay(
+                "history pagination made no progress; cursor was not advanced".into(),
+            ));
+        }
+        previous_cursor = Some(cursor);
         events.extend(page);
     }
-    warn!(
-        pages = REFRESH_MAX_PAGES,
-        events = events.len(),
-        "refresh hit the page cap; resuming from the advanced cursor next tick"
-    );
-    Ok(events)
+    Err(DispatchError::Relay(
+        "history page budget exhausted; incomplete history cannot advance the refresh cursor"
+            .into(),
+    ))
 }
 
 /// One `POST /query` page; unparseable events are skipped with a warning.
@@ -351,7 +362,11 @@ async fn query_page(relay: &RelayHttp, filter: &Value) -> Result<Vec<Event>, Dis
     for value in values {
         match serde_json::from_value::<Event>(value) {
             Ok(event) => events.push(event),
-            Err(error) => warn!(%error, "skipping unparseable query event"),
+            Err(error) => {
+                return Err(DispatchError::Relay(format!(
+                    "incomplete history: a query event could not be decoded: {error}"
+                )))
+            }
         }
     }
     Ok(events)
@@ -400,6 +415,7 @@ mod tests {
     fn test_config() -> DispatcherConfig {
         let home = Uuid::new_v4();
         DispatcherConfig {
+            remote_controls: false,
             relay_url: Some("http://localhost:3000".to_string()),
             service_id: "triage-dispatcher".to_string(),
             stream_id: Uuid::new_v4(),

@@ -16,6 +16,8 @@ pub mod channel_members;
 pub mod community;
 /// Durable whole-community deletion lifecycle and PostgreSQL adapter.
 pub mod deletion;
+/// Atomic Dispatch event admission and role evidence.
+pub mod dispatch_admission;
 /// Direct message channel persistence.
 pub mod dm;
 /// Event storage and retrieval.
@@ -46,6 +48,11 @@ pub mod relay_operators;
 pub mod reminder;
 /// Replaceable-event persistence and coordinate locking.
 pub mod replaceable;
+/// Summary audience directory and durable run coordination.
+pub mod summary;
+pub mod summary_archive;
+pub mod summary_publish;
+pub mod summary_runs;
 /// Thread metadata persistence.
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.
@@ -54,3 +61,11 @@ pub mod usage;
 pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
+
+#[cfg(test)]
+#[path = "summary_tests.rs"]
+mod summary_postgres_tests;
+
+mod summary_migration;
+mod summary_reads;
+mod summary_schedule;

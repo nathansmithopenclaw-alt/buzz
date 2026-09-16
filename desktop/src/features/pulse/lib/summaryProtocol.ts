@@ -1,3 +1,6 @@
+import { openDm } from "@/shared/api/tauriChannels";
+import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   addChannelMembers,
@@ -7,7 +10,11 @@ import {
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { KIND_BRIEF_CONFIG, KIND_BRIEF_REPORT } from "@/shared/constants/kinds";
 
-import { syncSummarySchedule } from "./summarySchedule";
+import {
+  syncSummarySchedule,
+  type SummarySchedule,
+  summaryScheduleError,
+} from "./summarySchedule";
 import type {
   SummaryConversation,
   SummarySourceConfig,
@@ -19,6 +26,9 @@ export const BRIEF_CONFIG_D_TAG = "summary";
 
 export type BriefConfigPayload = {
   v: 1;
+  read_delegation?: boolean;
+  /** Absent on legacy daily setups; null means manual only. */
+  schedule?: SummarySchedule | null;
   reporter_pubkey: string | null;
   hour: number;
   minute: number;
@@ -52,6 +62,8 @@ function tagValue(event: RelayEvent, name: string): string | undefined {
 
 export function conversationsFromChannels(
   channels: Channel[],
+  currentPubkey?: string,
+  profiles?: UserProfileLookup,
 ): SummaryConversation[] {
   return channels
     .filter((channel) => channel.isMember)
@@ -59,7 +71,10 @@ export function conversationsFromChannels(
       id: channel.id,
       name:
         channel.channelType === "dm"
-          ? channel.name || "Direct message"
+          ? buildDirectMessageIntro({ channel, currentPubkey, profiles })
+              ?.displayName ||
+            channel.participants.join(", ") ||
+            "Direct message"
           : channel.name,
       kind: channel.channelType === "dm" ? "dm" : "channel",
       archived: Boolean(channel.archivedAt),
@@ -184,28 +199,36 @@ export async function publishBriefConfig(input: {
   reporterName: string;
   conversations: SummaryConversation[];
   sourceConfig: SummarySourceConfig;
+  schedule?: SummarySchedule | null;
+  previousConfigCreatedAt?: number;
   previousChannelIds?: string[];
   previousWorkflowId?: string | null;
 }): Promise<void> {
+  const scheduleError = summaryScheduleError(input.schedule ?? null);
+  if (scheduleError) throw new Error(scheduleError);
   const lists = listsFromChecked(input.conversations, input.sourceConfig);
-  if (input.reporterPubkey) {
-    await reconcileReporterMembership({
-      reporterPubkey: input.reporterPubkey,
-      previousChannels: input.previousChannelIds ?? [],
-      nextChannels: lists.channels,
-    });
-  }
+  if (!input.reporterPubkey) throw new Error("Choose a Summary agent.");
+  const host =
+    lists.channels.length + lists.dms.length > 0
+      ? await openDm({
+          pubkeys: [input.reporterPubkey],
+          expectedSignerPubkey: input.ownerPubkey,
+        })
+      : null;
   const workflowId = await syncSummarySchedule({
     ownerPubkey: input.ownerPubkey,
     previousWorkflowId: input.previousWorkflowId ?? null,
-    hostChannelId: lists.channels[0] ?? null,
+    hostChannelId: host?.id ?? null,
     hour: input.hour,
     minute: input.minute,
     timezone: input.timezone,
     reporterName: input.reporterName,
+    schedule: input.schedule,
   });
   const payload: BriefConfigPayload = {
     v: 1,
+    read_delegation: true,
+    ...(input.schedule !== undefined ? { schedule: input.schedule } : {}),
     reporter_pubkey: input.reporterPubkey,
     hour: input.hour,
     minute: input.minute,
@@ -236,7 +259,12 @@ export async function publishBriefConfig(input: {
   for (const id of lists.exclude) tags.push(["exclude", id]);
 
   const event = await signRelayEvent({
+    allowSelfTagging: true,
     kind: KIND_BRIEF_CONFIG,
+    createdAt: Math.max(
+      Math.floor(Date.now() / 1000),
+      (input.previousConfigCreatedAt ?? 0) + 1,
+    ),
     content: JSON.stringify(payload),
     tags,
   });

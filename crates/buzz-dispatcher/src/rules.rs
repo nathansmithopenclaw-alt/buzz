@@ -366,6 +366,7 @@ mod tests {
 
     fn base_config(state_dir: PathBuf, stream: Uuid, home: Uuid) -> DispatcherConfig {
         DispatcherConfig {
+            remote_controls: false,
             relay_url: Some("http://localhost:3000".to_string()),
             service_id: "triage-dispatcher".to_string(),
             stream_id: stream,

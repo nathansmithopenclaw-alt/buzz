@@ -110,6 +110,49 @@ test("a stopped member agent is queued for a post-publish wake, never fired", as
   rendered.unmount();
 });
 
+test("an externally executed member keeps its recipient but queues no local wake", async () => {
+  const agent = managedAgent({
+    externalExecution: {
+      type: "codex_desktop",
+      threadId: "01a08c97-4b41-7000-bbd6-b58aa4b34eef",
+    },
+  });
+  const rendered = await renderEnsureReady({
+    getManagedAgentsByPubkey: async () => new Map([[MEMBER_AGENT, agent]]),
+    memberPubkeys: new Set([MEMBER_AGENT]),
+  });
+  const result = await rendered.result.current([MEMBER_AGENT], CHANNEL_ID);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.pubkeys, [MEMBER_AGENT]);
+  assert.deepEqual(result.agentsToWake, []);
+  assert.deepEqual(tauriInvocations, []);
+  rendered.unmount();
+});
+
+test("an externally executed nonmember still requires channel attachment without a local wake", async () => {
+  const agent = managedAgent({
+    externalExecution: {
+      type: "codex_desktop",
+      threadId: "01a08c97-4b41-7000-bbd6-b58aa4b34eef",
+    },
+  });
+  const attachments = [];
+  const rendered = await renderEnsureReady({
+    getManagedAgentsByPubkey: async () => new Map([[MEMBER_AGENT, agent]]),
+    attachAgentToChannel: async (input) => {
+      attachments.push(input.channelId);
+      input.detachedStart(input.agent);
+    },
+  });
+  const result = await rendered.result.current([MEMBER_AGENT], CHANNEL_ID);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(attachments, [CHANNEL_ID]);
+  assert.equal(result.wroteRelayState, true);
+  assert.deepEqual(result.pubkeys, [MEMBER_AGENT]);
+  assert.deepEqual(result.agentsToWake, []);
+  rendered.unmount();
+});
+
 test("only agents that are not up are queued", async () => {
   const runningLocal = managedAgent({ status: "running" });
   const undeployedProvider = managedAgent({

@@ -416,6 +416,13 @@ pub fn resolve_step_templates(
     };
 
     match &step.action {
+        RunSummary {
+            summary_id,
+            config_revision,
+        } => Ok(RunSummary {
+            summary_id: summary_id.clone(),
+            config_revision: config_revision.clone(),
+        }),
         SendMessage {
             text,
             channel,
@@ -637,6 +644,15 @@ pub async fn dispatch_action(
     let result = serving_write
         .protect(async {
             match action {
+                RunSummary { summary_id, config_revision } => {
+                    let run = engine.db.get_workflow_run(community_id, run_id).await
+                        .map_err(|e| WorkflowError::WebhookError(e.to_string()))?;
+                    let workflow = engine.db.get_workflow(community_id, run.workflow_id).await
+                        .map_err(|e| WorkflowError::WebhookError(e.to_string()))?;
+                    let channel = workflow.channel_id.ok_or_else(|| WorkflowError::InvalidDefinition("Summary requires its private agent conversation".into()))?;
+                    let result = engine.action_sink()?.run_summary(community_id, channel, &hex::encode(workflow.owner_pubkey), summary_id, crate::action_sink::SummaryInvocation::Scheduled { config_revision: config_revision.clone() }).await?;
+                    Ok(StepResult::Completed(result))
+                }
                 SendMessage {
                     text,
                     channel,

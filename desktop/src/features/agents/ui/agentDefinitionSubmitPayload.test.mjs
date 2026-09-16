@@ -90,3 +90,26 @@ test("explicit-runtime-chosen: runtime and model both persisted when user explic
   assert.equal(result.model, "claude-opus-4-8", "model must be persisted");
   assert.equal(result.provider, undefined, "empty provider must be omitted");
 });
+
+test("DeepSeek Create persists the catalog-declared provider with its selected model", () => {
+  const input = {
+    ...BUILTIN_EDIT_BASE,
+    isEditMode: false,
+    isAutoSeeded: false,
+    runtime: "deepseek",
+    runtimeMetadata: { id: "deepseek", providerEnvVar: "DSH_PROVIDER" },
+    model: "Qwen/Qwen3.8-27B",
+    provider: "deepseek-compatible",
+  };
+  assert.deepEqual(buildRuntimeModelProviderPayload(input), {
+    runtime: "deepseek",
+    model: "Qwen/Qwen3.8-27B",
+    provider: "deepseek-compatible",
+  });
+  // Negative control: losing the capability reproduces the original omitted-provider save.
+  assert.equal(
+    buildRuntimeModelProviderPayload({ ...input, runtimeMetadata: undefined })
+      .provider,
+    undefined,
+  );
+});

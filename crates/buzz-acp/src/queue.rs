@@ -2453,6 +2453,17 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             framing.prior_tag,
             &body,
         ));
+        sections.push(crate::prompt_framing::semantic_section(
+            "interrupted-execution-state",
+            "The prior provider turn was cancelled. The section above preserves its request, \
+             not its tool-call history or partial results. Cancellation is not rollback: tools \
+             may already have acquired resources or changed external state. A new session's \
+             empty resource list is not evidence that the prior turn did nothing. Check available \
+             receipts and current state before reporting or repeating actions. If prior outcomes \
+             cannot be established, report them as unknown; do not claim that no lease was acquired, \
+             no browser was opened, or no action was attempted. Follow an explicit stop instruction \
+             without restarting the original work.",
+        ));
     }
 
     // 4b. Event block(s).
@@ -3145,6 +3156,33 @@ mod tests {
             "unset reason should default to steer framing: {prompt}"
         );
         assert!(!prompt.contains("supersedes"));
+    }
+
+    #[test]
+    fn cancelled_prompt_preserves_uncertainty_without_claiming_tool_history() {
+        for reason in [
+            None,
+            Some(CancelReason::Steer),
+            Some(CancelReason::Interrupt),
+        ] {
+            let batch = make_merged_batch(reason);
+            let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+            assert!(prompt.contains("<interrupted-execution-state>"));
+            assert!(prompt.contains("not its tool-call history or partial results"));
+            assert!(prompt.contains("Cancellation is not rollback"));
+            assert!(prompt.contains("report them as unknown"));
+            assert!(prompt.contains("without restarting the original work"));
+
+            let mut normal = batch;
+            normal.cancelled_events.clear();
+            normal.cancel_reason = None;
+            let prompt = format_prompt(&normal, &FormatPromptArgs::default()).join("\n\n");
+            assert!(!prompt.contains("<interrupted-execution-state>"));
+        }
+        // Non-cancelling native steering still has the provider's tool history.
+        assert!(!native_steer_framing()
+            .1
+            .contains("Cancellation is not rollback"));
     }
 
     /// Full steering path, queue mechanics through to rendered prompt.

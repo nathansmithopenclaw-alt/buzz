@@ -5,6 +5,7 @@ import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarke
 import { useIsOtherSetupAgent } from "@/features/agents/useKnownAgentPubkeys";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
+import { ExternalExecutionRuntime } from "@/features/agents/ui/ExternalExecutionRuntime";
 import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
@@ -451,7 +452,7 @@ export function ProfileSummaryView({
           followMutation={followMutation}
           agentActionDisabled={isAgentActionPending}
           agentStartBlockReason={
-            managedAgent
+            managedAgent && !managedAgent.externalExecution
               ? agentPresenceStartBlockReason(
                   isManagedAgentActive(managedAgent),
                   presenceStatus,
@@ -566,58 +567,66 @@ export function ProfileSummaryView({
                 {showRuntimePreview ? (
                   <UserProfileRuntimePreviewNotice />
                 ) : null}
-                <ProfileRuntimeTabContent
-                  autoRestartEnabled={
-                    managedAgent?.autoRestartOnConfigChange ?? false
-                  }
-                  currentPubkey={pubkey}
-                  diagnosticsFields={displayedDiagnosticsFields}
-                  diagnosticsSummary={diagnosticsTrailing}
-                  configurationFields={displayedRuntimeFields}
-                  instances={instanceBuckets.live}
-                  archivedInstances={instanceBuckets.archived}
-                  modelSettings={
-                    isOwner === true && managedAgent !== undefined ? (
+                {managedAgent?.externalExecution ? (
+                  <ExternalExecutionRuntime onOpen={handleAgentPrimaryAction} />
+                ) : (
+                  <>
+                    <ProfileRuntimeTabContent
+                      autoRestartEnabled={
+                        managedAgent?.autoRestartOnConfigChange ?? false
+                      }
+                      currentPubkey={pubkey}
+                      diagnosticsFields={displayedDiagnosticsFields}
+                      diagnosticsSummary={diagnosticsTrailing}
+                      configurationFields={displayedRuntimeFields}
+                      instances={instanceBuckets.live}
+                      archivedInstances={instanceBuckets.archived}
+                      modelSettings={
+                        isOwner === true && managedAgent !== undefined ? (
+                          <AgentConfigPanel
+                            advancedMode="flat"
+                            onEdit={canEditAgent ? handleEditAgent : undefined}
+                            pubkey={managedAgent.pubkey}
+                            sections={["model"]}
+                          />
+                        ) : showRuntimePreview ? (
+                          <UserProfileConfigPreview
+                            onEdit={canEditAgent ? handleEditAgent : undefined}
+                            sections={["model"]}
+                          />
+                        ) : undefined
+                      }
+                      needsRestart={managedAgent?.needsRestart ?? false}
+                      onToggleStartOnLaunch={
+                        managedAgent?.backend.type === "local"
+                          ? handleToggleAgentAutoStart
+                          : undefined
+                      }
+                      restartDiff={managedAgent?.restartDiff ?? []}
+                      startOnLaunchEnabled={managedAgent?.startOnAppLaunch}
+                      startOnLaunchPending={isAgentActionPending}
+                      onOpenDiagnostics={onOpenDiagnostics}
+                      onOpenInstance={onOpenInstance}
+                      showDiagnosticsIngress={showDiagnosticsIngress}
+                      showPreviewHarnessLog={
+                        showRuntimePreview && !showDiagnosticsIngress
+                      }
+                      remoteDetails={readOnlyRemote}
+                    />
+                    {isOwner === true && managedAgent !== undefined ? (
                       <AgentConfigPanel
                         advancedMode="flat"
-                        onEdit={canEditAgent ? handleEditAgent : undefined}
                         pubkey={managedAgent.pubkey}
-                        sections={["model"]}
+                        sections={["mcp", "advanced"]}
                       />
-                    ) : showRuntimePreview ? (
+                    ) : null}
+                    {showRuntimePreview ? (
                       <UserProfileConfigPreview
-                        onEdit={canEditAgent ? handleEditAgent : undefined}
-                        sections={["model"]}
+                        sections={["mcp", "advanced"]}
                       />
-                    ) : undefined
-                  }
-                  needsRestart={managedAgent?.needsRestart ?? false}
-                  onToggleStartOnLaunch={
-                    managedAgent?.backend.type === "local"
-                      ? handleToggleAgentAutoStart
-                      : undefined
-                  }
-                  restartDiff={managedAgent?.restartDiff ?? []}
-                  startOnLaunchEnabled={managedAgent?.startOnAppLaunch}
-                  startOnLaunchPending={isAgentActionPending}
-                  onOpenDiagnostics={onOpenDiagnostics}
-                  onOpenInstance={onOpenInstance}
-                  showDiagnosticsIngress={showDiagnosticsIngress}
-                  showPreviewHarnessLog={
-                    showRuntimePreview && !showDiagnosticsIngress
-                  }
-                  remoteDetails={readOnlyRemote}
-                />
-                {isOwner === true && managedAgent !== undefined ? (
-                  <AgentConfigPanel
-                    advancedMode="flat"
-                    pubkey={managedAgent.pubkey}
-                    sections={["mcp", "advanced"]}
-                  />
-                ) : null}
-                {showRuntimePreview ? (
-                  <UserProfileConfigPreview sections={["mcp", "advanced"]} />
-                ) : null}
+                    ) : null}
+                  </>
+                )}
               </div>
             ) : null}
             {activeTab === "channels" ? (

@@ -1,3 +1,4 @@
+import { ProviderEndpointField } from "./ProviderEndpointField";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -183,7 +184,7 @@ export function AgentDefinitionDialog({
       model: inheritedModelDefault,
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
-  } = useAgentDialogDefaults({ open });
+  } = useAgentDialogDefaults({ open, runtimeId: runtime });
   const defaultRuntime = React.useMemo(
     () => getDefaultPersonaRuntime(runtimes, globalConfig.preferred_runtime),
     [globalConfig.preferred_runtime, runtimes],
@@ -349,6 +350,7 @@ export function AgentDefinitionDialog({
       model: modelForSubmit,
       provider: providerForSubmit,
     } = buildRuntimeModelProviderPayload({
+      runtimeMetadata: selectedRuntime,
       runtime,
       model: aiConfigurationMode === "defaults" ? "" : model,
       provider: aiConfigurationMode === "defaults" ? "" : provider,
@@ -415,7 +417,7 @@ export function AgentDefinitionDialog({
   const blankRuntimeModelProviderEditable =
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
   const runtimeCanChooseLlmProvider =
-    runtimeSupportsLlmProviderSelection(runtime) ||
+    runtimeSupportsLlmProviderSelection(runtime, selectedRuntime) ||
     blankRuntimeModelProviderEditable;
   const llmProviderFieldVisible =
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
@@ -448,6 +450,7 @@ export function AgentDefinitionDialog({
   const localModeGate = React.useMemo(
     () =>
       computeLocalModeGate({
+        runtime: selectedRuntime,
         bakedEnvKeys,
         envVars,
         globalEnvVars: globalConfig.env_vars,
@@ -460,6 +463,7 @@ export function AgentDefinitionDialog({
         runtimeFileConfig,
       }),
     [
+      selectedRuntime,
       bakedEnvKeys,
       envVars,
       globalConfig.env_vars,
@@ -548,7 +552,7 @@ export function AgentDefinitionDialog({
     // Gate provider by runtime: runtimes that don't support LLM provider
     // selection (codex, claude) must not inherit the global provider — doing
     // so causes them to discover models from the wrong provider.
-    provider: runtimeSupportsLlmProviderSelection(runtime)
+    provider: runtimeSupportsLlmProviderSelection(runtime, selectedRuntime)
       ? effectiveProvider
       : "",
     selectedRuntime,
@@ -600,6 +604,7 @@ export function AgentDefinitionDialog({
       ? inheritedProviderDefault.value
       : "",
     hideProviderIds,
+    selectedRuntime,
   );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -695,11 +700,17 @@ export function AgentDefinitionDialog({
     setRuntime(nextRuntime);
     applySelection(
       selectionOnRuntimeChange(selection, {
+        nextRuntimeSupportsConnections: runtimes
+          .find((r) => r.id === nextRuntime)
+          ?.providerOptions?.some(([id]) => id === "buzz-local"),
         previousRuntime: runtime,
         nextRuntime,
         nextRuntimeCanChooseProvider:
           nextRuntime.trim().length > 0 &&
-          runtimeSupportsLlmProviderSelection(nextRuntime),
+          runtimeSupportsLlmProviderSelection(
+            nextRuntime,
+            runtimes.find((r) => r.id === nextRuntime),
+          ),
         lockedRuntimeReset: "full",
       }),
     );
@@ -877,6 +888,22 @@ export function AgentDefinitionDialog({
                 </div>
               ) : null}
             </div>
+          ) : null}
+
+          {llmProviderFieldVisible && aiConfigurationMode === "custom" ? (
+            <ProviderEndpointField
+              provider={effectiveProvider}
+              envVars={envVars}
+              onChange={(next, endpointChanged, provider) => {
+                if (provider) setProvider(provider);
+                setEnvVars(next);
+                if (endpointChanged) {
+                  setModel("");
+                  setIsCustomModelEditing(false);
+                }
+              }}
+              disabled={isPending}
+            />
           ) : null}
 
           {llmProviderFieldVisible &&

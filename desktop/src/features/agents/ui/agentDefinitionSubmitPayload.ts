@@ -1,3 +1,4 @@
+import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { runtimeSupportsLlmProviderSelection } from "./agentConfigOptions";
 
 /**
@@ -12,6 +13,7 @@ import { runtimeSupportsLlmProviderSelection } from "./agentConfigOptions";
  */
 export function buildRuntimeModelProviderPayload({
   runtime,
+  runtimeMetadata,
   model,
   provider,
   isEditMode,
@@ -22,6 +24,7 @@ export function buildRuntimeModelProviderPayload({
   initialModelProviderEditableWithoutRuntime,
 }: {
   runtime: string;
+  runtimeMetadata?: AcpRuntimeCatalogEntry;
   model: string;
   provider: string;
   isEditMode: boolean;
@@ -51,7 +54,7 @@ export function buildRuntimeModelProviderPayload({
     runtimeForSubmit.length === 0;
   const llmProviderVisibleForSubmit =
     (runtimeForSubmit.length > 0 &&
-      runtimeSupportsLlmProviderSelection(runtimeForSubmit)) ||
+      runtimeSupportsLlmProviderSelection(runtimeForSubmit, runtimeMetadata)) ||
     modelProviderEditableWithoutRuntime;
   const shouldPreserveHiddenModelProvider =
     isEditMode &&

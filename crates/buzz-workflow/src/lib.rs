@@ -48,6 +48,9 @@ use buzz_core::kind::{event_kind_u32, is_workflow_execution_kind, KIND_REACTION}
 use buzz_core::tenant::CommunityId;
 use buzz_db::workflow::{ApprovalStatus, CreateApprovalParams, RunStatus};
 use buzz_db::Db;
+mod summary_schedule_preview;
+pub use summary_schedule_preview::next_summary_run;
+
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
@@ -185,6 +188,27 @@ impl WorkflowEngine {
     /// Returns `Err(WorkflowError)` if the sink has not been initialized via
     /// [`set_action_sink`]. This avoids a panic if the engine is used before
     /// wiring is complete.
+    /// Dispatch an owner-authorized manual Summary through the same relay path as schedules.
+    pub async fn dispatch_summary(
+        &self,
+        community: buzz_core::CommunityId,
+        channel: uuid::Uuid,
+        owner: &str,
+        id: &str,
+        replay_period: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, WorkflowError> {
+        self.action_sink()?
+            .run_summary(
+                community,
+                channel,
+                owner,
+                id,
+                action_sink::SummaryInvocation::Manual { replay_period },
+            )
+            .await
+            .map_err(Into::into)
+    }
+
     pub(crate) fn action_sink(&self) -> Result<&dyn ActionSink, WorkflowError> {
         self.action_sink.get().map(|s| s.as_ref()).ok_or_else(|| {
             WorkflowError::InvalidDefinition(

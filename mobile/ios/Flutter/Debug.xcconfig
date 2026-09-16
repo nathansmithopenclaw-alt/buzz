@@ -1,6 +1,9 @@
 #include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"
 #include "Generated.xcconfig"
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) DEBUG
+// BuzzPushKit's public Swift module imports P256K's C dependency. Xcode does
+// not forward that transitive module map to the app and notification extension.
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc "-fmodule-map-file=$(OBJROOT)/GeneratedModuleMaps-$(PLATFORM_NAME)/libsecp256k1.modulemap"
 
 // Default app bundle identifier. Internal/custom builds can override this
 // without patching tracked files by writing

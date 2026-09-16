@@ -2,6 +2,7 @@ mod agent_access;
 mod agent_auth;
 mod agent_config;
 mod agent_discovery;
+mod agent_external_execution;
 mod agent_logs;
 mod agent_management_delegation;
 mod agent_management_grant;
@@ -78,7 +79,11 @@ mod team_snapshot;
 mod teams;
 mod tracker;
 mod tracker_cache;
+mod tracker_diagnostics;
 mod tracker_mutations;
+mod tracker_tasks;
+#[cfg(test)]
+mod tracker_tasks_tests;
 mod updater;
 mod window_chrome;
 mod window_vibrancy;
@@ -89,6 +94,7 @@ pub use agent_access::*;
 pub use agent_auth::*;
 pub use agent_config::*;
 pub use agent_discovery::*;
+pub use agent_external_execution::*;
 pub use agent_logs::*;
 pub use agent_management_delegation::*;
 pub use agent_management_grant::*;
@@ -151,3 +157,8 @@ pub use window_chrome::*;
 pub use window_vibrancy::*;
 pub use workflows::*;
 pub use workspace::*;
+
+mod summary;
+pub use summary::*;
+
+mod tracker_automation;

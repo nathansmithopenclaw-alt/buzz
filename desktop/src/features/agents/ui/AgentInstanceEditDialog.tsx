@@ -1,3 +1,5 @@
+import { EditAgentCommandField } from "./EditAgentCommandField";
+import { ProviderEndpointField } from "./ProviderEndpointField";
 import {
   AgentInstanceAvatarField,
   AgentInstanceNameField,
@@ -29,7 +31,6 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
-import { Input } from "@/shared/ui/input";
 import {
   setManagedAgentAutoRestart,
   setManagedAgentSessionResidencyPolicy,
@@ -54,8 +55,6 @@ import {
   getPersonaProviderOptions,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
-  PERSONA_FIELD_CONTROL_CLASS,
-  PERSONA_FIELD_SHELL_CLASS,
   runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
@@ -285,7 +284,7 @@ export function AgentInstanceEditDialog({
     const matched =
       runtimes.find((r) => r.command?.trim() === originalCommand) ??
       runtimes.find((r) => r.id === originalCommand);
-    return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
+    return runtimeSupportsLlmProviderSelection(matched?.id ?? "", matched);
   }, [runtimes, originalAgentCommand]);
 
   // The runtime id active after submit — the single prospective id feeding BOTH
@@ -320,8 +319,10 @@ export function AgentInstanceEditDialog({
     selectedRuntimeId,
   ]);
 
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(prospectiveRuntimeId);
+  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+    runtimes.find((r) => r.id === prospectiveRuntimeId),
+  );
 
   const prospectiveRuntime = runtimes.find(
     (r) => r.id === prospectiveRuntimeId,
@@ -398,12 +399,17 @@ export function AgentInstanceEditDialog({
       model: inheritedModelDefault,
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
-  } = useAgentDialogDefaults({ inheritedEnvVars, open });
+  } = useAgentDialogDefaults({
+    inheritedEnvVars,
+    open,
+    runtimeId: prospectiveRuntimeId,
+  });
 
   // Runtime/provider-required credential state for the PROSPECTIVE post-submit runtime.
   // globalProvider/globalEnvVars: fallback for empty per-agent provider; keys satisfied globally don't block Save.
   const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
     useRequiredCredentialState({
+      runtime: prospectiveRuntime,
       open,
       prospectiveRuntimeId,
       provider: inheritedSubmission.provider ?? "",
@@ -548,8 +554,7 @@ export function AgentInstanceEditDialog({
       setInheritHarness(false);
     }
 
-    // When switching to a catalog-known runtime, update the agent command to
-    // its resolved command so the command field stays consistent.
+    // Keep the command and default args consistent with the selected runtime.
     if (nextRuntime?.command) {
       setAgentCommand(nextRuntime.command);
       const newArgs = nextRuntime.defaultArgs.join(",");
@@ -558,20 +563,21 @@ export function AgentInstanceEditDialog({
 
     applySelection(
       selectionOnRuntimeChange(selection, {
+        nextRuntimeSupportsConnections: nextRuntime?.providerOptions?.some(
+          ([id]) => id === "buzz-local",
+        ),
         previousRuntime: previousRuntimeId,
         nextRuntime: nextRuntime?.id ?? nextRuntimeId,
         nextRuntimeCanChooseProvider: runtimeSupportsLlmProviderSelection(
           nextRuntime?.id ?? nextRuntimeId,
+          nextRuntime,
         ),
         lockedRuntimeReset: "full",
       }),
     );
   }
 
-  // Routed through the normal change handler so a harness registered inline
-  // pins its command and resets model/provider like a hand-picked one. Scoped
-  // to `open` so a pending id can't outlive the dialog that started the
-  // registration.
+  // Inline registration uses the normal change handler; pending IDs are scoped to this dialog.
   const selectSavedHarness = usePendingHarnessSelection(
     runtimes,
     handleRuntimeDropdownChange,
@@ -725,14 +731,12 @@ export function AgentInstanceEditDialog({
       // Classify the effective post-submit runtime's provider capability as a
       // tri-state: "capable" persists the provider, "locked" clears it (only
       // when we KNOW it's provider-locked, e.g. Claude), "unknown" OMITS it so a
-      // transient/custom state never becomes a destructive write. Resolved
-      // STATICALLY (by id) so a not-yet-loaded catalog can't misclassify a known
-      // runtime as "unknown" — see resolveRuntimeProviderCapability. The runtime
-      // id is the shared prospectiveRuntimeId, so submit and the block-save gate
-      // always agree on which runtime is being saved.
+      // transient/custom state never becomes a destructive write. Reuse the
+      // visible control's catalog capability (including its legacy fallback)
+      // so submit and the block-save gate agree on the prospective runtime.
       const providerRuntimeCapability = resolveRuntimeProviderCapability(
         prospectiveRuntimeId,
-        runtimeSupportsLlmProviderSelection(prospectiveRuntimeId),
+        llmProviderFieldVisible,
       );
 
       // Provider + env to persist — the shared inherited-submission snapshot
@@ -910,6 +914,7 @@ export function AgentInstanceEditDialog({
       ? inheritedProviderDefault.value
       : "",
     hideProviderIds,
+    selectedRuntime,
   );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -1025,35 +1030,28 @@ export function AgentInstanceEditDialog({
               />
             </div>
             {selectedRuntimeId === "custom" && !inheritHarness ? (
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="edit-agent-command"
-                >
-                  Agent command
-                </label>
-                <div
-                  className={cn(
-                    "flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
-                    )}
-                    disabled={isSaving}
-                    id="edit-agent-command"
-                    onChange={(event) => setAgentCommand(event.target.value)}
-                    placeholder="Full path or shell command"
-                    value={agentCommand}
-                  />
-                </div>
-              </div>
+              <EditAgentCommandField
+                disabled={isSaving}
+                value={agentCommand}
+                onChange={setAgentCommand}
+              />
             ) : null}
             {/* LLM provider + provider API key + model */}
+            {llmProviderFieldVisible ? (
+              <ProviderEndpointField
+                provider={effectiveProvider}
+                envVars={envVars}
+                onChange={(next, endpointChanged, provider) => {
+                  if (provider) setProvider(provider);
+                  setEnvVars(next);
+                  if (endpointChanged) {
+                    setModel("");
+                    setIsCustomModelEditing(false);
+                  }
+                }}
+                disabled={isSaving}
+              />
+            ) : null}
             <EditAgentProviderModelFields
               disabled={isSaving}
               llmProviderFieldVisible={llmProviderFieldVisible}
