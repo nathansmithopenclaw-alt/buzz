@@ -2367,73 +2367,61 @@ mod postgres_tests {
     /// `FOR UPDATE` on the channel tuple before testing `ttl_seconds`, so
     /// concurrent commits into one hot permanent channel queued at commit
     /// time (deferred trigger) — invisible to any single-connection test.
-    /// This holds N insert transactions at a barrier past their INSERTs,
-    /// then proves (a) while all N sit pre-commit, no transaction holds a
-    /// row-level lock on the channel tuple, and (b) all N commits succeed
-    /// with the channel row untouched (permanent ⇒ no deadline write).
+    /// Hold a channel-row lock that blocks TTL updates but permits FK reads,
+    /// then prove N concurrent insert-and-commit tasks complete within a
+    /// deadline while that lock remains held. The channel stays untouched
+    /// (permanent ⇒ no deadline write).
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn permanent_channel_event_commits_do_not_lock_the_channel_row() {
         const N: usize = 8;
-        // setup_pool's default cap (10) covers N held transactions plus the
-        // pg_locks inspector connection.
+        // setup_pool's default cap (10) covers N writers and the channel guard.
         let pool = setup_pool().await;
         let community_uuid = make_test_community(&pool).await;
         let channel = make_test_channel(&pool, community_uuid, None).await;
 
-        // Open N transactions, run the full event INSERT in each (the deferred
-        // trigger fires at COMMIT), and park them at a barrier.
-        let mut txs = Vec::new();
-        for i in 0..N {
-            let mut tx = pool.begin().await.expect("begin insert txn");
-            let event = make_text_event(&format!("hot channel event {i}"));
-            sqlx::query(
-                "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
-                 VALUES ($1,$2,$3,$4,9,$5,$6,$7,now(),$8)",
-            )
-            .bind(community_uuid)
-            .bind(event.id.as_bytes().as_slice())
-            .bind(event.pubkey.as_bytes().as_slice())
-            .bind(DateTime::from_timestamp(event.created_at.as_secs() as i64, 0).unwrap())
-            .bind(serde_json::to_value(&event.tags).unwrap())
-            .bind(&event.content)
-            .bind(event.sig.serialize().as_slice())
-            .bind(channel)
-            .execute(&mut *tx)
-            .await
-            .expect("insert event inside held txn");
-            txs.push(tx);
-        }
-
-        // With all N transactions holding completed INSERTs, none may hold a
-        // row-level lock on the channels tuple. (The 0022 trigger would not
-        // have taken it yet either — it locks at COMMIT — so also verify the
-        // commit phase below completes without mutual blocking.)
-        let tuple_locks: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_locks l \
-             JOIN pg_class c ON c.oid = l.relation \
-             WHERE c.relname = 'channels' AND l.locktype = 'tuple'",
+        // Hold the channel row in a mode compatible with FK key-share reads
+        // but conflicting with a TTL UPDATE. The journal legitimately
+        // serializes writes per community, so inserting serially while holding
+        // every transaction open would deadlock on the journal before COMMIT.
+        let mut channel_guard = pool.begin().await.expect("begin channel guard");
+        sqlx::query(
+            "SELECT id FROM channels WHERE community_id = $1 AND id = $2 FOR NO KEY UPDATE",
         )
-        .fetch_one(&pool)
+        .bind(community_uuid)
+        .bind(channel)
+        .fetch_one(&mut *channel_guard)
         .await
-        .expect("inspect pg_locks");
-        assert_eq!(tuple_locks, 0, "no channel tuple locks while txns are held");
-
-        // Release all commits concurrently. Under 0022 these serialized on the
-        // channel row (each holding it across its WAL flush); under 0024 the
-        // shared advisory key admits them all. Join with a timeout so a
-        // regression fails fast instead of hanging the suite.
-        let commits = txs
-            .into_iter()
-            .map(|tx| tokio::spawn(async move { tx.commit().await }))
-            .collect::<Vec<_>>();
-        for c in commits {
-            tokio::time::timeout(std::time::Duration::from_secs(10), c)
-                .await
-                .expect("concurrent permanent-channel commits must not block")
-                .expect("join commit task")
-                .expect("commit succeeds");
-        }
+        .unwrap();
+        let commits = (0..N).map(|i| {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = pool.begin().await.expect("begin insert txn");
+                let event = make_text_event(&format!("hot channel event {i}"));
+                sqlx::query(
+                    "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+                     VALUES ($1,$2,$3,$4,9,$5,$6,$7,now(),$8)",
+                )
+                .bind(community_uuid)
+                .bind(event.id.as_bytes().as_slice())
+                .bind(event.pubkey.as_bytes().as_slice())
+                .bind(DateTime::from_timestamp(event.created_at.as_secs() as i64, 0).unwrap())
+                .bind(serde_json::to_value(&event.tags).unwrap())
+                .bind(&event.content)
+                .bind(event.sig.serialize().as_slice())
+                .bind(channel)
+                .execute(&mut *tx).await.expect("insert permanent-channel event");
+                tx.commit().await.expect("commit succeeds");
+            })
+        }).collect::<Vec<_>>();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            for commit in commits {
+                commit.await.expect("join commit task");
+            }
+        })
+        .await
+        .expect("permanent-channel inserts and commits must not need the channel row lock");
+        channel_guard.rollback().await.unwrap();
 
         let deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
             "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",

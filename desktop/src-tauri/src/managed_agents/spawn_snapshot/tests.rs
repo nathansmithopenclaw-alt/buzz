@@ -20,7 +20,7 @@ fn snapshot_with_policy(
         workspace_relay,
         global,
         enforced_owner_only,
-        session_policy: AcpSessionPolicy::Channel,
+
         session_residency_enabled: false,
     })
     .canonical()
@@ -55,7 +55,7 @@ fn residency_policy_is_effective_only_behind_experiment() {
         workspace_relay: "wss://ws.example",
         global: &Default::default(),
         enforced_owner_only: false,
-        session_policy: AcpSessionPolicy::Channel,
+
         session_residency_enabled: false,
     });
     assert_eq!(disabled.idle_pool_sleep_seconds, 900);
@@ -68,7 +68,7 @@ fn residency_policy_is_effective_only_behind_experiment() {
         workspace_relay: "wss://ws.example",
         global: &Default::default(),
         enforced_owner_only: false,
-        session_policy: AcpSessionPolicy::Channel,
+
         session_residency_enabled: true,
     });
     assert_eq!(enabled.idle_pool_sleep_seconds, 7_200);
@@ -80,7 +80,7 @@ fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
         avatar_selection: None,
         avatar_synced: Default::default(),
-
+        session_policy: Default::default(),
         description: None,
         pubkey: "p".repeat(64),
         name: "agent".into(),
@@ -150,7 +150,7 @@ fn record() -> ManagedAgentRecord {
 fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
     AgentDefinition {
         avatar_selection: None,
-
+        session_policy: Default::default(),
         description: None,
         id: id.into(),
         display_name: id.into(),

@@ -13,7 +13,7 @@ fn minimal_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
         avatar_selection: None,
         avatar_synced: Default::default(),
-
+        session_policy: Default::default(),
         description: None,
         pubkey: "deadbeef".to_string(),
         name: "Test Agent".to_string(),

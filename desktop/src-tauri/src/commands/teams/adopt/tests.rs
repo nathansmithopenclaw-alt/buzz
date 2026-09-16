@@ -22,7 +22,7 @@ const TEAM_D_TAG: &str = "team-alpha";
 fn persona(id: &str, prompt: &str) -> AgentDefinition {
     AgentDefinition {
         avatar_selection: None,
-
+        session_policy: Default::default(),
         id: id.to_string(),
         display_name: id.to_string(),
         description: None,
@@ -51,6 +51,7 @@ fn persona(id: &str, prompt: &str) -> AgentDefinition {
 
 fn member(member_key: &str, prompt: &str) -> TeamCatalogMember {
     TeamCatalogMember {
+        session_policy: Default::default(),
         member_key: member_key.to_string(),
         display_name: member_key.to_string(),
         system_prompt: Some(prompt.to_string()),

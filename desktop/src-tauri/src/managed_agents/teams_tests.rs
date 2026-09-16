@@ -169,7 +169,7 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
         avatar_selection: None,
         avatar_synced: Default::default(),
-
+        session_policy: Default::default(),
         description: None,
         pubkey: name.to_string(),
         name: name.to_string(),
@@ -464,7 +464,7 @@ const D_TAG: &str = "my-team";
 fn catalog_copy(id: &str, owner: &str, d_tag: &str) -> AgentDefinition {
     AgentDefinition {
         avatar_selection: None,
-
+        session_policy: Default::default(),
         id: id.to_string(),
         display_name: id.to_string(),
         description: None,
@@ -707,7 +707,7 @@ fn test_ref_check_preserves_copy_used_by_a_standalone_managed_agent() {
 fn catalog_persona(id: &str, owner: &str, d_tag: &str) -> AgentDefinition {
     AgentDefinition {
         avatar_selection: None,
-
+        session_policy: Default::default(),
         id: id.to_string(),
         display_name: id.to_string(),
         description: None,

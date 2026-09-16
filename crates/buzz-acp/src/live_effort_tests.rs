@@ -146,8 +146,8 @@ async fn busy_turn_queues_without_cancelling_then_applies_before_next_claim() {
     let scope = SessionScope::Conversation {
         channel_id: channel,
     };
-    let worker = agent(&scope, &file, "apply").await;
-    let mut pool = AgentPool::from_slots(vec![None]);
+    let mut pool = AgentPool::from_slots(vec![Some(agent(&scope, &file, "apply").await)]);
+    let worker = pool.try_claim(Some(&scope)).expect("claim session owner");
     let observer = ObserverHandle::in_process();
     let task = tokio::spawn(std::future::pending::<()>());
     let id = task.id();

@@ -140,7 +140,7 @@ fn backfill_of_promptless_record_keeps_spawn_snapshot_stable() {
         workspace_relay: "wss://ws.example",
         global: &Default::default(),
         enforced_owner_only: false,
-        session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
+
         session_residency_enabled: false,
     });
 
@@ -159,7 +159,7 @@ fn backfill_of_promptless_record_keeps_spawn_snapshot_stable() {
         workspace_relay: "wss://ws.example",
         global: &Default::default(),
         enforced_owner_only: false,
-        session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
+
         session_residency_enabled: false,
     });
 
@@ -196,7 +196,7 @@ fn backfill_of_prompted_record_keeps_spawn_snapshot_stable() {
         workspace_relay: "wss://ws.example",
         global: &Default::default(),
         enforced_owner_only: false,
-        session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
+
         session_residency_enabled: false,
     });
 
@@ -215,7 +215,7 @@ fn backfill_of_prompted_record_keeps_spawn_snapshot_stable() {
         workspace_relay: "wss://ws.example",
         global: &Default::default(),
         enforced_owner_only: false,
-        session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
+
         session_residency_enabled: false,
     });
 

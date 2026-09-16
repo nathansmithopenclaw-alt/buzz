@@ -7,7 +7,6 @@ export async function applyCommunity(
   reposDir?: string,
   agentManagedProfiles?: boolean,
   fleetVisibility?: boolean,
-  threadScopedAcpSessions?: boolean,
   agentSessionResidency?: boolean,
   answeredEventWatermark?: boolean,
 ): Promise<void> {
@@ -19,7 +18,6 @@ export async function applyCommunity(
     experiments: {
       agentManagedProfiles: agentManagedProfiles ?? false,
       fleetVisibility: fleetVisibility ?? false,
-      threadScopedAcpSessions: threadScopedAcpSessions ?? false,
       agentSessionResidency: agentSessionResidency ?? false,
       answeredEventWatermark: answeredEventWatermark ?? false,
     },
@@ -28,9 +26,6 @@ export async function applyCommunity(
 
 export const setAgentManagedProfiles = (enabled: boolean) =>
   invokeTauri("set_agent_managed_profiles", { enabled });
-
-export const setThreadScopedAcpSessions = (enabled: boolean) =>
-  invokeTauri("set_thread_scoped_acp_sessions", { enabled });
 
 export const setAgentSessionResidency = (enabled: boolean) =>
   invokeTauri("set_agent_session_residency", { enabled });

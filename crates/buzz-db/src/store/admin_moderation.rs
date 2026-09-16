@@ -611,21 +611,9 @@ mod postgres_tests {
         assert_eq!(message.author_pubkey, hex::encode([5_u8; 32]));
         assert!(message.deleted_at.is_some());
 
-        sqlx::query("DELETE FROM moderation_reports WHERE community_id = $1")
-            .bind(report_community)
-            .execute(&pool)
-            .await
-            .expect("delete report fixture");
-        sqlx::query("DELETE FROM events WHERE community_id = ANY($1)")
-            .bind(vec![report_community, other_community])
-            .execute(&pool)
-            .await
-            .expect("delete event fixtures");
-        sqlx::query("DELETE FROM communities WHERE id = ANY($1)")
-            .bind(vec![report_community, other_community])
-            .execute(&pool)
-            .await
-            .expect("delete community fixtures");
+        // The PostgreSQL lane drops this test's isolated database. Event
+        // journal rows intentionally retain community references, so ad-hoc
+        // community deletion is neither valid nor needed for fixture cleanup.
     }
 
     #[tokio::test]

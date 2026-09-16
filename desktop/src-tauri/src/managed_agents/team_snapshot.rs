@@ -256,7 +256,7 @@ mod tests {
         ManagedAgentRecord {
             avatar_selection: None,
             avatar_synced: Default::default(),
-
+            session_policy: Default::default(),
             description: None,
             pubkey: format!("{name}-pubkey"),
             name: name.to_string(),

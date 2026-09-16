@@ -72,7 +72,6 @@ struct RelayInfoIcon {
 pub struct WorkspaceExperimentFlags {
     agent_managed_profiles: bool,
     fleet_visibility: bool,
-    thread_scoped_acp_sessions: bool,
     agent_session_residency: bool,
     answered_event_watermark: bool,
 }
@@ -244,9 +243,6 @@ pub async fn apply_workspace(
             .managed_agent_profile_reconcile_enabled()
             .store(!experiments.agent_managed_profiles, Ordering::Release);
         state
-            .thread_scoped_acp_sessions_enabled()
-            .store(experiments.thread_scoped_acp_sessions, Ordering::Release);
-        state
             .session_residency_enabled()
             .store(experiments.agent_session_residency, Ordering::Release);
         state
@@ -412,7 +408,7 @@ pub async fn apply_workspace(
                 }
             }
         });
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(feature = "mesh-llm"))]
@@ -431,9 +427,11 @@ pub async fn apply_workspace(
         return Ok(());
     }
 
-    assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
-
-    Ok(())
+    #[cfg(not(feature = "mesh-llm"))]
+    {
+        assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -459,7 +457,6 @@ mod tests {
         assert!(enabled.answered_event_watermark);
         assert!(!enabled.agent_managed_profiles);
         assert!(!enabled.fleet_visibility);
-        assert!(!enabled.thread_scoped_acp_sessions);
 
         let omitted: WorkspaceExperimentFlags =
             serde_json::from_value(serde_json::json!({})).unwrap();

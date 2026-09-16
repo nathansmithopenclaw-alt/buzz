@@ -405,6 +405,9 @@ export function updateInputFromRequest(
                 : (changes.respondToAllowlist ??
                   current.behavior?.respondToAllowlist),
             parallelism: changes.parallelism ?? current.behavior?.parallelism,
+            ...(current.behavior?.sessionPolicy
+              ? { sessionPolicy: current.behavior.sessionPolicy }
+              : {}),
           },
           linkedInstanceBehaviorPatch:
             linkedInstanceBehaviorPatchFromRequest(request),

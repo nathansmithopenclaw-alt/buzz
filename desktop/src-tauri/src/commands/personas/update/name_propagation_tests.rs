@@ -7,7 +7,7 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
     ManagedAgentRecord {
         avatar_selection: None,
         avatar_synced: Default::default(),
-
+        session_policy: Default::default(),
         description: None,
         pubkey: format!("pubkey-{name}"),
         name: name.to_string(),

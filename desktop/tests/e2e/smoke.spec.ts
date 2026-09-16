@@ -247,6 +247,18 @@ test("create agent supports parallelism and system prompt overrides", async ({
     .evaluate((el) => el.scrollIntoView({ block: "nearest" }));
   await expect(page.locator("#persona-parallelism")).toBeVisible();
   await page.locator("#persona-parallelism").fill("3");
+  const sessionPolicy = page.locator("#persona-session-policy");
+  await expect(sessionPolicy).toHaveAttribute(
+    "aria-describedby",
+    "persona-session-policy-description",
+  );
+  await expect(
+    page.locator("#persona-session-policy-description"),
+  ).toBeVisible();
+  await sessionPolicy.click();
+  await page
+    .getByRole("menuitemradio", { exact: true, name: "Each thread" })
+    .click();
 
   // Submitting mints a running instance whose behavioral quad resolves from
   // the definition (agents always start after creation).
@@ -260,6 +272,18 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
   await expect(page.getByTestId("agents-fleet-grid")).toContainText(agentName);
+  const createPersonaPayload = await page.evaluate(() => {
+    const log = (
+      window as Window & {
+        __BUZZ_E2E_COMMAND_LOG__?: Array<{
+          command: string;
+          payload: { input?: { behavior?: { sessionPolicy?: string } } };
+        }>;
+      }
+    ).__BUZZ_E2E_COMMAND_LOG__;
+    return log?.find((entry) => entry.command === "create_persona")?.payload;
+  });
+  expect(createPersonaPayload?.input?.behavior?.sessionPolicy).toBe("thread");
 
   // Logs now live in the profile sidebar (PR #1274), not an inline panel.
   // Open the new agent's card to reveal the profile panel, then read the

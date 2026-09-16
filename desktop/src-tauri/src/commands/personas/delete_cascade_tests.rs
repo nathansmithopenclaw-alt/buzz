@@ -19,7 +19,7 @@ fn make_agent(
     ManagedAgentRecord {
         avatar_selection: None,
         avatar_synced: Default::default(),
-
+        session_policy: Default::default(),
         description: None,
         pubkey: pubkey.to_string(),
         name: "Test Agent".to_string(),

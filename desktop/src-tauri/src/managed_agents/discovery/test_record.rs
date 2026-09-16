@@ -4,6 +4,7 @@ pub(super) fn record_with(
     override_cmd: Option<&str>,
 ) -> crate::managed_agents::types::ManagedAgentRecord {
     crate::managed_agents::types::ManagedAgentRecord {
+        session_policy: Default::default(),
         avatar_selection: None,
         avatar_synced: Default::default(),
 

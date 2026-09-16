@@ -1479,8 +1479,6 @@ mod tests {
         assert!(json["setup_copy"].as_str().unwrap().contains("codex login"));
     }
 
-    // ── resolve_effective_agent_env ─────────────────────────────────────────
-
     #[test]
     fn buzz_agent_databricks_v2_with_databricks_model_but_no_buzz_agent_model_is_ready() {
         // The baked buzz-releases env sets DATABRICKS_MODEL but not BUZZ_AGENT_MODEL.

@@ -460,6 +460,7 @@ mod tests {
 
     fn persona(id: &str, updated_at: &str) -> AgentDefinition {
         AgentDefinition {
+            session_policy: Default::default(),
             avatar_selection: None,
 
             id: id.into(),

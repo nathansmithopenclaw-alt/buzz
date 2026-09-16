@@ -62,6 +62,14 @@ if ! "$workspace_root/bin/pgschema" apply \
   cat "$schema_log" >&2
   exit 1
 fi
+# pgschema's desired-state plan does not install extensions on an empty
+# database. schema.sql declares pgcrypto; journal triggers require its digest
+# function. Provision that prerequisite in this run's isolated template only.
+if ! "$psql" --dbname="$template_database" --set=ON_ERROR_STOP=1 \
+  --command='CREATE EXTENSION IF NOT EXISTS pgcrypto;' >>"$schema_log" 2>&1; then
+  cat "$schema_log" >&2
+  exit 1
+fi
 if ! "$psql" --dbname="$template_database" --set=ON_ERROR_STOP=1 \
   --file="$workspace_root/scripts/reconcile-schema-after-pgschema.sql" \
   >>"$schema_log" 2>&1; then

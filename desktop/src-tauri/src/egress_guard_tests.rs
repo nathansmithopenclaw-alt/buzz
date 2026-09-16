@@ -273,6 +273,7 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     // Delegation create/reuse loopback test; real creation uses submit_event_with_keys.
     ("src/commands/agent_management_grant.rs", 1, 0),
     ("src/relay_admission.rs", 1, 0),
+    ("src/native_relay_client_transport_tests.rs", 1, 0),
     ("src/archive/mod_tests.rs", 1, 0),
     ("src/managed_agents/persona_events/tests.rs", 1, 0),
     ("src/commands/team_snapshot/tests.rs", 1, 0),

@@ -1004,7 +1004,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 50);
+        assert_eq!(migrations.len(), 51);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -3545,6 +3545,89 @@ mod postgres_tests {
             .expect("move community hosts to 32 and apply upstream 27-31");
         assert_eq!(applied_versions(&pool).await, embedded_migration_versions());
         assert_t6_fold_objects(&pool).await;
+    }
+
+    /// The upstream tombstone migration follows the fork's existing 1-50
+    /// ledger. A revoked identity may be replaced while live uniqueness stays
+    /// enforced and the historical revocation remains queryable.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0051_preserves_revoked_installations_and_live_uniqueness() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 50).await.unwrap();
+        let ledger_before: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let old_id = uuid::Uuid::new_v4();
+        let insert = "INSERT INTO push_gateway_installations
+            (id, app_attest_key_id, app_attest_public_key, assertion_counter,
+             app_profile, token_ciphertext, token_fingerprint, endpoint_epoch,
+             expires_at, revoked_at)
+            VALUES ($1, $2, $3, 0, 'buzz-ios-dogfood', $4, $5, 1,
+                    now() + interval '1 day', $6)";
+        sqlx::query(insert)
+            .bind(old_id)
+            .bind(vec![1_u8; 32])
+            .bind(vec![2_u8; 33])
+            .bind(vec![3_u8])
+            .bind(vec![4_u8; 32])
+            .bind(Some(chrono::Utc::now()))
+            .execute(&pool)
+            .await
+            .unwrap();
+        run_migrations(&pool).await.unwrap();
+        let ledger_after: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, checksum FROM _sqlx_migrations WHERE version <= 50 ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            ledger_before, ledger_after,
+            "installed checksums stay immutable"
+        );
+        assert_eq!(applied_versions(&pool).await, embedded_migration_versions());
+        let replacement = uuid::Uuid::new_v4();
+        sqlx::query(insert)
+            .bind(replacement)
+            .bind(vec![1_u8; 32])
+            .bind(vec![2_u8; 33])
+            .bind(vec![3_u8])
+            .bind(vec![4_u8; 32])
+            .bind(None::<chrono::DateTime<chrono::Utc>>)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (key, token) in [(1_u8, 5_u8), (5_u8, 4_u8)] {
+            let error = sqlx::query(insert)
+                .bind(uuid::Uuid::new_v4())
+                .bind(vec![key; 32])
+                .bind(vec![2_u8; 33])
+                .bind(vec![3_u8])
+                .bind(vec![token; 32])
+                .bind(None::<chrono::DateTime<chrono::Utc>>)
+                .execute(&pool)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.as_database_error().unwrap().code().as_deref(),
+                Some("23505")
+            );
+        }
+        let revoked: bool = sqlx::query_scalar(
+            "SELECT revoked_at IS NOT NULL FROM push_gateway_installations WHERE id = $1",
+        )
+        .bind(old_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(revoked, "old revocation remains a tombstone");
+        run_migrations(&pool)
+            .await
+            .expect("rerunning migrations is harmless");
     }
 
     /// Verify migration 0050 applies cleanly against a DB that has rows in

@@ -28,7 +28,6 @@ import {
   buildChannelApprovalFilter,
   buildChannelFilter,
   buildChannelHistoryFilter,
-  buildChannelMentionFilter,
   buildGlobalStreamFilter,
 } from "@/shared/api/relayChannelFilters";
 import {
@@ -451,16 +450,6 @@ export class RelayClient {
         ? { onReady: optionsOrOnReady, readinessTimeoutMs }
         : optionsOrOnReady;
     return this.subscribe(filter, onEvent, options);
-  }
-  async subscribeToChannelMentionEvents(
-    channelId: string,
-    pubkey: string,
-    onEvent: (event: RelayEvent) => void,
-  ) {
-    return this.subscribe(
-      buildChannelMentionFilter(channelId, pubkey, 50),
-      onEvent,
-    );
   }
   async preconnect() {
     // Explicit re-engagement (reconnect card / community switch): clears the

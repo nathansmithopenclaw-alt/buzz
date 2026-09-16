@@ -22,7 +22,7 @@ import type {
   CapabilitySubject,
   GlobalAgentConfig,
 } from "@/shared/api/types";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import {
@@ -245,12 +245,12 @@ export function AgentManagementDelegationCard({
               >
                 <UserAvatar
                   avatarUrl={agent?.avatarUrl ?? null}
-                  displayName={agent?.name ?? truncatePubkey(pubkey)}
+                  displayName={agent?.name ?? truncateNpub(pubkey)}
                   size="sm"
                 />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm">
-                    {agent?.name ?? truncatePubkey(pubkey)}
+                    {agent?.name ?? truncateNpub(pubkey)}
                   </p>
                   <p className="text-xs text-muted-foreground">
                     {permissionCount === 1

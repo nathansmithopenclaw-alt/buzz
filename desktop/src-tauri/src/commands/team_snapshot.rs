@@ -144,6 +144,7 @@ fn definition_from_snapshot(
         respond_to,
         respond_to_allowlist: behavior.respond_to_allowlist,
         parallelism: behavior.parallelism,
+        session_policy: member.definition.session_policy,
         created_at: now.to_string(),
         updated_at: now.to_string(),
     })
@@ -591,6 +592,7 @@ pub async fn confirm_team_snapshot_import(
             max_turns_per_session: None,
             parallelism: minted_parallelism
                 .unwrap_or(crate::managed_agents::DEFAULT_AGENT_PARALLELISM),
+            session_policy: member.definition.session_policy,
             system_prompt: member.definition.system_prompt.clone(),
             model: member.definition.model.clone(),
             provider: member.definition.provider.clone(),

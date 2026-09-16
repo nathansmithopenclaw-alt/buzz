@@ -12,6 +12,7 @@ fn member(name: &str) -> AgentSnapshot {
         format: crate::managed_agents::agent_snapshot::FORMAT_DISCRIMINATOR.to_string(),
         version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
+            session_policy: Default::default(),
             name: name.to_string(),
             source_is_builtin: false,
             system_prompt: Some(format!("{name} prompt")),
@@ -56,7 +57,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
     let definitions = vec![
         AgentDefinition {
             avatar_selection: None,
-
+            session_policy: Default::default(),
             description: Some("A careful reviewer.".to_string()),
             id: "alice".to_string(),
             display_name: "Alice".to_string(),
@@ -83,7 +84,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
         },
         AgentDefinition {
             avatar_selection: None,
-
+            session_policy: Default::default(),
             description: None,
             id: "bob".to_string(),
             display_name: "Bob".to_string(),
@@ -158,7 +159,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
 fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
     let definitions = vec![AgentDefinition {
         avatar_selection: None,
-
+        session_policy: Default::default(),
         description: None,
         id: "alice".to_string(),
         display_name: "Alice".to_string(),
@@ -204,7 +205,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
     let instance = ManagedAgentRecord {
         avatar_selection: None,
         avatar_synced: Default::default(),
-
+        session_policy: Default::default(),
         description: None,
         pubkey: "a".repeat(64),
         name: "Alice".to_string(),

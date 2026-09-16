@@ -7464,43 +7464,24 @@ mod postgres_tests {
         .await
         .expect("reporter_notice outbox row");
 
-        // Pre-warm: deliver once through the full production path so the DM channel
-        // is created (open_dm is check-then-insert; concurrent creation races on the
-        // unique participant_hash index). After this delivery the DM channel exists,
-        // so both concurrent workers will hit the idempotent fast path. Delete the
-        // resulting events and reset the outbox row so the actual overlap test starts
-        // from a clean state.
+        // Pre-create only the DM: concurrent creation races on its unique
+        // participant hash. Delivering and then deleting a warm-up notice would
+        // leave its immutable journal entry behind; re-inserting that event is
+        // correctly rejected. The overlap below must be the first delivery.
         let state = state_from_pool(pool.clone()).await;
-        {
-            let lease_until = chrono::Utc::now() + chrono::Duration::seconds(30);
-            let warm_batch = state
-                .db
-                .claim_pending_admin_outbox_batch("notice-warmup", lease_until, 100)
-                .await
-                .expect("warmup claim batch");
-            let warm_row = warm_batch
-                .into_iter()
-                .find(|r| r.id == notice_outbox_id)
-                .expect("notice row in warmup batch");
-            crate::handlers::admin_outbox_worker::deliver_one(&state, &warm_row).await;
-        }
-        // Delete the events produced by the warm-up (kind:9 notice + discovery/profile
-        // events) so the concurrent test proves fresh insertion, not dedup against
-        // warm-up artefacts.
-        sqlx::query("DELETE FROM events WHERE community_id = $1")
-            .bind(community_id)
-            .execute(&pool)
-            .await
-            .expect("delete warmup events");
-        // Reset outbox row to pending so it can be re-claimed.
-        sqlx::query(
-            "UPDATE relay_admin_outbox SET state = 'pending', outbox_claim_token = NULL, \
-             held_by = NULL, lease_expires_at = NULL, attempt_count = 0 WHERE id = $1",
+        let reporter: Vec<u8> = sqlx::query_scalar(
+            "SELECT reporter_pubkey FROM moderation_reports WHERE community_id = $1 AND id = $2",
         )
-        .bind(notice_outbox_id)
-        .execute(&pool)
+        .bind(community_id)
+        .bind(report_id)
+        .fetch_one(&pool)
         .await
-        .expect("reset outbox row for overlap test");
+        .expect("reporter pubkey");
+        state
+            .db
+            .open_dm(cid, &[&reporter], &state.relay_keypair.public_key().to_bytes())
+            .await
+            .expect("pre-create reporter DM without delivering the notice");
 
         // Worker A claims the outbox row and captures the stable created_at.
         let lease_until_a = chrono::Utc::now() + chrono::Duration::seconds(30);

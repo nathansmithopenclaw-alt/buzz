@@ -445,6 +445,7 @@ fn ensure_cli_symlink_does_not_clobber_regular_file_dev() {
 
 fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
         avatar_selection: None,
 
         id: id.to_string(),
@@ -475,6 +476,7 @@ fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
 
 fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
         avatar_selection: None,
         avatar_synced: Default::default(),
 

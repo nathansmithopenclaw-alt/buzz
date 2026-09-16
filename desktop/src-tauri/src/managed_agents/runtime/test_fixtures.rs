@@ -38,7 +38,7 @@ pub(super) fn fixture(
     ManagedAgentRecord {
         avatar_selection: None,
         avatar_synced: Default::default(),
-
+        session_policy: Default::default(),
         description: None,
         pubkey: "p".into(),
         name: "n".into(),

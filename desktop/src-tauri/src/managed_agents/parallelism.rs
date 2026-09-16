@@ -83,7 +83,7 @@ mod tests {
         ManagedAgentRecord {
             avatar_selection: None,
             avatar_synced: Default::default(),
-
+            session_policy: Default::default(),
             description: None,
             pubkey: String::new(),
             name: "r".to_string(),
@@ -157,7 +157,7 @@ mod tests {
         use crate::managed_agents::types::AgentDefinition;
         AgentDefinition {
             avatar_selection: None,
-
+            session_policy: Default::default(),
             description: None,
             id: id.to_string(),
             display_name: String::new(),

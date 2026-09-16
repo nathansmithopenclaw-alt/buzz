@@ -13,6 +13,7 @@ fn resolve_effective_agent_env_user_env_wins_over_structured_fields() {
     );
     // Minimal record: only the fields resolve_effective_agent_env reads.
     let record = crate::managed_agents::types::ManagedAgentRecord {
+        session_policy: Default::default(),
         avatar_selection: None,
         avatar_synced: Default::default(),
 

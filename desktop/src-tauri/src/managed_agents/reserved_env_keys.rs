@@ -41,8 +41,6 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
-    // pi-acp's executable override is reserved for Buzz's generated launcher,
-    // which injects the managed system prompt and skills.
     "PI_ACP_PI_COMMAND",
     // Control-plane parallelism: the Desktop resolves the effective
     // worker-pool size (applying any per-harness cap) and writes it into
@@ -78,8 +76,8 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_PREFIX_BUDGET_WARNINGS",
     "BUZZ_ACP_PREFIX_CORE_WARNING_BYTES",
     "BUZZ_ACP_PREFIX_TOTAL_WARNING_BYTES",
-    // Desktop experiment policy: the Settings toggle is the sole authority
-    // for whether channel threads receive independent ACP sessions.
+    // Definition-owned policy: user env cannot override whether channel
+    // threads receive independent ACP sessions.
     "BUZZ_ACP_SESSION_POLICY",
     // Desktop experiment policy: persisted answered-event suppression is
     // controlled by the Settings toggle, not free-form agent env.

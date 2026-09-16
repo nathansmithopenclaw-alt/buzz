@@ -319,7 +319,6 @@ export function useCommunityInit(
           activeCommunity.reposDir,
           getOverrides().agentManagedProfiles === true,
           getOverrides().remoteControl === true,
-          getOverrides().threadScopedAcpSessions === true,
           getOverrides().agentSessionResidency === true,
           getOverrides().answeredEventWatermark === true,
         );

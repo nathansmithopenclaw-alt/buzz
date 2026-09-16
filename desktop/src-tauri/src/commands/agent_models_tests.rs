@@ -510,6 +510,7 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
     .expect("sample managed agent record");
 
     let persona = crate::managed_agents::AgentDefinition {
+        session_policy: Default::default(),
         avatar_selection: None,
 
         id: "persona-1".to_string(),

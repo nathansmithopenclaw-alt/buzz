@@ -131,9 +131,9 @@ pub(crate) use runtime_catalog::{record_supports_claude_accounts, runtime_primar
 pub use runtime_commands::*;
 pub use runtime_types::*;
 pub(crate) use session_policy::{
-    acp_session_policy, apply_app_acp_session_policy_env, apply_app_answered_event_watermark_env,
-    insert_acp_session_policy_env, AcpSessionPolicy, ManagedAgentExperimentState,
-    ACP_SESSION_POLICY_ENV_VAR, ANSWERED_EVENT_WATERMARK_ENV_VAR,
+    apply_acp_session_policy_env, apply_app_answered_event_watermark_env,
+    effective_acp_session_policy, insert_acp_session_policy_env, AcpSessionPolicy,
+    ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR, ANSWERED_EVENT_WATERMARK_ENV_VAR,
 };
 pub use storage::*;
 pub use teams::*;

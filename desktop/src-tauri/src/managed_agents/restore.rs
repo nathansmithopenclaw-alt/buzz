@@ -554,6 +554,24 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
     }
 }
 
+#[cfg(feature = "mesh-llm")]
+fn persist_restore_error(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    pubkey: &str,
+    error: String,
+) -> Result<(), String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    let record = find_managed_agent_mut(&mut records, pubkey)?;
+    record.updated_at = util::now_iso();
+    record.last_error = Some(error);
+    save_managed_agents(app, &records)
+}
+
 #[cfg(test)]
 mod profile_reconcile_tests {
     use super::profile_reconcile_completed;
@@ -571,22 +589,4 @@ mod profile_reconcile_tests {
             ProfileReconcileOutcome::SkippedAgentManagedProfiles
         ));
     }
-}
-
-#[cfg(feature = "mesh-llm")]
-fn persist_restore_error(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    pubkey: &str,
-    error: String,
-) -> Result<(), String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let record = find_managed_agent_mut(&mut records, pubkey)?;
-    record.updated_at = util::now_iso();
-    record.last_error = Some(error);
-    save_managed_agents(app, &records)
 }

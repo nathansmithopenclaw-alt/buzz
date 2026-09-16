@@ -18,13 +18,6 @@ pub fn set_agent_managed_profiles(enabled: bool, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-pub fn set_thread_scoped_acp_sessions(enabled: bool, state: State<'_, AppState>) {
-    state
-        .thread_scoped_acp_sessions_enabled()
-        .store(enabled, Ordering::Release);
-}
-
-#[tauri::command]
 pub fn set_agent_session_residency(enabled: bool, state: State<'_, AppState>) {
     state
         .session_residency_enabled()

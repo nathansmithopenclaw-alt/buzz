@@ -9,7 +9,7 @@ fn definition(
 ) -> AgentDefinition {
     AgentDefinition {
         avatar_selection: None,
-
+        session_policy: Default::default(),
         description: None,
         id: id.to_string(),
         display_name: "Test Definition".to_string(),
@@ -46,7 +46,7 @@ fn record(
     ManagedAgentRecord {
         avatar_selection: None,
         avatar_synced: Default::default(),
-
+        session_policy: Default::default(),
         description: None,
         pubkey: "agent-pk".to_string(),
         name: "Agent".to_string(),

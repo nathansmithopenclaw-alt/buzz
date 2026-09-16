@@ -10,14 +10,6 @@
       ]
     },
     {
-      "id": "threadScopedAcpSessions",
-      "name": "Thread Scoped ACP Sessions",
-      "description": "Give each channel thread isolated agent context. Applies when managed agents next start; DMs stay conversation-scoped.",
-      "platforms": [
-        "desktop"
-      ]
-    },
-    {
       "id": "agentSessionResidency",
       "name": "Agent Session Continuity",
       "description": "Tune idle residency and turn-count rotation, carry a bounded local handoff across predictable sleep, and warn on oversized standing prefixes. Applies when managed agents next start.",

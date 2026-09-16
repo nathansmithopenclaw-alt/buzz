@@ -224,9 +224,7 @@ pub fn build_managed_agent_summary(
                 workspace_relay: &key.relay_url,
                 global: global_config,
                 enforced_owner_only: super::owner_only_access_build(),
-                session_policy: super::acp_session_policy(
-                    app.state::<crate::app_state::AppState>().inner(),
-                ),
+
                 session_residency_enabled: app
                     .state::<crate::app_state::AppState>()
                     .session_residency_enabled()
@@ -303,6 +301,7 @@ pub fn build_managed_agent_summary(
         idle_pool_sleep_seconds: record.idle_pool_sleep_seconds,
         max_turns_per_session: record.max_turns_per_session,
         parallelism: record.parallelism,
+        session_policy: super::effective_acp_session_policy(record, personas),
         system_prompt: effective_prompt,
         avatar_url: record.avatar_url.clone(),
         avatar_sync_pending: record.avatar_selection.as_ref().is_some_and(|selection| {
@@ -850,7 +849,9 @@ pub fn spawn_agent_child(
         command.env_remove("BUZZ_ACP_THINKING_EFFORT_IS_DEFAULT");
     }
     // Resolve once and stamp the same value onto the snapshot below.
-    let acp_session_policy = super::apply_app_acp_session_policy_env(app, &mut command);
+    // Resolve once and stamp the same value onto the environment and snapshot.
+    let acp_session_policy = super::effective_acp_session_policy(record, &personas);
+    super::apply_acp_session_policy_env(&mut command, acp_session_policy);
     super::apply_app_answered_event_watermark_env(app, &mut command);
 
     crate::build_identity::apply_demo_config_home(&mut command)?;

@@ -241,7 +241,7 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
         effective.model.value.as_deref(),
         &owner_pubkey,
         LaunchPolicy {
-            session: crate::managed_agents::acp_session_policy(state),
+            session: crate::managed_agents::effective_acp_session_policy(record, &personas),
             answered_event_watermark: state
                 .answered_event_watermark_enabled()
                 .load(std::sync::atomic::Ordering::Acquire),

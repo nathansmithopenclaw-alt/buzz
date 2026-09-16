@@ -76,7 +76,7 @@ import {
   resolveAgentInstruction,
   resolvePanelProfile,
   resolveProfileDisplayName,
-  truncatePubkey,
+  truncateNpub,
   type UserProfilePanelProps,
   useRetainedPersona,
 } from "@/features/profile/ui/UserProfilePanelUtils";
@@ -667,7 +667,7 @@ export function UserProfilePanel({
       return (
         ownerProfile?.nip05Handle?.trim() ||
         ownerProfile?.displayName?.trim() ||
-        truncatePubkey(ownerPubkey)
+        truncateNpub(ownerPubkey)
       );
     }
 
@@ -679,7 +679,7 @@ export function UserProfilePanel({
     return (
       currentProfile?.nip05Handle?.trim() ||
       currentProfile?.displayName?.trim() ||
-      truncatePubkey(currentPubkey)
+      truncateNpub(currentPubkey)
     );
   }, [
     currentProfileQuery.data,

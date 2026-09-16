@@ -343,7 +343,7 @@ fn persona_with_provider(
 ) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
         avatar_selection: None,
-
+        session_policy: Default::default(),
         description: None,
         id: id.to_string(),
         display_name: id.to_string(),
@@ -1310,7 +1310,7 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
                 workspace_relay: "wss://relay.example",
                 global: &Default::default(),
                 enforced_owner_only: false,
-                session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
+
                 session_residency_enabled: false,
             },
         ),
