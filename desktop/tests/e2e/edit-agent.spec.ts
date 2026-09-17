@@ -297,6 +297,8 @@ test.describe("edit agent dialog", () => {
         {
           pubkey: AGENT_PUBKEY,
           name: AGENT_NAME,
+          // Bundled defaults belong to Buzz Agent, not the default Goose fixture.
+          runtime: "buzz-agent",
           status: "stopped",
           channelNames: ["agents"],
         },
@@ -334,6 +336,8 @@ test.describe("edit agent dialog", () => {
         {
           pubkey: AGENT_PUBKEY,
           name: AGENT_NAME,
+          // Bundled defaults belong to Buzz Agent, not the default Goose fixture.
+          runtime: "buzz-agent",
           status: "stopped",
           channelNames: ["agents"],
         },
@@ -355,6 +359,37 @@ test.describe("edit agent dialog", () => {
     await expect(
       defaults.getByText("claude-opus-4-5", { exact: true }),
     ).toBeVisible();
+  });
+
+  test("keeps bundled baked and global defaults out of a different runtime", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      bakedBuildEnv: BAKED_DEFAULTS,
+      globalAgentConfig: {
+        preferred_runtime: "buzz-agent",
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+      },
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          runtime: "goose",
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+
+    await expect(page.locator("#edit-agent-llm-provider")).toHaveText(
+      "Select a provider…",
+    );
+    await expect(page.locator("#edit-agent-model")).not.toContainText(
+      "claude-opus",
+    );
   });
 
   test("profile Edit routes persona-linked agents to the definition editor", async ({

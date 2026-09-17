@@ -25,3 +25,9 @@ Additional compatibility edits outside the conflict: the fork-only Summary autho
 ## Verification and scope
 
 Validation is pending at this commit and is recorded in the evidence directory. This source merge alone is not a passing release, installation, shared relay deployment, or mobile distribution. Existing browser gate issues retain their current owners.
+
+## Editor gate classification and fixture correction
+
+Fresh browser tests against the unchanged `9a06a910f` application reproduced the two inherited-label failures 6/6, at the named provider assertion. Source review identified a fixture/contract mismatch: the shared Tyler fixture selects Goose, while `getInheritedAgentDefaults` and the contributor contract scope structured global defaults to the preferred runtime (Buzz Agent when unset), and bundled provider/model defaults to Buzz Agent only.
+
+The two existing assertions remain unchanged. Their fixtures now explicitly select `buzz-agent`. A third browser test asserts that a Goose instance does not inherit the Buzz Agent global or bundled provider/model. The initial corrected run passed 9/9 against the exact same frozen application assets. This corrects stale test setup; it does not restore cross-runtime model leakage or change product code. The full repeat and release batteries are recorded in the external evidence directory. Existing D-365a4001 and D-ac89d28b assignments are not changed or awakened.
