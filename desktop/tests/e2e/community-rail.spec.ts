@@ -1497,6 +1497,8 @@ test.describe("community rail", () => {
     const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
     await expect(buttonA).toBeVisible();
     await expect(buttonB).toBeVisible();
+    await waitForStableLayout(buttonA);
+    await waitForStableLayout(buttonB);
 
     // Focus B (the second/lower item) and use keyboard to move it above A.
     // Note: page.keyboard.press("Space") fires the button's native click on this
@@ -1518,8 +1520,17 @@ test.describe("community rail", () => {
         }),
       );
     }, `community-rail-button-${COMMUNITY_B.id}`);
+    // Wait for activation before the sensor receives movement, then for its
+    // announced collision target before dropping. Back-to-back key events can
+    // otherwise precede sensor attachment or its deferred collision update.
+    await expect(buttonB).toHaveAttribute("aria-pressed", "true");
     // ArrowUp moves the active item one slot up.
     await page.keyboard.press("ArrowUp");
+    await expect(
+      page.getByRole("status").filter({
+        hasText: `Draggable item ${COMMUNITY_B.id} was moved over droppable area ${COMMUNITY_A.id}.`,
+      }),
+    ).toHaveCount(1);
     // Space drops the item — same synthetic dispatch for consistency.
     await page.evaluate((testId) => {
       const el = document.querySelector(`[data-testid="${testId}"]`);

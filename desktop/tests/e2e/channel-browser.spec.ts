@@ -413,6 +413,66 @@ test("Enter with no matches jumps to create", async ({ page }) => {
   );
 });
 
+// Flush the urgent input update, then submit before React's deferred list can
+// catch up in a later task. This pins the race observed by the native-key test.
+async function submitBeforeSearchSettles(page: Page, query: string) {
+  await page.goto("/");
+  await openChannelBrowser(page);
+  const search = page.getByTestId("channel-browser-search");
+  await expect(search).toBeVisible();
+  await expect(page.getByTestId("browse-channel-agents")).toBeVisible();
+  const state = await search.evaluate(async (element, value) => {
+    const input = element as HTMLInputElement;
+    input.focus();
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    if (!setter) throw new Error("Native input setter missing");
+    setter.call(input, value);
+    input.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: value,
+      }),
+    );
+    await Promise.resolve();
+    const createLabel = document.querySelector(
+      '[data-testid="channel-browser-create-row"]',
+    )?.textContent;
+    const oldResultStillMounted =
+      document.querySelector('[data-testid="browse-channel-agents"]') !== null;
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    return { createLabel, oldResultStillMounted };
+  }, query);
+  expect(state.createLabel).toContain(query);
+  expect(state.oldResultStillMounted).toBe(true);
+}
+
+test("Enter on an unmatched live query never selects a deferred result", async ({
+  page,
+}) => {
+  const query = "brand-new-channel-from-enter";
+  await submitBeforeSearchSettles(page, query);
+  await expect(page.getByTestId("create-channel-name")).toHaveValue(query);
+});
+
+test("Enter on a matching live query selects its match instead of a deferred result", async ({
+  page,
+}) => {
+  // A partial match keeps the live create label observable as the precondition.
+  await submitBeforeSearchSettles(page, "desig");
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("chat-title")).toHaveText("design");
+});
+
 test("arrow keys reach the pinned create row and Enter activates it", async ({
   page,
 }) => {

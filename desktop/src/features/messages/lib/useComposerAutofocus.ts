@@ -22,6 +22,8 @@ import * as React from "react";
  *    channel, or in-flight send at the moment of mount).
  *  - Skip if focus already lives in another text-entry surface (open
  *    dialog input, search box, etc.) so we don't yank focus from the user.
+ *  - Preserve open overlay controls, including switches and menu items,
+ *    when the editor becomes ready after the user has opened that overlay.
  */
 export function useComposerAutofocus(
   focus: () => void,
@@ -39,6 +41,15 @@ export function useComposerAutofocus(
     if (typeof document === "undefined") return;
     const active = document.activeElement as HTMLElement | null;
     if (active && active !== document.body) {
+      const overlay = active.closest(
+        '[role="dialog"], [role="menu"], [role="listbox"], dialog[open]',
+      );
+      if (
+        (overlay && overlay.getAttribute("data-state") !== "closed") ||
+        active.matches('[aria-haspopup][aria-expanded="true"]')
+      ) {
+        return;
+      }
       const tag = active.tagName;
       if (
         tag === "INPUT" ||
