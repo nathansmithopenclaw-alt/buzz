@@ -2,6 +2,12 @@
   "version": 1,
   "features": [
     {
+      "id": "agentBrowsers",
+      "name": "Agent browsers",
+      "description": "Show the Browser panel to opt in to local browser tools and inspect agent browser sessions. Hiding the panel does not disable enabled tools.",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "workflows",
       "name": "Workflows",
       "description": "YAML-defined automations with approval gates",
