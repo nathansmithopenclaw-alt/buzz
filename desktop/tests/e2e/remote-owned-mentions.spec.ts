@@ -521,7 +521,18 @@ for (const incoming of ["unrelated thread B draft", "@RemoteScout hello"]) {
     await waitForInviteGate(page);
     await expect(input).toHaveText("");
     await input.fill("new authored text");
-    await input.fill("");
+    // This race deliberately edits behind the pending invitation modal. A
+    // keyboard Delete is captured by its focus trap, so drive a real editor
+    // transaction just as the external navigation below drives its handler.
+    await input.evaluate((element) => {
+      const editor = (
+        element as HTMLElement & {
+          editor: { commands: { clearContent: (emitUpdate: boolean) => void } };
+        }
+      ).editor;
+      editor.commands.clearContent(true);
+    });
+    await expect(input).toHaveText("");
     const sourceRecord = () =>
       page.evaluate(([root, otherRoot]) => {
         const key = Object.keys(localStorage).find((key) =>

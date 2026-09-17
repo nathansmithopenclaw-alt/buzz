@@ -691,20 +691,44 @@ test("reconnect backfills more missed channel messages than the live subscriptio
   // prepend restores the visible anchor away from the top. Reaching "missed
   // 001" proves reconnect backfilled past the live-subscription limit.
   await timeline.hover();
-  await expect
-    .poll(
-      async () => {
-        // Compact same-author rows can leave the restored viewport inside the
-        // sentinel band. Move down first so the next upward gesture creates the
-        // leave→enter transition that arms another bounded page.
-        await page.mouse.wheel(0, 1200);
-        await page.waitForTimeout(40);
-        await page.mouse.wheel(0, -6000);
-        return timeline.evaluate((element) =>
-          (element.textContent ?? "").includes("reconnect e2e missed 001"),
-        );
-      },
-      { intervals: [100, 150, 250], timeout: 15_000 },
+  for (let pageIndex = 0; pageIndex < 8; pageIndex += 1) {
+    const target = "reconnect e2e missed 001";
+    if (
+      await timeline.evaluate(
+        (el, text) => el.textContent?.includes(text),
+        target,
+      )
     )
-    .toBe(true);
+      break;
+    const oldestBefore = await timeline.evaluate((el) =>
+      el
+        .closest("[data-oldest-message-id]")
+        ?.getAttribute("data-oldest-message-id"),
+    );
+    await page.mouse.wheel(0, 1200);
+    // A wheel RPC can finish before the compositor moves the viewport. Prove
+    // we left the sentinel before sending the next upward gesture.
+    await expect
+      .poll(() => timeline.evaluate((el) => el.scrollTop))
+      .toBeGreaterThan(500);
+    await page.mouse.wheel(
+      0,
+      -(await timeline.evaluate((el) => el.scrollHeight)),
+    );
+    await expect
+      .poll(
+        () =>
+          timeline.evaluate(
+            (el, previous) =>
+              el.textContent?.includes("reconnect e2e missed 001") ||
+              el
+                .closest("[data-oldest-message-id]")
+                ?.getAttribute("data-oldest-message-id") !== previous,
+            oldestBefore,
+          ),
+        { timeout: 5_000 },
+      )
+      .toBe(true);
+  }
+  await expect(timeline).toContainText("reconnect e2e missed 001");
 });

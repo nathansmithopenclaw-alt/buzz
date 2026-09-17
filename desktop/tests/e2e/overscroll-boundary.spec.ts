@@ -36,7 +36,12 @@ test("locks viewport rubber-band outside conversation scrollers", async ({
 }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("message-timeline")).toBeVisible();
+  // The loading host has the same test id until the virtualized scroller
+  // mounts. Only the actual conversation scroller owns wheel handling.
+  await expect(page.getByTestId("message-timeline")).toHaveAttribute(
+    "data-virtua-estimate-call-count",
+    /^\d+$/,
+  );
 
   await expect(
     dispatchWheelPrevented(page, '[data-testid="app-top-chrome"]', {
@@ -84,7 +89,12 @@ test("locks viewport rubber-band outside conversation scrollers", async ({
 test("locks horizontal viewport pan everywhere", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("message-timeline")).toBeVisible();
+  // The loading host has the same test id until the virtualized scroller
+  // mounts. Only the actual conversation scroller owns wheel handling.
+  await expect(page.getByTestId("message-timeline")).toHaveAttribute(
+    "data-virtua-estimate-call-count",
+    /^\d+$/,
+  );
 
   for (const deltaX of [-120, 120]) {
     await expect(

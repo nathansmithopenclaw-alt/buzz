@@ -541,6 +541,20 @@ test("primary+Shift+M favors the most recently mentioned eligible agent", async 
   await input.press("ArrowLeft");
   await input.press("ArrowLeft");
   await expect.poll(() => readComposerCaret(input)).toBe(8);
+  // Native cursor movement reaches the DOM before ProseMirror processes
+  // selectionchange. Establish the editor selection before the shortcut.
+  await expect
+    .poll(() =>
+      input.evaluate((element) => {
+        const editor = (
+          element as HTMLElement & {
+            editor: { state: { selection: { from: number } } };
+          }
+        ).editor;
+        return editor.state.selection.from;
+      }),
+    )
+    .toBe(9);
   await pressPrimaryShiftM(page);
 
   await expect(input).toHaveText("@Vogue draft text");
@@ -618,7 +632,13 @@ test("the mention button opens settings and can undo an address", async ({
   await expect(
     composer.getByRole("button", { name: "Mention someone" }),
   ).toBeVisible();
-  await input.fill("");
+  // Keyboard selection updates ProseMirror before Delete; fill("") only
+  // selects the DOM range and can race the editor's selectionchange handler.
+  await input.press("ControlOrMeta+A");
+  await input.press("Backspace");
+  await expect(input).toHaveText("");
+  await composer.getByRole("button", { name: "Mention someone" }).click();
+  await expect(menu).toBeVisible();
 
   await menu
     .getByRole("button", { name: "Mention Morgarita", exact: true })

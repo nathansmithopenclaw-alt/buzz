@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { truncateNpub } from "../../src/shared/lib/pubkey";
-import { waitForAnimations } from "../helpers/animations";
+import { waitForAnimations, waitForStableLayout } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 declare global {
@@ -27,9 +27,9 @@ async function openCreateWorkflow(
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
   const channelList = page.getByTestId("channel-combobox-list");
-  if (!(await channelList.isVisible())) {
-    await dialog.getByRole("combobox", { name: "Channel" }).click();
-  }
+  // A new workflow opens its channel picker after the mounting pointer event.
+  // Waiting for that state avoids toggling it closed while it is opening.
+  await expect(channelList).toBeVisible();
   await channelList
     .getByRole("option", { name: "agents", exact: true })
     .click();
@@ -161,6 +161,7 @@ test("inserts template variables with keyboard control and restores the caret", 
   await expect(listbox).toBeVisible();
   await expect(listbox.getByRole("option")).toHaveCount(5);
   await waitForAnimations(page);
+  await waitForStableLayout(listbox);
   expect(await page.locator("body").screenshot()).toMatchSnapshot(
     "workflow-template-variable-autocomplete.png",
   );
@@ -561,9 +562,9 @@ test("does not select stale picker results when Enter outruns deferred filtering
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
   const channelList = page.getByTestId("channel-combobox-list");
-  if (!(await channelList.isVisible())) {
-    await dialog.getByRole("combobox", { name: "Channel" }).click();
-  }
+  // A new workflow opens its channel picker after the mounting pointer event.
+  // Waiting for that state avoids toggling it closed while it is opening.
+  await expect(channelList).toBeVisible();
   await channelList
     .getByRole("option", { name: "agents", exact: true })
     .click();

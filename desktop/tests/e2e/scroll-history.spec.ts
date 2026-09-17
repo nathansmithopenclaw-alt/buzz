@@ -1316,6 +1316,24 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
     return element && element.scrollHeight > element.clientHeight * 3;
   });
 
+  // A real reader gesture releases initial bottom-follow intent. Assigning
+  // scrollTop alone is a layout write and intentionally does not retire it.
+  await timeline.hover();
+  await page.mouse.wheel(0, -120);
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (el) => el.scrollHeight - el.clientHeight - el.scrollTop,
+      ),
+    )
+    .toBeGreaterThan(32);
+  const oldestBeforePrepend = await timeline.evaluate((el) =>
+    el
+      .closest("[data-oldest-message-id]")
+      ?.getAttribute("data-oldest-message-id"),
+  );
+  expect(oldestBeforePrepend).toBeTruthy();
+
   // Land a genuine prepend first. This is what turns `shift` on; subsequent
   // ordinary list updates and measurements must happen with it cleared.
   const scrollHeightBeforePrepend = (await getTimelineMetrics(page))
@@ -1335,6 +1353,16 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
     )
     .toBeGreaterThan(scrollHeightBeforePrepend + 2_000);
 
+  await expect
+    .poll(() =>
+      timeline.evaluate((el) =>
+        el
+          .closest("[data-oldest-message-id]")
+          ?.getAttribute("data-oldest-message-id"),
+      ),
+    )
+    .not.toBe(oldestBeforePrepend);
+
   // Simulate a fast trackpad pass through several middle-page ranges, then
   // stop. The final evaluate emits the last scroll event; all coverage samples
   // after it are passive observations.
@@ -1346,6 +1374,14 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
     }
   });
   await page.waitForTimeout(250);
+
+  const middlePosition = await getTimelineMetrics(page);
+  expect(middlePosition.scrollTop).toBeGreaterThan(middlePosition.clientHeight);
+  expect(
+    middlePosition.scrollHeight -
+      middlePosition.clientHeight -
+      middlePosition.scrollTop,
+  ).toBeGreaterThan(middlePosition.clientHeight);
 
   const viewportCoverage = () =>
     timeline.evaluate((element) => {

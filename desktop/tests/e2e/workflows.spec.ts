@@ -15,14 +15,10 @@ async function navigateToWorkflows(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("workflows-view")).toBeVisible();
 }
 
-async function selectWorkflowChannel(
-  page: import("@playwright/test").Page,
-  dialog: import("@playwright/test").Locator,
-) {
+async function selectWorkflowChannel(page: import("@playwright/test").Page) {
   const channelList = page.getByTestId("channel-combobox-list");
-  if (!(await channelList.isVisible())) {
-    await dialog.getByRole("combobox", { name: "Channel" }).click();
-  }
+  // A new workflow opens its channel picker after the mounting pointer event.
+  // Waiting for that state avoids toggling it closed while it is opening.
   await expect(channelList).toBeVisible();
   await waitForAnimations(page);
   await channelList
@@ -61,7 +57,7 @@ async function createWorkflow(
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
   await expect(dialog).toBeVisible();
 
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page);
   await editWorkflowName(dialog, name);
   if (options?.description) {
     await dialog.getByRole("tab", { name: "YAML" }).click();
@@ -96,7 +92,11 @@ async function createWorkflow(
 
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  // The trigger inspector also has a Message text field while the step
+  // inspector is entering. Wait for the step's own editor before filling it.
+  await dialog
+    .locator('textarea[id^="wf-step-"][id$="-text"]')
+    .fill("Workflow notification");
   if (options?.stepName) {
     await dialog.getByRole("button", { name: "Step details" }).click();
     await dialog.getByLabel("Name (optional)").fill(options.stepName);
@@ -178,7 +178,7 @@ test("creation reveals the trigger pane only after a one-shot channel pick", asy
     .toBe(0);
   await expect(channelList).not.toBeVisible();
 
-  await dialog.getByRole("combobox", { name: "Channel" }).click();
+  await dialog.getByRole("combobox", { name: "Channel", exact: true }).click();
   await channelList
     .getByRole("option", { name: "agents", exact: true })
     .click();
@@ -230,7 +230,7 @@ test("accepts the generated name through the first form mutation", async ({
   await page.getByRole("button", { name: "Create Workflow" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page);
   const generatedName = (
     await dialog
       .getByRole("button", { name: "Edit workflow name" })
@@ -254,7 +254,7 @@ test("disables autocapitalization in the workflow form", async ({ page }) => {
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
 
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page);
   await dialog.getByRole("button", { name: "Edit workflow name" }).click();
   await expect(
     dialog.getByRole("textbox", { name: "Workflow name" }),
@@ -276,7 +276,7 @@ test("shows executable guidance for diff trigger conditions", async ({
 
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page);
   await dialog.getByRole("button", { name: "Trigger event" }).click();
   await page
     .getByRole("menuitem", { name: "Diff Posted", exact: true })
@@ -568,7 +568,7 @@ test("duplicates a workflow", async ({ page }) => {
 
   // Submit the duplicate after deliberately choosing its destination channel.
   const dialog = page.getByRole("dialog", { name: "Duplicate workflow" });
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page);
   await dialog.getByRole("button", { name: "Create copy" }).click();
   const activationConfirmation = page.getByRole("alertdialog", {
     name: "This workflow may run often",
@@ -696,7 +696,7 @@ test("captures the built editor at desktop and narrow widths", async ({
   await navigateToWorkflows(page);
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page);
   await editWorkflowName(dialog, "editor_screenshot");
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
@@ -728,7 +728,7 @@ test("preserves final sequence affordances and responsive inspector behavior", a
   await navigateToWorkflows(page);
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page);
   await editWorkflowName(dialog, "sequence_parity_test");
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
@@ -800,7 +800,7 @@ test("pane routes use stable IDs and Form/YAML changes stay synchronized", async
   await navigateToWorkflows(page);
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page);
   await editWorkflowName(dialog, "pane_sync_test");
 
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
@@ -893,7 +893,7 @@ test("dirty create close is blocked and keep editing preserves the draft", async
   await navigateToWorkflows(page);
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page);
   await editWorkflowName(dialog, "preserved_dirty_draft");
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
 

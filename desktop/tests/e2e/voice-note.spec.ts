@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { waitForAnimations } from "../helpers/animations";
+import { waitForAnimations, waitForStableLayout } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 import { expectSmoothCorners } from "../helpers/css";
 import { PREVIEW_ORIGIN } from "./previewOrigin";
@@ -651,6 +651,7 @@ test("records from the composer and renders an inline waveform card", async ({
   const composerCard = page.getByTestId("composer-voice-note-card");
   await expect(composerCard).toBeVisible();
   await waitForAnimations(page);
+  await waitForStableLayout(composerCard);
   const composerCardBox = await composerCard.boundingBox();
   expect(composerCardBox).not.toBeNull();
   expect(

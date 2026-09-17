@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import { PREVIEW_ORIGIN } from "./previewOrigin";
+
 import { KIND_HUDDLE_STARTED } from "../../src/shared/constants/kinds";
 import { installMockBridge } from "../helpers/bridge";
 
@@ -31,7 +33,7 @@ async function expectCopyLinkUnavailable(row: Locator, messageId: string) {
 
 test.beforeEach(async ({ page }) => {
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
-    origin: "http://127.0.0.1:4173",
+    origin: PREVIEW_ORIGIN,
   });
   await installMockBridge(page);
 });

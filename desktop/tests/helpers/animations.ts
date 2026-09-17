@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 
 /**
  * Wait for finishing CSS/Web animations on the page to complete, bounded by a
@@ -28,4 +28,36 @@ export async function waitForAnimations(
     );
     return Promise.race([settled.then(() => undefined), ceilingHit]);
   }, timeoutMs);
+}
+
+/** Wait for layout, including Motion's JS-driven springs, to stop moving. */
+export async function waitForStableLayout(locator: Locator): Promise<void> {
+  let previous: number[] | null = null;
+  let stableSince = 0;
+  await expect
+    .poll(
+      async () => {
+        const box = await locator.boundingBox();
+        if (!box) {
+          previous = null;
+          return false;
+        }
+        const current = [box.x, box.y, box.width, box.height];
+        const now = Date.now();
+        const prior = previous;
+        if (
+          !prior ||
+          current.some((value, i) => Math.abs(value - prior[i]) > 0.01)
+        ) {
+          stableSince = now;
+        }
+        previous = current;
+        return now - stableSince >= 100;
+      },
+      {
+        message: "element layout settles before interaction/measurement",
+        intervals: [50],
+      },
+    )
+    .toBe(true);
 }

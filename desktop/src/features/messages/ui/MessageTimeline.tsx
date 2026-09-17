@@ -755,6 +755,7 @@ const MessageTimelineBase = React.forwardRef<
             useTimelineVirtualizer && showMessageList ? undefined : "true"
           }
           data-scroll-restoration-id={scrollRestorationId}
+          data-oldest-message-id={renderedMessages[0]?.id}
           data-testid={
             useTimelineVirtualizer && showMessageList
               ? undefined

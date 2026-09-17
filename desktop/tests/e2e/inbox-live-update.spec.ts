@@ -325,7 +325,10 @@ test.describe("inbox stable-conversation regressions", () => {
       ) as HTMLElement | null;
       if (!pane) return;
       pane.scrollTop = pane.scrollHeight; // go to bottom
-      const mid = Math.max(1, Math.floor(pane.scrollHeight / 2));
+      const mid = Math.max(
+        1,
+        Math.floor((pane.scrollHeight - pane.clientHeight) / 2),
+      );
       pane.scrollTop = mid; // settle at mid
     });
     // State-based wait: scroll must be non-zero before proceeding.
@@ -347,6 +350,14 @@ test.describe("inbox stable-conversation regressions", () => {
     );
     await expect(composer).toBeFocused();
 
+    // Prove this is a history reader, not a bottom-pinned reader. Half the
+    // content height can exceed maxScrollTop and silently clamp to bottom.
+    const bottomGap = await detail
+      .locator("[aria-busy]")
+      .evaluate(
+        (pane) => pane.scrollHeight - pane.clientHeight - pane.scrollTop,
+      );
+    expect(bottomGap).toBeGreaterThan(100);
     // Reset scroll spy so only calls from the live update are counted.
     await resetScrollIntoViewCount(page);
 
@@ -358,8 +369,23 @@ test.describe("inbox stable-conversation regressions", () => {
     ).toBeVisible();
 
     // ── 1: scroll position preserved ──────────────────────────────────
-    const scrollTopAfter = await getScrollTop(page);
-    expect(Math.abs(scrollTopAfter - scrollTopBefore)).toBeLessThanOrEqual(2);
+    await expect(
+      detail.locator(`[data-message-id="${"c2".repeat(32)}"]`),
+    ).toHaveCount(1);
+    // Observe the whole settle period: a single early sample can precede a
+    // delayed scroll adjustment and falsely pass.
+    const maxScrollDrift = await detail
+      .locator("[aria-busy]")
+      .evaluate(async (pane, before) => {
+        let maxDrift = 0;
+        const until = performance.now() + 400;
+        while (performance.now() < until) {
+          maxDrift = Math.max(maxDrift, Math.abs(pane.scrollTop - before));
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        return maxDrift;
+      }, scrollTopBefore);
+    expect(maxScrollDrift).toBeLessThanOrEqual(2);
 
     // ── 2a: draft text preserved ───────────────────────────────────────
     await expect(composer).toHaveText(

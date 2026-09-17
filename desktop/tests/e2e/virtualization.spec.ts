@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -13,6 +13,35 @@ const FORUM_DEEPLINK_REPLY_ID = "mock-forum-release-deeplink";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const SECTION_TOP = { id: "sec-top", name: "Priority", order: 0 };
 const SECTION_BOTTOM = { id: "sec-bottom", name: "Archive", order: 1 };
+
+// Preserve gesture cadence independently of compositor acknowledgement latency.
+async function wheelBurst(
+  page: Page,
+  box: { x: number; y: number; width: number; height: number },
+  deltas: number[],
+  intervalMs: number,
+) {
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await Promise.all(
+      deltas.map((deltaY, index) =>
+        new Promise<void>((resolve) =>
+          setTimeout(resolve, index * intervalMs),
+        ).then(() =>
+          cdp.send("Input.dispatchMouseEvent", {
+            type: "mouseWheel",
+            x: box.x + box.width / 2,
+            y: box.y + box.height / 2,
+            deltaX: 0,
+            deltaY,
+          }),
+        ),
+      ),
+    );
+  } finally {
+    await cdp.detach();
+  }
+}
 
 async function seedChannelSections(page: Page) {
   await page.addInitScript(
@@ -338,8 +367,27 @@ test.describe("list virtualization", () => {
         let previousScrollTop = s.scrollTop;
         let maxBoundaryRollback = 0;
         let minScrollTop = s.scrollTop;
-        const deadline = performance.now() + 120;
-        while (performance.now() < deadline) {
+        const root = s.closest("[data-oldest-message-id]");
+        const oldest = root?.getAttribute("data-oldest-message-id");
+        let totalDeltaY = 0;
+        let lastInputAt = performance.now();
+        const recordWheel = (event: WheelEvent) => {
+          if (event.ctrlKey) return;
+          totalDeltaY += event.deltaY;
+          lastInputAt = performance.now();
+        };
+        s.addEventListener("wheel", recordWheel);
+        const deadline = performance.now() + 5_000;
+        while (
+          performance.now() < deadline &&
+          (totalDeltaY > -125 || performance.now() - lastInputAt < 100)
+        ) {
+          // A prepend's intentional offset correction belongs to the next
+          // phase, not the pre-commit boundary rollback measurement.
+          if (root?.getAttribute("data-oldest-message-id") !== oldest) {
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+            continue;
+          }
           maxBoundaryRollback = Math.max(
             maxBoundaryRollback,
             s.scrollTop - previousScrollTop,
@@ -348,16 +396,15 @@ test.describe("list virtualization", () => {
           minScrollTop = Math.min(minScrollTop, s.scrollTop);
           await new Promise((resolve) => requestAnimationFrame(resolve));
         }
-        return { maxBoundaryRollback, minScrollTop };
+        s.removeEventListener("wheel", recordWheel);
+        return { maxBoundaryRollback, minScrollTop, totalDeltaY };
       });
       const box = await timeline.boundingBox();
       if (!box) throw new Error("timeline has no bounding box");
       await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-      for (const deltaY of [-60, -30, -20, -15]) {
-        await page.mouse.wheel(0, deltaY);
-        await page.waitForTimeout(12);
-      }
+      await wheelBurst(page, box, [-60, -30, -20, -15], 12);
       const wheelTrace = await wheelTracePromise;
+      expect(wheelTrace.totalDeltaY).toBe(-125);
       expect(wheelTrace.minScrollTop).toBeLessThanOrEqual(350);
       expect(wheelTrace.maxBoundaryRollback).toBeLessThan(5);
       // Linux Chromium delivers CDP wheel input with more latency than macOS,
@@ -445,19 +492,53 @@ test.describe("list virtualization", () => {
       // completed prepend before the next upward load.
       const exitTracePromise = timeline.evaluate(async (scroller) => {
         const s = scroller as HTMLElement;
-        const startScrollTop = s.scrollTop;
-        let previousScrollTop = startScrollTop;
-        let maxForwardTravel = 0;
-        let maxRollback = 0;
-        const deadline = performance.now() + 400;
-        while (performance.now() < deadline) {
-          const travel = s.scrollTop - startScrollTop;
-          maxForwardTravel = Math.max(maxForwardTravel, travel);
-          maxRollback = Math.max(maxRollback, previousScrollTop - s.scrollTop);
-          previousScrollTop = s.scrollTop;
+        const start = performance.now();
+        const viewport = s.getBoundingClientRect();
+        const visualAnchor = [
+          ...s.querySelectorAll<HTMLElement>("[data-message-id]"),
+        ].find((row) => {
+          const bounds = row.getBoundingClientRect();
+          const midpoint = viewport.top + viewport.height / 2;
+          return bounds.top <= midpoint && bounds.bottom >= midpoint;
+        });
+        if (!visualAnchor)
+          throw new Error("No visible reading anchor before wheel input");
+        // Virtualizer spacer refinement changes scrollTop without moving the
+        // reader. Measure the same visible row, retaining the movement bars.
+        const visualStart = visualAnchor.getBoundingClientRect().top;
+        let visualPrevious = visualStart;
+        let visualTravel = 0;
+        let visualRollback = 0;
+        let totalDeltaY = 0;
+        let lastInputAt = start;
+        const recordInput = (event: WheelEvent) => {
+          totalDeltaY += event.deltaY;
+          lastInputAt = performance.now();
+        };
+        s.addEventListener("wheel", recordInput);
+        // Start the settle window after the complete gesture arrives.
+        // Chromium may coalesce inputs, so count delta rather than events.
+        const deadline = start + 5_000;
+        while (
+          performance.now() < deadline &&
+          (totalDeltaY < 300 || performance.now() - lastInputAt < 400)
+        ) {
+          if (!visualAnchor.isConnected)
+            throw new Error(
+              "Reading anchor unmounted during wheel observation",
+            );
+          const visualTop = visualAnchor.getBoundingClientRect().top;
+          visualTravel = Math.max(visualTravel, visualStart - visualTop);
+          visualRollback = Math.max(visualRollback, visualTop - visualPrevious);
+          visualPrevious = visualTop;
           await new Promise((resolve) => requestAnimationFrame(resolve));
         }
-        return { maxForwardTravel, maxRollback };
+        s.removeEventListener("wheel", recordInput);
+        return {
+          totalDeltaY,
+          visualTravel,
+          visualRollback,
+        };
       });
       const exitBox = await timeline.boundingBox();
       if (!exitBox) throw new Error("timeline has no bounding box");
@@ -465,13 +546,11 @@ test.describe("list virtualization", () => {
         exitBox.x + exitBox.width / 2,
         exitBox.y + exitBox.height / 2,
       );
-      for (const deltaY of [120, 100, 80]) {
-        await page.mouse.wheel(0, deltaY);
-        await page.waitForTimeout(12);
-      }
+      await wheelBurst(page, exitBox, [120, 100, 80], 12);
       const exitTrace = await exitTracePromise;
-      expect(exitTrace.maxForwardTravel).toBeGreaterThan(200);
-      expect(exitTrace.maxRollback).toBeLessThan(5);
+      expect(exitTrace.totalDeltaY).toBe(300);
+      expect(exitTrace.visualTravel).toBeGreaterThan(200);
+      expect(exitTrace.visualRollback).toBeLessThan(5);
 
       // Loading more history must not return keepMounted to its old linear
       // growth. Virtua still retains every measured size for spacer geometry;
@@ -492,7 +571,7 @@ test.describe("list virtualization", () => {
     // KEEPS ARRIVING through fetch resolution. Every prepend-compensation
     // mechanism is a scrollTop write, and macOS WebKit can drop those writes
     // while trackpad momentum owns the offset — so the contract under test is
-    // that the fetched page's RENDER COMMIT (the scrollHeight jump) is
+    // that the fetched page's RENDER COMMIT (the admitted history boundary) is
     // deferred until input quiesces, and that the at-rest commit then holds
     // the anchored row. Chromium cannot reproduce the dropped write itself;
     // it CAN prove the commit-at-rest scheduling that makes it unreachable.
@@ -513,22 +592,51 @@ test.describe("list virtualization", () => {
 
     // In-page observer: tracks the last wheel-input timestamp, captures the
     // first at-rest anchor after input stops, and records when the prepend
-    // commit (scrollHeight jump) lands relative to the last input.
+    // admitted history boundary changes relative to the last input.
     const tracePromise = timeline.evaluate(async (scroller) => {
       const s = scroller as HTMLElement;
-      const baseHeight = s.scrollHeight;
+      // Virtua refines estimated row heights while scrolling. A height jump
+      // alone can happen with exactly the same admitted messages, so observe
+      // the rendered snapshot's oldest identity at the production boundary.
+      const timelineRoot = s.closest("[data-oldest-message-id]");
+      const oldestBefore = timelineRoot?.getAttribute("data-oldest-message-id");
+      if (!timelineRoot || !oldestBefore)
+        throw new Error("Rendered history boundary missing");
       let lastInputTs = 0;
+      let firstInputTs = 0;
+      let inputCount = 0;
+      let totalDeltaY = 0;
       let sawInput = false;
       let restAnchor: { id: string; top: number } | null = null;
-      const onWheel = () => {
+      const onWheel = (event: WheelEvent) => {
+        totalDeltaY += event.deltaY;
         lastInputTs = performance.now();
+        if (!sawInput) firstInputTs = lastInputTs;
+        inputCount += 1;
         sawInput = true;
         // Input after a lull invalidates any anchor captured during it —
         // the commit must be measured against the FINAL at-rest position.
-        restAnchor = null;
+        if (commit === null) restAnchor = null;
       };
       s.addEventListener("wheel", onWheel, { passive: true });
-      let commit: { ts: number; gapSinceInput: number } | null = null;
+      let commit: {
+        ts: number;
+        gapSinceInput: number;
+        inputCount: number;
+      } | null = null;
+      const admissionObserver = new MutationObserver(() => {
+        if (
+          commit === null &&
+          timelineRoot?.getAttribute("data-oldest-message-id") !== oldestBefore
+        ) {
+          const now = performance.now();
+          commit = { ts: now, gapSinceInput: now - lastInputTs, inputCount };
+        }
+      });
+      admissionObserver.observe(timelineRoot, {
+        attributes: true,
+        attributeFilter: ["data-oldest-message-id"],
+      });
       let sawSpinnerDuringHold = false;
       let anchorDriftAfterCommit: number | null = null;
       const deadline = performance.now() + 8_000;
@@ -560,9 +668,6 @@ test.describe("list virtualization", () => {
               };
             }
           }
-          if (s.scrollHeight > baseHeight + 800) {
-            commit = { ts: now, gapSinceInput: now - lastInputTs };
-          }
         } else if (restAnchor !== null) {
           const anchor = restAnchor;
           const scrollerTop = s.getBoundingClientRect().top;
@@ -578,34 +683,51 @@ test.describe("list virtualization", () => {
             );
           }
           // Watch a settle window after the commit, then finish.
-          if (now - commit.ts > 700) break;
+          if (
+            now - commit.ts > 700 &&
+            totalDeltaY === 900 &&
+            now - lastInputTs > 400
+          )
+            break;
         }
         await new Promise((resolve) => requestAnimationFrame(resolve));
       }
       s.removeEventListener("wheel", onWheel);
+      admissionObserver.disconnect();
       return {
         commit,
         capturedRestAnchor: restAnchor !== null,
+        inputCount,
+        inputDuration: lastInputTs - firstInputTs,
+        totalDeltaY,
         sawSpinnerDuringHold,
         anchorDriftAfterCommit,
       };
     });
 
-    // Trip the boundary, then keep real wheel input flowing DOWN (away from
-    // the boundary) through and well past the 300ms fetch resolution — the
-    // mid-gesture window in which the ungated build commits the page.
+    // Keep native wheel input flowing through and beyond the 300ms fetch.
+    // Schedule independently of compositor acknowledgements, and verify the
+    // received duration stays below the separate forced-admission deadline.
     await timeline.evaluate((element) => {
       element.scrollTop = 150;
     });
     const box = await timeline.boundingBox();
     if (!box) throw new Error("timeline has no bounding box");
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    for (let burst = 0; burst < 30; burst += 1) {
-      await page.mouse.wheel(0, 30);
-      await page.waitForTimeout(40);
-    }
+    await wheelBurst(
+      page,
+      box,
+      Array.from({ length: 30 }, () => 30),
+      40,
+    );
 
     const trace = await tracePromise;
+    await test.info().attach("prepend-gesture", {
+      body: JSON.stringify(trace, null, 2),
+      contentType: "application/json",
+    });
+    // Native input can coalesce; the summed delta proves complete delivery.
+    expect(trace.inputCount).toBeGreaterThan(1);
     // The page must eventually commit — the gate defers, never strands.
     expect(trace.commit).not.toBeNull();
     // The commit landed only after input quiesced. On the ungated build the
@@ -613,11 +735,16 @@ test.describe("list virtualization", () => {
     // bursts, a gap far below the quiet window — so this line is the red/green
     // signal for the settle gate.
     expect(trace.commit?.gapSinceInput ?? 0).toBeGreaterThanOrEqual(80);
+    expect(trace.commit?.inputCount).toBe(trace.inputCount);
+    expect(trace.totalDeltaY, JSON.stringify(trace)).toBe(900);
+    expect(trace.inputDuration).toBeGreaterThan(300);
+    expect(trace.inputDuration).toBeLessThan(3_500);
     // The reader saw the fetching affordance while the page was held.
     expect(trace.sawSpinnerDuringHold).toBe(true);
     // The at-rest commit held the anchored row (writes land at rest).
     expect(trace.capturedRestAnchor).toBe(true);
-    expect(trace.anchorDriftAfterCommit ?? 0).toBeLessThan(5);
+    expect(trace.anchorDriftAfterCommit).not.toBeNull();
+    expect(trace.anchorDriftAfterCommit).toBeLessThan(5);
   });
 });
 

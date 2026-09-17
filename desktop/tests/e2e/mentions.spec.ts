@@ -1,7 +1,7 @@
 import { expect, test, type Locator } from "@playwright/test";
 
 import { truncateNpub } from "../../src/shared/lib/pubkey";
-import { waitForAnimations } from "../helpers/animations";
+import { waitForAnimations, waitForStableLayout } from "../helpers/animations";
 
 import {
   installMockBridge,
@@ -154,6 +154,20 @@ async function readCommandPayloadLog(page: import("@playwright/test").Page) {
       ).__BUZZ_E2E_COMMAND_LOG__ ?? []
     );
   });
+}
+
+function isSignedChannelMessage(
+  entry: { command: string; payload: unknown },
+  content: string,
+) {
+  const payload = entry.payload as
+    | { kind?: number; content?: string }
+    | undefined;
+  return (
+    entry.command === "sign_event" &&
+    payload?.kind === 9 &&
+    payload.content === content
+  );
 }
 
 async function readOutgoingMentionPubkeys(
@@ -980,6 +994,11 @@ test("blocks non-participant persona mentions in DM threads", async ({
 test("defers agent mentions until DM members finish loading", async ({
   page,
 }) => {
+  // This case checks restoration after send as well as the loading fence.
+  // Automatic pinning is opt-in; keep that prerequisite explicit.
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.messages.keepMentionedAgentsPinned", "true");
+  });
   await installMockBridge(page, {
     channelMembersReadDelayMs: 5_000,
     managedAgents: [
@@ -1562,6 +1581,8 @@ test("selecting a persona mention creates a channel agent before sending and sta
   await expect(composerChip).toBeVisible();
   await expect(composerChip).toHaveText("Fizz");
 
+  const messageContent = (await input.textContent())?.trim() ?? "";
+  expect(messageContent).not.toBe("");
   const baselineCommands = await readCommandLog(page);
   const baselineCreateCount = commandCount(
     baselineCommands,
@@ -1575,6 +1596,7 @@ test("selecting a persona mention creates a channel agent before sending and sta
     baselineCommands,
     "start_managed_agent",
   );
+  const baselinePayloadCount = (await readCommandPayloadLog(page)).length;
   await page.getByTestId("send-message").click();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
 
@@ -1594,15 +1616,27 @@ test("selecting a persona mention creates a channel agent before sending and sta
     )
     .toBeGreaterThan(baselineStartCount);
   await expect
-    .poll(async () => commandCount(await readCommandLog(page), "sign_event"))
-    .toBeGreaterThan(commandCount(baselineCommands, "sign_event"));
+    .poll(async () =>
+      (await readCommandPayloadLog(page))
+        .slice(baselinePayloadCount)
+        .some((entry) => isSignedChannelMessage(entry, messageContent)),
+    )
+    .toBe(true);
 
-  const commandsAfterSend = (await readCommandLog(page)).slice(
-    baselineCommands.length,
+  const commandsAfterSend = (await readCommandPayloadLog(page)).slice(
+    baselinePayloadCount,
   );
-  const createIndex = commandsAfterSend.indexOf("create_managed_agent");
-  const addIndex = commandsAfterSend.indexOf("add_channel_members");
-  const sendIndex = commandsAfterSend.indexOf("sign_event");
+  const createIndex = commandsAfterSend.findIndex(
+    (entry) => entry.command === "create_managed_agent",
+  );
+  const addIndex = commandsAfterSend.findIndex(
+    (entry) => entry.command === "add_channel_members",
+  );
+  // Presence events also use sign_event and can race this send. Compare the
+  // membership writes with this exact kind-9 message, not background traffic.
+  const sendIndex = commandsAfterSend.findIndex((entry) =>
+    isSignedChannelMessage(entry, messageContent),
+  );
   expect(createIndex).toBeGreaterThanOrEqual(0);
   expect(addIndex).toBeGreaterThanOrEqual(0);
   expect(sendIndex).toBeGreaterThanOrEqual(0);
@@ -3677,6 +3711,8 @@ test("mentioning a non-member managed agent adds it before sending and starts it
   await expect(fizzRow.getByText("not in channel")).toBeVisible();
   await input.press("Enter");
 
+  const messageContent = (await input.textContent())?.trim() ?? "";
+  expect(messageContent).not.toBe("");
   const baselineCommands = await readCommandLog(page);
   const baselineAddCount = commandCount(
     baselineCommands,
@@ -3699,8 +3735,12 @@ test("mentioning a non-member managed agent adds it before sending and starts it
   // Publish-first: the message signs while start_managed_agent is still
   // pending behind the injected delay.
   await expect
-    .poll(async () => commandCount(await readCommandLog(page), "sign_event"))
-    .toBeGreaterThan(commandCount(baselineCommands, "sign_event"));
+    .poll(async () =>
+      (await readCommandPayloadLog(page))
+        .slice(baselinePayloadCount)
+        .some((entry) => isSignedChannelMessage(entry, messageContent)),
+    )
+    .toBe(true);
   await expect
     .poll(async () =>
       commandCount(await readCommandLog(page), "start_managed_agent"),
@@ -3719,8 +3759,8 @@ test("mentioning a non-member managed agent adds it before sending and starts it
   const startIndex = sendCommands.findIndex(
     (entry) => entry.command === "start_managed_agent",
   );
-  const sendIndex = sendCommands.findIndex(
-    (entry) => entry.command === "sign_event",
+  const sendIndex = sendCommands.findIndex((entry) =>
+    isSignedChannelMessage(entry, messageContent),
   );
   expect(updateIndex).toBeGreaterThanOrEqual(0);
   expect(updateIndex).toBeLessThan(addIndex);
@@ -4840,6 +4880,7 @@ test("agent profile popover shows its owner", async ({ page }) => {
     .getByTestId("message-row")
     .filter({ hasText: "Pollen checking in." })
     .first();
+  await waitForStableLayout(pollenMessage);
   await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
@@ -4880,6 +4921,7 @@ test("agent profile popover labels an agent owned by the viewer as you", async (
     .getByTestId("message-row")
     .filter({ hasText: "Pollen checking in." })
     .first();
+  await waitForStableLayout(pollenMessage);
   await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
@@ -4920,6 +4962,7 @@ test("agent profile popover falls back to the owner's pubkey", async ({
     .getByTestId("message-row")
     .filter({ hasText: "Pollen checking in." })
     .first();
+  await waitForStableLayout(pollenMessage);
   await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
@@ -5034,6 +5077,7 @@ test("owned agent mention profile exposes message and huddle actions", async ({
     .filter({ hasText: "Can charlie take this?" })
     .locator("[data-mention].agent-mention-highlight", { hasText: "charlie" });
   await expect(mentionChip).toBeVisible();
+  await waitForStableLayout(mentionChip);
   await mentionChip.hover();
 
   const profilePopover = page.locator(

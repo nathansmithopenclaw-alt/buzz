@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForStableLayout } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 import { PREVIEW_ORIGIN } from "./previewOrigin";
@@ -272,6 +273,8 @@ test.describe("community rail", () => {
   test("shows active community actions instead of another switcher in the profile menu", async ({
     page,
   }) => {
+    // Measure the hover grace interval in browser time, excluding RPC latency.
+    await page.clock.install();
     await installMockBridge(
       page,
       {
@@ -332,7 +335,10 @@ test.describe("community rail", () => {
         attributes: true,
       });
     });
+    await waitForStableLayout(communityTrigger);
+    await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 100);
     await communityTrigger.hover();
+    await page.clock.runFor(100);
     await expect(menu).toBeVisible({ timeout: 700 });
     const openDelayMs = await communityTrigger.evaluate((trigger) => {
       const hoverStartedAt = Number(trigger.dataset.hoverStartedAt);
@@ -345,6 +351,7 @@ test.describe("community rail", () => {
     expect(openDelayMs).toBeGreaterThanOrEqual(40);
     expect(openDelayMs).toBeLessThan(300);
 
+    await page.clock.runFor(300);
     const openTriggerBox = await communityTrigger.boundingBox();
     const menuBox = await menu.boundingBox();
     expect(openTriggerBox).not.toBeNull();
@@ -357,9 +364,10 @@ test.describe("community rail", () => {
       openTriggerBox.y + openTriggerBox.height - 4,
       menuBox.y + menuBox.height - 4,
     );
+    await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 100);
     await page.mouse.move(triggerExitX, triggerExitY);
     await page.mouse.move(menuBox.x + 8, menuBox.y - 8);
-    await page.waitForTimeout(80);
+    await page.clock.runFor(80);
     await page.mouse.move(menuBox.x + 8, menuBox.y + 8);
     const bridgeDurationMs = await communityTrigger.evaluate((trigger) => {
       const leftAt = Number(trigger.dataset.leftAt);
@@ -372,7 +380,8 @@ test.describe("community rail", () => {
     });
     expect(bridgeDurationMs).toBeGreaterThanOrEqual(60);
     expect(bridgeDurationMs).toBeLessThan(140);
-    await page.waitForTimeout(180);
+    await page.clock.runFor(180);
+    await page.clock.resume();
     await expect(menu).toBeVisible();
     await expect(communityTrigger).not.toHaveAttribute(
       "data-closed-after-opening",

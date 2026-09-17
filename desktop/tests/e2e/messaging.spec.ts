@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { expect, test, type Locator } from "@playwright/test";
 
-import { waitForAnimations } from "../helpers/animations";
+import { waitForAnimations, waitForStableLayout } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 import { openSettings } from "../helpers/settings";
@@ -2850,7 +2850,11 @@ test("opens a single-level thread panel with inline expansion", async ({
     `[data-testid="message-thread-summary"][data-thread-head-id="${rootMessageId}"]`,
   );
 
+  await waitForStableLayout(rootMessage);
   await rootMessage.hover();
+  await expect(
+    rootMessage.getByTestId(`message-action-bar-${rootMessageId}`),
+  ).toHaveCSS("pointer-events", "auto");
   await rootMessage.getByRole("button", { name: "Reply" }).click();
   await expect(threadPanel).toBeVisible();
   await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
