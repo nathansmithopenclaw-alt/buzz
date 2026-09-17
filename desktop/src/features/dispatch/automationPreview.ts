@@ -77,6 +77,10 @@ export function automationPreview(
       );
       if (!capacity)
         return held("Add this agent under “Agents and work limits” first.");
+      if (!capacity.matches.includes(route.label))
+        return held(
+          `Add “${route.label}” to this agent’s work settings first.`,
+        );
       if (!capacity.eligible)
         return held(
           capacity.explanation

@@ -75,3 +75,20 @@ test("parked imports and self-review cannot be offered as eligible", () => {
   assert.match(preview[0].reason, /enable it for current work first/);
   assert.match(preview[1].reason, /someone other than the agent/);
 });
+
+test("a different matching issue label cannot make an unapproved assignment look ready", () => {
+  const value = context();
+  value.issues[0].labels = ["testing", "writing"];
+  const selected = {
+    ...controls,
+    routing: [{ ...controls.routing[0], label: "writing" }],
+  };
+  const preview = automationPreview(value, selected);
+  assert.equal(preview[0].ready, false);
+  assert.match(
+    preview[0].reason,
+    /Add “writing” to this agent’s work settings/,
+  );
+  value.records[0].record.payload.capabilities.push("writing");
+  assert.equal(automationPreview(value, selected)[0].ready, true);
+});
