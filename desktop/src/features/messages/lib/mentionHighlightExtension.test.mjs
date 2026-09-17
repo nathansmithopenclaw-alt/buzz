@@ -462,6 +462,55 @@ function textInput(state, from, to, text) {
     : current.apply(current.tr.insertText(text, from, to));
 }
 
+test("whitespace-only browser rewrites keep mention settlement armed for the next letter", () => {
+  for (const [label, rewrites] of [
+    ["Fizz", 1],
+    ["portal", 2],
+    ["Alice Chen", 1],
+  ]) {
+    let state = pickMentionAt(
+      editorStateWithMentionHighlight("Ask @fi", [label]),
+      5,
+      8,
+      `@${label} `,
+    );
+    const edge = 1 + `Ask @${label}`.length;
+    // Captured Chromium sequence: a space key rewrites the separator as NBSP,
+    // then the next letter replaces that same range. Neither may delete it.
+    for (let rewrite = 0; rewrite < rewrites; rewrite += 1) {
+      state = textInput(state, edge, edge + 1, "\u00a0");
+      assert.equal(state.doc.textContent, `Ask @${label} `);
+    }
+    state = textInput(state, edge, edge + 1, "f");
+    assert.equal(state.doc.textContent, `Ask @${label} f`);
+  }
+});
+
+test("ArrowLeft still cancels mention settlement after a whitespace rewrite", () => {
+  let state = pickMentionAt(
+    editorStateWithMentionHighlight("Ask @fi", ["Fizz"]),
+    5,
+    8,
+    "@Fizz ",
+  );
+  state = textInput(state, 10, 11, "\u00a0");
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr) {
+      state = state.apply(tr);
+    },
+  };
+  const handled = state.plugins.some(
+    (plugin) =>
+      plugin.props.handleKeyDown?.(view, { key: "ArrowLeft" }) === true,
+  );
+  assert.equal(handled, true);
+  state = textInput(state, 10, 10, "x");
+  assert.equal(state.doc.textContent, "Ask @Fizzx ");
+});
+
 test("a whitespace-run rewrite after a mention pick keeps the draft space", () => {
   // The CI failure: with "hello world" drafted, the caret placed after
   // "hello", " @bo" typed and the "bob" suggestion picked, the document is

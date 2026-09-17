@@ -3043,19 +3043,39 @@ test("opens a single-level thread panel with inline expansion", async ({
     throw new Error("Expected first reply row to have a data-message-id.");
   }
 
+  // These arrivals must follow the authored reply. Same-second timestamps
+  // sort by event ID, which can insert them before it and randomize the
+  // participant-stack order this test deliberately exercises.
+  const nestedReplyCreatedAt = await nestedReplyRow.evaluate(
+    async (element) => {
+      const events = (await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__(
+        "get_events",
+        {
+          eventIds: [element.getAttribute("data-message-id")],
+        },
+      )) as Array<{ created_at: number }>;
+      const createdAt = events[0]?.created_at;
+      if (!Number.isFinite(createdAt))
+        throw new Error("Nested reply timestamp missing");
+      return createdAt;
+    },
+  );
+
   await page.evaluate(
-    ({ content, parentEventId, pubkey }) => {
+    ({ content, parentEventId, pubkey, createdAt }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content,
         parentEventId,
         pubkey,
+        createdAt,
       });
     },
     {
       content: nestedReplyFromBob,
       parentEventId: firstReplyId,
       pubkey: TEST_IDENTITIES.bob.pubkey,
+      createdAt: nestedReplyCreatedAt + 1,
     },
   );
   const nestedReplyFromBobRow = threadReplies
@@ -3065,18 +3085,20 @@ test("opens a single-level thread panel with inline expansion", async ({
   await expect(nestedReplyFromBobRow).toBeVisible();
 
   await page.evaluate(
-    ({ content, parentEventId, pubkey }) => {
+    ({ content, parentEventId, pubkey, createdAt }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content,
         parentEventId,
         pubkey,
+        createdAt,
       });
     },
     {
       content: nestedReplyFromAgent,
       parentEventId: firstReplyId,
       pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: nestedReplyCreatedAt + 2,
     },
   );
   const nestedReplyFromAgentRow = threadReplies

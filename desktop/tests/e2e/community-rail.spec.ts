@@ -30,19 +30,25 @@ async function expectContentSurfaceHorizontalGutters(
   page: import("@playwright/test").Page,
   expectedLeftGutter = 1,
 ) {
-  const [mainInsetBox, contentBox] = await Promise.all([
-    page.locator("[data-buzz-glass-inset]").boundingBox(),
-    page.locator("[data-buzz-content-surface]").first().boundingBox(),
+  await Promise.all([
+    waitForStableLayout(page.locator("[data-buzz-glass-inset]")),
+    waitForStableLayout(page.locator("[data-buzz-content-surface]").first()),
   ]);
-  expect(mainInsetBox).not.toBeNull();
-  expect(contentBox).not.toBeNull();
-  const leftGutter = (contentBox?.x ?? 0) - (mainInsetBox?.x ?? 0);
-  const rightGutter =
-    (mainInsetBox?.x ?? 0) +
-    (mainInsetBox?.width ?? 0) -
-    ((contentBox?.x ?? 0) + (contentBox?.width ?? 0));
-  expect(Math.abs(leftGutter - expectedLeftGutter)).toBeLessThan(0.5);
-  expect(Math.abs(rightGutter - 8)).toBeLessThan(0.5);
+  // Read both edges in one browser frame after the sidebar transition settles.
+  // Separate boundingBox calls can sample different points of the same slide.
+  const gutters = await page.evaluate(() => {
+    const inset = document.querySelector("[data-buzz-glass-inset]");
+    const content = document.querySelector("[data-buzz-content-surface]");
+    if (!inset || !content) throw new Error("Content surface is missing");
+    const insetBox = inset.getBoundingClientRect();
+    const contentBox = content.getBoundingClientRect();
+    return {
+      left: contentBox.left - insetBox.left,
+      right: insetBox.right - contentBox.right,
+    };
+  });
+  expect(Math.abs(gutters.left - expectedLeftGutter)).toBeLessThan(0.5);
+  expect(Math.abs(gutters.right - 8)).toBeLessThan(0.5);
 }
 
 async function seedCommunities(
@@ -1333,6 +1339,9 @@ test.describe("community rail", () => {
     await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCount(
       0,
     );
+    await expect(
+      page.locator('[data-side="left"][data-state="collapsed"]'),
+    ).toBeVisible();
     await expectContentSurfaceHorizontalGutters(page);
   });
 

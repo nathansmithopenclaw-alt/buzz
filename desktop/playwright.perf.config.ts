@@ -1,8 +1,12 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 
 import { PREVIEW_ORIGIN, PREVIEW_PORT } from "./tests/e2e/previewOrigin";
 
 export default defineConfig({
+  globalSetup: fileURLToPath(
+    new URL("../scripts/require-detached-browser.mjs", import.meta.url),
+  ),
   testDir: "./tests/e2e",
   timeout: 60_000,
   retries: 0,

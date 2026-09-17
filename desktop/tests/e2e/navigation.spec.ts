@@ -124,11 +124,7 @@ test("back/forward keyboard chords work while the composer has focus", async ({
   await expect(page.getByTestId("message-input")).toHaveText("");
 });
 
-// FIXME: the forum post "Back to posts" header renders under the fixed top
-// chrome drag region, which intercepts the click. Pre-existing breakage —
-// this spec file was never registered in playwright.config.ts until now.
-// The header-chrome rework (PR #941) covers this overlap class.
-test.fixme("direct forum thread links close back to the forum route", async ({
+test("direct forum thread links close back to the forum route", async ({
   page,
 }) => {
   await page.goto(

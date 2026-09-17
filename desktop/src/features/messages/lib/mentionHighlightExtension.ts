@@ -489,7 +489,10 @@ export const MentionHighlightExtension = Extension.create({
             const caret = tr.mapping.map(insertion.insertAt, 1);
             tr.setSelection(TextSelection.create(tr.doc, caret));
             view.dispatch(tr);
-            settlement.cancel();
+            // A whitespace-only DOM rewrite has not settled the first typed
+            // character yet. Chromium can replace that same separator again
+            // with the next letter, so keep protecting it until text arrives.
+            if (insertion.text.length > 0) settlement.cancel();
             setDomCaretAtPos(view, caret);
             return true;
           },

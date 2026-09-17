@@ -502,8 +502,7 @@ test.describe("list virtualization", () => {
           // fully inside the viewport and clear of the overlapping top chrome
           // afterward, rather than choosing a row that exits at the top edge.
           return (
-            bounds.top >= viewport.top + 400 &&
-            bounds.bottom <= viewport.bottom
+            bounds.top >= viewport.top + 400 && bounds.bottom <= viewport.bottom
           );
         });
         if (!visualAnchor)

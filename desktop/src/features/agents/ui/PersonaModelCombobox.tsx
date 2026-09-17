@@ -32,9 +32,12 @@ export function PersonaModelCombobox({
   // Focus once when the search input mounts. An inline ref fires again on
   // every render, even during the closing animation, and steals text intended
   // for the custom-model or API-key field.
-  const focusSearchInput = React.useCallback((input: HTMLInputElement | null) => {
-    input?.focus();
-  }, []);
+  const focusSearchInput = React.useCallback(
+    (input: HTMLInputElement | null) => {
+      input?.focus();
+    },
+    [],
+  );
 
   const selectedOption = options.find((option) => option.value === value);
 
