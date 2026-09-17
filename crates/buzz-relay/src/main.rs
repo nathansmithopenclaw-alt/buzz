@@ -1658,6 +1658,7 @@ impl InMemoryMetricKey {
 /// racing the lifecycle-relative increments and decrements.
 fn refresh_legacy_active_gauge_recency() {
     metrics::gauge!("buzz_ws_connections_active").increment(0.0);
+    metrics::gauge!("buzz_ws_authenticated_connections_active").increment(0.0);
     metrics::gauge!("buzz_subscriptions_active").increment(0.0);
 }
 
@@ -2340,13 +2341,16 @@ mod tests {
 
         metrics::with_local_recorder(&recorder, || {
             let connections = metrics::gauge!("buzz_ws_connections_active");
+            let authenticated = metrics::gauge!("buzz_ws_authenticated_connections_active");
             let subscriptions = metrics::gauge!("buzz_subscriptions_active");
             connections.increment(1.0);
+            authenticated.increment(1.0);
             subscriptions.increment(1.0);
 
             refresh_legacy_active_gauge_recency();
 
             connections.decrement(1.0);
+            authenticated.decrement(1.0);
             subscriptions.increment(1.0);
         });
 
@@ -2363,6 +2367,10 @@ mod tests {
             .collect::<std::collections::HashMap<_, _>>();
 
         assert_eq!(values.get("buzz_ws_connections_active"), Some(&0.0));
+        assert_eq!(
+            values.get("buzz_ws_authenticated_connections_active"),
+            Some(&0.0)
+        );
         assert_eq!(values.get("buzz_subscriptions_active"), Some(&2.0));
     }
 

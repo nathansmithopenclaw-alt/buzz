@@ -334,7 +334,7 @@ impl Fixture {
     async fn count_and_live(&self, key: &Keys, event: &nostr::Event) -> (u64, bool) {
         use crate::connection::{AuthState, ConnectionState};
         use std::{collections::HashMap, sync::atomic::AtomicU8};
-        use tokio::sync::{mpsc, Mutex, RwLock};
+        use tokio::sync::{mpsc, Mutex};
         use tokio_util::sync::CancellationToken;
         let (tx, mut rx) = mpsc::channel(8);
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
@@ -343,7 +343,7 @@ impl Fixture {
             tenant: self.tenant.clone(),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
             public_scheme: crate::proxy::PublicScheme::Http,
-            auth_state: RwLock::new(AuthState::Authenticated(buzz_auth::AuthContext {
+            auth_state: std::sync::Mutex::new(AuthState::Authenticated(buzz_auth::AuthContext {
                 pubkey: key.public_key(),
                 scopes: vec![],
                 channel_ids: None,
