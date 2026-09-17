@@ -353,3 +353,39 @@ test("reminder setup stays usable in a narrow window with larger text", async ({
     routing: [],
   });
 });
+
+test("dark setup remains readable and its actions reachable with 200 percent text", async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(() =>
+    window.localStorage.setItem("buzz-theme", "catppuccin-mocha"),
+  );
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openAutomation(page);
+  await page.getByRole("button", { name: /^Save messages as work/ }).click();
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "32px";
+  });
+  const dialog = page.getByTestId("automation-setup");
+  await dialog
+    .getByRole("button", { name: "Choose the details", exact: true })
+    .click();
+  await dialog.getByRole("checkbox", { name: "#general", exact: true }).check();
+  await dialog
+    .getByRole("button", { name: "Review setup", exact: true })
+    .click();
+  await expect(
+    dialog.getByRole("button", { name: "Save and check setup", exact: true }),
+  ).toBeInViewport();
+  expect(
+    await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth + 1),
+  ).toBe(true);
+  await page.screenshot({
+    path: testInfo.outputPath("dark-large-text-review.png"),
+  });
+  await dialog.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(
+    dialog.getByRole("checkbox", { name: "#general", exact: true }),
+  ).toBeChecked();
+  expect(await publishedRecords(page)).toHaveLength(0);
+});
