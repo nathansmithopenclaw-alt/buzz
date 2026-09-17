@@ -202,7 +202,7 @@ test("triage renders unassigned and assigned current-fold sections in P0-first t
   await expect(rows.nth(1)).toContainText("P0 newer canonical issue");
   await expect(rows.nth(2)).toContainText("P1 older than second P0");
   await expect(
-    page.getByText(/Use Automation to preview routing/),
+    page.getByText(/Open Automation to set up reminders/),
   ).toBeVisible();
 });
 
@@ -988,31 +988,50 @@ test("automation stays in preview until a configured service acknowledges it", a
     .getByRole("button", { name: "Automation", exact: true })
     .click();
   await page
-    .getByRole("button", { name: "Create preview", exact: true })
+    .getByRole("button", { name: /^Remind us about unassigned work/ })
     .click();
-  const dialog = page.getByRole("dialog", {
-    name: "Preview bounded automation",
-  });
+  const dialog = page.getByTestId("automation-setup");
   await dialog
-    .getByLabel("Expected service public key", { exact: true })
+    .getByRole("button", { name: "Choose the details", exact: true })
+    .click();
+  await expect(
+    dialog.getByText(
+      "Ask the person who manages your Buzz workspace to connect automation.",
+      { exact: false },
+    ),
+  ).toBeVisible();
+  await dialog
+    .getByText("Connection settings for administrators", { exact: true })
+    .click();
+  await dialog
+    .getByLabel("Service name", { exact: true })
+    .fill("test-dispatcher");
+  await dialog
+    .getByLabel("Service public key", { exact: true })
     .fill("b".repeat(64));
   await dialog
     .getByLabel("P0 oldest canonical triage issue", { exact: true })
     .check();
   await dialog
-    .getByRole("button", { name: "Save preview", exact: true })
+    .getByLabel("Post reminders in")
+    .selectOption({ label: "#general" });
+  await dialog
+    .getByRole("button", { name: "Review setup", exact: true })
+    .click();
+  await dialog
+    .getByRole("button", { name: "Save and check setup", exact: true })
     .click();
   await expect(dialog).not.toBeVisible();
+  const card = page.getByTestId("automation-run-card");
+  await expect(card.getByRole("status")).toHaveText("Waiting for connection");
   await expect(
-    page.getByText("Preview only · No service observed", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Activate for 1 hour", exact: true }),
+    card.getByRole("button", { name: "Turn on…", exact: true }),
   ).toBeDisabled();
-  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  await card.getByRole("button", { name: "Pause", exact: true }).click();
   await expect(
-    page.getByText("Paused · No service observed", { exact: true }),
+    card.getByRole("button", { name: "Check before turning on", exact: true }),
   ).toBeVisible();
+  await expect(card.getByRole("status")).toHaveText("Waiting for connection");
   const events = await page.evaluate(
     () => window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [],
   );

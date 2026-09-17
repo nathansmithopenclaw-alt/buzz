@@ -18,7 +18,13 @@ export function DispatchCapacityEditor({
   context,
   workspace,
   refresh,
+  inline = false,
+  onEditingChange,
+  onEscapeActionChange,
 }: {
+  inline?: boolean;
+  onEditingChange?: (editing: boolean) => void;
+  onEscapeActionChange?: (action: (() => void) | null) => void;
   context: DispatchContext;
   workspace: string;
   refresh: () => Promise<DispatchContext>;
@@ -33,6 +39,23 @@ export function DispatchCapacityEditor({
     [labels, setLabels] = React.useState(""),
     [paused, setPaused] = React.useState(false),
     [error, setError] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    onEditingChange?.(open);
+    return () => onEditingChange?.(false);
+  }, [open, onEditingChange]);
+  React.useLayoutEffect(() => {
+    onEscapeActionChange?.(
+      open
+        ? () => {
+            if (!busy) {
+              if (picker) setPicker(false);
+              else setOpen(false);
+            }
+          }
+        : null,
+    );
+    return () => onEscapeActionChange?.(null);
+  }, [open, picker, busy, onEscapeActionChange]);
   const profiles = useUsersBatchQuery([
     ...new Set([
       ...records.map((value) => value.record.payload.executor),
@@ -40,7 +63,11 @@ export function DispatchCapacityEditor({
     ]),
   ]);
   const label = (key: string) =>
-    resolveUserLabel({ pubkey: key, profiles: profiles.data?.profiles });
+    resolveUserLabel({
+      pubkey: key,
+      profiles: profiles.data?.profiles,
+      fallbackName: "Agent name unavailable",
+    });
   const editable =
     context.viewerRole === "maintainer" && !context.sectionErrors.records;
   const edit = (value?: RecordOf<"capacity">) => {
@@ -84,22 +111,107 @@ export function DispatchCapacityEditor({
       setBusy(false);
     }
   };
+  const description =
+    "Tell Buzz what this agent can handle. Automations that are already on will use these settings. Pausing stops new assignments, but work already started can continue.";
+  const form = (
+    <form onSubmit={(event) => void save(event)}>
+      <fieldset className="space-y-4" disabled={busy}>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={Boolean(base)}
+          onClick={() => setPicker(true)}
+        >
+          {executor ? label(executor) : "Choose an agent"}
+        </Button>
+        <AssigneePickerDialog
+          agentsOnly
+          open={picker}
+          onOpenChange={setPicker}
+          assignee={executor}
+          disabled={busy}
+          onAssign={(value) => {
+            setExecutor(value);
+            setPicker(false);
+          }}
+        />
+        <label htmlFor="capacity-maximum" className="grid gap-1 text-sm">
+          Issues at the same time
+          <Input
+            id="capacity-maximum"
+            aria-label="Issues at the same time"
+            required
+            type="number"
+            min={1}
+            max={100}
+            value={limit}
+            onChange={(event) => setLimit(Number(event.target.value))}
+          />
+        </label>
+        <label htmlFor="capacity-labels" className="grid gap-1 text-sm">
+          Issue labels this agent can handle
+          <Input
+            id="capacity-labels"
+            aria-label="Issue labels this agent can handle"
+            value={labels}
+            onChange={(event) => setLabels(event.target.value)}
+            placeholder="For example: research, writing"
+          />
+        </label>
+        <p className="text-xs text-muted-foreground">
+          Use the labels on your issues, separated by commas. An assignment rule
+          must match one of these labels.
+        </p>
+        <label className="flex gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={paused}
+            onChange={(event) => setPaused(event.target.checked)}
+          />
+          Pause new assignments
+        </label>
+        {error ? (
+          <div role="alert" className="text-sm text-destructive">
+            Buzz could not save these agent settings. Your choices are still
+            here; check the connection and try again.
+            <details className="mt-2 text-xs">
+              <summary>Show details</summary>
+              {error}
+            </details>
+          </div>
+        ) : null}
+        <div className="flex flex-wrap gap-2">
+          <Button type="submit" disabled={!executor || busy}>
+            {busy ? "Saving…" : "Save agent settings"}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => setOpen(false)}
+          >
+            Cancel agent settings
+          </Button>
+        </div>
+      </fieldset>
+    </form>
+  );
   return (
     <section className="rounded-xl border border-border p-4">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="font-semibold">Executor capacity</h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="font-semibold">Agents that can take work</h2>
         <Button
           size="sm"
           variant="outline"
           disabled={!editable}
           onClick={() => edit()}
         >
-          Add executor
+          Add an agent
         </Button>
       </div>
       <p className="mt-2 text-sm text-muted-foreground">
-        Set explicit capabilities and simultaneous work limits. Pausing an
-        executor holds new routing proposals.
+        Choose what each agent can work on and how many issues it can handle at
+        once. Pause an agent here to stop new automatic assignments.
       </p>
       <div className="mt-3 space-y-2">
         {records.length ? (
@@ -112,7 +224,7 @@ export function DispatchCapacityEditor({
                 {label(value.record.payload.executor)} ·{" "}
                 {value.record.payload.paused
                   ? "Paused"
-                  : `${value.record.payload.max_active} active attempt(s) maximum`}
+                  : `Up to ${value.record.payload.max_active} ${value.record.payload.max_active === 1 ? "issue" : "issues"} at a time`}
               </span>
               <Button
                 size="sm"
@@ -120,92 +232,42 @@ export function DispatchCapacityEditor({
                 disabled={!editable}
                 onClick={() => edit(value)}
               >
-                Edit capacity
+                Edit agent settings
               </Button>
             </div>
           ))
         ) : (
           <p className="text-sm text-muted-foreground">
-            No executors enabled for automatic routing.
+            No agents are set up to take work automatically yet.
           </p>
         )}
       </div>
-      <Dialog
-        open={open}
-        onOpenChange={(value) => {
-          if (!busy) setOpen(value);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Executor capacity</DialogTitle>
-            <DialogDescription>
-              These settings guide proposals and bounded automation. Saving does
-              not assign work.
-            </DialogDescription>
-          </DialogHeader>
-          <form onSubmit={(event) => void save(event)}>
-            <fieldset className="space-y-4" disabled={busy}>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={Boolean(base)}
-                onClick={() => setPicker(true)}
-              >
-                {executor ? label(executor) : "Choose executor"}
-              </Button>
-              <AssigneePickerDialog
-                open={picker}
-                onOpenChange={setPicker}
-                assignee={executor}
-                disabled={busy}
-                onAssign={(value) => {
-                  setExecutor(value);
-                  setPicker(false);
-                }}
-              />
-              <label htmlFor="capacity-maximum" className="grid gap-1 text-sm">
-                Maximum active attempts
-                <Input
-                  id="capacity-maximum"
-                  aria-label="Maximum active attempts"
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={limit}
-                  onChange={(event) => setLimit(Number(event.target.value))}
-                />
-              </label>
-              <label htmlFor="capacity-labels" className="grid gap-1 text-sm">
-                Capability labels
-                <Input
-                  id="capacity-labels"
-                  aria-label="Capability labels"
-                  value={labels}
-                  onChange={(event) => setLabels(event.target.value)}
-                  placeholder="area:desktop, testing"
-                />
-              </label>
-              <label className="flex gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={paused}
-                  onChange={(event) => setPaused(event.target.checked)}
-                />
-                Pause new assignments
-              </label>
-              {error ? (
-                <p role="alert" className="text-sm text-destructive">
-                  {error}
-                </p>
-              ) : null}
-              <Button type="submit" disabled={!executor || busy}>
-                {busy ? "Saving…" : "Save capacity"}
-              </Button>
-            </fieldset>
-          </form>
-        </DialogContent>
-      </Dialog>
+      {inline && open ? (
+        <section
+          aria-label="Agent work settings"
+          className="mt-4 space-y-4 border-t border-border pt-4"
+        >
+          <h3 className="font-semibold">Agent work settings</h3>
+          <p className="text-sm text-muted-foreground">{description}</p>
+          {form}
+        </section>
+      ) : null}
+      {!inline ? (
+        <Dialog
+          open={open}
+          onOpenChange={(value) => {
+            if (!busy) setOpen(value);
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Agent work settings</DialogTitle>
+              <DialogDescription>{description}</DialogDescription>
+            </DialogHeader>
+            {form}
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </section>
   );
 }

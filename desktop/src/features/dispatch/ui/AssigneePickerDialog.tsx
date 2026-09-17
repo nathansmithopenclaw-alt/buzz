@@ -70,6 +70,7 @@ export function AssigneePickerDialog({
   onOpenChange,
   open,
   profiles,
+  agentsOnly = false,
 }: {
   assignee: string | null;
   disabled: boolean;
@@ -77,6 +78,7 @@ export function AssigneePickerDialog({
   onOpenChange: (open: boolean) => void;
   open: boolean;
   profiles?: UserProfileLookup;
+  agentsOnly?: boolean;
 }) {
   const [searchQuery, setSearchQuery] = React.useState("");
   const deferredSearchQuery = React.useDeferredValue(searchQuery.trim());
@@ -162,8 +164,14 @@ export function AssigneePickerDialog({
       ranked.unshift(candidateFromProfiles(pasted, profiles));
     }
 
-    return ranked;
+    return agentsOnly
+      ? ranked.filter(
+          (user) => user.isAgent || knownAgentPubkeys.has(user.pubkey),
+        )
+      : ranked;
   }, [
+    agentsOnly,
+    knownAgentPubkeys,
     deferredSearchQuery,
     directoryResults,
     isArchivedIdentity,
@@ -196,10 +204,12 @@ export function AssigneePickerDialog({
         select(candidates[0].pubkey);
       }}
       open={open}
-      searchPlaceholder="Search people and agents"
+      searchPlaceholder={
+        agentsOnly ? "Search agents" : "Search people and agents"
+      }
       searchValue={searchQuery}
       testId="dispatch-assignee-picker"
-      title="Set assignee"
+      title={agentsOnly ? "Choose an agent" : "Set assignee"}
     >
       <UserSearchResultsPanel
         onScroll={handleDirectoryScroll}
@@ -207,9 +217,11 @@ export function AssigneePickerDialog({
       >
         {normalizedAssignee ? (
           <>
-            <UserSearchSectionTitle>Assigned</UserSearchSectionTitle>
+            <UserSearchSectionTitle>
+              {agentsOnly ? "Selected" : "Assigned"}
+            </UserSearchSectionTitle>
             <UserSearchResultRow
-              actionLabel="Unassign"
+              actionLabel={agentsOnly ? "Remove selection" : "Unassign"}
               disabled={disabled}
               onSelect={() => select(null)}
               testId={`dispatch-assignee-option-${normalizedAssignee}`}
@@ -217,10 +229,12 @@ export function AssigneePickerDialog({
             />
           </>
         ) : null}
-        <UserSearchSectionTitle>People</UserSearchSectionTitle>
+        <UserSearchSectionTitle>
+          {agentsOnly ? "Agents" : "People"}
+        </UserSearchSectionTitle>
         {candidates.map((user) => (
           <UserSearchResultRow
-            actionLabel="Assign"
+            actionLabel={agentsOnly ? "Choose" : "Assign"}
             disabled={disabled}
             key={user.pubkey}
             onSelect={(selected) => select(selected.pubkey)}
@@ -235,7 +249,9 @@ export function AssigneePickerDialog({
         ) : null}
         {!isSearching && candidates.length === 0 ? (
           <p className="px-4 py-3 text-sm text-muted-foreground">
-            No matching people or agents.
+            {agentsOnly
+              ? "No matching agents. Add an agent in Buzz’s Agents view first."
+              : "No matching people or agents."}
           </p>
         ) : null}
       </UserSearchResultsPanel>
