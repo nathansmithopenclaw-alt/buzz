@@ -76,6 +76,13 @@ export function AutomationSetup({
   const heading = React.useCallback((node: HTMLHeadingElement | null) => {
     node?.focus();
   }, []);
+  const agentEscapeAction = React.useRef<(() => void) | null>(null);
+  const setAgentEscapeAction = React.useCallback(
+    (action: (() => void) | null) => {
+      agentEscapeAction.current = action;
+    },
+    [],
+  );
   const profiles = useUsersBatchQuery(
     connections.map((value) => value.record.payload.controls.service_pubkey),
   );
@@ -216,12 +223,20 @@ export function AutomationSetup({
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open && !busy) onClose();
+        if (!open && !busy && !agentSettingsOpen) onClose();
       }}
     >
       <DialogContent
         className="flex max-h-[90vh] max-w-2xl flex-col overflow-hidden p-0"
         data-testid="automation-setup"
+        showCloseButton={!agentSettingsOpen}
+        onEscapeKeyDown={(event) => {
+          // The nested picker or editor owns Escape until its work is dismissed.
+          if (!event.defaultPrevented && agentEscapeAction.current) {
+            event.preventDefault();
+            agentEscapeAction.current();
+          }
+        }}
       >
         <DialogHeader className="px-6 pt-6 pr-12">
           <DialogTitle>Set up automation</DialogTitle>
@@ -362,6 +377,7 @@ export function AutomationSetup({
                   <DispatchCapacityEditor
                     inline
                     onEditingChange={setAgentSettingsOpen}
+                    onEscapeActionChange={setAgentEscapeAction}
                     context={context}
                     workspace={workspace}
                     refresh={refresh}

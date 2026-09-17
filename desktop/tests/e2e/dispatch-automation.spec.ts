@@ -296,6 +296,13 @@ test("agent setup uses names and excludes people from the agent picker", async (
   await expect(capacity).not.toBeVisible();
   await expect(dialog).toBeVisible();
   await dialog
+    .getByRole("button", { name: "Add an agent", exact: true })
+    .click();
+  await expect(capacity).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(capacity).not.toBeVisible();
+  await expect(dialog).toBeVisible();
+  await dialog
     .getByRole("button", { name: "Review setup", exact: true })
     .click();
   await expect(dialog.getByTestId("automation-rule-summary")).toContainText(

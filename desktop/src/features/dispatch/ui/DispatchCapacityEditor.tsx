@@ -20,9 +20,11 @@ export function DispatchCapacityEditor({
   refresh,
   inline = false,
   onEditingChange,
+  onEscapeActionChange,
 }: {
   inline?: boolean;
   onEditingChange?: (editing: boolean) => void;
+  onEscapeActionChange?: (action: (() => void) | null) => void;
   context: DispatchContext;
   workspace: string;
   refresh: () => Promise<DispatchContext>;
@@ -41,6 +43,19 @@ export function DispatchCapacityEditor({
     onEditingChange?.(open);
     return () => onEditingChange?.(false);
   }, [open, onEditingChange]);
+  React.useLayoutEffect(() => {
+    onEscapeActionChange?.(
+      open
+        ? () => {
+            if (!busy) {
+              if (picker) setPicker(false);
+              else setOpen(false);
+            }
+          }
+        : null,
+    );
+    return () => onEscapeActionChange?.(null);
+  }, [open, picker, busy, onEscapeActionChange]);
   const profiles = useUsersBatchQuery([
     ...new Set([
       ...records.map((value) => value.record.payload.executor),
