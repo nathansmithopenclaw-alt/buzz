@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { waitForAnimations } from "../helpers/animations";
 import {
   AGENT,
   ISSUE,
@@ -75,6 +76,7 @@ test("capture setup reuses its connection, shows named scope, and saves only a p
     "In #general, Buzz creates an issue",
   );
   await expect(dialog).toContainText("This replaces the previous setup");
+  await waitForAnimations(page);
   await page.screenshot({ path: testInfo.outputPath("capture-review.png") });
   await dialog.getByRole("button", { name: "Back", exact: true }).click();
   await expect(
@@ -218,6 +220,7 @@ test("captured work is visible in activity and a spent run cannot be restarted",
   await expect(
     page.getByRole("button", { name: "Turn on…", exact: true }),
   ).toHaveCount(0);
+  await waitForAnimations(page);
   await page.screenshot({
     path: testInfo.outputPath("automation-overview.png"),
     fullPage: true,
@@ -344,6 +347,7 @@ test("reminder setup stays usable in a narrow window with larger text", async ({
   expect(
     await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth + 1),
   ).toBe(true);
+  await waitForAnimations(page);
   await page.screenshot({ path: testInfo.outputPath("narrow-review.png") });
   await save.click();
   await expect(dialog).not.toBeVisible();
@@ -383,6 +387,7 @@ test("dark setup remains readable and its actions reachable with 200 percent tex
   expect(
     await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth + 1),
   ).toBe(true);
+  await waitForAnimations(page);
   await page.screenshot({
     path: testInfo.outputPath("dark-large-text-review.png"),
   });
