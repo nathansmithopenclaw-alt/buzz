@@ -1,6 +1,10 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
+  globalSetup: fileURLToPath(
+    new URL("../scripts/require-detached-browser.mjs", import.meta.url),
+  ),
   testDir: "./tests/e2e",
   timeout: 30_000,
   retries: process.env.CI ? 2 : 0,

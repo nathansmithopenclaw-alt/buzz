@@ -23,6 +23,9 @@
 //   --messages <path>          JSON file with messages to inject before capture
 //   --update-ready             Mock an available update so the sidebar update card renders
 
+import { assertDetachedBrowser } from "../../../scripts/require-detached-browser.mjs";
+assertDetachedBrowser();
+
 import { parseArgs } from "node:util";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";

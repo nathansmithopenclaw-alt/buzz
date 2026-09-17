@@ -16,6 +16,21 @@ just test               # unit + integration (starts Docker if needed)
 cargo test -p buzz-test-client -- --ignored
 ```
 
+### Browser checks from macOS Desktop agents
+
+Browser helpers launched as ChatGPT/Codex Desktop descendants can inherit the
+host's application identity and create extra Dock icons. All Playwright configs,
+standalone screenshot helpers, and computer-use browser tests reject this ancestry
+before launching a browser.
+This also covers the browser probes inside `desktop-release-build` packaging
+verification. A refusal is a failed measurement, never a pass or a skipped gate.
+
+Run these checks from Terminal or a finite detached launchd job. On the shared
+Smith Crafts host, use `~/.buzz/scripts/browser-run-once.py` and the ordinary
+suite lock as documented in `~/.buzz/GUIDES/E2E_SUITE_LOCK.md`. Retain normal
+scheduling for timing-sensitive tests; Background QoS throttles browser timers.
+The guard does not inspect process ancestry on Linux or Windows.
+
 ### Review-Proven Test Standards
 
 Mined from the last 25 PRs' review threads (see Review-Proven Rules in

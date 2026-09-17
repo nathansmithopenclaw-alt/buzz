@@ -1,4 +1,5 @@
 import test from "node:test";
+import { assertDetachedBrowser } from "../../scripts/require-detached-browser.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
@@ -9,6 +10,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { BrowserService } from "../src/browser.mjs";
 import { startViewer } from "../src/viewer.mjs";
+
+assertDetachedBrowser();
 
 const mainScript =
   process.env.BUZZ_TEST_COMPUTER_SCRIPT ||

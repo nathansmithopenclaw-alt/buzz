@@ -1,9 +1,13 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 
 const webPort = process.env.BUZZ_RELEASE_SMOKE_WEB_PORT ?? "4173";
 const webUrl = `http://127.0.0.1:${webPort}`;
 
 export default defineConfig({
+  globalSetup: fileURLToPath(
+    new URL("../scripts/require-detached-browser.mjs", import.meta.url),
+  ),
   testDir: "./tests/e2e",
   testMatch: [
     "**/release-smoke.spec.ts",

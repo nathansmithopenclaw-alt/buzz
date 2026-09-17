@@ -1,6 +1,10 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
+  globalSetup: fileURLToPath(
+    new URL("../scripts/require-detached-browser.mjs", import.meta.url),
+  ),
   testDir: "./tests",
   webServer: {
     command: "pnpm exec vite preview --host 127.0.0.1 --port 4174",

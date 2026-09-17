@@ -1,5 +1,8 @@
 // Custom screenshot helper for header zoom-fix comparison.
 // Supports --port (4173 baseline / 4174 branch), --zoom (CSS zoom factor), and --open-thread / --open-profile / --open-agent.
+import { assertDetachedBrowser } from "../../../scripts/require-detached-browser.mjs";
+assertDetachedBrowser();
+
 import { chromium } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
