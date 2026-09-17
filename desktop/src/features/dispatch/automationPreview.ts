@@ -27,19 +27,25 @@ export function automationPreview(
       ready: false,
       reason,
     });
-    if (!issue) return held("Issue is unavailable");
+    if (!issue) return held("This issue is no longer available.");
     if (["done", "cancelled"].includes(issue.status))
-      return held("Issue is closed");
+      return held("This issue is already closed.");
     if (imported.has(id) && !activated.has(id))
-      return held("Imported work is parked");
+      return held(
+        "Open this imported issue and enable it for current work first.",
+      );
     if (context.sectionErrors.tasks || context.sectionErrors.records)
-      return held("Refresh incomplete task or planning history");
+      return held(
+        "Refresh Dispatch so Buzz can check the latest work and settings.",
+      );
     const route = controls.routing.find((route) =>
       issue.labels.includes(route.label),
     );
     if (route) {
-      if (issue.status !== "todo") return held("Accept into Todo first");
-      if (blocked.has(id)) return held("Unfinished dependency");
+      if (issue.status !== "todo")
+        return held("Move this issue to Todo when it is ready to start.");
+      if (blocked.has(id))
+        return held("Waiting for work that blocks this issue.");
       if (
         context.linkedTasks.some(
           (task) =>
@@ -47,7 +53,9 @@ export function automationPreview(
             !["verified", "failed"].includes(task.status),
         )
       )
-        return held("An attempt is active or awaiting review");
+        return held(
+          "This work is already with an agent or waiting for review.",
+        );
       if (
         issue.externalRefs.some(
           (ref) =>
@@ -55,25 +63,41 @@ export function automationPreview(
             !context.linkedTasks.some((task) => task.taskId === ref.ref),
         )
       )
-        return held("Linked task history is unavailable");
+        return held(
+          "Buzz needs the linked task’s latest update before sending more work.",
+        );
       if (!issue.assignee)
-        return held("Choose an accountable owner and reviewer");
+        return held("Choose an issue owner to review the agent’s result.");
       if (issue.assignee === route.executor)
-        return held("Choose an independent reviewer");
+        return held(
+          "The issue owner must be someone other than the agent doing the work.",
+        );
       const capacity = routingSuggestions(context, issue).find(
         (value) => value.executor === route.executor,
       );
-      if (!capacity) return held("Configure executor capacity");
-      if (!capacity.eligible) return held(capacity.explanation);
+      if (!capacity)
+        return held("Add this agent under “Agents and work limits” first.");
+      if (!capacity.eligible)
+        return held(
+          capacity.explanation
+            .replaceAll("Executor is paused", "This agent is paused")
+            .replaceAll("At capacity", "This agent already has enough work")
+            .replaceAll(
+              "No matching capability label",
+              "This label is not listed in the agent’s work settings",
+            ),
+        );
       const inPreview = reserved.get(route.executor) ?? 0;
       if (capacity.used + inPreview >= capacity.limit)
-        return held("Earlier candidates reserve the remaining capacity");
+        return held(
+          "Other selected issues will use this agent’s available room.",
+        );
       reserved.set(route.executor, inPreview + 1);
       return {
         id,
         title: issue.title,
         ready: true,
-        reason: `Route by ${route.label}; retain current owner`,
+        reason: `Ready to send: matches “${route.label}”. The owner stays responsible for review.`,
       };
     }
     if (controls.notify_triage && issue.status === "triage" && !issue.assignee)
@@ -81,15 +105,15 @@ export function automationPreview(
         id,
         title: issue.title,
         ready: true,
-        reason: "One triage notice, if not previously delivered",
+        reason: "Ready for a reminder if Buzz has not already sent it.",
       };
     if (controls.unassigned_after_secs && !issue.assignee)
       return {
         id,
         title: issue.title,
         ready: false,
-        reason: "Notice becomes eligible after the configured waiting period",
+        reason: "Buzz will check the waiting time before sending a reminder.",
       };
-    return held("No enabled rule applies");
+    return held("This issue does not match the jobs you chose.");
   });
 }

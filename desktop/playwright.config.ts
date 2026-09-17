@@ -151,6 +151,7 @@ export default defineConfig({
         "**/project-pr-review.spec.ts",
         "**/dispatch-shell.spec.ts",
         "**/dispatch-loading.spec.ts",
+        "**/dispatch-automation.spec.ts",
         "**/dispatch-triage-detail.spec.ts",
         "**/persona-model-combobox-screenshots.spec.ts",
         "**/drafts-screenshots.spec.ts",

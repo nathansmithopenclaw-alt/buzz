@@ -1,4 +1,4 @@
-import { TriangleAlert } from "lucide-react";
+import { Info, TriangleAlert } from "lucide-react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
@@ -111,9 +111,10 @@ export function TriageInbox({
         )}
       </section>
       <div className="m-5 flex items-center gap-2 rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-        <TriangleAlert aria-hidden className="h-4 w-4 shrink-0" />
-        Review ownership and priority here. Use Automation to preview routing
-        and reminders before enabling a bounded run.
+        <Info aria-hidden className="h-4 w-4 shrink-0" />
+        Choose an owner and priority here. Open Automation to set up reminders
+        or send ready work to an agent. You will review the setup before it
+        runs.
       </div>
     </div>
   );
