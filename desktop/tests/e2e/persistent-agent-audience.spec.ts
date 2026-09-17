@@ -637,6 +637,9 @@ test("the mention button opens settings and can undo an address", async ({
   await input.press("ControlOrMeta+A");
   await input.press("Backspace");
   await expect(input).toHaveText("");
+  // Deletion closes suggestions after the mention debounce. Wait for that
+  // state before toggling the picker, or this click closes the still-open menu.
+  await expect(menu).toHaveCount(0);
   await composer.getByRole("button", { name: "Mention someone" }).click();
   await expect(menu).toBeVisible();
 

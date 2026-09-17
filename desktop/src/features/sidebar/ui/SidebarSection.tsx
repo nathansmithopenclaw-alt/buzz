@@ -362,10 +362,8 @@ export function ChannelMenuButton({
     </SidebarMenuButton>
   );
 
-  if (!activeWorking && !hasThreadUnread) {
-    return button;
-  }
-
+  // Keep the same button mounted as unread/working activity changes. Replacing
+  // its wrapper between pointer-down and pointer-up loses the channel click.
   return (
     <ChannelActivityPopover activeWorking={activeWorking} channel={channel}>
       {button}

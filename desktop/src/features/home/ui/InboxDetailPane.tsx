@@ -693,7 +693,7 @@ function InboxMessageDetailPane({
 
         <div
           aria-busy={isThreadContextLoading}
-          className="-mt-13 min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 pt-13 [overflow-anchor:none]"
+          className="-mt-13 min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 pt-13"
           data-testid="home-inbox-detail-scroll"
           // Selection copy across a rendered mention chip: restores the sigil
           // and the identity sidecar the browser's default copy would drop.

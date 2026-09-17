@@ -498,8 +498,13 @@ test.describe("list virtualization", () => {
           ...s.querySelectorAll<HTMLElement>("[data-message-id]"),
         ].find((row) => {
           const bounds = row.getBoundingClientRect();
-          const midpoint = viewport.top + viewport.height / 2;
-          return bounds.top <= midpoint && bounds.bottom >= midpoint;
+          // This gesture moves rows upward by 300px. Keep the observation row
+          // fully inside the viewport and clear of the overlapping top chrome
+          // afterward, rather than choosing a row that exits at the top edge.
+          return (
+            bounds.top >= viewport.top + 400 &&
+            bounds.bottom <= viewport.bottom
+          );
         });
         if (!visualAnchor)
           throw new Error("No visible reading anchor before wheel input");

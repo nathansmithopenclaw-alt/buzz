@@ -381,10 +381,8 @@ export function ChannelActivityPopover({
     [clearUnreadOverride, markMessageRead, markThreadRead],
   );
 
-  if (!hasContent) {
-    return children;
-  }
-
+  // The anchor stays mounted even with no activity. Hover/focus handlers
+  // already guard hasContent; swapping the subtree would interrupt clicks.
   return (
     <Popover onOpenChange={setOpen} open={open}>
       {/* biome-ignore lint/a11y/noStaticElementInteractions: hover/focus events bubble from the nested channel button while the wrapper keeps the preview interactive. */}

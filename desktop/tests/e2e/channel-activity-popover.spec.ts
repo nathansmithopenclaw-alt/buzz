@@ -264,6 +264,41 @@ async function openActivityPopover(page: Page) {
   return popover;
 }
 
+test("keeps an in-progress channel click when unread activity first arrives", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await expect(page.getByTestId("channel-unread-dot-general")).toHaveCount(0);
+
+  const channel = page.getByTestId("channel-general");
+  const originalButton = await channel.elementHandle();
+  const box = await channel.boundingBox();
+  if (!originalButton || !box) throw new Error("Channel button is unavailable");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  try {
+    await emitMockMessage(page, "Unread arrives during a channel click", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: Math.floor(Date.now() / 1000) + 60,
+    });
+    await expect(page.getByTestId("channel-unread-dot-general")).toBeVisible();
+    expect(
+      await originalButton.evaluate((button) => button.isConnected),
+      "unread decoration must preserve the pressed channel button",
+    ).toBe(true);
+  } finally {
+    await page.mouse.up();
+  }
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+});
+
 test.describe("channel activity hover preview", () => {
   test.beforeEach(async ({ page }) => {
     await installMockBridge(page, {

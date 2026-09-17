@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { waitForStableLayout } from "../helpers/animations";
 import type { RelayEvent } from "../../src/shared/api/types";
 
 /**
@@ -338,9 +339,6 @@ test.describe("inbox stable-conversation regressions", () => {
       ) as HTMLElement | null;
       return (pane?.scrollTop ?? 0) > 0;
     });
-    const scrollTopBefore = await getScrollTop(page);
-    expect(scrollTopBefore).toBeGreaterThan(0);
-
     // Type a draft and confirm focus before the live update.
     const composer = detail.getByTestId("message-input");
     await composer.click();
@@ -349,6 +347,11 @@ test.describe("inbox stable-conversation regressions", () => {
       "My draft text — must survive the live update",
     );
     await expect(composer).toBeFocused();
+    // Capture the live-arrival baseline after preparation and row layout have
+    // settled. Native anchoring may compensate legitimate layout refinement.
+    await waitForStableLayout(detail.locator("[aria-busy] > div"));
+    const scrollTopBefore = await getScrollTop(page);
+    expect(scrollTopBefore).toBeGreaterThan(0);
 
     // Prove this is a history reader, not a bottom-pinned reader. Half the
     // content height can exceed maxScrollTop and silently clamp to bottom.

@@ -29,6 +29,12 @@ export function PersonaModelCombobox({
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
+  // Focus once when the search input mounts. An inline ref fires again on
+  // every render, even during the closing animation, and steals text intended
+  // for the custom-model or API-key field.
+  const focusSearchInput = React.useCallback((input: HTMLInputElement | null) => {
+    input?.focus();
+  }, []);
 
   const selectedOption = options.find((option) => option.value === value);
 
@@ -164,7 +170,7 @@ export function PersonaModelCombobox({
               // Popover supports onOpenAutoFocus; we preventDefault above so
               // Radix doesn't move focus to the first focusable. But we still
               // want the input focused immediately, so use the callback ref.
-              ref={(el) => el?.focus()}
+              ref={focusSearchInput}
               spellCheck={false}
               value={query}
             />

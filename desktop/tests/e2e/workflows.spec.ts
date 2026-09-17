@@ -568,6 +568,8 @@ test("duplicates a workflow", async ({ page }) => {
 
   // Submit the duplicate after deliberately choosing its destination channel.
   const dialog = page.getByRole("dialog", { name: "Duplicate workflow" });
+  // Only creation auto-opens this picker; duplicate mode starts closed.
+  await dialog.getByRole("combobox", { name: "Channel", exact: true }).click();
   await selectWorkflowChannel(page);
   await dialog.getByRole("button", { name: "Create copy" }).click();
   const activationConfirmation = page.getByRole("alertdialog", {

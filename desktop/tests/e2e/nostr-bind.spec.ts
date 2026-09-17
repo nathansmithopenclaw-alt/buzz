@@ -55,15 +55,44 @@ async function openNostrBind(
   payload: NostrBindPayload = VALID_REQUEST,
   mock?: Parameters<typeof installMockBridge>[1],
 ) {
+  // The IPC mock is installed before React registers the consent listener.
+  // Observe completed registration so the test cannot lose its one-shot event
+  // during startup. No sleep or repeated delivery is needed.
+  await page.addInitScript(() => {
+    type Invoke = (
+      command: string,
+      args: Record<string, unknown>,
+    ) => Promise<unknown>;
+    const win = window as Window & {
+      __TAURI_INTERNALS__?: { invoke?: Invoke };
+      __nostrBindListeners?: Set<unknown>;
+    };
+    const listeners = new Set<unknown>();
+    win.__nostrBindListeners = listeners;
+    win.__TAURI_INTERNALS__ ??= {};
+    let invoke: Invoke | undefined;
+    Object.defineProperty(win.__TAURI_INTERNALS__, "invoke", {
+      configurable: true,
+      get: () => invoke,
+      set: (next: Invoke) => {
+        invoke = async (command, args) => {
+          const result = await next(command, args);
+          if (args?.event === "deep-link-nostr-bind") {
+            if (command === "plugin:event|listen") listeners.add(result);
+            if (command === "plugin:event|unlisten")
+              listeners.delete(args.eventId);
+          }
+          return result;
+        };
+      },
+    });
+  });
   await installMockBridge(page, mock);
   await page.goto("/");
   await page.waitForFunction(
     () =>
-      typeof (
-        window as Window & {
-          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
-        }
-      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function",
+      ((window as Window & { __nostrBindListeners?: Set<unknown> })
+        .__nostrBindListeners?.size ?? 0) > 0,
   );
   await emitNostrBind(page, payload);
   await expect(page.getByTestId("nostr-bind-page")).toBeVisible();
