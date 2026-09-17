@@ -19,8 +19,10 @@ export function DispatchCapacityEditor({
   workspace,
   refresh,
   inline = false,
+  onEditingChange,
 }: {
   inline?: boolean;
+  onEditingChange?: (editing: boolean) => void;
   context: DispatchContext;
   workspace: string;
   refresh: () => Promise<DispatchContext>;
@@ -35,6 +37,10 @@ export function DispatchCapacityEditor({
     [labels, setLabels] = React.useState(""),
     [paused, setPaused] = React.useState(false),
     [error, setError] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    onEditingChange?.(open);
+    return () => onEditingChange?.(false);
+  }, [open, onEditingChange]);
   const profiles = useUsersBatchQuery([
     ...new Set([
       ...records.map((value) => value.record.payload.executor),

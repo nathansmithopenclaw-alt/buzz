@@ -271,6 +271,9 @@ test("agent setup uses names and excludes people from the agent picker", async (
     name: "Agent work settings",
     exact: true,
   });
+  await expect(
+    dialog.getByRole("button", { name: "Review setup", exact: true }),
+  ).toBeDisabled();
   await capacity
     .getByRole("button", { name: "Choose an agent", exact: true })
     .click();

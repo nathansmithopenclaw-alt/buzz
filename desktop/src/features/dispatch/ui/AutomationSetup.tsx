@@ -71,6 +71,7 @@ export function AutomationSetup({
   );
   const [step, setStep] = React.useState(0),
     [busy, setBusy] = React.useState(false),
+    [agentSettingsOpen, setAgentSettingsOpen] = React.useState(false),
     [error, setError] = React.useState<string | null>(null);
   const heading = React.useCallback((node: HTMLHeadingElement | null) => {
     node?.focus();
@@ -225,8 +226,7 @@ export function AutomationSetup({
         <DialogHeader className="px-6 pt-6 pr-12">
           <DialogTitle>Set up automation</DialogTitle>
           <DialogDescription>
-            Choose a small job for Buzz. You will review it before anything
-            runs.
+            Build a setup and review what it will do before turning it on.
           </DialogDescription>
         </DialogHeader>
         <ol aria-label="Setup progress" className="flex gap-2 px-6 text-xs">
@@ -361,6 +361,7 @@ export function AutomationSetup({
                 {selected.includes("assign") ? (
                   <DispatchCapacityEditor
                     inline
+                    onEditingChange={setAgentSettingsOpen}
                     context={context}
                     workspace={workspace}
                     refresh={refresh}
@@ -522,7 +523,11 @@ export function AutomationSetup({
           ) : null}
         </div>
         <div className="border-t border-border px-6 py-4">
-          {step === 1 && validationMessage ? (
+          {agentSettingsOpen ? (
+            <p className="mb-3 text-sm text-muted-foreground" role="status">
+              Save or cancel the agent settings above to continue.
+            </p>
+          ) : step === 1 && validationMessage ? (
             <p className="mb-3 text-sm text-muted-foreground" role="status">
               {validationMessage}
             </p>
@@ -530,7 +535,7 @@ export function AutomationSetup({
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
             <Button
               variant="ghost"
-              disabled={busy}
+              disabled={busy || agentSettingsOpen}
               onClick={() => (step === 0 ? onClose() : setStep(step - 1))}
             >
               {step > 0 ? (
@@ -542,6 +547,7 @@ export function AutomationSetup({
               <Button
                 disabled={
                   busy ||
+                  agentSettingsOpen ||
                   !selected.length ||
                   (step === 1 && Boolean(validationMessage))
                 }
