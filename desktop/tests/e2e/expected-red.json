@@ -45,24 +45,13 @@
     {
       "file": "tests/e2e/mentions.spec.ts",
       "title": "defers agent mentions until DM members finish loading",
-      "line": 664,
-      "class": "deterministic",
-      "reason": "Composer input stays empty where '@alice ' is expected; failed in all 3 runs.",
+      "line": 994,
+      "class": "quarantined-flake",
+      "reason": "RECLASSIFIED 2026-09-18 at f0d37b6cb (was deterministic since 08-29: composer stayed empty). e2cc4e3b0 added the keepMentionedAgentsPinned prerequisite and the test passed on the gate run; Helm 10x loop at 14feb2705 = 8 passed (6.6 s) / 2 timedOut at the 30 s test cap with no assertion (whole-test hang, load avg 2.5). Root cause = D-d6006cc1; de-quarantine needs >=10 consecutive passes.",
       "owner": "anvil",
-      "issue": "D-6f0edd0ed",
+      "issue": "D-d6006cc1e820481cb43b347094030c5f",
       "added": "2026-08-29",
-      "expires": "2026-09-28"
-    },
-    {
-      "file": "tests/e2e/message-copy-link.spec.ts",
-      "title": "message action rail copies the same canonical thread link as More",
-      "line": 39,
-      "class": "deterministic",
-      "reason": "'Link copied to clipboard' toast never appears; failed in all 3 runs.",
-      "owner": "anvil",
-      "issue": "D-6f0edd0ed",
-      "added": "2026-08-29",
-      "expires": "2026-09-28"
+      "expires": "2026-10-18"
     },
     {
       "file": "tests/e2e/send-channel-binding.spec.ts",
