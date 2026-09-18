@@ -9,7 +9,11 @@ function inspectChain(entries) {
   };
 }
 
-for (const app of ["ChatGPT", "Codex"]) {
+for (const [app, executable] of [
+  ["ChatGPT", "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"],
+  ["Codex", "/Applications/Codex.app/Contents/MacOS/Codex"],
+  ["Buzz", "/Applications/Buzz.app/Contents/MacOS/buzz-desktop"],
+]) {
   test(`refuses an indirect ${app} Desktop browser descendant`, () => {
     assert.throws(
       () =>
@@ -21,7 +25,7 @@ for (const app of ["ChatGPT", "Codex"]) {
             20: { parentPid: 10, executable: "/bin/bash" },
             10: {
               parentPid: 1,
-              executable: `/Applications/${app}.app/Contents/MacOS/${app}`,
+              executable,
             },
           }),
         }),

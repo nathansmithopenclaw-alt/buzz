@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 
 const desktopExecutable =
-  /\/(?:ChatGPT|Codex)\.app\/Contents\/MacOS\/(?:ChatGPT|Codex)$/;
+  /\/(?:ChatGPT\.app\/Contents\/MacOS\/ChatGPT|Codex\.app\/Contents\/MacOS\/Codex|Buzz\.app\/Contents\/MacOS\/buzz-desktop)$/;
 
 function readProcess(pid) {
   const output = execFileSync(
@@ -43,7 +43,7 @@ export function assertDetachedBrowser({
     }
     if (desktopExecutable.test(ancestor.executable)) {
       throw new Error(
-        "Browser tests cannot launch as ChatGPT/Codex Desktop descendants on macOS: " +
+        "Browser tests cannot launch as ChatGPT/Codex/Buzz Desktop descendants on macOS: " +
           "their helpers inherit the app identity and create extra Dock icons. " +
           "Run this check from Terminal or a finite detached launchd job. " +
           "This refusal is not a passing measurement.",

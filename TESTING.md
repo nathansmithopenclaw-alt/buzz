@@ -18,7 +18,7 @@ cargo test -p buzz-test-client -- --ignored
 
 ### Browser checks from macOS Desktop agents
 
-Browser helpers launched as ChatGPT/Codex Desktop descendants can inherit the
+Browser helpers launched as ChatGPT/Codex/Buzz Desktop descendants can inherit the
 host's application identity and create extra Dock icons. All Playwright configs,
 standalone screenshot helpers, and computer-use browser tests reject this ancestry
 before launching a browser.
