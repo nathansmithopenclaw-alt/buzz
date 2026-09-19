@@ -580,7 +580,6 @@ export function ChannelManagementSheet({
                           <ChannelCaptureSetting
                             key={resolvedChannel.id}
                             channel={resolvedChannel.id}
-                            signer={currentPubkey}
                           />
                         </React.Suspense>
                       </FeatureGate>

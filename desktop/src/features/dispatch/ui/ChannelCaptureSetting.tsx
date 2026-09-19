@@ -7,12 +7,7 @@ import { useDispatchContext, useDispatchWorkspaces } from "../hooks";
 import { activeRecords } from "../recordTypes";
 import { saveRelayAuthorization } from "../relayAutomation";
 
-export function ChannelCaptureSetting({
-  channel,
-}: {
-  channel: string;
-  signer: string;
-}) {
+export function ChannelCaptureSetting({ channel }: { channel: string }) {
   const workflows = useChannelWorkflowsQuery(channel);
   const context = useDispatchContext(channel);
   const discovery = useDispatchWorkspaces();

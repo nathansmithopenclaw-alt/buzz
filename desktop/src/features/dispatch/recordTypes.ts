@@ -134,7 +134,17 @@ export function activeRecords<T extends DispatchRecordPayload["type"]>(
   const matching = (records ?? []).filter(
     (record) => record.record.payload.type === type,
   );
-  if (["project_plan", "activation", "capacity", "automation"].includes(type)) {
+  if (
+    [
+      "project_plan",
+      "activation",
+      "capacity",
+      "automation",
+      "capture",
+      "unowned_alert",
+      "autopilot",
+    ].includes(type)
+  ) {
     const latest = new Map<string, DispatchRecordProjection>();
     for (const value of matching) {
       const payload = value.record.payload;
@@ -147,7 +157,13 @@ export function activeRecords<T extends DispatchRecordPayload["type"]>(
               ? payload.issue_id
               : payload.type === "capacity"
                 ? payload.executor
-                : value.record.record_id;
+                : payload.type === "capture"
+                  ? payload.channel
+                  : payload.type === "unowned_alert"
+                    ? payload.workspace
+                    : payload.type === "autopilot"
+                      ? `${payload.workspace}:${payload.project}`
+                      : value.record.record_id;
       const previous = latest.get(key);
       if (
         !previous ||
