@@ -1,3 +1,4 @@
+import { authorizationIntent } from "./relayAuthorizationIntent";
 import { getJournalItem, setJournalItem } from "./journalStorage";
 import { withLocalJournalLock } from "./localJournalLock";
 import { stringify } from "yaml";
@@ -9,7 +10,10 @@ import {
   updateWorkflow,
 } from "@/shared/api/tauriWorkflows";
 import { assertDispatchAudience } from "./audience";
-import { publishPlanningRecord } from "./recordMutations";
+import {
+  pendingPlanningChanges,
+  publishPlanningRecord,
+} from "./recordMutations";
 import type {
   AutopilotAuthorization,
   CaptureAuthorization,
@@ -51,14 +55,20 @@ async function saveRelayAuthorizationUnlocked({
   payload,
   previous,
   refresh,
+  expectedScope,
 }: {
   payload: RelayAuthorization;
   previous?: DispatchRecordProjection;
   refresh: () => Promise<DispatchContext>;
+  expectedScope: { relay: string; signer: string };
 }) {
   const stream =
     payload.type === "capture" ? payload.channel : payload.workspace;
   const [identity, relay] = await Promise.all([getIdentity(), getRelayWsUrl()]);
+  if (relay !== expectedScope.relay || identity.pubkey !== expectedScope.signer)
+    throw new Error(
+      "Return to the original community and identity to retry this setting.",
+    );
   const scope = {
     expectedRelayUrl: relay,
     expectedSignerPubkey: identity.pubkey,
@@ -86,22 +96,31 @@ async function saveRelayAuthorizationUnlocked({
     previous
       ? value.record.record_id === previous.record.record_id
       : !value.record.archived &&
-        JSON.stringify(value.record.payload) === JSON.stringify(payload),
+        authorizationIntent(value.record.payload) ===
+          authorizationIntent(payload),
   );
   // A pause may have committed its grant before its workflow write failed.
   // Recognize that exact already-accepted intent; never rebase a different edit.
   const alreadyAccepted =
     latest &&
     !latest.record.archived &&
-    JSON.stringify(latest.record.payload) === JSON.stringify(payload);
+    authorizationIntent(latest.record.payload) === authorizationIntent(payload);
+  const pendingRecords = await pendingPlanningChanges(stream);
+  const needsRecordRecovery = pendingRecords.some(
+    (value) =>
+      authorizationIntent(value.record.payload) ===
+        authorizationIntent(payload) &&
+      value.record.parent_event === (previous?.event_id ?? null),
+  );
   const persist = () =>
-    alreadyAccepted
+    alreadyAccepted && !needsRecordRecovery
       ? Promise.resolve(latest)
       : publishPlanningRecord({
           workspace: stream,
           payload,
           previous,
           refresh,
+          expectedScope,
         });
   // A failed second write remains visible and retryable. Never delete history.
   let accepted = payload.enabled ? undefined : await persist();
@@ -187,7 +206,8 @@ export async function saveRelayAuthorization(
     const pending = readPending(key, stream, setting);
     if (
       pending &&
-      JSON.stringify(pending.payload) !== JSON.stringify(input.payload)
+      authorizationIntent(pending.payload) !==
+        authorizationIntent(input.payload)
     )
       throw new Error(
         "Finish the saved automation change with Retry saved setting before making another change.",
@@ -211,6 +231,7 @@ export async function saveRelayAuthorization(
     const result = await saveRelayAuthorizationUnlocked({
       ...intent,
       refresh: input.refresh,
+      expectedScope: { relay, signer: identity.pubkey },
     });
     if (!setJournalItem(key, "null"))
       throw new Error(

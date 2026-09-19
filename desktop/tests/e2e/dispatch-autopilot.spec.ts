@@ -70,7 +70,10 @@ async function open(page: Page, context = fixture(), project = true) {
   await page.getByTestId("open-dispatch-view").click();
   await expect(page.getByTestId("dispatch-new-issue")).toBeEnabled();
   if (project) {
-    await page.getByTestId("dispatch-tab-projects").click();
+    await page
+      .getByRole("navigation", { name: "Dispatch views" })
+      .getByRole("button", { name: "Projects", exact: true })
+      .click();
     await page.getByRole("button", { name: /Website launch/ }).click();
     await expect(page.getByTestId("dispatch-autopilot")).toBeVisible();
   }
@@ -381,4 +384,51 @@ test("a partially saved Pause survives card closure and retries without another 
       (r) => r.payload.type === "autopilot",
     ),
   ).toHaveLength(2);
+});
+
+test("lost authorization ACK recovers the accepted record and clears its signed retry entry", async ({
+  page,
+}) => {
+  const context = fixture();
+  context.records = [
+    planningRecord(
+      {
+        type: "capacity",
+        executor: AGENT,
+        max_active: 2,
+        capabilities: [],
+        paused: false,
+      },
+      "b",
+    ),
+  ];
+  await open(page, context);
+  await chooseAgent(page);
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_FAIL_DISPATCH_ACKS__ = 1;
+  });
+  await page.getByRole("switch", { name: "Autopilot", exact: true }).click();
+  await expect(
+    page.getByTestId("dispatch-autopilot").getByRole("alert"),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Retry saved setting", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Retry saved setting", exact: true }),
+  ).toHaveCount(0);
+  expect(
+    (await publishedRecords(page)).filter(
+      (r) => r.payload.type === "autopilot",
+    ),
+  ).toHaveLength(1);
+  expect(
+    await page.evaluate(() =>
+      Object.keys(localStorage)
+        .filter((key) => key.startsWith("buzz-dispatch-pending-v1:"))
+        .every(
+          (key) => JSON.parse(localStorage.getItem(key) ?? "[]").length === 0,
+        ),
+    ),
+  ).toBe(true);
 });

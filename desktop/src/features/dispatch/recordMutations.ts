@@ -167,14 +167,23 @@ async function publishPlanningRecordUnlocked({
   previous,
   archived = false,
   refresh,
+  expectedScope,
 }: {
   workspace: string;
   payload: DispatchRecordPayload;
   previous?: DispatchRecordProjection;
   archived?: boolean;
   refresh: () => Promise<DispatchContext>;
+  expectedScope?: { relay: string; signer: string };
 }) {
   const [identity, relay] = await Promise.all([getIdentity(), getRelayWsUrl()]);
+  if (
+    expectedScope &&
+    (relay !== expectedScope.relay || identity.pubkey !== expectedScope.signer)
+  )
+    throw new Error(
+      "Return to the original community and identity to save this setting.",
+    );
   const key = journalKey(relay, identity.pubkey, workspace);
   const pending = readJournal(key);
   const matching = pending.find(

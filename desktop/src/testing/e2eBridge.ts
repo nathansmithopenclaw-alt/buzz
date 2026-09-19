@@ -11307,11 +11307,10 @@ function emitMockDispatchFixture(
         (workspace) =>
           workspace.populated && filter["#h"]?.includes(workspace.id),
       )
-      .forEach((workspace, index) => {
+      .forEach((workspace) => {
+        const digit = (workspaces.indexOf(workspace) + 9).toString(16);
         matching.push(
-          dispatchFixtureEvent((index + 9).toString(16), 40020, [
-            ["h", workspace.id],
-          ]),
+          dispatchFixtureEvent(digit, 40020, [["h", workspace.id]]),
         );
       });
   } else if (kinds.has(30621) && filter["#buzz-workspace"]) {

@@ -248,8 +248,12 @@ test("pin toggle persists the channel workflow and disables without deleting", a
   });
   await toggle.click();
   await expect(toggle).not.toBeChecked();
-  const disabled = (await read()).find((w) => w.id === workflow?.id);
-  expect(disabled?.definition.enabled).toBe(false);
+  await expect
+    .poll(
+      async () =>
+        (await read()).find((w) => w.id === workflow?.id)?.definition.enabled,
+    )
+    .toBe(false);
   const last = (await grants()).at(-1);
   expect(last.record_id).toBe(first.record_id);
   expect(last.revision).toBe(1);
