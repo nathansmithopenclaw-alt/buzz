@@ -67,7 +67,7 @@ test("hover capture exposes the first-row action, tooltip and linked issue", asy
   });
   await expect(track).toBeVisible();
   await waitForAnimations(page);
-  await row.screenshot({ path: info.outputPath("hover-row.png") });
+  await page.screenshot({ path: info.outputPath("hover-row.png") });
   await track.hover();
   await expect(page.getByRole("tooltip")).toHaveText("Track in Dispatch (T)");
   await waitForAnimations(page);

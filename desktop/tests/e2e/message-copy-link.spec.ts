@@ -92,6 +92,7 @@ test("message action rail copies the same canonical thread link as More", async 
     "React with :joy:",
     "Open reactions",
     "Reply",
+    "Track in Dispatch",
     "Copy link",
     "More actions",
   ]);
