@@ -110,12 +110,7 @@ test("Cmd+Shift+T captures the newest own message in the open channel", async ({
   page,
 }) => {
   await open(page);
-  await emit(
-    page,
-    "a".repeat(64),
-    TEST_IDENTITIES.tyler.pubkey,
-    "My latest message",
-  );
+  await emit(page, "a".repeat(64), "deadbeef".repeat(8), "My latest message");
   await emit(
     page,
     ID,

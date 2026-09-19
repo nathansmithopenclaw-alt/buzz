@@ -922,7 +922,6 @@ export const MessageRow = React.memo(
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
               : "",
           )}
-          // biome-ignore lint/a11y/noNoninteractiveTabindex: message focus owns the documented T capture shortcut.
           tabIndex={dispatchEnabled ? 0 : undefined}
           data-message-id={message.id}
           data-testid="message-row"

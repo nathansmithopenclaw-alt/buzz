@@ -12,7 +12,7 @@ composer extensions/autocomplete, and the app shortcut registry on base
 | ArrowUp / ArrowDown | `useMentions`, `useChannelLinks`, `useEmojiAutocomplete`: navigate suggestions | Different key |
 | Tab / Enter / Escape | Composer autocomplete: accept/dismiss; Tab settles link editor; Escape cancels edit | Different keys; T ignores editable targets |
 | Cmd+Shift+M / Ctrl+Shift+M | `useAlwaysAddressShortcut`: address agent | Different key |
-| Cmd+B / I / E / U / Shift+S | Tiptap: bold, italic, inline code, strike | Different keys; T ignores editor input |
+| Cmd+B / I / E / U / Shift+S | Tiptap: bold, italic, inline code, underline, strike | Different keys; T ignores editor input |
 | Cmd+K / Ctrl+K | Composer link editor when it owns selection, otherwise app search | Different key |
 | Cmd+Shift+V / Ctrl+Shift+V | Plain-text paste in `useRichTextEditor` | Different key |
 | Ctrl+A / E | macOS visual-line start/end | Different keys |
