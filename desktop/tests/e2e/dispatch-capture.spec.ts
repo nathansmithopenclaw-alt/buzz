@@ -1,9 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import {
-  installMockBridge,
-  TEST_IDENTITIES,
-  waitForMockLiveSubscription,
-} from "../helpers/bridge";
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
 const WORKSPACE = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const ID = "f".repeat(64);
@@ -28,7 +24,16 @@ async function open(page: Page, fail = false) {
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
-  await waitForMockLiveSubscription(page, "general");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: "general",
+          }) ?? false,
+      ),
+    )
+    .toBe(true);
 }
 async function emit(
   page: Page,

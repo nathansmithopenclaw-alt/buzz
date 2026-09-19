@@ -1,3 +1,4 @@
+import { useFeatureEnabled } from "@/shared/features";
 import { FeatureGate } from "@/shared/features";
 import * as React from "react";
 import { AlertTriangle } from "lucide-react";
@@ -172,6 +173,7 @@ export const MessageRow = React.memo(
   }) {
     // Keep the transient send state with its timestamp rather than collapsing
     // it into a grouped message row with no header.
+    const dispatchEnabled = useFeatureEnabled("dispatch");
     const isDisplayedAsContinuation = isContinuation && !message.pending;
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
       null,
@@ -921,7 +923,7 @@ export const MessageRow = React.memo(
               : "",
           )}
           // biome-ignore lint/a11y/noNoninteractiveTabindex: message focus owns the documented T capture shortcut.
-          tabIndex={0}
+          tabIndex={dispatchEnabled ? 0 : undefined}
           data-message-id={message.id}
           data-testid="message-row"
           onAnimationEnd={handleEntranceAnimationEnd}

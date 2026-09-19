@@ -1,4 +1,6 @@
 import 'dart:ui' as ui;
+import 'dart:convert';
+import 'package:flutter/services.dart';
 
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
@@ -350,6 +352,24 @@ class _FakeChannelActions extends ChannelActions {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  setUpAll(() async {
+    final manifest =
+        jsonDecode(await rootBundle.loadString('FontManifest.json')) as List;
+    for (final entry in manifest.cast<Map<String, dynamic>>()) {
+      final family = entry['family'] as String;
+      if (family == 'Inter' ||
+          family == 'MaterialIcons' ||
+          family.toLowerCase().contains('lucide')) {
+        final loader = FontLoader(family);
+        for (final font
+            in (entry['fonts'] as List).cast<Map<String, dynamic>>()) {
+          loader.addFont(rootBundle.load(font['asset'] as String));
+        }
+        await loader.load();
+      }
+    }
+  });
   testWidgets(
     'message long press keeps taps and scrolling while repeated holds win',
     (tester) async {
@@ -585,6 +605,10 @@ void main() {
     testWidgets('Track in Dispatch is the first delivered-message action', (
       tester,
     ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
       final prefs = await _mockPrefs();
       await _pumpMessageActionsPopover(
         tester,
@@ -601,6 +625,7 @@ void main() {
         find.byKey(const ValueKey('message-action-surface')),
         matchesGoldenFile('goldens/dispatch-capture-actions.png'),
       );
+      await _dismissMessageActionsPopover(tester);
     });
     testWidgets('composes the tray, lifted preview, and compact actions', (
       tester,

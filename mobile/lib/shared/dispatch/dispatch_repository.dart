@@ -99,6 +99,12 @@ class DispatchRepository {
         found.map((event) => event.channelId).whereType<String>(),
       );
     }
+    // A first capture can be retained before any issue exists remotely. Keep
+    // its member workspace discoverable so Work can offer normal recovery.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    _fence();
+    populated.addAll(ids.where((id) => prefs.containsKey(_key(id))));
     if (populated.isEmpty) return [];
     final metadata = await session.queryRelay([
       NostrFilters.channelMetadata(populated.toList()),
@@ -206,7 +212,7 @@ class DispatchRepository {
     nostr.Event.fromJson(jsonEncode(event.toJson()));
     if (event.pubkey != pubkey ||
         event.channelId != workspace ||
-        ![40021, 40026].contains(event.kind)) {
+        ![40020, 40021, 40026].contains(event.kind)) {
       throw const FormatException(
         'Retained edit scope does not match this workspace',
       );

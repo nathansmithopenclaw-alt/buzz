@@ -1,4 +1,7 @@
 import 'dart:convert';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/dispatch/dispatch_capture.dart';
 import 'package:buzz/shared/dispatch/dispatch_capture_sheet.dart';
 import 'package:buzz/shared/dispatch/dispatch_repository.dart';
@@ -20,7 +23,68 @@ class Repository extends Fake implements DispatchRepository {
   }
 }
 
+class RetainedCaptureRepository extends DispatchRepository {
+  RetainedCaptureRepository(nostr.Keys keys)
+    : super(
+        relay: 'https://capture.invalid',
+        pubkey: keys.public,
+        nsec: keys.nsec,
+        session: RelaySessionNotifier(),
+        isCurrent: () => true,
+      );
+  bool failVerification = true;
+  final List<String> checkedEvents = [];
+  @override
+  Future<Map<String, dynamic>> snapshot(
+    String workspace, {
+    String? issueId,
+    String? after,
+    bool includeClosed = false,
+  }) async {
+    final saved = await pending(workspace);
+    if (saved != null) {
+      checkedEvents.add(saved.event.id);
+      if (failVerification) throw StateError('Acceptance unavailable');
+    }
+    return {
+      'issues': [
+        if (saved != null)
+          {
+            'issueId': saved.issueId,
+            'sourceEventId': source,
+            'rootEvent': saved.event.id,
+            'tipEvent': saved.event.id,
+            'acceptedEvents': [saved.event.id],
+          },
+      ],
+      'decisions': [],
+    };
+  }
+}
+
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'capture retains signed bytes before verification and reuses them on retry',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final keys = nostr.Keys.generate();
+      final repository = RetainedCaptureRepository(keys);
+      await expectLater(
+        repository.capture(channel, source, 'Original intent'),
+        throwsStateError,
+      );
+      final saved = await repository.pending(channel);
+      expect(saved, isNotNull);
+      final event = nostr.Event.fromJson(jsonEncode(saved!.event.toJson()));
+      expect(event.id, saved.event.id);
+      expect(jsonDecode(saved.event.content)['title'], 'Original intent');
+      repository.failVerification = false;
+      await repository.capture(channel, source, 'A different retry title');
+      expect(repository.checkedEvents, [saved.event.id, saved.event.id]);
+      expect(await repository.pending(channel), isNull);
+    },
+  );
   test(
     'capture uses SDK request identity, same-channel triage and source tags',
     () {

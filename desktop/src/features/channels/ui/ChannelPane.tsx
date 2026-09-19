@@ -330,6 +330,11 @@ export const ChannelPane = React.memo(function ChannelPane({
       capture.send,
     ],
   );
+  const captureThreadReply = React.useCallback(
+    (...args: Parameters<typeof onSendThreadReply>) =>
+      capture.send(onSendThreadReply, ...args),
+    [capture.send, onSendThreadReply],
+  );
   const canDropInMainColumn =
     hasMainComposerOverlay &&
     !isComposerDisabled &&
@@ -873,7 +878,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onMarkRead={onMarkRead}
                 onExpandReplies={onExpandThreadReplies}
                 onSelectReplyTarget={onSelectThreadReplyTarget}
-                onSend={(...args) => capture.send(onSendThreadReply, ...args)}
+                onSend={captureThreadReply}
                 onSendToChannel={
                   isComposerDisabled ? undefined : onSendToChannel
                 }

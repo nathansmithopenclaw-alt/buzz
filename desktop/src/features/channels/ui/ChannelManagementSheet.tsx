@@ -1,7 +1,3 @@
-const ChannelCaptureSetting = React.lazy(async () => ({
-  default: (await import("@/features/dispatch/ui/ChannelCaptureSetting"))
-    .ChannelCaptureSetting,
-}));
 import {
   Archive,
   ArchiveRestore,
@@ -86,6 +82,11 @@ import {
   useChannelModerationCapabilities,
 } from "./ChannelManagementModerationActions";
 import { ChannelMemberAvatarStack } from "./ChannelMemberAvatarStack";
+
+const ChannelCaptureSetting = React.lazy(async () => ({
+  default: (await import("@/features/dispatch/ui/ChannelCaptureSetting"))
+    .ChannelCaptureSetting,
+}));
 
 type ChannelManagementSheetProps = {
   channel: Channel | null;
