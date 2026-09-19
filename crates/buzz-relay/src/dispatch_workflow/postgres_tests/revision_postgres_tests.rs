@@ -232,6 +232,16 @@ async fn backdated_status_revision_uses_receipt_age_and_title_edits_do_not_reset
 #[tokio::test]
 #[ignore = "requires isolated Postgres"]
 async fn projection_failure_preserves_ingest_ack_and_next_tick_recovers() {
+    projection_recovery(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated Postgres"]
+async fn capture_only_tick_recovers_failed_lifecycle_projection() {
+    projection_recovery(true).await;
+}
+
+async fn projection_recovery(capture_only: bool) {
     use crate::handlers::ingest::{ingest_event, IngestAuth};
     let f = Fixture::new().await;
     let root = f.issue("Durable lifecycle retry", false, 25).await;
@@ -250,6 +260,29 @@ async fn projection_failure_preserves_ingest_ack_and_next_tick_recovers() {
         .sign_with_keys(&f.owner)
         .unwrap();
     f.save(&paused, f.workspace).await;
+    let source = EventBuilder::new(Kind::Custom(9), "Capture recovery trigger")
+        .tags([tag("h", &f.channel.to_string()).unwrap()])
+        .sign_with_keys(&f.owner)
+        .unwrap();
+    f.save(&source, f.channel).await;
+    let pin = f.pin(&source, "recovery").await;
+    if capture_only {
+        sqlx::query("DELETE FROM workflows WHERE community_id=$1")
+            .bind(f.community.as_uuid())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        f.record(
+            f.channel,
+            DispatchRecordPayload::Capture {
+                channel: f.channel,
+                workspace: f.workspace,
+                project: None,
+                enabled: true,
+            },
+        )
+        .await;
+    }
     let assignment = f
         .history(f.channel)
         .await
@@ -335,7 +368,16 @@ async fn projection_failure_preserves_ingest_ack_and_next_tick_recovers() {
         } else {
             action.clone()
         };
-        f.invoke(f.workspace, tick, None).await;
+        if capture_only {
+            f.invoke(
+                f.channel,
+                json!({"id":"capture","action":"dispatch.create_issue"}),
+                Some(&pin),
+            )
+            .await;
+        } else {
+            f.invoke(f.workspace, tick, None).await;
+        }
         assert!(
             digests(&f).await.is_empty(),
             "escalation in recovery transaction must see newly observed status age"
@@ -354,7 +396,27 @@ async fn projection_failure_preserves_ingest_ack_and_next_tick_recovers() {
             "next scheduled Dispatch tick must recover pending lifecycle projection"
         );
         let tip = issue.tip_event.clone();
-        f.invoke(f.workspace, action.clone(), None).await;
+        if capture_only {
+            f.invoke(
+                f.channel,
+                json!({"id":"capture","action":"dispatch.create_issue"}),
+                Some(&pin),
+            )
+            .await;
+            let scheduled: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM workflows WHERE community_id=$1 AND name<>'dispatch-capture'",
+            )
+            .bind(f.community.as_uuid())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                scheduled, 0,
+                "recovery must work with only capture workflows"
+            );
+        } else {
+            f.invoke(f.workspace, action.clone(), None).await;
+        }
         let fold = preliminary_planner(&f.state, f.community, f.workspace)
             .await
             .unwrap()

@@ -156,8 +156,36 @@ impl Planner<'_> {
             return self.skip(workspace, &record.event_id, "escalate", "alerts paused");
         }
         let fold = self.issues(workspace);
+        let times = self.admission_times(workspace);
+        // A compatibility fold is diagnostic only: never grant legacy history
+        // unattended authority. It exposes issues hidden by missing receipts.
+        let (auth, _) = self.authorization(workspace);
+        let visible = fold_tracker_events(
+            self.events()
+                .filter(|e| scope(e) == Some(workspace))
+                .filter_map(|e| parse_tracker_event(e, self.now()).ok()),
+            &auth,
+        );
         let mut digest = BTreeMap::<Uuid, Vec<String>>::new();
         let threshold = format!("unowned-{after_hours}h");
+        let mut missing = BTreeSet::new();
+        for issue in visible
+            .issues
+            .values()
+            .filter(|i| i.stream_id == workspace && !i.status.is_terminal() && i.assignee.is_none())
+        {
+            if status_observed(&visible, issue, &times).is_none() {
+                missing.insert(issue.issue_id);
+                if self.batch.ledger.len() < 100 {
+                    self.skip(
+                        workspace,
+                        &format!("{}:{threshold}", issue.issue_id),
+                        "escalate",
+                        "no admission receipt",
+                    )?;
+                }
+            }
+        }
         for issue in fold
             .issues
             .values()
@@ -166,32 +194,18 @@ impl Planner<'_> {
             if self.batch.ledger.len() >= 100 {
                 break;
             }
-            // Follow canonical ancestry, not the author's clock or a title-only edit.
-            let entered = fold
-                .activity
-                .get(&(workspace, issue.issue_id))
-                .and_then(|history| {
-                    history.iter().rev().find(|entry| {
-                        entry
-                            .before
-                            .as_ref()
-                            .is_none_or(|before| before.status != entry.after.status)
-                    })
-                })
-                .ok_or("issue status ancestry missing")?;
-            let observed = self
-                .events()
-                .filter(|event| {
-                    event.kind.as_u16() == 40027
-                        && event.pubkey == self.state.relay_keypair.public_key()
-                })
-                .filter_map(|event| serde_json::from_str::<DispatchAdmission>(&event.content).ok())
-                .filter(|receipt| {
-                    receipt.workspace == workspace && receipt.event_id == entered.event_id
-                })
-                .map(|receipt| receipt.observed_at)
-                .min()
-                .ok_or("status transition has no relay admission time")?;
+            if missing.contains(&issue.issue_id) {
+                continue;
+            }
+            let Some(observed) = status_observed(&fold, issue, &times) else {
+                self.skip(
+                    workspace,
+                    &format!("{}:{threshold}", issue.issue_id),
+                    "escalate",
+                    "no admission receipt",
+                )?;
+                continue;
+            };
             let age = self.now().saturating_sub(observed);
             if age < u64::from(after_hours) * 3600 {
                 continue;
@@ -247,4 +261,24 @@ impl Planner<'_> {
         }
         Ok(())
     }
+}
+
+// Canonical root or last actual status change, never a title-only edit.
+fn status_observed(
+    fold: &TrackerFold,
+    issue: &IssueProjection,
+    times: &BTreeMap<String, u64>,
+) -> Option<u64> {
+    let entered = fold
+        .activity
+        .get(&(issue.stream_id, issue.issue_id))?
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry
+                .before
+                .as_ref()
+                .is_none_or(|before| before.status != entry.after.status)
+        })?;
+    times.get(&entered.event_id).copied()
 }

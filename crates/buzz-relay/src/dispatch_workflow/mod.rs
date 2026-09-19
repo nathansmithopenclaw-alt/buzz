@@ -18,7 +18,7 @@ mod assign;
 mod capture;
 mod lifecycle;
 #[cfg(test)]
-mod tests;
+mod postgres_tests;
 pub(crate) use lifecycle::transition;
 
 type Result<T> = std::result::Result<T, String>;
@@ -113,11 +113,10 @@ async fn execute_inner(
             Some((workflow.id, workflow.definition_hash)),
             |snapshot| {
                 let mut p = Planner::new(state, snapshot);
-                if matches!(
-                    action,
-                    ActionDef::DispatchEscalate { .. } | ActionDef::DispatchAssign {}
-                ) {
-                    p.project_lifecycle(channel, None)?;
+                // Includes capture destinations, even when assignment is paused.
+                // One shared budget bounds recovery across all locked scopes.
+                for workspace in &channels {
+                    p.project_lifecycle(*workspace, None)?;
                 }
                 let record_type = match action {
                     ActionDef::DispatchCreateIssue {} => "create_issue",
@@ -361,6 +360,17 @@ impl<'a> Planner<'a> {
             })
             .collect();
         (auth, admitted)
+    }
+    fn admission_times(&self, channel: Uuid) -> std::collections::BTreeMap<String, u64> {
+        let mut auth = TrackerAuthorization::new([]);
+        apply_dispatch_admissions(
+            &self.events().cloned().collect::<Vec<_>>(),
+            channel,
+            self.state.relay_keypair.public_key(),
+            &mut auth,
+            self.now(),
+        )
+        .observed_at
     }
     fn records(&self, channel: Uuid) -> Vec<DispatchRecordProjection> {
         let (auth, events) = self.authorization(channel);

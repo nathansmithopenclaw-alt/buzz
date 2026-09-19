@@ -2,7 +2,8 @@ use super::*;
 use buzz_sdk::{dispatch_record::build_dispatch_record, task_envelope::*};
 use nostr::Keys;
 use serde_json::{json, Value};
-mod revision;
+mod recovery_postgres_tests;
+mod revision_postgres_tests;
 struct Fixture {
     state: Arc<AppState>,
     pool: sqlx::PgPool,
@@ -18,7 +19,9 @@ impl Fixture {
         let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
             .await
             .unwrap();
-        buzz_db::migration::run_migrations(&pool).await.unwrap();
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            buzz_db::migration::run_migrations(&pool).await.unwrap();
+        }
         let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
         state
             .workflow_engine

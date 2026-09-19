@@ -587,11 +587,20 @@ Forged, stale and superseded attempts cannot move the board. The transition keep
 the issue owner and records the relay pickup time through the ordinary status
 activity. Once the source event is durably stored, projection failures are logged
 at error level and never change the successful ACK (including duplicate ACKs).
-Admitted task history is the durable retry source: the next scheduled Dispatch
-action reconciles up to 32 pending current pickup/done states in its transaction,
-even if new assignments are paused. Existing snapshot bounds still apply;
+Admitted task history is the durable retry source: the next Dispatch action
+(including reaction capture) reconciles up to 32 pending current pickup/done
+states in relay-admission order, even if new assignments are paused. This retry
+requires an action tick: capture-only workspaces retry on the next pin, and
+workspaces with no running Dispatch workflow have no background recovery.
+Configure a scheduled Dispatch action for periodic recovery; a paused assignment
+record can retain that schedule without assigning new work. Existing snapshot bounds still apply;
 oversized or unavailable history remains pending and fails visibly until repaired.
 Ledger claims prevent duplicate revisions and prevent a consumed lifecycle event
 from undoing subsequent manual board changes. The relay uses the existing
 Tracker monotonic revision timestamp rule so same-second acceptance cannot lose
 to a prior revision's lexical event-ID ordering.
+
+Unowned alerts skip an issue with missing status admission evidence, emitting one
+kind-40023 `no admission receipt` outcome per issue and threshold. Other issues
+continue in the same tick. A later administrator baseline can restore eligibility;
+the skip does not consume the successful alert claim.

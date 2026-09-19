@@ -154,3 +154,12 @@ definitions. The external [dispatcher](dispatcher.md) remains an optional
 operator mode with its existing controls; it is not required for these relay
 actions. Desktop controls that publish the new scope records are a separate
 integration from the relay protocol.
+
+If an accepted pickup or completion does not update the board because projection
+failed, its task history remains saved. The next Dispatch action retries the
+update, including the next pin in a capture-only workspace. Periodic recovery
+requires a scheduled Dispatch workflow; without one, a quiet workspace has no
+background retry. Administrators can keep an assignment schedule running with
+Autopilot paused to retry updates without starting new work. Missing legacy
+admission evidence appears as a skipped unowned alert and needs an administrator
+baseline; it does not block reminders for other issues.
