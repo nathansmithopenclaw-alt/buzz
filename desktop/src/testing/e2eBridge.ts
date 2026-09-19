@@ -1,3 +1,4 @@
+import { dispatchPopulationProbeFilter } from "./e2eDispatchPopulation";
 import { dispatchMockCommand } from "./dispatchMockCommands";
 import { applyDispatchMockEvent } from "./dispatchMockProjection";
 import {
@@ -11307,11 +11308,10 @@ function emitMockDispatchFixture(
         (workspace) =>
           workspace.populated && filter["#h"]?.includes(workspace.id),
       )
-      .forEach((workspace, index) => {
+      .forEach((workspace) => {
+        const digit = (workspaces.indexOf(workspace) + 9).toString(16);
         matching.push(
-          dispatchFixtureEvent((index + 9).toString(16), 40020, [
-            ["h", workspace.id],
-          ]),
+          dispatchFixtureEvent(digit, 40020, [["h", workspace.id]]),
         );
       });
   } else if (kinds.has(30621) && filter["#buzz-workspace"]) {
@@ -11453,7 +11453,8 @@ function sendToMockSocket(args: {
     }
 
     const filter = rest[1] as MockFilter;
-    if (emitMockDispatchFixture(socket, subId, filter)) return;
+    const probe = dispatchPopulationProbeFilter(filters) ?? filter;
+    if (emitMockDispatchFixture(socket, subId, probe)) return;
     if (filter.kinds?.includes(13534)) {
       sendWsText(socket.handler, [
         "EVENT",

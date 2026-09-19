@@ -156,6 +156,7 @@ export default defineConfig({
         "**/dispatch-shell.spec.ts",
         "**/dispatch-triage-badge.spec.ts",
         "**/dispatch-capture.spec.ts",
+        "**/dispatch-autopilot.spec.ts",
         "**/dispatch-loading.spec.ts",
         "**/dispatch-automation.spec.ts",
         "**/dispatch-triage-detail.spec.ts",

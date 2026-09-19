@@ -28,7 +28,38 @@ export type AutomationControls = {
   unassigned_after_secs: number | null;
   notification_channel: string;
 };
+export type CaptureAuthorization = {
+  type: "capture";
+  channel: string;
+  workspace: string;
+  project: string | null;
+  enabled: boolean;
+};
+export type UnownedAlertAuthorization = {
+  type: "unowned_alert";
+  workspace: string;
+  channel: string | null;
+  after_hours: number;
+  enabled: boolean;
+};
+export type AutopilotAuthorization = {
+  type: "autopilot";
+  workspace: string;
+  project: string;
+  agents: string[];
+  label: string | null;
+  at_a_time: number;
+  per_day: number;
+  reviewer_required: true;
+  enabled: boolean;
+  activation_id: string;
+  confirmation_required: boolean;
+  confirmation_event: string | null;
+};
 export type DispatchRecordPayload =
+  | CaptureAuthorization
+  | UnownedAlertAuthorization
+  | AutopilotAuthorization
   | { type: "automation"; controls: AutomationControls }
   | { type: "view"; name: string; filters: Record<string, string> }
   | {
@@ -103,7 +134,17 @@ export function activeRecords<T extends DispatchRecordPayload["type"]>(
   const matching = (records ?? []).filter(
     (record) => record.record.payload.type === type,
   );
-  if (["project_plan", "activation", "capacity", "automation"].includes(type)) {
+  if (
+    [
+      "project_plan",
+      "activation",
+      "capacity",
+      "automation",
+      "capture",
+      "unowned_alert",
+      "autopilot",
+    ].includes(type)
+  ) {
     const latest = new Map<string, DispatchRecordProjection>();
     for (const value of matching) {
       const payload = value.record.payload;
@@ -116,7 +157,13 @@ export function activeRecords<T extends DispatchRecordPayload["type"]>(
               ? payload.issue_id
               : payload.type === "capacity"
                 ? payload.executor
-                : value.record.record_id;
+                : payload.type === "capture"
+                  ? payload.channel
+                  : payload.type === "unowned_alert"
+                    ? payload.workspace
+                    : payload.type === "autopilot"
+                      ? `${payload.workspace}:${payload.project}`
+                      : value.record.record_id;
       const previous = latest.get(key);
       if (
         !previous ||

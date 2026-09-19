@@ -167,14 +167,23 @@ async function publishPlanningRecordUnlocked({
   previous,
   archived = false,
   refresh,
+  expectedScope,
 }: {
   workspace: string;
   payload: DispatchRecordPayload;
   previous?: DispatchRecordProjection;
   archived?: boolean;
   refresh: () => Promise<DispatchContext>;
+  expectedScope?: { relay: string; signer: string };
 }) {
   const [identity, relay] = await Promise.all([getIdentity(), getRelayWsUrl()]);
+  if (
+    expectedScope &&
+    (relay !== expectedScope.relay || identity.pubkey !== expectedScope.signer)
+  )
+    throw new Error(
+      "Return to the original community and identity to save this setting.",
+    );
   const key = journalKey(relay, identity.pubkey, workspace);
   const pending = readJournal(key);
   const matching = pending.find(
@@ -315,7 +324,21 @@ function assertPlanningPermission(
     );
   const maintainer = context.viewerRole === "maintainer";
   if (
-    (["automation", "activation", "capacity"].includes(payload.type) ||
+    ["capture", "unowned_alert", "autopilot"].includes(payload.type) &&
+    !context.canAuthorizeAutomation
+  )
+    throw new Error(
+      "A current workspace owner or admin must approve this setting.",
+    );
+  if (
+    ([
+      "automation",
+      "activation",
+      "capacity",
+      "capture",
+      "unowned_alert",
+      "autopilot",
+    ].includes(payload.type) ||
       (payload.type === "delivery" &&
         ["reviewed", "accepted"].includes(payload.stage))) &&
     !maintainer

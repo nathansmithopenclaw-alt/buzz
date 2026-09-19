@@ -1,3 +1,11 @@
+import { UnownedAlertSetting } from "./UnownedAlertSetting";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/shared/ui/dialog";
 import { DispatchSyncNotice } from "./DispatchSyncNotice";
 import { DispatchBulkActions } from "./DispatchBulkActions";
 import { DispatchProjectsPanel } from "./DispatchProjectsPanel";
@@ -99,6 +107,7 @@ const tabClassName =
 
 export function DispatchScreen() {
   const navigate = useNavigate();
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
   const { activeCommunity } = useCommunities();
   const { applyPatch, values } = useHistorySearchState(DISPATCH_SEARCH_KEYS);
   const identity = useIdentityQuery();
@@ -292,6 +301,18 @@ export function DispatchScreen() {
                         ? "Checking for updates…"
                         : syncedLabel(context.snapshotAt)}
                 </span>
+                {workspaceId &&
+                context.canAuthorizeAutomation === true &&
+                !context.isPreview &&
+                !context.error ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setSettingsOpen(true)}
+                  >
+                    Settings
+                  </Button>
+                ) : null}
                 <Button
                   aria-label="Refresh Dispatch"
                   data-testid="dispatch-refresh"
@@ -503,6 +524,20 @@ export function DispatchScreen() {
             </div>
           ) : (
             <section className="flex min-h-0 flex-1 flex-col overflow-auto">
+              <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Dispatch settings</DialogTitle>
+                    <DialogDescription>Workspace alerts</DialogDescription>
+                  </DialogHeader>
+                  <UnownedAlertSetting
+                    key={workspaceId}
+                    workspace={workspaceId}
+                    context={context}
+                    refresh={context.refresh}
+                  />
+                </DialogContent>
+              </Dialog>
               {view === "projects" && identity.data?.pubkey ? (
                 <DispatchProjectsPanel
                   key={`${workspaceId}:${identity.data.pubkey}`}

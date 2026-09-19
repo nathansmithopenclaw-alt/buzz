@@ -159,6 +159,15 @@ export type DispatchWorkspace = {
 };
 
 export type DispatchAutomationObservations = {
+  relaySigner?: string;
+  outcomes?: {
+    eventId: string;
+    requestKey: string;
+    source: string;
+    result: string;
+    confirmationRequired: boolean;
+    confirmationEvent: string | null;
+  }[];
   heartbeats: {
     eventId: string;
     signer: string;
@@ -178,6 +187,7 @@ export type DispatchAutomationObservations = {
   }[];
 };
 export type DispatchContext = {
+  canAuthorizeAutomation?: boolean;
   linkedTaskScope?: { channelIds: string[]; taskIds: string[] };
   admission?: {
     sealed: string[];
