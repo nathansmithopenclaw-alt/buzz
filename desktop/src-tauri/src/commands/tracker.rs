@@ -248,6 +248,7 @@ fn fold_tracker_context_values(
         &planning,
         workspace_id,
         snapshot_at,
+        membership_event.pubkey,
     );
     let projects = fold_tracker_projects_at(
         signed_events.iter().cloned(),
@@ -352,6 +353,10 @@ fn fold_tracker_context_values(
         "linkedTasks": linked_tasks,
         "projects": projects,
         "automation": automation,
+        "canAuthorizeAutomation": membership_event.tags.iter().map(|tag| tag.as_slice()).any(|tag|
+            tag.first().map(String::as_str) == Some("p")
+            && tag.get(1).map(String::as_str) == Some(managed_signer.as_str())
+            && matches!(tag.get(3).map(String::as_str), Some("owner" | "admin"))),
         "admission": admission,
         "records": planning.records.into_values().collect::<Vec<_>>(),
         "diagnostics": diagnostics,
@@ -495,6 +500,10 @@ pub fn fold_tracker_context_incremental(
     persist_cache_best_effort(&app, &key, &merged);
     Ok(folded)
 }
+
+#[cfg(test)]
+#[path = "tracker_authorization_tests.rs"]
+mod authorization_tests;
 
 #[cfg(test)]
 mod tests {

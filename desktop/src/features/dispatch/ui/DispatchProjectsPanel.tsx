@@ -20,6 +20,7 @@ import { activeRecords, type PayloadOf, type RecordOf } from "../recordTypes";
 import { publishPlanningRecord } from "../recordMutations";
 import { issueAlias } from "../issueEditing";
 import type { DispatchContext, DispatchProject } from "../types";
+import { AutopilotCard } from "./AutopilotCard";
 import { AssigneePickerDialog } from "./AssigneePickerDialog";
 
 export function DispatchProjectsPanel({
@@ -218,6 +219,13 @@ function ProjectHome({
           Edit project plan
         </Button>
       </div>
+      <AutopilotCard
+        context={context}
+        workspace={workspace}
+        project={project.projectId}
+        refresh={refresh}
+        onOpenIssue={onOpenIssue}
+      />
       <section className="mt-5 rounded-xl border border-border p-4">
         <h3 className="text-sm font-semibold">Target outcome</h3>
         <p className="mt-2 text-sm">

@@ -3,11 +3,23 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
 const WORKSPACE = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const ID = "f".repeat(64);
-async function open(page: Page, fail = false) {
+async function open(page: Page, fail = false, multiple = false) {
   await installMockBridge(page, {
     ...(fail ? { sendMessageErrors: ["Capture send failed"] } : {}),
     dispatch: {
       workspace: { id: WORKSPACE, name: "Capture workspace" },
+      ...(multiple
+        ? {
+            workspaces: [
+              { id: WORKSPACE, name: "Capture workspace", populated: true },
+              {
+                id: "8dd44714-7598-4710-92a8-77d4effbf39a",
+                name: "Other workspace",
+                populated: true,
+              },
+            ],
+          }
+        : {}),
       context: {
         issues: [],
         activity: [],
@@ -17,6 +29,7 @@ async function open(page: Page, fail = false) {
         diagnostics: [],
         taskDiagnostics: [],
         viewerRole: "maintainer",
+        canAuthorizeAutomation: true,
         sectionErrors: { comments: null, projects: null, tasks: null },
         snapshotAt: new Date().toISOString(),
       },
@@ -182,7 +195,7 @@ test("failed /track send never opens capture or creates an issue", async ({
 });
 test("pin toggle persists the channel workflow and disables without deleting", async ({
   page,
-}) => {
+}, info) => {
   await open(page);
   await page.getByTestId("channel-management-trigger").click();
   await page.getByTestId("channel-management-edit").click();
@@ -200,6 +213,25 @@ test("pin toggle persists the channel workflow and disables without deleting", a
           { channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50" },
         ),
     ) as Promise<Array<{ id: string; definition: Record<string, unknown> }>>;
+  await expect(page.getByLabel("Issues go to")).toHaveValue(WORKSPACE);
+  const grants = () =>
+    page.evaluate(() =>
+      (window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [])
+        .filter((e) => e.kind === 40026)
+        .map((e) => JSON.parse(e.content)),
+    );
+  const first = (await grants())[0];
+  expect(first.payload).toEqual({
+    type: "capture",
+    channel: WORKSPACE,
+    workspace: WORKSPACE,
+    project: null,
+    enabled: true,
+  });
+  await waitForAnimations(page);
+  await page
+    .getByTestId("channel-capture-setting")
+    .screenshot({ path: info.outputPath("pin-workspace-setting.png") });
   const workflows = await read();
   const workflow = workflows.find(
     (w) => w.definition.name === "dispatch-capture",
@@ -218,9 +250,43 @@ test("pin toggle persists the channel workflow and disables without deleting", a
   await expect(toggle).not.toBeChecked();
   const disabled = (await read()).find((w) => w.id === workflow?.id);
   expect(disabled?.definition.enabled).toBe(false);
+  const last = (await grants()).at(-1);
+  expect(last.record_id).toBe(first.record_id);
+  expect(last.revision).toBe(1);
+  expect(last.payload.enabled).toBe(false);
   expect(
     await page.evaluate(() =>
       window.__BUZZ_E2E_COMMANDS__?.includes("delete_workflow"),
     ),
   ).toBe(false);
+});
+
+test("multiple populated workspaces require an explicit capture destination", async ({
+  page,
+}) => {
+  await open(page, false, true);
+  await page.getByTestId("channel-management-trigger").click();
+  await page.getByTestId("channel-management-edit").click();
+  const setting = page.getByTestId("channel-capture-setting");
+  const toggle = setting.getByRole("switch");
+  await expect(setting.getByLabel("Issues go to")).toHaveValue("");
+  await expect(toggle).toBeDisabled();
+  await setting
+    .getByLabel("Issues go to")
+    .selectOption("8dd44714-7598-4710-92a8-77d4effbf39a");
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  const event = await page.evaluate(() =>
+    (window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? []).find(
+      (e) => e.kind === 40026,
+    ),
+  );
+  expect(event?.tags).toContainEqual(["h", WORKSPACE]);
+  expect(JSON.parse(event?.content ?? "{}").payload).toEqual({
+    type: "capture",
+    channel: WORKSPACE,
+    workspace: "8dd44714-7598-4710-92a8-77d4effbf39a",
+    project: null,
+    enabled: true,
+  });
 });

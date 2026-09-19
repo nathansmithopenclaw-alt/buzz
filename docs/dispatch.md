@@ -152,8 +152,7 @@ See [NIP-BT](nips/NIP-BT.md#built-in-relay-automation-authorizations-kind-40026)
 for the signed records and [NIP-WF](nips/NIP-WF.md#dispatch-actions) for workflow
 definitions. The external [dispatcher](dispatcher.md) remains an optional
 operator mode with its existing controls; it is not required for these relay
-actions. Desktop controls that publish the new scope records are a separate
-integration from the relay protocol.
+actions. The project and workspace controls below publish their signed scope records.
 
 If an accepted pickup or completion does not update the board because projection
 failed, its task history remains saved. The next Dispatch action retries the
@@ -163,3 +162,41 @@ background retry. Administrators can keep an assignment schedule running with
 Autopilot paused to retry updates without starting new work. Missing legacy
 admission evidence appears as a skipped unowned alert and needs an administrator
 baseline; it does not block reminders for other issues.
+
+### Project Autopilot and workspace alerts
+
+Open a project from Dispatch > Projects to use its **Autopilot** card. Choose one
+or more agents, all ready issues or a label, and limits on the same screen. Defaults
+are 2 issues at a time per agent, 10 per project per UTC day, and an independent
+reviewer (the issue owner). Missing agent capacity records are created inline with
+“Issues at the same time” defaulting to 2; existing capacity can lower the limit.
+The review sentence uses the values being saved. Autopilot starts off.
+
+Turning on saves a scheduled `dispatch.assign` workflow and a signed NIP-BT
+`autopilot` authorization record. Setting changes revise the same record; pausing
+sets `enabled:false` on the record and workflow, retaining work and history.
+Only current workspace owners/admins can authorize these settings. The relay
+rechecks authority, membership, readiness, capacity and limits when it acts.
+
+After the third assignment in the first hour, the card asks “Autopilot made 3
+assignments in the first hour. Keep it on?” Keep on revises the same activation,
+setting `confirmation_required:false` and `confirmation_event` to the exact third
+assignment's kind-40023 ID from the relay-signed confirmation outcome. Pause stops
+future assignments. “What Autopilot has done” links relay-signed assignment and
+alert records to their issues, newest first. These settings do not run a loop in
+the Desktop app.
+
+Dispatch > **Settings** lets workspace owners/admins enable **Alert when work has
+no owner**, choose a threshold (24 hours by default) and a destination (the issue's
+home channel by default). Saving starts alerts; merely opening the form does not.
+The signed `unowned_alert` record and scheduled `dispatch.escalate` workflow share
+the same threshold. Buzz posts one reminder per channel listing issues that still
+need an owner. It never assigns work by itself.
+
+Channel **Pin reactions create Dispatch issues** also saves a signed `capture`
+authorization. **Issues go to** selects the destination workspace, automatically
+choosing the sole populated Tracker workspace. The relay enforces audience
+containment. Disabling capture revokes its record and disables its workflow; it
+never removes captured issues. Failed saves remain visible with retry controls;
+record writes retain the existing signed-event retry journal. No relay execution
+is authorized by a workflow definition alone.

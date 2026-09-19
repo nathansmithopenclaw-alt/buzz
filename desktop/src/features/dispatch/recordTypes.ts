@@ -28,7 +28,38 @@ export type AutomationControls = {
   unassigned_after_secs: number | null;
   notification_channel: string;
 };
+export type CaptureAuthorization = {
+  type: "capture";
+  channel: string;
+  workspace: string;
+  project: string | null;
+  enabled: boolean;
+};
+export type UnownedAlertAuthorization = {
+  type: "unowned_alert";
+  workspace: string;
+  channel: string | null;
+  after_hours: number;
+  enabled: boolean;
+};
+export type AutopilotAuthorization = {
+  type: "autopilot";
+  workspace: string;
+  project: string;
+  agents: string[];
+  label: string | null;
+  at_a_time: number;
+  per_day: number;
+  reviewer_required: true;
+  enabled: boolean;
+  activation_id: string;
+  confirmation_required: boolean;
+  confirmation_event: string | null;
+};
 export type DispatchRecordPayload =
+  | CaptureAuthorization
+  | UnownedAlertAuthorization
+  | AutopilotAuthorization
   | { type: "automation"; controls: AutomationControls }
   | { type: "view"; name: string; filters: Record<string, string> }
   | {

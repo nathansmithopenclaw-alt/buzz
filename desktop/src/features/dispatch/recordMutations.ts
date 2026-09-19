@@ -315,7 +315,21 @@ function assertPlanningPermission(
     );
   const maintainer = context.viewerRole === "maintainer";
   if (
-    (["automation", "activation", "capacity"].includes(payload.type) ||
+    ["capture", "unowned_alert", "autopilot"].includes(payload.type) &&
+    !context.canAuthorizeAutomation
+  )
+    throw new Error(
+      "A current workspace owner or admin must approve this setting.",
+    );
+  if (
+    ([
+      "automation",
+      "activation",
+      "capacity",
+      "capture",
+      "unowned_alert",
+      "autopilot",
+    ].includes(payload.type) ||
       (payload.type === "delivery" &&
         ["reviewed", "accepted"].includes(payload.stage))) &&
     !maintainer
