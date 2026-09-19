@@ -1366,6 +1366,12 @@ test("issue Remind me publishes its root target and the due notification opens t
 }, testInfo) => {
   test.setTimeout(75000);
   await page.addInitScript((pubkey) => {
+    // Model an already-running app before advancing past the due time. A first
+    // launch deliberately seeds its watermark to now and suppresses old toasts.
+    localStorage.setItem(
+      `buzz:lastReminderCheck:${pubkey}`,
+      String(Math.floor(Date.now() / 1000)),
+    );
     localStorage.setItem(
       `buzz-notification-settings.v2:${pubkey}`,
       JSON.stringify({
