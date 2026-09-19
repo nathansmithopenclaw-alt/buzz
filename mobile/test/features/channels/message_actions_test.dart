@@ -582,6 +582,26 @@ void main() {
   });
 
   group('showMessageActions', () {
+    testWidgets('Track in Dispatch is the first delivered-message action', (
+      tester,
+    ) async {
+      final prefs = await _mockPrefs();
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(id: 'a' * 64),
+        prefs: prefs,
+        allMessages: [_message(id: 'a' * 64)],
+      );
+      expect(find.text('Track in Dispatch'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('Track in Dispatch')).dy,
+        lessThan(tester.getTopLeft(find.text('Reply')).dy),
+      );
+      await expectLater(
+        find.byKey(const ValueKey('message-action-surface')),
+        matchesGoldenFile('goldens/dispatch-capture-actions.png'),
+      );
+    });
     testWidgets('composes the tray, lifted preview, and compact actions', (
       tester,
     ) async {

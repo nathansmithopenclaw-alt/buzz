@@ -235,6 +235,28 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
   final canRemind = ref.read(reminderServiceProvider) != null;
 
   if (!message.isSystem) {
+    if (isMember &&
+        !isArchived &&
+        RegExp(r'^[0-9a-f]{64}$').hasMatch(message.id)) {
+      actions.add(
+        _PopoverMessageAction(
+          id: 'track',
+          title: 'Track in Dispatch',
+          icon: LucideIcons.waypoints,
+          group: _PopoverMessageActionGroup.primary,
+          onSelected: () {
+            if (context.mounted) {
+              showDispatchCaptureSheet(
+                context,
+                channelId,
+                message.id,
+                message.content,
+              );
+            }
+          },
+        ),
+      );
+    }
     if (messages != null) {
       actions.add(
         _PopoverMessageAction(
@@ -404,6 +426,7 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
   }
 
   const actionOrder = {
+    'track': -1,
     'reply': 0,
     'markRead': 1,
     'markUnread': 1,
@@ -441,6 +464,7 @@ class _PopoverMessageAction {
   });
 
   String get iosSymbol => switch (id) {
+    'track' => 'point.3.connected.trianglepath.dotted',
     'reply' => 'arrowshape.turn.up.left',
     'markRead' => 'envelope.open',
     'markUnread' => 'envelope.badge',

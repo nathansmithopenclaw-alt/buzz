@@ -27,10 +27,12 @@ export function ConversationDispatchDialog({
   message,
   channel,
   onClose,
+  initialTitle = "",
 }: {
   message: TimelineMessage;
   channel: string;
   onClose: () => void;
+  initialTitle?: string;
 }) {
   const navigate = useNavigate(),
     { activeCommunity } = useCommunities();
@@ -41,7 +43,7 @@ export function ConversationDispatchDialog({
   const [workspace, setWorkspace] = React.useState<string | null>(null);
   const context = useDispatchContext(workspace);
   const [mode, setMode] = React.useState<"create" | "attach">("create"),
-    [title, setTitle] = React.useState(""),
+    [title, setTitle] = React.useState(initialTitle),
     [body, setBody] = React.useState(""),
     [query, setQuery] = React.useState("");
   const [copySource, setCopySource] = React.useState(false),
