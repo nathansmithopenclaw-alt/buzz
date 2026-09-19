@@ -471,6 +471,10 @@ must preserve the workspace audience and include the author. `after_hours` is
 1–8760 and must match the workflow parameter. Nonterminal unassigned issues
 qualify by time in their current state. Each `(issue, threshold)` fires once,
 even across restart or repeated schedule ticks. Changing ownership never occurs.
+Age starts at the relay-signed admission receipt for the canonical root or most
+recent actual status change. Author timestamps and unrelated edits cannot age
+or reset the timer. Only relay-signed prior action records can suppress a
+duplicate alert; a member-authored kind-40023 claim is not execution evidence.
 
 ```json
 {
@@ -556,6 +560,11 @@ for confirmation. Trust the relay signature before displaying these as automatio
 results. A skipped source does not consume its successful-capture claim: an admin
 can authorize a later retry. Source capture claims are scoped to the original
 conversation, so changing its destination does not recapture the message.
+Cross-writer capture deduplication honors an accepted canonical issue root only
+while its author is a current workspace member. It emits a source-idempotent
+skipped outcome naming that existing issue, making a false member claim visible
+instead of silently suppressing capture. The durable relay capture claim remains
+the authority for captures already performed by the relay itself.
 
 Migration **0055** adds `dispatch_workflow_effects`, keyed by community, scope
 and effect key, protected by the community write fence and included in community
@@ -565,6 +574,9 @@ together. A snapshot is bounded to 64 channels, 20,000 events/16 MiB, and 100,00
 ledger entries; exceeding a bound fails visibly instead of acting on partial
 history. A batch handles at most 100 alert effects or 60 assignment/skip effects;
 subsequent ticks continue past already claimed effects.
+Scope discovery precedes the locked snapshot. A concurrent home-channel move can
+therefore abort a tick with `Dispatch event scope mismatch`; this fails closed
+and the next tick discovers the new scope.
 
 ### Task lifecycle projects onto issue state
 
@@ -573,7 +585,13 @@ In Progress; accepted `done` adds In Review. Current signed assignment authority
 reciprocal task-event links and the independent-review contract remain intact.
 Forged, stale and superseded attempts cannot move the board. The transition keeps
 the issue owner and records the relay pickup time through the ordinary status
-activity. A duplicate ingestion retries an incomplete projection before ACK;
-its ledger claim prevents duplicate issue revisions. The relay uses the existing
+activity. Once the source event is durably stored, projection failures are logged
+at error level and never change the successful ACK (including duplicate ACKs).
+Admitted task history is the durable retry source: the next scheduled Dispatch
+action reconciles up to 32 pending current pickup/done states in its transaction,
+even if new assignments are paused. Existing snapshot bounds still apply;
+oversized or unavailable history remains pending and fails visibly until repaired.
+Ledger claims prevent duplicate revisions and prevent a consumed lifecycle event
+from undoing subsequent manual board changes. The relay uses the existing
 Tracker monotonic revision timestamp rule so same-second acceptance cannot lose
 to a prior revision's lexical event-ID ordering.

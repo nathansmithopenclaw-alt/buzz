@@ -2,6 +2,7 @@ use super::*;
 use buzz_sdk::{dispatch_record::build_dispatch_record, task_envelope::*};
 use nostr::Keys;
 use serde_json::{json, Value};
+mod revision;
 struct Fixture {
     state: Arc<AppState>,
     pool: sqlx::PgPool,
@@ -59,6 +60,10 @@ impl Fixture {
         }
     }
     async fn save(&self, event: &Event, channel: Uuid) {
+        self.save_observed_hours_ago(event, channel, 0).await;
+    }
+    // Simulate historical relay observation separately from the author's clock.
+    async fn save_observed_hours_ago(&self, event: &Event, channel: Uuid, hours: u64) {
         if requires_dispatch_event_admission(event) {
             self.state
                 .db
@@ -79,9 +84,10 @@ impl Fixture {
                             } else {
                                 "member".into()
                             },
-                            observed_at: now,
+                            observed_at: now - hours * 3600,
                             basis: AdmissionBasis::Admission,
                         })?
+                        .custom_created_at(Timestamp::from(now - hours * 3600))
                         .sign_with_keys(&self.state.relay_keypair)
                         .map_err(err)
                     },
@@ -147,7 +153,8 @@ impl Fixture {
             ))
             .sign_with_keys(&self.owner)
             .unwrap();
-        self.save(&event, self.workspace).await;
+        self.save_observed_hours_ago(&event, self.workspace, age_hours)
+            .await;
         event
     }
     async fn invoke(&self, channel: Uuid, action: Value, reaction: Option<&Event>) -> Value {

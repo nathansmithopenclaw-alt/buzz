@@ -62,12 +62,32 @@ impl Planner<'_> {
         let request = pin_capture_request_id(&source_hex);
         let key = format!("capture:{source_hex}");
         // Cross-writer source pre-check preserves captures made by the desktop or sidecar.
-        let existing = self.snapshot.events.iter().any(|e| {
-            e.channel_id == Some(workspace)
-                && serde_json::from_str::<IssueRoot>(&e.event.content)
-                    .is_ok_and(|root| root.source_event_id.as_deref() == Some(&source_hex))
+        let accepted = self.issues(workspace);
+        let existing = self.snapshot.events.iter().find_map(|e| {
+            if e.channel_id != Some(workspace) || !self.member(workspace, &e.event.pubkey.to_hex())
+            {
+                return None;
+            }
+            let parsed = parse_tracker_event(&e.event, self.now()).ok()?;
+            let TrackerPayload::Root(root) = parsed.payload else {
+                return None;
+            };
+            (root.source_event_id.as_deref() == Some(&source_hex)
+                && accepted
+                    .issues
+                    .get(&(workspace, root.issue_id))
+                    .is_some_and(|issue| issue.root_event == e.event.id.to_hex()))
+            .then_some(root.issue_id)
         });
-        if existing || !self.claim(channel, key.clone(), "create_issue") {
+        if let Some(existing) = existing {
+            return self.skip(
+                channel,
+                &source_hex,
+                "create_issue",
+                &format!("existing issue {existing} already captures source"),
+            );
+        }
+        if !self.claim(channel, key.clone(), "create_issue") {
             return Ok(());
         }
         let root = IssueRoot {
@@ -146,7 +166,33 @@ impl Planner<'_> {
             if self.batch.ledger.len() >= 100 {
                 break;
             }
-            let age = self.now().saturating_sub(issue.entered_status_at);
+            // Follow canonical ancestry, not the author's clock or a title-only edit.
+            let entered = fold
+                .activity
+                .get(&(workspace, issue.issue_id))
+                .and_then(|history| {
+                    history.iter().rev().find(|entry| {
+                        entry
+                            .before
+                            .as_ref()
+                            .is_none_or(|before| before.status != entry.after.status)
+                    })
+                })
+                .ok_or("issue status ancestry missing")?;
+            let observed = self
+                .events()
+                .filter(|event| {
+                    event.kind.as_u16() == 40027
+                        && event.pubkey == self.state.relay_keypair.public_key()
+                })
+                .filter_map(|event| serde_json::from_str::<DispatchAdmission>(&event.content).ok())
+                .filter(|receipt| {
+                    receipt.workspace == workspace && receipt.event_id == entered.event_id
+                })
+                .map(|receipt| receipt.observed_at)
+                .min()
+                .ok_or("status transition has no relay admission time")?;
+            let age = self.now().saturating_sub(observed);
             if age < u64::from(after_hours) * 3600 {
                 continue;
             }
@@ -163,8 +209,9 @@ impl Planner<'_> {
             let key = format!("escalate:{}:{threshold}", issue.issue_id);
             let request = threshold_request_id(issue.issue_id, &threshold, 0);
             let prior = self.snapshot.events.iter().any(|e| {
-                parse_dispatch_action(&e.event, self.now())
-                    .is_ok_and(|a| a.stream_id == workspace && a.action.request_id == request)
+                e.event.pubkey == self.state.relay_keypair.public_key()
+                    && parse_dispatch_action(&e.event, self.now())
+                        .is_ok_and(|a| a.stream_id == workspace && a.action.request_id == request)
             });
             if prior || !self.claim(workspace, key, "escalate") {
                 continue;

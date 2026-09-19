@@ -113,6 +113,12 @@ async fn execute_inner(
             Some((workflow.id, workflow.definition_hash)),
             |snapshot| {
                 let mut p = Planner::new(state, snapshot);
+                if matches!(
+                    action,
+                    ActionDef::DispatchEscalate { .. } | ActionDef::DispatchAssign {}
+                ) {
+                    p.project_lifecycle(channel, None)?;
+                }
                 let record_type = match action {
                     ActionDef::DispatchCreateIssue {} => "create_issue",
                     ActionDef::DispatchEscalate { .. } => "escalate",
@@ -287,6 +293,13 @@ impl<'a> Planner<'a> {
     fn now(&self) -> u64 {
         self.snapshot.now.max(0) as u64
     }
+    fn events(&self) -> impl Iterator<Item = &Event> {
+        self.snapshot
+            .events
+            .iter()
+            .map(|stored| &stored.event)
+            .chain(self.batch.events.iter().map(|(event, _)| event))
+    }
     fn member(&self, channel: Uuid, key: &str) -> bool {
         self.snapshot
             .members
@@ -329,12 +342,9 @@ impl<'a> Planner<'a> {
                     TrackerRole::Maintainer,
                 )]),
         );
-        let events = self
-            .snapshot
-            .events
-            .iter()
-            .map(|s| s.event.clone())
-            .collect::<Vec<_>>();
+        // Later actions in the same transaction see recovered lifecycle revisions
+        // and their admission receipts, including the new status-age anchor.
+        let events = self.events().cloned().collect::<Vec<_>>();
         let coverage = apply_dispatch_admissions(
             &events,
             channel,
