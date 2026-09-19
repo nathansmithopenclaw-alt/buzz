@@ -1,3 +1,4 @@
+import { useChannelCapture } from "@/features/dispatch/ui/useChannelCapture";
 import * as React from "react";
 import { LogIn } from "lucide-react";
 import { AnimatePresence } from "motion/react";
@@ -280,6 +281,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     }
     return pubkeys;
   }, [activityAgents, agentPubkeys, agentSessionAgents]);
+  const capture = useChannelCapture(activeChannelId, messages, currentPubkey);
   const handleSendMessage = React.useCallback(
     async (
       content: string,
@@ -297,7 +299,8 @@ export const ChannelPane = React.memo(function ChannelPane({
         (containsWelcomePersonaMention(content) ||
           mentionsKnownAgent(mentionPubkeys, knownAgentPubkeys));
       messageTimelineRef.current?.scrollToBottomOnNextUpdate();
-      await onSendMessage(
+      await capture.send(
+        onSendMessage,
         content,
         mentionPubkeys,
         mediaTags,
@@ -324,7 +327,13 @@ export const ChannelPane = React.memo(function ChannelPane({
       isActiveWelcomeChannel,
       knownAgentPubkeys,
       onSendMessage,
+      capture.send,
     ],
+  );
+  const captureThreadReply = React.useCallback(
+    (...args: Parameters<typeof onSendThreadReply>) =>
+      capture.send(onSendThreadReply, ...args),
+    [capture.send, onSendThreadReply],
   );
   const canDropInMainColumn =
     hasMainComposerOverlay &&
@@ -582,6 +591,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       className="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden"
       style={isHuddleTranscript ? HUDDLE_TRANSCRIPT_ROOT_STYLE : undefined}
     >
+      {capture.dialog}
       {!isSinglePanelView && !isHuddleTranscript ? (
         <div
           aria-hidden="true"
@@ -868,7 +878,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onMarkRead={onMarkRead}
                 onExpandReplies={onExpandThreadReplies}
                 onSelectReplyTarget={onSelectThreadReplyTarget}
-                onSend={onSendThreadReply}
+                onSend={captureThreadReply}
                 onSendToChannel={
                   isComposerDisabled ? undefined : onSendToChannel
                 }

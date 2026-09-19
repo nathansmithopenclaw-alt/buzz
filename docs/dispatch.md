@@ -110,3 +110,25 @@ selected Dispatch workspace with an existing active automation service record.
 Select the workspace in Dispatch first when more than one workspace is available.
 The existing service connection, heartbeat, action allowance, expiry, preview,
 and pause behavior is unchanged. Insights has no replacement Flow block.
+
+## Capture shortcuts
+
+With the Dispatch experiment enabled, hover a delivered message and choose
+**Track in Dispatch**, or focus its row and press **T**. The More menu keeps the
+same action. **Cmd+Shift+T** opens capture for your newest loaded, delivered
+message in the open channel. Shortcuts leave text entry, composition, dialogs,
+and menus in control of their own keys.
+
+Start a new channel or thread message with `/track ` to send the message and
+open capture with its first line as the title. The command is removed from the
+sent text. Capture opens only after the send succeeds; review and create the
+linked issue in the dialog. Editing an existing message does not execute the
+command. On mobile, long-press a delivered message and choose **Track in
+Dispatch** to review its title and create a Triage issue in that channel. Work
+shows the issue; uncertain sends retain the exact signed change for recovery.
+
+Channel editors can enable **Pin reactions create Dispatch issues**. This saves
+a channel-scoped `dispatch-capture` workflow with a fixed 📌 reaction trigger
+and `dispatch.create_issue` action. Turning it off sets `enabled:false` and
+preserves its history. The relay must support that action; saving an unsupported
+workflow reports the error without claiming it was enabled.

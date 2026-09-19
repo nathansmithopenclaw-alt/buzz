@@ -16,6 +16,7 @@ import 'package:photo_manager/photo_manager.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/dispatch/dispatch_capture_sheet.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -151,6 +152,22 @@ void showMessageActions({
                   ),
                   const SizedBox(height: Grid.xs),
                   if (!message.isSystem) ...[
+                    if (isMember &&
+                        !isArchived &&
+                        RegExp(r'^[0-9a-f]{64}$').hasMatch(message.id))
+                      ListTile(
+                        leading: const Icon(LucideIcons.waypoints),
+                        title: const Text('Track in Dispatch'),
+                        onTap: () {
+                          Navigator.of(sheetContext).pop();
+                          showDispatchCaptureSheet(
+                            context,
+                            channelId,
+                            message.id,
+                            message.content,
+                          );
+                        },
+                      ),
                     // Fast actions: respond now, hand off context, defer.
                     _FastActionsRow(
                       message: message,

@@ -155,6 +155,7 @@ export default defineConfig({
         "**/project-pr-review.spec.ts",
         "**/dispatch-shell.spec.ts",
         "**/dispatch-triage-badge.spec.ts",
+        "**/dispatch-capture.spec.ts",
         "**/dispatch-loading.spec.ts",
         "**/dispatch-automation.spec.ts",
         "**/dispatch-triage-detail.spec.ts",

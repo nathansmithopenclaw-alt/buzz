@@ -27,7 +27,7 @@ import { useChannelWorkflowsQuery } from "@/features/workflows/hooks";
 import { DEFAULT_EPHEMERAL_TTL_SECONDS } from "@/features/channels/lib/ephemeralChannel";
 import type { Channel, ChannelMember, Workflow } from "@/shared/api/types";
 import { useWorkflowEditorOverlay } from "@/shared/context/WorkflowEditorOverlayContext";
-import { useFeatureEnabled } from "@/shared/features";
+import { FeatureGate, useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Button } from "@/shared/ui/button";
@@ -82,6 +82,11 @@ import {
   useChannelModerationCapabilities,
 } from "./ChannelManagementModerationActions";
 import { ChannelMemberAvatarStack } from "./ChannelMemberAvatarStack";
+
+const ChannelCaptureSetting = React.lazy(async () => ({
+  default: (await import("@/features/dispatch/ui/ChannelCaptureSetting"))
+    .ChannelCaptureSetting,
+}));
 
 type ChannelManagementSheetProps = {
   channel: Channel | null;
@@ -569,6 +574,17 @@ export function ChannelManagementSheet({
                       testIdPrefix="channel-management"
                       ttlSeconds={ttlSecondsDraft}
                     />
+                    {currentPubkey ? (
+                      <FeatureGate feature="dispatch">
+                        <React.Suspense fallback={null}>
+                          <ChannelCaptureSetting
+                            key={resolvedChannel.id}
+                            channel={resolvedChannel.id}
+                            signer={currentPubkey}
+                          />
+                        </React.Suspense>
+                      </FeatureGate>
+                    ) : null}
                     <ChannelPermissionsSettings
                       disabled={isSavingChannelEdits}
                       onVisibilityChange={(visibility) => {

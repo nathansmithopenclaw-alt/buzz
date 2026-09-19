@@ -1,3 +1,4 @@
+import { useFeatureEnabled } from "@/shared/features";
 import { FeatureGate } from "@/shared/features";
 import * as React from "react";
 import { AlertTriangle } from "lucide-react";
@@ -172,6 +173,7 @@ export const MessageRow = React.memo(
   }) {
     // Keep the transient send state with its timestamp rather than collapsing
     // it into a grouped message row with no header.
+    const dispatchEnabled = useFeatureEnabled("dispatch");
     const isDisplayedAsContinuation = isContinuation && !message.pending;
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
       null,
@@ -903,7 +905,6 @@ export const MessageRow = React.memo(
             }}
           />
         ) : null}
-
         <article
           className={cn(
             "group/message relative z-10 rounded-2xl transition-colors",
@@ -921,6 +922,7 @@ export const MessageRow = React.memo(
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
               : "",
           )}
+          tabIndex={dispatchEnabled ? 0 : undefined}
           data-message-id={message.id}
           data-testid="message-row"
           onAnimationEnd={handleEntranceAnimationEnd}

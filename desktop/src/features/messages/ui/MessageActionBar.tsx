@@ -1,4 +1,4 @@
-import { FeatureGate } from "@/shared/features";
+import { FeatureGate, useFeatureEnabled } from "@/shared/features";
 import {
   BellOff,
   BellRing,
@@ -470,6 +470,37 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   /** Resolves the mention identities carried by "Copy message". */
   profiles?: UserProfileLookup;
 }) {
+  const [dispatchOpen, setDispatchOpen] = React.useState(false);
+  const dispatchEnabled = useFeatureEnabled("dispatch");
+  const actionBarRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    const row = actionBarRef.current?.closest("article[data-message-id]");
+    if (!row || !dispatchEnabled || !canCopyMessageLink(message, channelId))
+      return;
+    const handleKey = (event: Event) => {
+      const key = event as KeyboardEvent;
+      const target = key.target as HTMLElement;
+      if (
+        key.defaultPrevented ||
+        key.isComposing ||
+        key.repeat ||
+        key.metaKey ||
+        key.ctrlKey ||
+        key.altKey ||
+        key.shiftKey ||
+        key.key.toLowerCase() !== "t" ||
+        target.closest(
+          'input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"]',
+        )
+      )
+        return;
+      key.preventDefault();
+      key.stopPropagation();
+      setDispatchOpen(true);
+    };
+    row.addEventListener("keydown", handleKey);
+    return () => row.removeEventListener("keydown", handleKey);
+  }, [dispatchEnabled, message, channelId]);
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
   const customEmoji = useCustomEmoji();
@@ -547,7 +578,11 @@ export const MessageActionBar = React.memo(function MessageActionBar({
           : "",
       )}
       data-testid={`message-action-bar-${message.id}`}
-      ref={ref}
+      ref={(node) => {
+        actionBarRef.current = node;
+        if (typeof ref === "function") return ref(node);
+        if (ref) ref.current = node;
+      }}
     >
       <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
         <div className="flex items-center gap-0.5 p-1">
@@ -643,6 +678,27 @@ export const MessageActionBar = React.memo(function MessageActionBar({
           ) : null}
 
           {canCopyMessageLink(message, channelId) ? (
+            <FeatureGate feature="dispatch">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    aria-label="Track in Dispatch"
+                    className={ACTION_BUTTON_CLASS}
+                    data-testid={`track-message-${message.id}`}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                    onClick={() => setDispatchOpen(true)}
+                  >
+                    <Waypoints className={ACTION_ICON_CLASS} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Track in Dispatch (T)</TooltipContent>
+              </Tooltip>
+            </FeatureGate>
+          ) : null}
+
+          {canCopyMessageLink(message, channelId) ? (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -684,6 +740,15 @@ export const MessageActionBar = React.memo(function MessageActionBar({
           ) : null}
         </div>
       </div>
+      {dispatchOpen && channelId ? (
+        <React.Suspense fallback={null}>
+          <ConversationDispatchDialog
+            message={message}
+            channel={channelId}
+            onClose={() => setDispatchOpen(false)}
+          />
+        </React.Suspense>
+      ) : null}
     </div>
   );
 });
