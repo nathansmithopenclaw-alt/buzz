@@ -94,6 +94,15 @@ void main() {
       expect(root['home_channel_id'], channel);
       expect(root['status'], 'triage');
       expect(root['body'], '');
+      const seededChannel = '9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50';
+      expect(
+        dispatchCaptureRoot(
+          seededChannel,
+          source,
+          'Follow up',
+        )['home_channel_id'],
+        seededChannel,
+      );
       expect(
         dispatchCaptureTags(channel, root),
         contains(equals(['e', source, '', 'source'])),
