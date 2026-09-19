@@ -202,6 +202,7 @@ test("OFF disables the same workflow and revises the same record without deletin
 test("Keep on binds confirmation to the exact third assignment and same activation", async ({
   page,
 }, info) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
   await open(page, fixture(true, true));
   const card = page.getByTestId("dispatch-autopilot");
   await expect(
