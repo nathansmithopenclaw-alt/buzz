@@ -26,6 +26,10 @@ pub struct WorkflowDef {
     pub enabled: bool,
 }
 
+fn default_dispatch_after_hours() -> u32 {
+    24
+}
+
 fn default_true() -> bool {
     true
 }
@@ -98,6 +102,19 @@ pub struct Step {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ActionDef {
+    /// Capture the pinned source message into its authorized Tracker workspace.
+    #[serde(rename = "dispatch.create_issue")]
+    DispatchCreateIssue {},
+    /// Digest unassigned issues past the configured age (hours).
+    #[serde(rename = "dispatch.escalate")]
+    DispatchEscalate {
+        /// Age threshold; must match the signed alert authorization.
+        #[serde(default = "default_dispatch_after_hours")]
+        after_hours: u32,
+    },
+    /// Assign ready issues under the current signed project Autopilot grant.
+    #[serde(rename = "dispatch.assign")]
+    DispatchAssign {},
     /// Claim and dispatch a named Summary owned by this workflow owner.
     RunSummary {
         /// Stable, literal Summary identity; templates are forbidden.
@@ -207,6 +224,20 @@ impl WorkflowDef {
 
         let mut seen_ids: HashSet<&str> = HashSet::new();
         for step in &self.steps {
+            let valid_dispatch = match &step.action {
+                ActionDef::DispatchCreateIssue {} => {
+                    matches!(&self.trigger, TriggerDef::ReactionAdded { emoji: Some(emoji), .. } if emoji == "📌")
+                }
+                ActionDef::DispatchEscalate { after_hours } => {
+                    (1..=8760).contains(after_hours)
+                        && matches!(self.trigger, TriggerDef::Schedule { .. })
+                }
+                ActionDef::DispatchAssign {} => matches!(self.trigger, TriggerDef::Schedule { .. }),
+                _ => true,
+            };
+            if !valid_dispatch {
+                return Err(WorkflowError::InvalidDefinition("dispatch.create_issue requires a 📌 reaction trigger; dispatch.assign/escalate require a schedule and after_hours must be 1..=8760".into()));
+            }
             if let ActionDef::RunSummary {
                 summary_id,
                 config_revision,
@@ -1067,5 +1098,55 @@ mod tests {
             trigger,
             TriggerDef::DiffPosted { filter: Some(_) }
         ));
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    #[test]
+    fn exact_desktop_capture_contract_and_default_escalation_round_trip() {
+        let channel = "c2e8c9dd-f748-47c2-b56e-749ae34d1b62";
+        let value = serde_json::json!({"name":"dispatch-capture","trigger":{"on":"reaction_added","emoji":"📌","filter":format!("trigger_channel_id == \"{channel}\"")},"steps":[{"id":"capture","action":"dispatch.create_issue"}]});
+        let def: WorkflowDef = serde_json::from_value(value).unwrap();
+        def.validate().unwrap();
+        assert!(matches!(
+            def.steps[0].action,
+            ActionDef::DispatchCreateIssue {}
+        ));
+        let def:WorkflowDef=serde_json::from_value(serde_json::json!({"name":"alerts","trigger":{"on":"schedule","interval":"1h"},"steps":[{"id":"alert","action":"dispatch.escalate"}]})).unwrap();
+        def.validate().unwrap();
+        assert!(matches!(
+            def.steps[0].action,
+            ActionDef::DispatchEscalate { after_hours: 24 }
+        ));
+    }
+    #[test]
+    fn invalid_dispatch_actions_and_trigger_combinations_are_rejected() {
+        for (action, trigger) in [
+            (
+                serde_json::json!({"action":"dispatch.unknown"}),
+                serde_json::json!({"on":"schedule","interval":"1h"}),
+            ),
+            (
+                serde_json::json!({"action":"dispatch.create_issue"}),
+                serde_json::json!({"on":"reaction_added","emoji":"👍"}),
+            ),
+            (
+                serde_json::json!({"action":"dispatch.assign"}),
+                serde_json::json!({"on":"webhook"}),
+            ),
+            (
+                serde_json::json!({"action":"dispatch.escalate","after_hours":0}),
+                serde_json::json!({"on":"schedule","interval":"1h"}),
+            ),
+        ] {
+            let mut step = action;
+            step["id"] = serde_json::json!("step");
+            let parsed = serde_json::from_value::<WorkflowDef>(
+                serde_json::json!({"name":"invalid","trigger":trigger,"steps":[step]}),
+            );
+            assert!(parsed.is_err() || parsed.unwrap().validate().is_err());
+        }
     }
 }

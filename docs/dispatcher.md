@@ -1,4 +1,6 @@
-# Buzz Triage Dispatcher — Operations Guide
+# Buzz Triage Dispatcher — Optional Operator Mode
+
+`buzz-dispatcher` is an optional external operator mode; built-in Dispatch automation runs in the relay workflow engine.
 
 `buzz-dispatcher` is the resident automation service for Buzz Tracker triage
 (task c6d2bd9d, plan `PLANS/TRACKER/P2_DISPATCHER_PLAN.md`). It projects the

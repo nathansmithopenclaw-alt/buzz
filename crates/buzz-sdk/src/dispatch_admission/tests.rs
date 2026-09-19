@@ -36,6 +36,7 @@ fn demotion_preserves_old_role_without_granting_new_authority() {
         20,
     );
     assert_eq!(coverage.unsealed, 0);
+    assert_eq!(coverage.observed_at.get(&source.id.to_hex()), Some(&10));
     assert_eq!(
         auth.event_role(&source.id.to_hex(), &receipt.author),
         Some(TrackerRole::Maintainer)
@@ -102,6 +103,7 @@ fn contradictory_receipts_and_future_observations_fail_closed() {
         20,
     );
     assert_eq!(coverage.unsealed, 1);
+    assert!(coverage.observed_at.is_empty());
     assert_eq!(auth.event_role(&source.id.to_hex(), &receipt.author), None);
     let mut auth = TrackerAuthorization::default();
     assert_eq!(
@@ -117,4 +119,60 @@ fn baseline_is_explicit_and_none_never_masquerades_as_admission() {
     assert!(build_dispatch_admission(&receipt).is_err());
     receipt.basis = AdmissionBasis::LegacyBaseline;
     assert!(build_dispatch_admission(&receipt).is_ok());
+}
+
+#[test]
+fn observation_times_require_valid_unambiguous_receipts() {
+    let (relay, _, workspace, source, receipt) = fixture();
+    let good = build_dispatch_admission(&receipt)
+        .unwrap()
+        .sign_with_keys(&relay)
+        .unwrap();
+    let malformed = EventBuilder::new(good.kind, good.content.clone())
+        .tags([Tag::parse(["h", &workspace.to_string()]).unwrap()])
+        .custom_created_at(Timestamp::from(receipt.observed_at))
+        .sign_with_keys(&relay)
+        .unwrap();
+    let mut invalid_signature = good.clone();
+    invalid_signature.content.push(' ');
+    let mut future = receipt.clone();
+    future.observed_at = 30;
+    let future = build_dispatch_admission(&future)
+        .unwrap()
+        .sign_with_keys(&relay)
+        .unwrap();
+    let mut conflict = receipt.clone();
+    conflict.observed_at = 11;
+    let conflict = build_dispatch_admission(&conflict)
+        .unwrap()
+        .sign_with_keys(&relay)
+        .unwrap();
+    for receipts in [
+        vec![malformed],
+        vec![invalid_signature],
+        vec![future],
+        vec![good.clone(), conflict],
+    ] {
+        let mut events = vec![source.clone()];
+        events.extend(receipts);
+        let coverage = apply_dispatch_admissions(
+            &events,
+            workspace,
+            relay.public_key(),
+            &mut TrackerAuthorization::default(),
+            20,
+        );
+        assert!(
+            coverage.observed_at.is_empty(),
+            "invalid evidence must never supply a trusted age"
+        );
+    }
+    let coverage = apply_dispatch_admissions(
+        &[source.clone(), good],
+        workspace,
+        relay.public_key(),
+        &mut TrackerAuthorization::default(),
+        20,
+    );
+    assert_eq!(coverage.observed_at[&source.id.to_hex()], 10);
 }

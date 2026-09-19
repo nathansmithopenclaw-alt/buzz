@@ -90,6 +90,9 @@ pub fn build_dispatch_admission(value: &DispatchAdmission) -> Result<EventBuilde
 pub struct AdmissionCoverage {
     /// Exact event IDs with valid, unambiguous relay evidence.
     pub sealed: BTreeSet<String>,
+    /// Relay observation times for sealed events, after all receipt checks.
+    #[serde(skip)]
+    pub observed_at: BTreeMap<String, u64>,
     /// Signed legacy baselines among sealed events.
     pub legacy_baselines: usize,
     /// Dispatch events without historical evidence.
@@ -179,6 +182,7 @@ pub fn apply_dispatch_admissions(
         };
         authorization.admit_event(id.clone(), first.author.clone(), role);
         if sources.contains_key(&id) {
+            result.observed_at.insert(id.clone(), first.observed_at);
             result.sealed.insert(id);
             result.legacy_baselines += usize::from(first.basis == AdmissionBasis::LegacyBaseline);
         }

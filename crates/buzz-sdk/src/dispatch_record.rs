@@ -55,6 +55,57 @@ pub enum DeliveryStage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DispatchRecordPayload {
+    /// Channel administrator authorization for pin capture into an explicit workspace.
+    Capture {
+        /// Source conversation, also the record's h-tag scope.
+        channel: Uuid,
+        /// Receiving Tracker workspace.
+        workspace: Uuid,
+        /// Optional existing Tracker project.
+        project: Option<Uuid>,
+        /// Pause leaves all captured work intact.
+        enabled: bool,
+    },
+    /// Administrator authorization for one workspace's unowned-work digest.
+    UnownedAlert {
+        /// Tracker workspace, also the record's h-tag scope.
+        workspace: Uuid,
+        /// Optional destination override; otherwise each issue's home channel.
+        channel: Option<Uuid>,
+        /// Age threshold in hours.
+        after_hours: u32,
+        /// Opt-in switch.
+        enabled: bool,
+    },
+    /// Administrator authorization for bounded project execution in the relay.
+    Autopilot {
+        /// Explicit workspace and record h-tag scope.
+        workspace: Uuid,
+        /// Existing project identity.
+        project: Uuid,
+        /// Eligible executor public keys, in routing order.
+        agents: Vec<String>,
+        /// Optional ready-work label.
+        label: Option<String>,
+        /// Maximum simultaneous unfinished attempts per agent.
+        #[serde(default = "crate::dispatch_autopilot::default_at_a_time")]
+        at_a_time: u32,
+        /// Maximum project assignments per UTC day.
+        #[serde(default = "crate::dispatch_autopilot::default_per_day")]
+        per_day: u32,
+        /// Always true: the issue owner independently reviews.
+        #[serde(default = "crate::dispatch_autopilot::default_reviewer_required")]
+        reviewer_required: bool,
+        /// Turning off never cancels existing assignments.
+        enabled: bool,
+        /// Identity of the activation; keep unchanged across confirmation/revisions.
+        activation_id: Uuid,
+        /// A fresh activation starts true; an admin revision clears it to confirm.
+        confirmation_required: bool,
+        /// Exact third first-hour assignment action being confirmed, absent until review.
+        #[serde(default)]
+        confirmation_event: Option<String>,
+    },
     /// A bounded automation rollout or a pause/preview control for one service.
     Automation {
         /// Explicit scope, routing, expected service signer and limits.
@@ -212,6 +263,13 @@ fn date(value: &Option<String>) -> bool {
 }
 fn slot(payload: &DispatchRecordPayload) -> String {
     match payload {
+        DispatchRecordPayload::Capture { channel, .. } => format!("capture:{channel}"),
+        DispatchRecordPayload::UnownedAlert { workspace, .. } => {
+            format!("unowned_alert:{workspace}")
+        }
+        DispatchRecordPayload::Autopilot {
+            workspace, project, ..
+        } => format!("autopilot:{workspace}:{project}"),
         DispatchRecordPayload::Automation { controls } => format!(
             "automation:{}:{}",
             controls.service_id, controls.service_pubkey
@@ -232,6 +290,9 @@ fn controlled(payload: &DispatchRecordPayload) -> bool {
     matches!(
         payload,
         DispatchRecordPayload::Automation { .. }
+            | DispatchRecordPayload::Capture { .. }
+            | DispatchRecordPayload::UnownedAlert { .. }
+            | DispatchRecordPayload::Autopilot { .. }
             | DispatchRecordPayload::Activation { .. }
             | DispatchRecordPayload::Capacity { .. }
             | DispatchRecordPayload::Delivery {
@@ -252,6 +313,50 @@ pub fn validate_dispatch_record(record: &DispatchRecord) -> Result<(), String> {
         return Err("invalid planning record identity, version or predecessor".into());
     }
     let valid = match &record.payload {
+        DispatchRecordPayload::Capture {
+            channel,
+            workspace,
+            project,
+            ..
+        } => !channel.is_nil() && !workspace.is_nil() && project.is_none_or(|id| !id.is_nil()),
+        DispatchRecordPayload::UnownedAlert {
+            workspace,
+            channel,
+            after_hours,
+            ..
+        } => {
+            !workspace.is_nil()
+                && channel.is_none_or(|id| !id.is_nil())
+                && (1..=8760).contains(after_hours)
+        }
+        DispatchRecordPayload::Autopilot {
+            workspace,
+            project,
+            agents,
+            label,
+            at_a_time,
+            per_day,
+            reviewer_required,
+            activation_id,
+            confirmation_event,
+            ..
+        } => {
+            !workspace.is_nil()
+                && !project.is_nil()
+                && !activation_id.is_nil()
+                && (1..=32).contains(&agents.len())
+                && agents.iter().all(|agent| key(agent))
+                && agents
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == agents.len()
+                && label.as_ref().is_none_or(|value| bounded(value, 80, true))
+                && (1..=32).contains(at_a_time)
+                && (1..=1000).contains(per_day)
+                && *reviewer_required
+                && confirmation_event.as_ref().is_none_or(|id| hash(id))
+        }
         DispatchRecordPayload::Automation { controls } => controls.validate(),
         DispatchRecordPayload::View { name, filters } => {
             bounded(name, 80, true)
@@ -588,7 +693,10 @@ pub fn active_dispatch_records(
             DispatchRecordPayload::Activation { .. }
             | DispatchRecordPayload::Capacity { .. }
             | DispatchRecordPayload::ProjectPlan { .. }
-            | DispatchRecordPayload::Automation { .. } => slot(&value.record.payload),
+            | DispatchRecordPayload::Automation { .. }
+            | DispatchRecordPayload::Capture { .. }
+            | DispatchRecordPayload::UnownedAlert { .. }
+            | DispatchRecordPayload::Autopilot { .. } => slot(&value.record.payload),
             _ => value.record.record_id.to_string(),
         };
         if latest

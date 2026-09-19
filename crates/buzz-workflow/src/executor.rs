@@ -416,6 +416,9 @@ pub fn resolve_step_templates(
     };
 
     match &step.action {
+        DispatchCreateIssue {} | DispatchEscalate { .. } | DispatchAssign {} => {
+            Ok(step.action.clone())
+        }
         RunSummary {
             summary_id,
             config_revision,
@@ -644,6 +647,10 @@ pub async fn dispatch_action(
     let result = serving_write
         .protect(async {
             match action {
+                DispatchCreateIssue {} | DispatchEscalate { .. } | DispatchAssign {} => {
+                    let result = engine.action_sink()?.dispatch(community_id, run_id, action.clone()).await?;
+                    Ok(StepResult::Completed(result))
+                }
                 RunSummary { summary_id, config_revision } => {
                     let run = engine.db.get_workflow_run(community_id, run_id).await
                         .map_err(|e| WorkflowError::WebhookError(e.to_string()))?;

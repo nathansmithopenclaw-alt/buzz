@@ -17,6 +17,7 @@ pub mod broker;
 pub mod builders;
 pub mod dispatch_audience;
 pub mod dispatch_automation;
+pub mod dispatch_autopilot;
 pub mod dispatch_record;
 pub mod mentions;
 pub mod nip_oa;

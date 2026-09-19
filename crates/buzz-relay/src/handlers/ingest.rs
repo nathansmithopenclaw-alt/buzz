@@ -3455,6 +3455,14 @@ async fn ingest_event_inner(
             }
         };
 
+    // The event is durable: projection must never turn its ACK into a failure.
+    // Admitted lifecycle history is the retry source on scheduled Dispatch ticks.
+    if let Err(error) =
+        crate::dispatch_workflow::transition(state, tenant.community(), &event).await
+    {
+        error!(event_id = %event_id_hex, "Dispatch lifecycle projection deferred: {error}");
+    }
+
     if !was_inserted {
         return Ok(IngestResult {
             event_id: event_id_hex,

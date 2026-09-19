@@ -308,3 +308,68 @@ fn project_milestones_reject_ambiguous_identity_and_nil_issue_links() {
     }
     assert!(validate_dispatch_record(&value).is_err());
 }
+
+#[test]
+fn relay_automation_records_are_strict_maintainer_controlled_singletons() {
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let workspace = Uuid::new_v4();
+    let auth = TrackerAuthorization::new([
+        (owner.public_key().to_hex(), TrackerRole::Maintainer),
+        (member.public_key().to_hex(), TrackerRole::Member),
+    ]);
+    for payload in [
+        DispatchRecordPayload::Capture {
+            channel: workspace,
+            workspace,
+            project: None,
+            enabled: true,
+        },
+        DispatchRecordPayload::UnownedAlert {
+            workspace,
+            channel: None,
+            after_hours: 24,
+            enabled: true,
+        },
+        DispatchRecordPayload::Autopilot {
+            workspace,
+            project: Uuid::new_v4(),
+            agents: vec![member.public_key().to_hex()],
+            label: None,
+            at_a_time: 2,
+            per_day: 10,
+            reviewer_required: true,
+            enabled: true,
+            activation_id: Uuid::new_v4(),
+            confirmation_required: true,
+            confirmation_event: None,
+        },
+    ] {
+        let mut root = record(&owner);
+        root.payload = payload;
+        assert!(fold_dispatch_records(
+            [signed(workspace, &root, &member, 100)],
+            workspace,
+            &auth,
+            200
+        )
+        .records
+        .is_empty());
+        let event = signed(workspace, &root, &owner, 100);
+        let mut archived = next(&root, &event);
+        archived.archived = true;
+        let folded = fold_dispatch_records(
+            [event, signed(workspace, &archived, &owner, 101)],
+            workspace,
+            &auth,
+            200,
+        );
+        assert!(
+            active_dispatch_records(&folded.records).is_empty(),
+            "archive must not resurrect an older automation grant"
+        );
+        let mut json = serde_json::to_value(&root).unwrap();
+        json["payload"]["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<DispatchRecord>(json).is_err());
+    }
+}
