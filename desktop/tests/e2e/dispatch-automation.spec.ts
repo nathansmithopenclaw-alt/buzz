@@ -12,47 +12,32 @@ import {
   publishedRecords,
 } from "../helpers/automationFixture";
 
-test("first visit explains the jobs and offers an honest connection next step", async ({
+test("service settings are absent without a configured service", async ({
   page,
 }) => {
   const context = automationFixture();
   context.records = [];
   context.automation = { actions: [], heartbeats: [] };
-  await openAutomation(page, context);
-  await expect(
-    page.getByRole("heading", { name: "Let Buzz handle the routine" }),
-  ).toBeVisible();
-  await expect(
-    page.getByText("Nothing is running yet", { exact: true }),
-  ).toBeVisible();
-  await expect(page.getByLabel("How automation works")).toContainText(
-    "Review, then turn it on",
-  );
-  await page.getByRole("button", { name: /^Save messages as work/ }).click();
-  const dialog = page.getByTestId("automation-setup");
-  await expect(
-    dialog.getByRole("checkbox", {
-      name: "Save messages as work",
-      exact: true,
-    }),
-  ).toBeChecked();
-  await dialog
-    .getByRole("button", { name: "Choose the details", exact: true })
-    .click();
-  await expect(
-    dialog.getByText(
-      /Ask the person who manages your Buzz workspace to connect automation/,
-    ),
-  ).toBeVisible();
-  await expect(
-    dialog.getByRole("button", { name: "Review setup", exact: true }),
-  ).toBeDisabled();
-  await expect(
-    dialog.getByLabel("Service public key", { exact: true }),
-  ).not.toBeVisible();
-  await dialog.getByRole("button", { name: "Back", exact: true }).click();
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await openAutomation(page, context, { available: false });
+  await expect(page.getByTestId("dispatch-automation")).toHaveCount(0);
   expect(await publishedRecords(page)).toHaveLength(0);
+});
+
+test("service settings require the Dispatch experiment", async ({ page }) => {
+  await openAutomation(page, automationFixture(), {
+    enabled: false,
+    available: false,
+  });
+  await expect(page.getByTestId("dispatch-automation")).toHaveCount(0);
+});
+
+test("service settings require workspace administrator permissions", async ({
+  page,
+}) => {
+  const context = automationFixture();
+  context.viewerRole = "member";
+  await openAutomation(page, context, { available: false });
+  await expect(page.getByTestId("dispatch-automation")).toHaveCount(0);
 });
 
 test("capture setup reuses its connection, shows named scope, and saves only a preview", async ({

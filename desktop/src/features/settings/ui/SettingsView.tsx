@@ -1,4 +1,6 @@
 import * as React from "react";
+import { FeatureGate } from "@/shared/features";
+import { DispatchServiceSettings } from "@/features/dispatch/ui/DispatchServiceSettings";
 import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
@@ -72,7 +74,14 @@ const settingsNavGroups: Array<{
   },
   {
     label: "App",
-    sections: ["agents", "compute", "experimental", "mobile", "updates"],
+    sections: [
+      "agents",
+      "compute",
+      "dispatch-service",
+      "experimental",
+      "mobile",
+      "updates",
+    ],
   },
 ];
 
@@ -111,7 +120,22 @@ function SettingsSectionButton({
   );
 }
 
-export function SettingsView({
+export function SettingsView(props: SettingsViewProps) {
+  return (
+    <FeatureGate
+      feature="dispatch"
+      fallback={<SettingsViewContent {...props} />}
+    >
+      <DispatchServiceSettings>
+        {(servicePanel) => (
+          <SettingsViewContent {...props} servicePanel={servicePanel} />
+        )}
+      </DispatchServiceSettings>
+    </FeatureGate>
+  );
+}
+
+function SettingsViewContent({
   currentPubkey,
   fallbackDisplayName,
   isUpdatingDesktopNotifications,
@@ -127,12 +151,14 @@ export function SettingsView({
   onSetAllSlotAlertsEnabled,
   onSetSoundForSlot,
   section,
-}: SettingsViewProps) {
+  servicePanel,
+}: SettingsViewProps & { servicePanel?: React.ReactNode }) {
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const featureState = useFeatureSnapshot();
   const visibleSections = React.useMemo(() => {
     return settingsSections.filter((s) => {
+      if (s.value === "dispatch-service") return Boolean(servicePanel);
       // Feature gate check. Manifest is preview-only — if the gate id is in
       // the manifest, it's preview and needs an opt-in; if it's not, it's
       // stable and renders unconditionally (fail-open).
@@ -152,7 +178,7 @@ export function SettingsView({
       }
       return true;
     });
-  }, [myMembershipQuery.data, featureState]);
+  }, [myMembershipQuery.data, featureState, servicePanel]);
 
   const [isLoaded, setIsLoaded] = React.useState(false);
   const [appVersion, setAppVersion] = React.useState<string | null>(null);
@@ -346,20 +372,22 @@ export function SettingsView({
               className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-4"
               data-testid={`settings-panel-${section}`}
             >
-              {renderSettingsSection(section, {
-                currentPubkey,
-                fallbackDisplayName,
-                isUpdatingDesktopNotifications,
-                notificationErrorMessage,
-                notificationPermission,
-                notificationSettings,
-                onSetDesktopNotificationsEnabled,
-                onSetHomeBadgeEnabled,
-                onSetSlotAlertsEnabled,
-                onSetNotifyWhileViewing,
-                onSetAllSlotAlertsEnabled,
-                onSetSoundForSlot,
-              })}
+              {section === "dispatch-service"
+                ? servicePanel
+                : renderSettingsSection(section, {
+                    currentPubkey,
+                    fallbackDisplayName,
+                    isUpdatingDesktopNotifications,
+                    notificationErrorMessage,
+                    notificationPermission,
+                    notificationSettings,
+                    onSetDesktopNotificationsEnabled,
+                    onSetHomeBadgeEnabled,
+                    onSetSlotAlertsEnabled,
+                    onSetNotifyWhileViewing,
+                    onSetAllSlotAlertsEnabled,
+                    onSetSoundForSlot,
+                  })}
             </div>
           </section>
         </div>

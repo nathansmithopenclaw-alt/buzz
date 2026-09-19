@@ -124,21 +124,34 @@ export function automationFixture(
 export async function openAutomation(
   page: Page,
   context = automationFixture(),
+  options: { available?: boolean; enabled?: boolean } = {},
 ) {
-  await installMockBridge(page, {
-    dispatch: { workspace: { id: WORKSPACE, name: "Product work" }, context },
-    searchProfiles: [
-      { pubkey: OWNER, displayName: "Tyler" },
-      { pubkey: AGENT, displayName: "Research helper", isAgent: true },
-      { pubkey: SERVICE, displayName: "Workspace automation", isAgent: true },
-    ],
-  });
+  await installMockBridge(
+    page,
+    {
+      dispatch: { workspace: { id: WORKSPACE, name: "Product work" }, context },
+      searchProfiles: [
+        { pubkey: OWNER, displayName: "Tyler" },
+        { pubkey: AGENT, displayName: "Research helper", isAgent: true },
+        { pubkey: SERVICE, displayName: "Workspace automation", isAgent: true },
+      ],
+    },
+    { seedPreviewFeatures: options.enabled ?? true },
+  );
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  await page.getByTestId("open-dispatch-view").click();
-  await page
-    .getByRole("navigation", { name: "Dispatch views" })
-    .getByRole("button", { name: "Automation", exact: true })
-    .click();
+  if (options.enabled !== false) {
+    await page.getByTestId("open-dispatch-view").click();
+    await expect(page.getByTestId("dispatch-new-issue")).toBeEnabled();
+  }
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  if (options.available === false) {
+    await expect(page.getByTestId("settings-nav-dispatch-service")).toHaveCount(
+      0,
+    );
+    return;
+  }
+  await page.getByTestId("settings-nav-dispatch-service").click();
   await expect(page.getByTestId("dispatch-automation")).toBeVisible();
 }
 export async function publishedRecords(page: Page) {

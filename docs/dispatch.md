@@ -96,3 +96,17 @@ before the new UI can control it; see the rollout guide.
 The mobile Work tab offers open/personal queues, triage and named decisions using
 the existing Buzz identity. Its relay must support the Dispatch read/preparation
 command. Offline and uncertain sends retain exact changes and saved drafts for recovery.
+
+### Desktop navigation and operator service controls
+
+Dispatch has five views: Board, List, Triage, My Issues, and Projects. Retired
+`view=insights` and `view=automation` links open Board. The Triage badge counts
+unassigned issues in Triage and shows the oldest time in that status, in whole
+days; it disappears when no unassigned Triage issues remain.
+
+The fork-only external dispatcher controls live in Settings > Dispatch service,
+behind the Dispatch experiment. The entry appears only for a maintainer of the
+selected Dispatch workspace with an existing active automation service record.
+Select the workspace in Dispatch first when more than one workspace is available.
+The existing service connection, heartbeat, action allowance, expiry, preview,
+and pause behavior is unchanged. Insights has no replacement Flow block.
