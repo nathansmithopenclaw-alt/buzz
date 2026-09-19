@@ -65,17 +65,6 @@
       "expires": "2026-09-28"
     },
     {
-      "file": "tests/e2e/workflow-local-controls.spec.ts",
-      "title": "inserts template variables with keyboard control and restores the caret",
-      "line": 148,
-      "class": "deterministic",
-      "reason": "Visual snapshot diff, 498px (ratio 0.01) vs the committed -darwin.png; failed in all 3 runs.",
-      "owner": "anvil",
-      "issue": "D-6f0edd0ed",
-      "added": "2026-08-29",
-      "expires": "2026-09-28"
-    },
-    {
       "file": "tests/e2e/virtualization.spec.ts",
       "title": "08 — cascading older pages never snap the viewport toward newest",
       "line": 246,
