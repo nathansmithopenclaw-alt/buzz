@@ -1004,7 +1004,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 54);
+        assert_eq!(migrations.len(), 55);
+        assert_eq!(migrations[54].version, 55);
+        assert!(migrations[54]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE dispatch_workflow_effects"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -2202,6 +2207,7 @@ mod postgres_tests {
         expected_fences.insert("relay_event_journal".to_owned());
         expected_fences.insert("relay_journal_checkpoints".to_owned());
         expected_fences.insert("relay_journal_state".to_owned());
+        expected_fences.insert("dispatch_workflow_effects".to_owned());
         // 0051 adds durable Summary execution, observed reads and independent cursors.
         expected_fences.extend(
             [
