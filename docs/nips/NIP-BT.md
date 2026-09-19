@@ -433,3 +433,147 @@ changed. An unresolved existing task link blocks another execution attempt until
 it is reconciled. Retained review and conversation updates similarly freeze the
 reviewed source event. Issue completion, executor completion, independent review,
 merge, installation and observed acceptance remain separate states.
+
+## Built-in relay automation authorizations (kind 40026)
+
+These payloads use the existing immutable `DispatchRecord` wrapper: `v: 1`, a
+stable `record_id`, `revision` starting at zero, `parent_event` null on the root
+and equal to the accepted predecessor on each revision, a fresh `request_id`,
+`archived`, and `payload`. Update the same record to change or pause a setting;
+archiving the latest setting does not revive an older grant. Normal admission
+receipts seal the author's role at write time. The relay additionally requires
+the current record author to remain an **owner or admin**, not merely a bot or
+an admitted former maintainer, at effect time.
+
+### Capture
+
+The signed event's `h` tag is the source `channel`. That channel's owner/admin
+signs the record. The signer must also belong to `workspace`; its audience may
+not exceed the source audience. `project` is optional (null or an existing
+project UUID). The reaction's stored channel and message target are authoritative;
+reaction-controlled text cannot select the workspace.
+
+```json
+{
+  "type": "capture",
+  "channel": "c2e8c9dd-f748-47c2-b56e-749ae34d1b62",
+  "workspace": "8dd44714-7598-4710-92a8-77d4effbf39a",
+  "project": null,
+  "enabled": true
+}
+```
+
+### Unowned alerts
+
+The `h` tag is `workspace`; a workspace owner/admin signs. `channel: null` uses
+each issue's home channel (or its workspace when no home is set). An override
+must preserve the workspace audience and include the author. `after_hours` is
+1–8760 and must match the workflow parameter. Nonterminal unassigned issues
+qualify by time in their current state. Each `(issue, threshold)` fires once,
+even across restart or repeated schedule ticks. Changing ownership never occurs.
+
+```json
+{
+  "type": "unowned_alert",
+  "workspace": "8dd44714-7598-4710-92a8-77d4effbf39a",
+  "channel": null,
+  "after_hours": 24,
+  "enabled": true
+}
+```
+
+### Autopilot
+
+The `h` tag is `workspace`; a workspace owner/admin signs. `agents` contains
+1–32 distinct public keys. `at_a_time` is per executor (default 2, range 1–32)
+and `per_day` is per project per UTC day (default 10, range 1–1000). An existing
+capacity record may further lower an executor's limit or pause them.
+`reviewer_required` must be true. The issue owner (accountable assignee, falling
+back to a non-relay root author) reviews and cannot equal the selected executor.
+The executor and reviewer must belong to both the workspace and destination;
+the issue body is never copied to a broader destination audience.
+
+```json
+{
+  "type": "autopilot",
+  "workspace": "8dd44714-7598-4710-92a8-77d4effbf39a",
+  "project": "31334708-f5ba-4d7e-b7d6-8bd63984de30",
+  "agents": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+  "label": null,
+  "at_a_time": 2,
+  "per_day": 10,
+  "reviewer_required": true,
+  "enabled": true,
+  "activation_id": "624f136a-e4e9-4af6-942e-d722ca9bc1e0",
+  "confirmation_required": true,
+  "confirmation_event": null
+}
+```
+
+Use a real agent public key in `agents`. A fresh activation begins with
+`confirmation_required: true`. The relay admission time of its first accepted revision fixes the start of
+the first hour, so backdating the signed policy cannot bypass warm-up. The third assignment within that hour emits a durable confirmation
+outcome; further assignments stop until an admin revision sets the flag false
+and `confirmation_event` to that exact third kind-40023 assignment event ID.
+An earlier confirmation, a timestamp coincidence, or an unrelated event cannot
+satisfy this check. Keep `activation_id` unchanged when confirming. If fewer than
+three assignments occur during the first hour, the warm-up limit expires. If
+three occurred, confirmation remains pending even after the hour ends. Pausing
+only prevents future assignments.
+
+Only Todo issues in the named project, matching `label` when present and with
+no nonterminal blocking issue, qualify. Imported issues require an active signed
+activation record. Unfinished attempts, including reported-complete work awaiting
+independent review, consume capacity. The relay preserves the accountable owner
+and issues an unchanged v3 task envelope to the home channel. Issue links, envelope,
+admission receipts, action record and `(issue, observed revision)` claim commit
+atomically before notification. Per-day counts and first-hour claims survive
+restart and policy revisions.
+
+### Action history and durable claims (kind 40023)
+
+Existing issue-bound `DispatchAction` records retain their `assign`/`escalate`
+schema and request UUIDs, preserving the optional dispatcher's reader contract.
+Capture results, missing/revoked-authority skips and first-hour confirmation use
+a separately tagged `t: dispatch-workflow-outcome` record:
+
+```json
+{
+  "v": 1,
+  "type": "workflow_outcome",
+  "action": "dispatch.create_issue",
+  "request_key": "skip:create_issue:<source-event-id>:no authorization record",
+  "source": "<source-event-id>",
+  "result": "skipped: no authorization record",
+  "confirmation_required": false,
+  "confirmation_event": null
+}
+```
+
+These records are signed by the relay. The `h` tag is the workflow's scope for
+skips, the receiving workspace for successful capture, and the project workspace
+for confirmation. Trust the relay signature before displaying these as automation
+results. A skipped source does not consume its successful-capture claim: an admin
+can authorize a later retry. Source capture claims are scoped to the original
+conversation, so changing its destination does not recapture the message.
+
+Migration **0055** adds `dispatch_workflow_effects`, keyed by community, scope
+and effect key, protected by the community write fence and included in community
+deletion. Scope membership locks serialize policy changes, normal Tracker writes
+and concurrent automation. The transaction stores claims and their signed effects
+together. A snapshot is bounded to 64 channels, 20,000 events/16 MiB, and 100,000
+ledger entries; exceeding a bound fails visibly instead of acting on partial
+history. A batch handles at most 100 alert effects or 60 assignment/skip effects;
+subsequent ticks continue past already claimed effects.
+
+### Task lifecycle projects onto issue state
+
+An accepted v3 `picked_up` event automatically adds a Tracker revision to
+In Progress; accepted `done` adds In Review. Current signed assignment authority,
+reciprocal task-event links and the independent-review contract remain intact.
+Forged, stale and superseded attempts cannot move the board. The transition keeps
+the issue owner and records the relay pickup time through the ordinary status
+activity. A duplicate ingestion retries an incomplete projection before ACK;
+its ledger claim prevents duplicate issue revisions. The relay uses the existing
+Tracker monotonic revision timestamp rule so same-second acceptance cannot lose
+to a prior revision's lexical event-ID ordering.

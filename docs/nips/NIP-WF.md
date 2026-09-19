@@ -46,3 +46,59 @@ Relays MUST sweep unanswered requests after `expiration`. The transition is
 idempotent: a pending approval becomes `expired`, and its `waiting_approval`
 run becomes terminal `failed` with error code `approval_expired`. A repeated or
 concurrent sweep MUST NOT transition either row again.
+
+## Dispatch actions
+
+The relay implements these actions through `ActionSink`, using direct database
+transactions. No sidecar or HTTP loopback is required. Definitions still require
+the normal workflow owner authority, and every Dispatch effect additionally
+requires the current signed NIP-BT authorization described below.
+
+| Action | Trigger | Parameters |
+| --- | --- | --- |
+| `dispatch.create_issue` | `reaction_added`, emoji `📌` | None |
+| `dispatch.escalate` | `schedule` | `after_hours`: integer 1–8760, default 24 |
+| `dispatch.assign` | `schedule` | None; project scope and limits come from signed Autopilot records |
+
+The desktop capture definition is accepted unchanged:
+
+```json
+{
+  "name": "dispatch-capture",
+  "trigger": {
+    "on": "reaction_added",
+    "emoji": "📌",
+    "filter": "trigger_channel_id == \"c2e8c9dd-f748-47c2-b56e-749ae34d1b62\""
+  },
+  "steps": [{"id": "capture", "action": "dispatch.create_issue"}]
+}
+```
+
+A separate signed `capture` record names the receiving Tracker workspace.
+Enabling the workflow alone does not authorize capture. Un-pinning does not
+remove the issue. The source message supplies the title's first line, bounded
+to 256 UTF-8 bytes, and a source link; captured work enters Triage.
+
+Scheduled actions reuse the existing scheduled-fire claim table. For example:
+
+```yaml
+name: dispatch-ready-work
+trigger:
+  on: schedule
+  interval: 1m
+steps:
+  - id: assign
+    action: dispatch.assign
+```
+
+An alert definition uses `action: dispatch.escalate` with `after_hours: 24`.
+The threshold must equal the signed `unowned_alert` authorization. A tick
+coalesces eligible issues into one digest per destination channel. Assignment
+and alerting remain separate actions; an alert never assigns.
+
+Unknown actions, invalid thresholds and incompatible trigger/action combinations
+are rejected during definition validation. At execution, the relay rechecks the
+current definition and enabled state under a database lock, current policy-signer
+roles, source/destination audiences, and accepted issue/task history. Missing or
+revoked grants produce an idempotent kind-40023 skipped outcome. Storage errors
+fail the run rather than returning an empty successful projection.

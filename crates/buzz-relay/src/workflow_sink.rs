@@ -501,6 +501,21 @@ impl RelayActionSink {
 }
 
 impl ActionSink for RelayActionSink {
+    fn dispatch(
+        &self,
+        community: CommunityId,
+        run_id: Uuid,
+        action: buzz_workflow::ActionDef,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, ActionSinkError>> + Send + '_>> {
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay shutting down".into()))?;
+            crate::dispatch_workflow::execute(&state, community, run_id, action).await
+        })
+    }
+
     fn send_message(
         &self,
         community_id: CommunityId,

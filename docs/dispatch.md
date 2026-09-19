@@ -132,3 +132,25 @@ a channel-scoped `dispatch-capture` workflow with a fixed 📌 reaction trigger
 and `dispatch.create_issue` action. Turning it off sets `enabled:false` and
 preserves its history. The relay must support that action; saving an unsupported
 workflow reports the error without claiming it was enabled.
+
+## Automation in the relay
+
+Pin capture, unowned-work alerts and project Autopilot run in Buzz's relay
+workflow engine. An administrator enables the workflow and its signed scope
+record. The capture record names the receiving Dispatch workspace; the workflow
+alone cannot infer it. Missing or revoked authorization appears in automation
+history as a skipped action.
+
+Autopilot selects Todo work with no blockers, optionally filtered by a label.
+Defaults are two unfinished attempts per agent and ten project assignments per
+UTC day. The issue owner independently reviews the result. Three assignments in
+the first hour pause further assignment for confirmation; pausing never undoes
+existing work. When the executor picks up a linked task, its issue moves to In
+Progress automatically; reported completion moves it to In Review.
+
+See [NIP-BT](nips/NIP-BT.md#built-in-relay-automation-authorizations-kind-40026)
+for the signed records and [NIP-WF](nips/NIP-WF.md#dispatch-actions) for workflow
+definitions. The external [dispatcher](dispatcher.md) remains an optional
+operator mode with its existing controls; it is not required for these relay
+actions. Desktop controls that publish the new scope records are a separate
+integration from the relay protocol.

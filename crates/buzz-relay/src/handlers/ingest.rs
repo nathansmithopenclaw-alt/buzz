@@ -3455,6 +3455,13 @@ async fn ingest_event_inner(
             }
         };
 
+    // Retryable board projection runs before both the original and duplicate ACK.
+    crate::dispatch_workflow::transition(state, tenant.community(), &event)
+        .await
+        .map_err(|error| {
+            IngestError::Internal(format!("Dispatch lifecycle projection: {error}"))
+        })?;
+
     if !was_inserted {
         return Ok(IngestResult {
             event_id: event_id_hex,

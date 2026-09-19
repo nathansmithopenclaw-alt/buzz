@@ -2157,3 +2157,13 @@ CREATE INDEX summary_report_history ON events (community_id, created_at DESC, id
     WHERE kind = 40030 AND deleted_at IS NULL;
 
 CREATE INDEX summary_read_consumption ON summary_run_reads (community_id,owner_pubkey,summary_id,channel_id,event_id,run_id);
+
+-- Claims and all signed effects are committed in the same membership-fenced transaction.
+CREATE TABLE dispatch_workflow_effects (
+    community_id uuid NOT NULL REFERENCES communities(id),
+    workspace uuid NOT NULL,
+    effect_key text NOT NULL,
+    detail jsonb NOT NULL,
+    PRIMARY KEY (community_id, workspace, effect_key)
+);
+SELECT attach_community_write_fence('dispatch_workflow_effects');

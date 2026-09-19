@@ -88,6 +88,20 @@ pub enum SummaryInvocation {
 /// Returns `Pin<Box<dyn Future>>` for dyn-compatibility — required because
 /// `WorkflowEngine` stores `Arc<dyn ActionSink>`.
 pub trait ActionSink: Send + Sync {
+    /// Execute a Dispatch action using durable workflow/run identity, never rendered authority.
+    fn dispatch(
+        &self,
+        _community: CommunityId,
+        _run_id: Uuid,
+        _action: crate::schema::ActionDef,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, ActionSinkError>> + Send + '_>> {
+        Box::pin(async {
+            Err(ActionSinkError::InvalidInput(
+                "Dispatch execution is unavailable".into(),
+            ))
+        })
+    }
+
     /// Execute a literal named Summary on behalf of the stored workflow owner.
     fn run_summary(
         &self,
