@@ -1,3 +1,4 @@
+import { dispatchPopulationProbeFilter } from "./e2eDispatchPopulation";
 import { dispatchMockCommand } from "./dispatchMockCommands";
 import { applyDispatchMockEvent } from "./dispatchMockProjection";
 import {
@@ -11452,7 +11453,8 @@ function sendToMockSocket(args: {
     }
 
     const filter = rest[1] as MockFilter;
-    if (emitMockDispatchFixture(socket, subId, filter)) return;
+    const probe = dispatchPopulationProbeFilter(filters) ?? filter;
+    if (emitMockDispatchFixture(socket, subId, probe)) return;
     if (filter.kinds?.includes(13534)) {
       sendWsText(socket.handler, [
         "EVENT",

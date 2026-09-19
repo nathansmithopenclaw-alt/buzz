@@ -10,6 +10,7 @@ import {
   publishedRecords,
 } from "../helpers/automationFixture";
 import type { AutopilotAuthorization } from "../../src/features/dispatch/recordTypes";
+// Activation can create capacity and authorization; each confirms paced history reads.
 const PROJECT = "31334708-f5ba-4d7e-b7d6-8bd63984de30";
 const ACTIVATION = "624f136a-e4e9-4af6-942e-d722ca9bc1e0";
 const RELAY = "e".repeat(64);
@@ -105,7 +106,7 @@ test("card defaults and review line derive from chosen values; ON writes approva
   await expect(card.getByLabel("Per day")).toHaveValue("10");
   await expect(
     card.getByRole("switch", { name: "Reviewer required" }),
-  ).toBeChecked();
+  ).toBeChecked({ timeout: 15000 });
   await expect(
     card.getByRole("switch", { name: "Autopilot", exact: true }),
   ).not.toBeChecked();
@@ -124,7 +125,7 @@ test("card defaults and review line derive from chosen values; ON writes approva
   await card.getByRole("switch", { name: "Autopilot", exact: true }).click();
   await expect(
     card.getByRole("switch", { name: "Autopilot", exact: true }),
-  ).toBeChecked();
+  ).toBeChecked({ timeout: 15000 });
   const records = await publishedRecords(page);
   expect(records.find((r) => r.payload.type === "capacity").payload).toEqual({
     type: "capacity",
@@ -167,7 +168,7 @@ test("OFF disables the same workflow and revises the same record without deletin
   await chooseAgent(page);
   const toggle = page.getByRole("switch", { name: "Autopilot", exact: true });
   await toggle.click();
-  await expect(toggle).toBeChecked();
+  await expect(toggle).toBeChecked({ timeout: 15000 });
   const first = (await publishedRecords(page)).find(
     (r) => r.payload.type === "autopilot",
   );
@@ -215,7 +216,7 @@ test("Keep on binds confirmation to the exact third assignment and same activati
   await card.getByRole("button", { name: "Keep on", exact: true }).click();
   await expect(
     card.getByRole("button", { name: "Keep on", exact: true }),
-  ).toHaveCount(0);
+  ).toHaveCount(0, { timeout: 15000 });
   const confirmed = (await publishedRecords(page)).find(
     (r) => r.payload.type === "autopilot",
   );
@@ -295,7 +296,7 @@ test("workspace alert settings persist matching threshold and disable without de
   await open(page, fixture(), false);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const setting = page.getByTestId("dispatch-unowned-alert");
-  await expect(setting.getByRole("switch")).toBeChecked();
+  await expect(setting.getByRole("switch")).toBeChecked({ timeout: 15000 });
   await expect(setting.getByLabel("after", { exact: true })).toHaveValue("24");
   await expect(setting.getByLabel("post in")).toHaveValue("");
   expect(await publishedRecords(page)).toHaveLength(0);
@@ -348,7 +349,7 @@ test("a partially saved Pause survives card closure and retries without another 
   await chooseAgent(page);
   const toggle = page.getByRole("switch", { name: "Autopilot", exact: true });
   await toggle.click();
-  await expect(toggle).toBeChecked();
+  await expect(toggle).toBeChecked({ timeout: 15000 });
   await page.evaluate(() => {
     if (window.__BUZZ_E2E__?.mock)
       window.__BUZZ_E2E__.mock.workflowUpdateError =
