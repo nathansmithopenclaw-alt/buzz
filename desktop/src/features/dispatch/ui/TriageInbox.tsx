@@ -112,9 +112,8 @@ export function TriageInbox({
       </section>
       <div className="m-5 flex items-center gap-2 rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
         <Info aria-hidden className="h-4 w-4 shrink-0" />
-        Choose an owner and priority here. Open Automation to set up reminders
-        or send ready work to an agent. You will review the setup before it
-        runs.
+        Choose an owner and priority here. Open an issue to review its details
+        and assign the work.
       </div>
     </div>
   );

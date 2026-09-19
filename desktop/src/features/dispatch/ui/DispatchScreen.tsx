@@ -1,7 +1,5 @@
 import { DispatchSyncNotice } from "./DispatchSyncNotice";
-import { DispatchAutomationPanel } from "./DispatchAutomationPanel";
 import { DispatchBulkActions } from "./DispatchBulkActions";
-import { DispatchInsights } from "./DispatchInsights";
 import { DispatchProjectsPanel } from "./DispatchProjectsPanel";
 import { conflictTitle, unresolvedDiagnostics } from "../conflicts";
 import { DispatchAliasContext } from "./DispatchAliases";
@@ -14,8 +12,6 @@ import {
   AlertTriangle,
   LayoutGrid,
   FolderKanban,
-  ChartNoAxesCombined,
-  SlidersHorizontal,
   List,
   Plus,
   RefreshCw,
@@ -37,6 +33,7 @@ import {
   dispatchSearchForNavigation,
   parseExcludedIssueIds,
   type DispatchView,
+  validateDispatchSearch,
 } from "../dispatchSearch";
 import { useDispatchContext, useDispatchWorkspaces } from "../hooks";
 import type { DispatchWorkspace } from "../types";
@@ -150,7 +147,7 @@ export function DispatchScreen() {
     if (activeWorkspace?.id)
       setStorageItem(LAST_WORKSPACE_KEY, activeWorkspace.id);
   }, [activeWorkspace?.id]);
-  const view = (values.view as DispatchView | null) ?? "board";
+  const view = validateDispatchSearch(values).view ?? "board";
   const filters = dispatchFiltersFromSearch(values);
   const groupBy = (values.group as DispatchGroupBy | null) ?? "status";
   const sort = {
@@ -210,9 +207,26 @@ export function DispatchScreen() {
   );
   const createPrefix =
     prefix ?? fallbackWorkspacePrefix(selectedWorkspace?.name ?? "");
-  const triageCount = context.issues.filter(
-    (issue) => issue.status === "triage",
-  ).length;
+  const unownedTriage = context.issues.filter(
+    (issue) => issue.status === "triage" && !issue.assignee,
+  );
+  const [now, setNow] = React.useState(() => Date.now() / 1000);
+  React.useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now() / 1000), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const triageCount = unownedTriage.length;
+  const oldestTriageDays = Math.max(
+    0,
+    Math.floor(
+      (now -
+        unownedTriage.reduce(
+          (oldest, issue) => Math.min(oldest, issue.enteredStatusAt),
+          now,
+        )) /
+        86_400,
+    ),
+  );
   const openIssue = (issueId: string) => {
     if (!workspaceId) return;
     void navigate({
@@ -336,13 +350,17 @@ export function DispatchScreen() {
                   tabClassName,
                   view === "triage" && "text-foreground after:bg-primary",
                 )}
+                data-testid="dispatch-tab-triage"
                 onClick={() => changeView("triage")}
                 type="button"
               >
                 <AlertTriangle className="h-4 w-4" /> Triage
                 {triageCount > 0 ? (
-                  <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs text-muted-foreground">
-                    {triageCount}
+                  <span
+                    data-testid="dispatch-triage-badge"
+                    className="whitespace-nowrap rounded-full bg-muted px-1.5 py-0.5 text-2xs text-muted-foreground"
+                  >
+                    {triageCount} · oldest {oldestTriageDays}d
                   </span>
                 ) : null}
               </button>
@@ -368,34 +386,10 @@ export function DispatchScreen() {
               >
                 <FolderKanban className="h-4 w-4" /> Projects
               </button>
-              <button
-                type="button"
-                aria-pressed={view === "insights"}
-                className={cn(
-                  tabClassName,
-                  view === "insights" && "text-foreground after:bg-primary",
-                )}
-                onClick={() => changeView("insights")}
-              >
-                <ChartNoAxesCombined className="h-4 w-4" /> Insights
-              </button>
-              <button
-                type="button"
-                aria-pressed={view === "automation"}
-                className={cn(
-                  tabClassName,
-                  view === "automation" && "text-foreground after:bg-primary",
-                )}
-                onClick={() => changeView("automation")}
-              >
-                <SlidersHorizontal className="h-4 w-4" /> Automation
-              </button>
             </nav>
           </TopChromeInsetHeader>
 
-          {workspaceId &&
-          identity.data?.pubkey &&
-          !["projects", "insights", "automation"].includes(view) ? (
+          {workspaceId && identity.data?.pubkey && view !== "projects" ? (
             <DispatchViewToolbar
               key={`${activeCommunity?.relayUrl}:${workspaceId}:${identity.data.pubkey}`}
               scope={activeCommunity?.relayUrl ?? ""}
@@ -509,16 +503,6 @@ export function DispatchScreen() {
             </div>
           ) : (
             <section className="flex min-h-0 flex-1 flex-col overflow-auto">
-              {view === "automation" && identity.data?.pubkey ? (
-                <DispatchAutomationPanel
-                  key={`${activeCommunity?.relayUrl}:${workspaceId}:${identity.data.pubkey}`}
-                  context={context}
-                  workspace={workspaceId}
-                  viewer={identity.data.pubkey}
-                  refresh={context.refresh}
-                  onOpenIssue={openIssue}
-                />
-              ) : null}
               {view === "projects" && identity.data?.pubkey ? (
                 <DispatchProjectsPanel
                   key={`${workspaceId}:${identity.data.pubkey}`}
@@ -530,9 +514,6 @@ export function DispatchScreen() {
                   onOpenIssue={openIssue}
                   refresh={context.refresh}
                 />
-              ) : null}
-              {view === "insights" ? (
-                <DispatchInsights context={context} onOpenIssue={openIssue} />
               ) : null}
               {view === "board" ? (
                 <DispatchBoardPanel

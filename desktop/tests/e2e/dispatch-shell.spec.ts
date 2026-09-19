@@ -768,3 +768,32 @@ test("Board and List URL state survives issue-detail back navigation", async ({
   await page.getByTestId("dispatch-tab-board").click();
   await expect(page.getByTestId("dispatch-group-by")).toHaveValue("project");
 });
+
+for (const retiredView of ["insights", "automation"]) {
+  test(`retired ${retiredView} deep link falls back to the five-tab Board`, async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      dispatch: {
+        workspace: { id: ACCEPTANCE_WORKSPACE, name: "dispatch" },
+        context: acceptanceContext(orderedAcceptanceIssues()),
+      },
+    });
+    await page.goto(
+      `/#/dispatch?workspace=${ACCEPTANCE_WORKSPACE}&view=${retiredView}`,
+      {
+        waitUntil: "domcontentloaded",
+      },
+    );
+    const nav = page.getByRole("navigation", { name: "Dispatch views" });
+    await expect(page.getByTestId("dispatch-board")).toBeVisible();
+    await expect(nav.getByRole("button")).toHaveCount(5);
+    await expect(page.getByTestId("dispatch-tab-board")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(
+      nav.getByRole("button", { name: /Insights|Automation/ }),
+    ).toHaveCount(0);
+  });
+}

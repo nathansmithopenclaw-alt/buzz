@@ -1,3 +1,9 @@
+import {
+  automationFixture,
+  openAutomation,
+  publishedRecords,
+  ISSUE as AUTOMATION_ISSUE,
+} from "../helpers/automationFixture";
 import { expect, test } from "@playwright/test";
 
 import type {
@@ -181,7 +187,9 @@ async function openDispatch(
 }
 
 async function openPrimaryIssue(page: import("@playwright/test").Page) {
-  await page.getByRole("button", { name: /^Triage(?: \d+)?$/ }).click();
+  await page
+    .getByRole("button", { name: /^Triage(?: \d+ · oldest \d+d)?$/ })
+    .click();
   await page
     .getByTestId("dispatch-issue-11111111-1111-4111-8111-111111111111")
     .click();
@@ -192,7 +200,9 @@ test("triage renders unassigned and assigned current-fold sections in P0-first t
   page,
 }) => {
   await openDispatch(page);
-  await page.getByRole("button", { name: /^Triage(?: \d+)?$/ }).click();
+  await page
+    .getByRole("button", { name: /^Triage(?: \d+ · oldest \d+d)?$/ })
+    .click();
   await expect(page.getByTestId("dispatch-triage")).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Unassigned · 3" }),
@@ -202,7 +212,7 @@ test("triage renders unassigned and assigned current-fold sections in P0-first t
   await expect(rows.nth(1)).toContainText("P0 newer canonical issue");
   await expect(rows.nth(2)).toContainText("P1 older than second P0");
   await expect(
-    page.getByText(/Open Automation to set up reminders/),
+    page.getByText(/Open an issue to review its details/),
   ).toBeVisible();
 });
 
@@ -982,46 +992,12 @@ test("a message can create linked work without copying its source text", async (
 test("automation stays in preview until a configured service acknowledges it", async ({
   page,
 }) => {
-  await openDispatch(page);
-  await page
-    .getByRole("navigation", { name: "Dispatch views" })
-    .getByRole("button", { name: "Automation", exact: true })
-    .click();
-  await page
-    .getByRole("button", { name: /^Remind us about unassigned work/ })
-    .click();
-  const dialog = page.getByTestId("automation-setup");
-  await dialog
-    .getByRole("button", { name: "Choose the details", exact: true })
-    .click();
-  await expect(
-    dialog.getByText(
-      "Ask the person who manages your Buzz workspace to connect automation.",
-      { exact: false },
-    ),
-  ).toBeVisible();
-  await dialog
-    .getByText("Connection settings for administrators", { exact: true })
-    .click();
-  await dialog
-    .getByLabel("Service name", { exact: true })
-    .fill("test-dispatcher");
-  await dialog
-    .getByLabel("Service public key", { exact: true })
-    .fill("b".repeat(64));
-  await dialog
-    .getByLabel("P0 oldest canonical triage issue", { exact: true })
-    .check();
-  await dialog
-    .getByLabel("Post reminders in")
-    .selectOption({ label: "#general" });
-  await dialog
-    .getByRole("button", { name: "Review setup", exact: true })
-    .click();
-  await dialog
-    .getByRole("button", { name: "Save and check setup", exact: true })
-    .click();
-  await expect(dialog).not.toBeVisible();
+  const fixture = automationFixture({
+    notify_triage: true,
+    issue_ids: [AUTOMATION_ISSUE],
+  });
+  fixture.automation = { actions: [], heartbeats: [] };
+  await openAutomation(page, fixture);
   const card = page.getByTestId("automation-run-card");
   await expect(card.getByRole("status")).toHaveText("Waiting for connection");
   await expect(
@@ -1032,18 +1008,9 @@ test("automation stays in preview until a configured service acknowledges it", a
     card.getByRole("button", { name: "Check before turning on", exact: true }),
   ).toBeVisible();
   await expect(card.getByRole("status")).toHaveText("Waiting for connection");
-  const events = await page.evaluate(
-    () => window.__BUZZ_E2E_PUBLISHED_DISPATCH_EVENTS__ ?? [],
-  );
-  expect(events.filter((event) => event.kind === 9)).toHaveLength(0);
-  const settings = events
-    .filter((event) => event.kind === 40026)
-    .map((event) => JSON.parse(event.content));
-  expect(settings.map((record) => record.payload.controls.mode)).toEqual([
-    "preview",
-    "paused",
-  ]);
-  expect(settings[1].record_id).toBe(settings[0].record_id);
+  const records = await publishedRecords(page);
+  expect(records).toHaveLength(1);
+  expect(records[0].payload.controls.mode).toBe("paused");
 });
 
 test("human assignment confirms its issue link before notifying the executor and retains its owner", async ({

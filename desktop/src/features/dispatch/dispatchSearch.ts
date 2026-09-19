@@ -13,9 +13,7 @@ export type DispatchView =
   | "list"
   | "triage"
   | "my-issues"
-  | "projects"
-  | "insights"
-  | "automation";
+  | "projects";
 
 export type DispatchRouteSearch = {
   workspace?: string;
@@ -57,8 +55,6 @@ const VIEWS: DispatchView[] = [
   "triage",
   "my-issues",
   "projects",
-  "insights",
-  "automation",
 ];
 const STATUSES: Array<DispatchStatus | "all"> = [
   "all",

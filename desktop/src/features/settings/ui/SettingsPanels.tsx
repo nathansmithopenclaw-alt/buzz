@@ -7,6 +7,7 @@ import {
   ChevronDown,
   Cpu,
   Download,
+  SlidersHorizontal,
   FlaskConical,
   Gauge,
   Keyboard,
@@ -88,6 +89,7 @@ export type SettingsSection =
   | "profile"
   | "notifications"
   | "voice"
+  | "dispatch-service"
   | "experimental"
   | "agents"
   | "channel-templates"
@@ -115,6 +117,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "profile",
   "notifications",
   "voice",
+  "dispatch-service",
   "experimental",
   "agents",
   "channel-templates",
@@ -162,6 +165,12 @@ export type SettingsPanelProps = {
 };
 
 export const settingsSections: SettingsSectionDescriptor[] = [
+  {
+    value: "dispatch-service",
+    label: "Dispatch service",
+    icon: SlidersHorizontal,
+    featureGate: "dispatch",
+  },
   {
     value: "appearance",
     label: "Appearance",
@@ -848,6 +857,8 @@ export function renderSettingsSection(
       );
     case "voice":
       return <VoiceSettingsCard />;
+    case "dispatch-service":
+      return null; // The gated workspace service panel is supplied by SettingsView.
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
