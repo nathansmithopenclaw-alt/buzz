@@ -1469,9 +1469,7 @@ test("issue Remind me publishes its root target and the due notification opens t
   });
   await page.getByRole("button", { name: "Inbox", exact: true }).click();
   await page.getByTestId("inbox-filter-trigger").click();
-  await page
-    .getByRole("menuitemradio", { name: "Reminders" })
-    .click();
+  await page.getByRole("menuitemradio", { name: "Reminders" }).click();
   await page
     .locator('[data-testid^="home-reminder-item-"]')
     .getByRole("button")
