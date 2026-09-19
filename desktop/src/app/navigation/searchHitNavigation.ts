@@ -4,6 +4,11 @@ import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import type { SearchHit } from "@/shared/api/types";
 
 type SearchHitNavigationActions = {
+  goDispatchIssue?: (
+    workspace: string,
+    issueId: string,
+    options?: { force?: boolean },
+  ) => Promise<unknown>;
   force?: boolean;
   query?: string;
   goChannel: (
@@ -54,6 +59,14 @@ export async function openSearchHitWithNavigation(
     // Delay community-scoped writes for notification routing until async
     // destination resolution completes and its owner is still current.
     cacheSearchHitEvent(hit);
+  }
+
+  if (destination.kind === "dispatch-issue") {
+    return actions.goDispatchIssue?.(
+      destination.workspace,
+      destination.issueId,
+      { force: actions.force },
+    );
   }
 
   if (destination.kind === "forum-post") {

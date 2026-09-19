@@ -127,6 +127,19 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goDispatchIssue = React.useCallback(
+    (workspace: string, issueId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/dispatch/issue/$issueId",
+          params: { issueId },
+          search: { workspace },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goDispatch = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -459,10 +472,11 @@ export function useAppNavigation() {
         force: behavior?.force,
         goChannel,
         goForumPost,
+        goDispatchIssue,
         query: behavior?.query,
         signal: behavior?.signal,
       }),
-    [goChannel, goForumPost],
+    [goChannel, goForumPost, goDispatchIssue],
   );
 
   return {
@@ -481,6 +495,7 @@ export function useAppNavigation() {
     goProject,
     goProjects,
     goDispatch,
+    goDispatchIssue,
     goPulse,
     goProfile,
     goSettings,

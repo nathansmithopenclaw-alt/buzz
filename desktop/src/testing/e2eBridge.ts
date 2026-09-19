@@ -11022,6 +11022,23 @@ async function resolveGetEvent(
   }
   const identity = getIdentity(config);
   if (!identity) {
+    const issue = mockDispatchContext?.issues.find(
+      (value) => value.rootEvent === args.eventId,
+    );
+    if (issue)
+      return JSON.stringify({
+        id: issue.rootEvent,
+        kind: 40020,
+        pubkey: config?.mock?.dispatch?.members?.[0] ?? "deadbeef".repeat(8),
+        created_at: issue.rootCreatedAt,
+        content: JSON.stringify({ v: 1, issue_id: issue.issueId }),
+        tags: [
+          ["h", issue.streamId],
+          ["d", issue.issueId],
+          ["t", "buzz-tracker"],
+        ],
+        sig: "mock",
+      });
     const knownEvents: RelayEvent[] = [
       ...Array.from(mockMessages.values()).flat(),
       {

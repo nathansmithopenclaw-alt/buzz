@@ -279,7 +279,7 @@ export function RemindersPanel({
 }) {
   const remindersQuery = useRemindersQuery(pubkey);
   const reminders = remindersQuery.data;
-  const { goChannel } = useAppNavigation();
+  const { goChannel, goDispatchIssue } = useAppNavigation();
   const sources = useReminderSources(reminders ?? []);
 
   const handleNavigate = React.useCallback(
@@ -290,12 +290,19 @@ export function RemindersPanel({
       if (!destination) {
         return;
       }
+      if (destination.issue) {
+        void goDispatchIssue(
+          destination.issue.workspace,
+          destination.issue.issueId,
+        );
+        return;
+      }
       void goChannel(destination.channelId, {
         messageId: destination.messageId,
         threadRootId: destination.threadRootId,
       });
     },
-    [goChannel],
+    [goChannel, goDispatchIssue],
   );
 
   const groups = React.useMemo(
@@ -377,7 +384,7 @@ export function ReminderDetailPane({
   pubkey: string;
   reminder: Reminder | null;
 }) {
-  const { goChannel } = useAppNavigation();
+  const { goChannel, goDispatchIssue } = useAppNavigation();
   const reminderList = React.useMemo(
     () => (reminder ? [reminder] : []),
     [reminder],
@@ -412,6 +419,13 @@ export function ReminderDetailPane({
       reminder.content.target,
     );
     if (!destination) return;
+    if (destination.issue) {
+      void goDispatchIssue(
+        destination.issue.workspace,
+        destination.issue.issueId,
+      );
+      return;
+    }
     void goChannel(destination.channelId, {
       messageId: destination.messageId,
       threadRootId: destination.threadRootId,
@@ -490,7 +504,7 @@ export function ReminderDetailPane({
               variant="outline"
             >
               <ExternalLink className="h-4 w-4" />
-              Open message
+              Open item
             </Button>
             {isDone ? null : (
               <>

@@ -4,7 +4,7 @@ import { keepAssignmentAsDraft } from "../taskAssignments";
 import * as React from "react";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
-import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
+import { activeRecords } from "../recordTypes";
 import { Button } from "@/shared/ui/button";
 import { Textarea } from "@/shared/ui/textarea";
 import {
@@ -15,7 +15,7 @@ import {
   DialogDescription,
 } from "@/shared/ui/dialog";
 import { AssigneePickerDialog } from "./AssigneePickerDialog";
-import { routingSuggestions, assignmentWarnings } from "../attention";
+import { assignmentWarnings } from "../attention";
 import {
   assignDispatchIssue,
   pendingAssignment,
@@ -23,15 +23,18 @@ import {
   type PendingAssignment,
 } from "../taskAssignments";
 import type { DispatchContext, DispatchIssue } from "../types";
+/** The issue owner reviews by default, unless they will execute the work. */
+export function defaultReviewer(owner: string | null, executor: string | null) {
+  return owner && owner !== executor ? owner : null;
+}
+
 export function DispatchAssignmentDialog({
   issue,
   context,
-  viewer,
   refresh,
 }: {
   issue: DispatchIssue;
   context: DispatchContext;
-  viewer: string;
   refresh: () => Promise<DispatchContext>;
 }) {
   const journalVersion = useDispatchJournalVersion();
@@ -40,28 +43,38 @@ export function DispatchAssignmentDialog({
     [base, setBase] = React.useState(issue),
     [executor, setExecutor] = React.useState<string | null>(null),
     [reviewer, setReviewer] = React.useState<string | null>(
-      issue.assignee ?? viewer,
+      defaultReviewer(issue.assignee, null),
     ),
     [picker, setPicker] = React.useState<"executor" | "reviewer" | null>(null),
-    [channel, setChannel] = React.useState(
-      issue.homeChannelId ?? issue.streamId,
-    ),
-    [method, setMethod] = React.useState(
-      "Check the resulting artifact against the accepted scope and record evidence.",
-    ),
+    [notes, setNotes] = React.useState(""),
+    [deadline, setDeadline] = React.useState(""),
+    [advanced, setAdvanced] = React.useState(false),
     [override, setOverride] = React.useState(""),
     [error, setError] = React.useState<string | null>(null),
     [message, setMessage] = React.useState<string | null>(null),
     [pending, setPending] = React.useState<PendingAssignment | null>(null);
-  const { channels } = useChannelNavigation(),
-    profiles = useUsersBatchQuery(
-      [executor, reviewer].filter(Boolean) as string[],
-    );
+  const profiles = useUsersBatchQuery(
+    [executor, reviewer].filter(Boolean) as string[],
+  );
   const label = (key: string | null) =>
     key
       ? resolveUserLabel({ pubkey: key, profiles: profiles.data?.profiles })
       : "Choose a person";
-  const suggestions = routingSuggestions(context, issue);
+  const capacityExecutors = React.useMemo(
+    () =>
+      activeRecords(context.records, "capacity").map(
+        (entry) => entry.record.payload.executor,
+      ),
+    [context.records],
+  );
+  const selectExecutor = (value: string | null) => {
+    setExecutor(value);
+    setReviewer((current) =>
+      current === executor || current === value || !current
+        ? defaultReviewer(base.assignee, value)
+        : current,
+    );
+  };
   const unfinished = context.linkedTasks.some(
     (task) =>
       task.issueId === issue.issueId &&
@@ -93,8 +106,11 @@ export function DispatchAssignmentDialog({
         issue: base,
         executor,
         reviewer,
-        channel,
-        method,
+        channel: base.homeChannelId ?? base.streamId,
+        method:
+          "Check the resulting artifact against the accepted scope and record evidence.",
+        notes,
+        deadline: deadline ? new Date(deadline).toISOString() : undefined,
         overrideReason: override,
         refresh,
       });
@@ -115,11 +131,10 @@ export function DispatchAssignmentDialog({
     }
   };
   return (
-    <div className="mt-3 space-y-2">
+    <div className="space-y-2">
       <div className="flex flex-wrap gap-2">
         <Button
           size="sm"
-          variant="outline"
           disabled={
             context.viewerRole === "none" ||
             Boolean(context.sectionErrors.tasks) ||
@@ -129,11 +144,17 @@ export function DispatchAssignmentDialog({
           }
           onClick={() => {
             setBase(issue);
+            setExecutor(null);
+            setReviewer(defaultReviewer(issue.assignee, null));
+            setNotes("");
+            setDeadline("");
+            setAdvanced(false);
+            setOverride("");
             setError(null);
             setOpen(true);
           }}
         >
-          Assign execution
+          Assign
         </Button>
         {pending ? (
           <>
@@ -200,10 +221,10 @@ export function DispatchAssignmentDialog({
       >
         <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Assign execution</DialogTitle>
+            <DialogTitle>Assign</DialogTitle>
             <DialogDescription>
-              Review who will do this work, who will independently check it, and
-              where the accepted context will be shared.
+              Choose who will do the work and who will review it. The assignment
+              goes to the issue’s home channel.
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={(event) => void submit(event)}>
@@ -215,6 +236,7 @@ export function DispatchAssignmentDialog({
                   <Button
                     type="button"
                     variant="outline"
+                    aria-label="Executor"
                     onClick={() => setPicker("executor")}
                   >
                     {label(executor)}
@@ -225,10 +247,18 @@ export function DispatchAssignmentDialog({
                   <Button
                     type="button"
                     variant="outline"
+                    aria-label="Independent reviewer"
+                    aria-describedby="dispatch-reviewer-help"
                     onClick={() => setPicker("reviewer")}
                   >
                     {label(reviewer)}
                   </Button>
+                  <p
+                    id="dispatch-reviewer-help"
+                    className="mt-1 text-xs text-muted-foreground"
+                  >
+                    Reviews the result. Cannot be the executor.
+                  </p>
                 </div>
               </div>
               <AssigneePickerDialog
@@ -238,94 +268,74 @@ export function DispatchAssignmentDialog({
                 }}
                 assignee={picker === "executor" ? executor : reviewer}
                 disabled={busy}
+                capacityPubkeys={
+                  picker === "executor" ? capacityExecutors : undefined
+                }
+                excludedPubkey={picker === "reviewer" ? executor : null}
                 onAssign={(value) => {
-                  if (picker === "executor") setExecutor(value);
+                  if (picker === "executor") selectExecutor(value);
                   else setReviewer(value);
                   setPicker(null);
                 }}
               />
-              {suggestions.length ? (
-                <details>
-                  <summary className="text-sm">Capacity suggestions</summary>
-                  {suggestions.map((value) => (
-                    <div
-                      key={value.executor}
-                      className="mt-2 rounded border border-border p-2 text-sm"
-                    >
-                      <button
-                        type="button"
-                        className="font-medium hover:underline"
-                        onClick={() => setExecutor(value.executor)}
-                      >
-                        {label(value.executor)}
-                      </button>
-                      <p className="text-xs text-muted-foreground">
-                        {value.explanation}
-                      </p>
-                    </div>
-                  ))}
-                </details>
-              ) : null}
               <label
-                htmlFor="dispatch-execution-channel"
+                htmlFor="dispatch-assignment-notes"
                 className="grid gap-1 text-sm"
               >
-                Execution conversation
-                <select
-                  id="dispatch-execution-channel"
-                  value={channel}
-                  onChange={(event) => setChannel(event.target.value)}
-                  className="h-9 rounded border border-input bg-background px-2"
-                >
-                  {!channels.some(
-                    (channel) => channel.id === issue.streamId,
-                  ) ? (
-                    <option value={issue.streamId}>
-                      Current Dispatch workspace
-                    </option>
-                  ) : null}
-                  {channels.map((channel) => (
-                    <option key={channel.id} value={channel.id}>
-                      {channel.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label
-                htmlFor="dispatch-verification-method"
-                className="grid gap-1 text-sm"
-              >
-                How the result will be verified
+                Notes
                 <Textarea
-                  id="dispatch-verification-method"
-                  required
+                  id="dispatch-assignment-notes"
                   maxLength={2048}
                   rows={3}
-                  value={method}
-                  onChange={(event) => setMethod(event.target.value)}
+                  value={notes}
+                  onChange={(event) => setNotes(event.target.value)}
                 />
               </label>
-              {reasons.length ? (
-                <div className="rounded border border-warning/40 bg-warning-bg p-3 text-sm">
-                  <ul className="list-disc pl-4">
-                    {reasons.map((reason) => (
-                      <li key={reason}>{reason}</li>
-                    ))}
-                  </ul>
+              <details
+                open={advanced}
+                onToggle={(event) => setAdvanced(event.currentTarget.open)}
+              >
+                <summary className="cursor-pointer text-sm">Advanced</summary>
+                <div className="mt-3 space-y-3">
+                  {reasons.length ? (
+                    <ul className="list-disc pl-4 text-sm text-warning">
+                      {reasons.map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                  ) : null}
                   <label
                     htmlFor="dispatch-routing-override"
-                    className="mt-3 grid gap-1"
+                    className="grid gap-1 text-sm"
                   >
-                    Reason to proceed with this human override
+                    Routing override
                     <Textarea
                       id="dispatch-routing-override"
-                      required
                       maxLength={2000}
                       value={override}
                       onChange={(event) => setOverride(event.target.value)}
                     />
                   </label>
+                  <label
+                    htmlFor="dispatch-assignment-deadline"
+                    className="grid gap-1 text-sm"
+                  >
+                    Deadline
+                    <input
+                      id="dispatch-assignment-deadline"
+                      type="datetime-local"
+                      className="h-9 rounded border border-input bg-background px-2"
+                      value={deadline}
+                      onChange={(event) => setDeadline(event.target.value)}
+                    />
+                  </label>
                 </div>
+              </details>
+              {reasons.length > 0 && !override.trim() ? (
+                <p className="text-sm text-warning">
+                  Review the routing conditions in Advanced and explain an
+                  override before assigning.
+                </p>
               ) : null}
               {!busy && base.tipEvent !== issue.tipEvent ? (
                 <p role="status" className="text-sm text-warning">
@@ -350,14 +360,11 @@ export function DispatchAssignmentDialog({
                   !executor ||
                   !reviewer ||
                   executor === reviewer ||
-                  !method.trim() ||
                   (reasons.length > 0 && !override.trim()) ||
                   base.tipEvent !== issue.tipEvent
                 }
               >
-                {busy
-                  ? "Confirming assignment…"
-                  : "Confirm assignment and notify executor"}
+                {busy ? "Confirming assignment…" : "Assign"}
               </Button>
             </fieldset>
           </form>

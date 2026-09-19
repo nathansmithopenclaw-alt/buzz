@@ -71,6 +71,8 @@ export function AssigneePickerDialog({
   open,
   profiles,
   agentsOnly = false,
+  capacityPubkeys,
+  excludedPubkey,
 }: {
   assignee: string | null;
   disabled: boolean;
@@ -79,6 +81,8 @@ export function AssigneePickerDialog({
   open: boolean;
   profiles?: UserProfileLookup;
   agentsOnly?: boolean;
+  capacityPubkeys?: readonly string[];
+  excludedPubkey?: string | null;
 }) {
   const [searchQuery, setSearchQuery] = React.useState("");
   const deferredSearchQuery = React.useDeferredValue(searchQuery.trim());
@@ -87,12 +91,12 @@ export function AssigneePickerDialog({
   const relayMembersQuery = useRelayMembersQuery(open);
   const normalizedAssignee = assignee ? normalizePubkey(assignee) : null;
   const preferredPubkeys = React.useMemo(() => {
-    const pubkeys = new Set(knownAgentPubkeys);
+    const pubkeys = new Set([...knownAgentPubkeys, ...(capacityPubkeys ?? [])]);
     for (const member of relayMembersQuery.data ?? []) {
       pubkeys.add(normalizePubkey(member.pubkey));
     }
     return pubkeys;
-  }, [knownAgentPubkeys, relayMembersQuery.data]);
+  }, [knownAgentPubkeys, relayMembersQuery.data, capacityPubkeys]);
   const preferredPubkeyList = React.useMemo(
     () => [...preferredPubkeys],
     [preferredPubkeys],
@@ -164,13 +168,22 @@ export function AssigneePickerDialog({
       ranked.unshift(candidateFromProfiles(pasted, profiles));
     }
 
+    const eligible = ranked.filter((user) => user.pubkey !== excludedPubkey);
+    if (capacityPubkeys)
+      eligible.sort(
+        (a, b) =>
+          Number(capacityPubkeys.includes(b.pubkey)) -
+          Number(capacityPubkeys.includes(a.pubkey)),
+      );
     return agentsOnly
-      ? ranked.filter(
+      ? eligible.filter(
           (user) => user.isAgent || knownAgentPubkeys.has(user.pubkey),
         )
-      : ranked;
+      : eligible;
   }, [
     agentsOnly,
+    capacityPubkeys,
+    excludedPubkey,
     knownAgentPubkeys,
     deferredSearchQuery,
     directoryResults,
@@ -215,7 +228,7 @@ export function AssigneePickerDialog({
         onScroll={handleDirectoryScroll}
         testId="dispatch-assignee-picker-people"
       >
-        {normalizedAssignee ? (
+        {normalizedAssignee && normalizedAssignee !== excludedPubkey ? (
           <>
             <UserSearchSectionTitle>
               {agentsOnly ? "Selected" : "Assigned"}

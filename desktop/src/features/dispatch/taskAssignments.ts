@@ -82,6 +82,8 @@ export async function assignDispatchIssue(input: {
   reviewer: string;
   channel: string;
   method: string;
+  notes?: string;
+  deadline?: string;
   overrideReason: string;
   refresh: () => Promise<DispatchContext>;
 }) {
@@ -130,6 +132,8 @@ export async function assignDispatchIssue(input: {
       throw new Error(
         "Open issue state and current routing controls are required before assigning.",
       );
+    if (input.channel !== (issue.homeChannelId ?? issue.streamId))
+      throw new Error("Assignments must use the issue’s home channel.");
     const warnings = assignmentWarnings(current, issue, input.executor);
     if (warnings.length && !input.overrideReason.trim())
       throw new Error(
@@ -194,9 +198,16 @@ export async function assignDispatchIssue(input: {
       deliverables: [],
       verification: { method: input.method, evidence_ref: null },
       blocked_on: null,
-      notes: input.overrideReason
-        ? `Human routing override: ${input.overrideReason}`
-        : "Explicit assignment from Dispatch",
+      notes:
+        [
+          input.notes?.trim(),
+          input.deadline ? `Deadline: ${input.deadline}` : "",
+          input.overrideReason
+            ? `Human routing override: ${input.overrideReason}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n") || "Explicit assignment from Dispatch",
       tracker_issue_id: issue.issueId,
       dispatch_request_id: requestId,
     };

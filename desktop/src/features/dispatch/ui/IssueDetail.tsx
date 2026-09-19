@@ -1,4 +1,5 @@
 import { IssueWriteRecoveryPanel } from "./IssueWriteRecoveryPanel";
+import { IssueReminderButton } from "./IssueReminderButton";
 import { DispatchDraftsPanel } from "./DispatchDraftsPanel";
 import { ConversationUpdatePanel } from "./ConversationUpdatePanel";
 import { DispatchAssignmentDialog } from "./DispatchAssignmentDialog";
@@ -373,6 +374,19 @@ export function IssueDetail({
             Edit issue
           </Button>
         </div>
+        <div className="mt-3 flex flex-wrap items-start gap-2">
+          {currentPubkey ? (
+            <IssueReminderButton key={issue.rootEvent} issue={issue} />
+          ) : null}
+          {currentPubkey ? (
+            <DispatchAssignmentDialog
+              key={`assignment:${issue.issueId}`}
+              issue={issue}
+              context={context}
+              refresh={refresh}
+            />
+          ) : null}
+        </div>
         <nav
           aria-label="Issue sections"
           className="sticky top-0 z-10 mt-3 flex flex-wrap gap-1 border-b border-border bg-background py-2"
@@ -461,15 +475,6 @@ export function IssueDetail({
             error={sectionErrors.tasks}
             profiles={profiles}
           />
-          {currentPubkey ? (
-            <DispatchAssignmentDialog
-              key={`assignment:${issue.issueId}`}
-              issue={issue}
-              context={context}
-              viewer={currentPubkey}
-              refresh={refresh}
-            />
-          ) : null}
         </div>
         <div
           id={`${sectionId}-decisions`}

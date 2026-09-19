@@ -1,9 +1,12 @@
+import { issueEventDestination } from "@/features/dispatch/issueEventDestination";
+import { KIND_TRACKER_ISSUE } from "@/shared/constants/kinds";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { getEventById } from "@/shared/api/tauri";
 import type { SearchHit } from "@/shared/api/types";
 import { KIND_FORUM_COMMENT, KIND_FORUM_POST } from "@/shared/constants/kinds";
 
 export type SearchHitDestination =
+  | { kind: "dispatch-issue"; workspace: string; issueId: string }
   | {
       kind: "channel";
       channelId: string;
@@ -22,6 +25,11 @@ export async function resolveSearchHitDestination(
 ): Promise<SearchHitDestination | null> {
   if (!hit.channelId) {
     return null;
+  }
+
+  if (hit.kind === KIND_TRACKER_ISSUE) {
+    const issue = issueEventDestination(await getEventById(hit.eventId));
+    return issue ? { kind: "dispatch-issue", ...issue } : null;
   }
 
   if (hit.kind === KIND_FORUM_POST) {
