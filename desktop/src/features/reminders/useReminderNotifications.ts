@@ -1,3 +1,6 @@
+import { getEventById } from "@/shared/api/tauri";
+import { buildEventNotificationTarget } from "@/features/notifications/lib/target";
+import { hasNavigableTarget } from "./lib/reminderNavigation";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -62,6 +65,14 @@ export function useReminderNotifications(
 ): void {
   const reminders = useRemindersQuery(pubkey).data;
   const queryClient = useQueryClient();
+  const generation = React.useRef(0);
+  React.useEffect(() => {
+    if (!pubkey) return;
+    generation.current += 1;
+    return () => {
+      generation.current += 1;
+    };
+  }, [pubkey]);
   const remindersRef = React.useRef<Reminder[]>([]);
   remindersRef.current = reminders ?? [];
   const settingsRef = React.useRef(settings);
@@ -105,11 +116,29 @@ export function useReminderNotifications(
           )
         : `${due.length} reminders are due`;
 
-    void sendDesktopNotification({
-      title: formatNotificationTitle({ prefix: "Reminder due", channelLabel }),
-      body,
-    }).then((didSend) => {
-      if (!didSend) return;
+    const activeGeneration = generation.current;
+    const reminderTarget = due.length === 1 ? due[0].content.target : undefined;
+    void (async () => {
+      const event = hasNavigableTarget(reminderTarget)
+        ? await getEventById(reminderTarget.eventId).catch(() => null)
+        : null;
+      if (activeGeneration !== generation.current) return false;
+      return sendDesktopNotification({
+        title: formatNotificationTitle({
+          prefix: "Reminder due",
+          channelLabel,
+        }),
+        body,
+        target:
+          event && reminderTarget
+            ? buildEventNotificationTarget(event, {
+                id: reminderTarget.channelId,
+                name: channelLabel,
+              })
+            : undefined,
+      });
+    })().then((didSend) => {
+      if (!didSend || activeGeneration !== generation.current) return;
       playNotificationSound(resolveSlotSound(current, "needs_action"));
       void requestDockBounce();
     });

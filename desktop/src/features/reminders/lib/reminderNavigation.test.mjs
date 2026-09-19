@@ -104,3 +104,20 @@ test("resolveReminderDestination_absent_target_returns_null", async () => {
 
   assert.equal(destination, null);
 });
+
+test("issue reminders resolve the immutable root to Dispatch", async () => {
+  const destination = await resolveReminderDestination(
+    FULL_TARGET,
+    async () => ({
+      kind: 40020,
+      tags: [
+        ["h", "workspace"],
+        ["d", "issue"],
+      ],
+    }),
+  );
+  assert.deepEqual(destination.issue, {
+    workspace: "workspace",
+    issueId: "issue",
+  });
+});

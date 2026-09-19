@@ -1,3 +1,4 @@
+import { issueEventDestination } from "@/features/dispatch/issueEventDestination";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import type { ReminderTarget } from "@/features/reminders/lib/reminderTypes";
 import { getEventById } from "@/shared/api/tauri";
@@ -7,6 +8,7 @@ import { getEventById } from "@/shared/api/tauri";
  * search-hit destination: a message inside a channel, optionally inside a thread.
  */
 export type ReminderDestination = {
+  issue?: { workspace: string; issueId: string };
   channelId: string;
   messageId: string;
   threadRootId: string | null;
@@ -51,10 +53,12 @@ export async function resolveReminderDestination(
 
   try {
     const event = await fetchEvent(target.eventId);
+    const issue = issueEventDestination(event);
     return {
+      ...(issue ? { issue } : {}),
       channelId: target.channelId,
       messageId: target.eventId,
-      threadRootId: getThreadReference(event.tags).rootId,
+      threadRootId: getThreadReference(event?.tags ?? []).rootId,
     };
   } catch (error) {
     console.error(

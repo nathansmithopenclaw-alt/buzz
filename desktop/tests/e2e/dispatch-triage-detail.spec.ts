@@ -4,6 +4,7 @@ import type {
   DispatchContext,
   DispatchIssue,
 } from "../../src/features/dispatch/types";
+import { planningRecord } from "../helpers/automationFixture";
 import { waitForAnimations } from "../helpers/animations";
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
@@ -164,6 +165,7 @@ async function openDispatch(
     assignmentAckDelayMs?: number;
   } = {},
 ) {
+  page.on("pageerror", (error) => console.error("Browser error:", error));
   await installMockBridge(page, {
     dispatch: {
       workspace: { id: WORKSPACE, name: "Dispatch Test Workspace" },
@@ -1060,16 +1062,12 @@ test("human assignment confirms its issue link before notifying the executor and
     assignmentAckDelayMs: 2500,
   });
   await openPrimaryIssue(page);
-  await page
-    .getByRole("button", { name: "Assign execution", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Assign", exact: true }).click();
   const dialog = page.getByRole("dialog", {
-    name: "Assign execution",
+    name: "Assign",
     exact: true,
   });
-  await dialog
-    .getByRole("button", { name: "Choose a person", exact: true })
-    .click();
+  await dialog.getByRole("button", { name: "Executor", exact: true }).click();
   const picker = page.getByTestId("dispatch-assignee-picker");
   await page.getByTestId("dispatch-assignee-search").fill("Helm");
   await picker
@@ -1077,11 +1075,16 @@ test("human assignment confirms its issue link before notifying the executor and
     .getByRole("button", { name: "Assign", exact: true })
     .click();
   await dialog
-    .getByLabel("Reason to proceed with this human override")
+    .getByLabel("Notes", { exact: true })
+    .fill("Include a concise result and evidence.");
+  await dialog.getByText("Advanced", { exact: true }).click();
+  await dialog.getByLabel("Deadline", { exact: true }).fill("2030-01-02T12:00");
+  await dialog
+    .getByLabel("Routing override")
     .fill("Explicit small test; the human owner will verify the result.");
   await dialog
     .getByRole("button", {
-      name: "Confirm assignment and notify executor",
+      name: "Assign",
       exact: true,
     })
     .click();
@@ -1120,6 +1123,16 @@ test("human assignment confirms its issue link before notifying the executor and
   expect(linkIndex).toBeGreaterThanOrEqual(0);
   expect(assignmentIndex).toBeGreaterThan(linkIndex);
   expect(events.filter((event) => event.kind === 9)).toHaveLength(1);
+  expect(events[assignmentIndex].tags).toContainEqual(["h", WORKSPACE]);
+  const envelope = JSON.parse(
+    events[assignmentIndex].content
+      .split("```buzz-task\n")[1]
+      .replace(/\n```$/, ""),
+  );
+  expect(envelope.v).toBe(3);
+  expect(envelope.authority.reviewer).toBe(SELF);
+  expect(envelope.notes).toContain("Include a concise result and evidence.");
+  expect(envelope.notes).toContain("Deadline: 2030-01-02T");
   const revision = JSON.parse(events[linkIndex].content);
   expect(revision.set.assignee).toBeUndefined();
   expect(
@@ -1277,4 +1290,197 @@ test("a rejected issue edit can become a durable draft without changing accepted
   await expect(
     page.getByText("Saved drafts on this device (1)", { exact: true }),
   ).toBeVisible();
+});
+
+test("Assign shows three fields, defaults the owner reviewer, and excludes the executor", async ({
+  page,
+}, testInfo) => {
+  const fixture = context({ linkedTasks: [] });
+  const primary = fixture.issues.find(
+    (value) => value.issueId === PRIMARY_ISSUE,
+  );
+  if (!primary) throw new Error("Missing primary issue");
+  primary.assignee = SELF;
+  fixture.records = [
+    planningRecord({
+      type: "capacity",
+      executor: OTHER,
+      max_active: 2,
+      capabilities: ["dispatch"],
+      paused: false,
+    }),
+  ];
+  await openDispatch(page, fixture, { members: [SELF, OTHER] });
+  await openPrimaryIssue(page);
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: testInfo.outputPath("issue-remind-assign.png"),
+  });
+  await page.getByRole("button", { name: "Assign", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Assign", exact: true });
+  await expect(
+    dialog.getByRole("button", { name: "Executor", exact: true }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Independent reviewer", exact: true }),
+  ).toHaveText("Tyler");
+  await expect(dialog.getByLabel("Notes", { exact: true })).toBeVisible();
+  await expect(dialog.locator("details")).not.toHaveAttribute("open", "");
+  await expect(
+    dialog.getByLabel("Deadline", { exact: true }),
+  ).not.toBeVisible();
+  await expect(dialog.locator("select")).toHaveCount(0);
+  await expect(
+    dialog.getByText("Reviews the result. Cannot be the executor."),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await dialog.screenshot({
+    path: testInfo.outputPath("assign-three-fields.png"),
+  });
+  await dialog.getByRole("button", { name: "Executor", exact: true }).click();
+  const picker = page.getByTestId("dispatch-assignee-picker");
+  await expect(
+    picker.locator('[data-testid^="dispatch-assignee-option-"]').first(),
+  ).toHaveAttribute("data-testid", `dispatch-assignee-option-${OTHER}`);
+  await picker
+    .getByTestId(`dispatch-assignee-option-${SELF}`)
+    .getByRole("button", { name: "Assign", exact: true })
+    .click();
+  await expect(
+    dialog.getByRole("button", { name: "Independent reviewer", exact: true }),
+  ).toHaveText("Choose a person");
+  await dialog
+    .getByRole("button", { name: "Independent reviewer", exact: true })
+    .click();
+  await expect(
+    picker.getByTestId(`dispatch-assignee-option-${SELF}`),
+  ).toHaveCount(0);
+  await page.getByTestId("dispatch-assignee-search").fill(SELF);
+  await expect(
+    picker.getByTestId(`dispatch-assignee-option-${SELF}`),
+  ).toHaveCount(0);
+});
+
+test("issue Remind me publishes its root target and the due notification opens the issue", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(75000);
+  await page.addInitScript((pubkey) => {
+    localStorage.setItem(
+      `buzz-notification-settings.v2:${pubkey}`,
+      JSON.stringify({
+        desktopEnabled: true,
+        slotAlertsEnabled: { needs_action: true },
+      }),
+    );
+  }, "deadbeef".repeat(8));
+  const reminderFixture = context({ linkedTasks: [] });
+  reminderFixture.issues = reminderFixture.issues.filter(
+    (value) => value.issueId === PRIMARY_ISSUE,
+  );
+  await openDispatch(page, reminderFixture, {
+    members: [SELF, OTHER],
+  });
+  await openPrimaryIssue(page);
+  await page.getByRole("button", { name: "Remind me", exact: true }).click();
+  await page
+    .getByRole("dialog", { name: "Remind me later" })
+    .getByRole("button", { name: "In 30 minutes" })
+    .click();
+  await expect(page.getByText("Reminder set", { exact: true })).toBeVisible();
+  const reminder = await page.evaluate(() =>
+    (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? []).find(
+      (event) => event.kind === 30300,
+    ),
+  );
+  expect(reminder).toBeTruthy();
+  if (!reminder) throw new Error("Reminder was not signed");
+  const payload = JSON.parse(reminder.content);
+  expect(payload.target).toMatchObject({
+    eventId: "1".repeat(64),
+    channelId: WORKSPACE,
+  });
+  expect(payload.status).toBe("pending");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryData([
+              "reminders",
+              "deadbeef".repeat(8),
+            ]) as { content: { target?: { eventId: string } } }[] | undefined
+          )?.some(
+            (value) => value.content.target?.eventId === "1".repeat(64),
+          ) ?? false,
+      ),
+    )
+    .toBe(true);
+  await page.getByTestId("channel-general").click();
+  await page.clock.setSystemTime(new Date(Date.now() + 31 * 60 * 1000));
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () =>
+            (
+              window as Window & {
+                __BUZZ_E2E_NOTIFICATIONS__?: { title: string; body: string }[];
+              }
+            ).__BUZZ_E2E_NOTIFICATIONS__?.filter((n) =>
+              n.title.startsWith("Reminder due"),
+            ).length ?? 0,
+        ),
+      { timeout: 40000 },
+    )
+    .toBe(1);
+  const clicked = await page.evaluate(() => {
+    const win = window as Window & {
+      __BUZZ_E2E_NOTIFICATIONS__?: { title: string }[];
+      __BUZZ_E2E_CLICK_NOTIFICATION__?: (index: number) => boolean;
+    };
+    const index = (win.__BUZZ_E2E_NOTIFICATIONS__ ?? []).findIndex((n) =>
+      n.title.startsWith("Reminder due"),
+    );
+    return win.__BUZZ_E2E_CLICK_NOTIFICATION__?.(index);
+  });
+  expect(clicked).toBe(true);
+  await expect(page.getByTestId("dispatch-issue-detail")).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/dispatch/issue/${PRIMARY_ISSUE}`));
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: testInfo.outputPath("reminder-notification-destination.png"),
+  });
+  await testInfo.attach("due-notification.json", {
+    body: JSON.stringify(
+      await page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_NOTIFICATIONS__?: unknown[] })
+            .__BUZZ_E2E_NOTIFICATIONS__,
+      ),
+    ),
+    contentType: "application/json",
+  });
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page
+    .getByRole("menuitemradio", { name: "Reminders", exact: true })
+    .click();
+  await page
+    .locator('[data-testid^="home-reminder-item-"]')
+    .getByRole("button")
+    .first()
+    .click();
+  await expect(page.getByTestId("home-reminder-detail")).toContainText(
+    "P0 oldest canonical triage issue",
+  );
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: testInfo.outputPath("reminder-due-inbox.png"),
+  });
+  await page
+    .getByTestId("home-reminder-detail")
+    .getByRole("button", { name: "Open item", exact: true })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/dispatch/issue/${PRIMARY_ISSUE}`));
 });

@@ -38,10 +38,19 @@ keeps a source link and lets you review the description. Repeating a capture ope
 the same source-derived issue. Imported work keeps its provenance and needs explicit
 activation before unattended processing.
 
+Choose **Remind me** on an issue to select a due-time preset or a custom time.
+The reminder appears in Reminders; opening it or its due notification returns to
+the issue. Use **Remind later**, mark it done, or cancel it there, just like any
+other reminder.
+
 ## Execute and review
 
-Assign execution after reviewing scope, destination audience, independent reviewer
-and any routing override. The owner stays accountable. The assignment links to the
+Choose **Assign** on an issue. Select an **Executor**, confirm the **Independent reviewer**,
+and add **Notes**. Executors with capacity records appear first. The reviewer defaults
+to the issue owner when they are not the executor; an executor cannot review their own work.
+The assignment always goes to the issue’s home channel. Open **Advanced** for a routing
+override or an optional deadline, which is included in the assignment notes. The owner
+stays accountable. The assignment links to the
 issue before the executor is notified. Blockers, deliverables and task history stay
 visible in Execution and evidence.
 

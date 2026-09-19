@@ -62,7 +62,7 @@ export function RemindMeLaterDialog({
             Remind me later
           </DialogTitle>
           <DialogDescription>
-            Choose when you want to be reminded about this message.
+            Choose when you want to be reminded about this item.
           </DialogDescription>
         </DialogHeader>
 

@@ -349,7 +349,7 @@ test.describe("reminders phase 2 — author, source, navigation", () => {
       .click();
     await page
       .getByTestId("home-reminder-detail")
-      .getByRole("button", { name: "Open message" })
+      .getByRole("button", { name: "Open item" })
       .click();
 
     // Lands in the #general chat view with the target message in context.
