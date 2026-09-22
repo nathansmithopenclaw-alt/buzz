@@ -20,6 +20,7 @@ const BASE_ALIASES: &[&str] = &["opus", "sonnet", "haiku"];
 const CURATED: &[(&str, Option<&str>)] = &[
     ("claude-fable-5-1", None),
     ("fable", Some("claude-fable-5")),
+    ("claude-opus-5-5", None),
     ("claude-opus-5", None),
     ("claude-opus-4-8", None),
     ("claude-opus-4-7", None),
@@ -185,6 +186,7 @@ mod tests {
             "haiku",
             "claude-fable-5",
             "claude-fable-5-1",
+            "claude-opus-5-5",
             "claude-opus-5",
             "claude-opus-4-8",
             "claude-opus-4-7",

@@ -35,13 +35,13 @@ test("Claude catalog canonicalizes aliases, keeps 1m variants selectable, and or
   );
   assert.equal(
     options.filter((option) => option.group === "Opus").length,
-    8,
+    9,
     "the live alias and canonical id collapse to one Opus 4.5 row",
   );
   assert.equal(
     options.length,
-    20,
-    "19 catalog rows including 1m variants plus one custom value",
+    21,
+    "20 catalog rows including 1m variants plus one custom value",
   );
   assert.deepEqual(
     options
@@ -64,6 +64,7 @@ test("Claude catalog canonicalizes aliases, keeps 1m variants selectable, and or
       .filter((option) => option.group === "Opus")
       .map((option) => option.id),
     [
+      "claude-opus-5-5",
       "claude-opus-5",
       "opus[1m]",
       "claude-opus-4-8",

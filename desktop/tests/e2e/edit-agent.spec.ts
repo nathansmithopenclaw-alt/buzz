@@ -455,6 +455,7 @@ test.describe("edit agent dialog", () => {
       ["sonnet", "Claude Sonnet (current)"],
       ["haiku", "Claude Haiku (current)"],
       ["claude-fable-5", "Claude Fable 5"],
+      ["claude-opus-5-5", "Claude Opus 5.5"],
       ["claude-opus-5", "Claude Opus 5"],
       ["claude-opus-4-8", "Claude Opus 4.8"],
       ["claude-opus-4-7", "Claude Opus 4.7"],
@@ -576,14 +577,14 @@ test.describe("edit agent dialog", () => {
 
     await page
       .getByRole("menuitemradio")
-      .filter({ hasText: "Claude Opus 4.1 (2025-08-05)" })
+      .filter({ has: page.getByText("Claude Opus 5.5", { exact: true }) })
       .click();
-    await expect(model).toHaveText("Claude Opus 4.1 (2025-08-05)");
+    await expect(model).toHaveText("Claude Opus 5.5");
     await page.getByTestId("edit-agent-dialog-submit").click();
     await expect(dialog).not.toBeVisible();
 
     await page.getByTestId("user-profile-edit-agent").click();
-    await expect(model).toHaveText("Claude Opus 4.1 (2025-08-05)", {
+    await expect(model).toHaveText("Claude Opus 5.5", {
       timeout: 10_000,
     });
   });

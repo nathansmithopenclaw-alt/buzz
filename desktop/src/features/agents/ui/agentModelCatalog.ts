@@ -16,6 +16,7 @@ const ANTHROPIC_MODELS: readonly CatalogModel[] = [
     label: "Claude Fable 5 (1M context)",
     group: "Fable",
   },
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5", group: "Opus" },
   { id: "claude-opus-5", label: "Claude Opus 5", group: "Opus" },
   { id: "opus[1m]", label: "Claude Opus (1M context)", group: "Opus" },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", group: "Opus" },
