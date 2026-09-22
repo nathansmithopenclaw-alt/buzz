@@ -6271,6 +6271,99 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
         || message.contains("refresh token has been revoked")
 }
 
+const CLAUDE_CLI_TOO_OLD_CODE: i64 = -32550;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PermanentPromptError {
+    code: i64,
+    dedupe_key: String,
+    user_message: String,
+}
+
+fn version_after<'a>(message: &'a str, marker: &str) -> Option<&'a str> {
+    let tail = message.split_once(marker)?.1.trim_start();
+    let version = tail
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .next()?;
+    (!version.is_empty() && version.matches('.').count() >= 1).then_some(version)
+}
+
+/// Classify only high-confidence deterministic failures. Unknown errors stay
+/// retryable: a false permanent classification would discard a user message.
+fn classify_permanent_prompt_error(
+    error: &acp::AcpError,
+    configured_model: Option<&str>,
+) -> Option<PermanentPromptError> {
+    let (provider_code, message) = match error {
+        acp::AcpError::AgentError { code, message } => (*code, message.as_str()),
+        acp::AcpError::Io(error) => {
+            let message = error.to_string();
+            let lower = message.to_ascii_lowercase();
+            return (lower.contains("no such file")
+                || lower.contains("permission denied")
+                || lower.contains("not executable"))
+            .then(|| PermanentPromptError {
+                code: -32551,
+                dedupe_key: "cli_unavailable".into(),
+                user_message: "I can't run right now: the configured CLI is missing or cannot be executed. An owner can fix this from my settings in Buzz.".into(),
+            });
+        }
+        _ => return None,
+    };
+
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("does not support this model") && lower.contains("or newer is required") {
+        let installed = version_after(message, "Claude Code ").unwrap_or("the installed version");
+        let required = version_after(message, "version ").unwrap_or("a newer version");
+        let model = configured_model.unwrap_or("the configured model");
+        return Some(PermanentPromptError {
+            code: CLAUDE_CLI_TOO_OLD_CODE,
+            dedupe_key: format!("claude_cli_too_old:{installed}:{required}:{model}"),
+            user_message: format!(
+                "I can't run right now: Claude Code {installed} doesn't support {model} (needs {required}+). An owner can fix this from my settings in Buzz."
+            ),
+        });
+    }
+
+    let invalid_model = lower.contains("unrecognized_model")
+        || lower.contains("unrecognized model")
+        || lower.contains("invalid model")
+        || lower.contains("model not found")
+        || lower.contains("unknown model")
+        || lower.contains("unsupported model")
+        || lower.contains("model is not supported");
+    let is_403 = lower.contains("api error: 403") || lower.contains("status 403");
+    let model_access_denied = is_403
+        && lower.contains("model")
+        && (lower.contains("does not have access")
+            || lower.contains("permission")
+            || lower.contains("not authorized")
+            || lower.contains("not available"));
+    if is_auth_error(error) {
+        return None;
+    }
+    (invalid_model || model_access_denied).then(|| PermanentPromptError {
+        code: if provider_code == 0 { -32552 } else { provider_code },
+        dedupe_key: format!("provider:{provider_code}:{message}"),
+        user_message: if lower.contains("model not found") {
+            "⚠️ I couldn't process the last request: the configured model wasn't found at the provider's endpoint. Open agent settings, select a different model from the dropdown, and save your changes. Restart the agent to apply the new configuration, then re-send your request.".into()
+        } else {
+            "I can't run right now: the provider rejected my configured model or request. An owner can fix this from my settings in Buzz.".into()
+        },
+    })
+}
+
+/// The Claude ACP adapter can keep its stdio pipe alive after its nested
+/// `claude` child exits. Replacing the adapter is the only safe recovery.
+fn adapter_process_died(message: &str) -> bool {
+    let normalized = message.trim().to_ascii_lowercase();
+    normalized == "internal error"
+        || normalized.ends_with(": internal error")
+        || normalized.contains("process exited")
+        || normalized.contains("process died")
+        || normalized.contains("child process") && normalized.contains("exited")
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -6457,6 +6550,32 @@ fn handle_prompt_result(
         "unrecoverable"
     };
 
+    // Local Claude intentionally uses ANTHROPIC_MODEL as its sole startup
+    // authority, so BUZZ_ACP_MODEL/desired_model is absent. Preserve that
+    // single-authority contract while reporting the actual configured model.
+    let inherited_claude_model = std::env::var("ANTHROPIC_MODEL").ok();
+    let configured_model = result
+        .agent
+        .desired_model
+        .as_deref()
+        .or(inherited_claude_model.as_deref());
+    let permanent_error = match &result.outcome {
+        PromptOutcome::Error(error) => classify_permanent_prompt_error(error, configured_model),
+        _ => None,
+    };
+    let adapter_must_restart = matches!(
+        &result.outcome,
+        PromptOutcome::Error(acp::AcpError::AgentError { message, .. })
+            if adapter_process_died(message)
+    );
+    if let Some(permanent) = permanent_error.as_ref() {
+        tracing::error!(
+            "Agent reported error (code {}): {}",
+            permanent.code,
+            permanent.user_message
+        );
+    }
+
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
     // retry_counts. If mark_complete runs first, retry_counts is cleared and
@@ -6562,23 +6681,21 @@ fn handle_prompt_result(
                 spawn_failure_notice(rest_client, &batch,
                     "⚠️ I couldn't process the last request: authentication failed. Re-authenticate the CLI and then re-send.".into());
                 delivery_fate = "dead_letter";
-            } else if matches!(
-                &result.outcome,
-                PromptOutcome::Error(acp::AcpError::AgentError { code: -32002, message })
-                    if message.contains("model not found")
-            ) {
-                // Retrying the same missing model cannot repair its configuration.
+            } else if let Some(permanent) = permanent_error.as_ref() {
+                // Retrying deterministic configuration failures loses time and
+                // makes a healthy harness look silently dead. Retire the batch
+                // and surface one actionable reply; the pool-level ten-minute
+                // dedupe covers bursts across parallel workers.
                 tracing::warn!(
                     channel_id = %batch.channel_id,
                     events = batch.events.len(),
-                    "dead-lettering batch immediately — model not found"
+                    error_code = permanent.code,
+                    "dead-lettering batch immediately — permanent prompt error"
                 );
-                let content = "⚠️ I couldn't process the last request: the configured model \
-                    wasn't found at the provider's endpoint. Open agent settings, select a \
-                    different model from the dropdown, and save your changes. Restart the agent \
-                    to apply the new configuration, then re-send your request."
-                    .to_string();
-                spawn_failure_notice(rest_client, &batch, content);
+                if pool.should_post_permanent_error_notice(&permanent.dedupe_key) {
+                    spawn_failure_notice(rest_client, &batch, permanent.user_message.clone());
+                }
+                delivery_fate = "dead_letter_permanent";
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 let notice_batch = batch.clone();
                 pool.set_account_quiesced(true);
@@ -6666,6 +6783,7 @@ fn handle_prompt_result(
         .agent
         .desired_model
         .as_deref()
+        .or(inherited_claude_model.as_deref())
         .unwrap_or("<none>")
         .to_string();
     let harness_pid = std::process::id();
@@ -6846,14 +6964,14 @@ fn handle_prompt_result(
                 acp::AcpError::AgentError { code, .. } => Some(*code),
                 _ => None,
             };
-            if is_transport_error {
+            if is_transport_error || adapter_must_restart {
                 tracing::warn!(
                     agent = agent_index,
                     outcome = outcome_label,
                     configured_model = %harness_configured_model,
                     pid = harness_pid,
                     error = %e,
-                    "transport/protocol error — respawning agent"
+                    "transport/protocol/dead-child error — respawning agent"
                 );
                 emit_turn_error(&e.to_string(), error_code);
 
@@ -12998,6 +13116,15 @@ mod error_outcome_emission_tests {
     }
 
     #[test]
+    fn is_auth_error_rejects_permission_error_403() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "API Error: 403 {\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"Your organization does not have access to model claude-opus-5-5\"}}".into(),
+        };
+        assert!(!is_auth_error(&error));
+    }
+
+    #[test]
     fn is_auth_error_rejects_transport_errors() {
         let io = acp::AcpError::Io(std::io::Error::other("pipe broke"));
         assert!(
@@ -13009,6 +13136,236 @@ mod error_outcome_emission_tests {
             !is_auth_error(&timeout),
             "WriteTimeout must not be classified as auth error"
         );
+    }
+
+    #[test]
+    fn permanent_error_classifies_literal_claude_cli_version_failure() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error: API Error: 400 Claude Code 2.1.257 does not support this model; version 2.1.280 or newer is required. Run 'claude update', ...".into(),
+        };
+        let classified = classify_permanent_prompt_error(&error, Some("claude-opus-5-5"))
+            .expect("version incompatibility is permanent");
+        assert_eq!(classified.code, CLAUDE_CLI_TOO_OLD_CODE);
+        assert_eq!(
+            classified.dedupe_key,
+            "claude_cli_too_old:2.1.257:2.1.280:claude-opus-5-5"
+        );
+        assert!(classified.user_message.contains("2.1.257"));
+        assert!(classified.user_message.contains("2.1.280+"));
+        assert!(classified.user_message.contains("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn permanent_error_classification_is_narrow_and_unknown_stays_retryable() {
+        for message in [
+            "API Error: 429 rate_limit_error",
+            "API Error: 503 overloaded",
+            "network timeout",
+            "Internal provider surprise",
+            "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 215000 tokens > 200000 maximum\"}}",
+            "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"tool_use ids were found without tool_result blocks immediately after\"}}",
+            "API Error: 403 {\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"This action is forbidden\"}}",
+        ] {
+            let error = acp::AcpError::AgentError {
+                code: -32603,
+                message: message.into(),
+            };
+            assert!(
+                classify_permanent_prompt_error(&error, Some("model")).is_none(),
+                "{message}"
+            );
+        }
+        assert!(adapter_process_died("Internal error"));
+        assert!(!adapter_process_died(
+            "Internal error: API Error: 503 overloaded"
+        ));
+    }
+
+    #[test]
+    fn permanent_error_classifies_model_access_403_without_auth_quiesce() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "API Error: 403 {\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"Your organization does not have access to model claude-opus-5-5\"}}".into(),
+        };
+        let classified = classify_permanent_prompt_error(&error, Some("claude-opus-5-5"))
+            .expect("model-access denial is a permanent model configuration error");
+        assert_eq!(classified.code, -32603);
+        assert!(classified.user_message.contains("configured model"));
+        assert!(!is_auth_error(&error));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bare_internal_error_after_nested_child_death_replaces_adapter_for_next_prompt() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = dir.path().join("fake-dead-child-adapter.py");
+        let generations = dir.path().join("generations");
+        std::fs::write(
+            &adapter,
+            r#"#!/usr/bin/python3
+import json, pathlib, subprocess, sys
+state = pathlib.Path(sys.argv[1])
+generation = int(state.read_text()) + 1 if state.exists() else 1
+state.write_text(str(generation))
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        body = {"protocolVersion": 1, "agentInfo": {"name": "fake-dead-child"}, "agentCapabilities": {}}
+        reply = {"jsonrpc": "2.0", "id": request["id"], "result": body}
+    elif method == "session/new":
+        reply = {"jsonrpc": "2.0", "id": request["id"], "result": {"sessionId": f"session-{generation}"}}
+    elif method == "session/prompt" and generation == 1:
+        subprocess.run(["/bin/sh", "-c", "exit 17"], check=False)
+        reply = {"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32603, "message": "Internal error"}}
+    elif method == "session/prompt":
+        reply = {"jsonrpc": "2.0", "id": request["id"], "result": {"stopReason": "end_turn"}}
+    else:
+        reply = {"jsonrpc": "2.0", "id": request.get("id"), "result": {}}
+    print(json.dumps(reply), flush=True)
+"#,
+        )
+        .unwrap();
+        let mut permissions = adapter.metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&adapter, permissions).unwrap();
+        let command = adapter.to_string_lossy().into_owned();
+        let args = vec![generations.to_string_lossy().into_owned()];
+
+        let (mut acp, protocol_version, agent_name) =
+            spawn_and_init(&command, &args, &[], false, 0, None)
+                .await
+                .unwrap();
+        let first_session = acp
+            .session_new_full("/tmp", vec![], None, None)
+            .await
+            .unwrap()
+            .session_id;
+        let first_error = acp
+            .session_prompt_with_idle_timeout(
+                &first_session,
+                "first prompt",
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect_err("first adapter loses its nested child");
+        assert!(matches!(
+            &first_error,
+            AcpError::AgentError { message, .. } if message == "Internal error"
+        ));
+
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: Default::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name,
+            goose_system_prompt_supported: None,
+            protocol_version,
+        };
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "dead-child-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashMap::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let mut config = test_config();
+        config.agent_command = command;
+        config.agent_args = args;
+        let mut heartbeat_in_flight = false;
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, mut respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let action = handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            PromptResult {
+                agent,
+                source: PromptSource::Heartbeat,
+                turn_id: "dead-child-turn".into(),
+                outcome: PromptOutcome::Error(first_error),
+                batch: None,
+            },
+            &mut heartbeat_in_flight,
+            &HashSet::new(),
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+        assert!(matches!(action, LoopAction::Continue));
+        assert_eq!(pool.live_count(), 0, "poisoned adapter is not reused");
+
+        let replacement = tokio::time::timeout(Duration::from_secs(5), respawn_rx.recv())
+            .await
+            .expect("replacement deadline")
+            .expect("replacement result");
+        let (acp, protocol_version, agent_name) = replacement.result.unwrap();
+        crash_history[replacement.index].respawn_in_flight = false;
+        pool.return_agent(OwnedAgent {
+            index: replacement.index,
+            acp,
+            state: Default::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name,
+            goose_system_prompt_supported: None,
+            protocol_version,
+        });
+        assert_eq!(std::fs::read_to_string(&generations).unwrap(), "2");
+
+        let mut fresh = pool.agents_mut()[0].take().expect("fresh adapter in slot");
+        let next_session = fresh
+            .acp
+            .session_new_full("/tmp", vec![], None, None)
+            .await
+            .unwrap()
+            .session_id;
+        assert_eq!(next_session, "session-2");
+        assert_eq!(
+            fresh
+                .acp
+                .session_prompt_with_idle_timeout(
+                    &next_session,
+                    "next prompt",
+                    Duration::from_secs(2),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap(),
+            acp::StopReason::EndTurn
+        );
+        fresh.acp.shutdown().await;
+        respawn_tasks.shutdown().await;
     }
 
     // ── auth error dead-letter behavior ────────────────────────────────────
@@ -13288,22 +13645,9 @@ mod error_outcome_emission_tests {
             Some(&rest),
         );
 
-        // The batch must not be requeued: pending_channels returns 0.
-        assert_eq!(
-            queue.pending_channels(),
-            0,
-            "model-not-found must stop immediately — batch must not be requeued"
-        );
-        assert_eq!(
-            queue.queued_event_count(channel_id),
-            0,
-            "model-not-found must stop immediately — no events should be pending"
-        );
-
-        assert!(
-            pool.agents_mut()[0].is_some(),
-            "healthy process remains reusable"
-        );
+        assert_eq!(queue.pending_channels(), 0);
+        assert_eq!(queue.queued_event_count(channel_id), 0);
+        assert!(pool.agents_mut()[0].is_some());
         assert!(respawn_tasks.is_empty());
         let errors: Vec<_> = observer
             .snapshot()
@@ -13314,7 +13658,6 @@ mod error_outcome_emission_tests {
         assert_eq!(errors[0].payload["code"], -32002);
         assert_eq!(errors[0].payload["error"], expected_error);
 
-        // Capture the real signed notice sent by handle_prompt_result, without a live relay.
         let notice: nostr::Event = tokio::time::timeout(Duration::from_secs(3), async {
             let (socket, _) = listener.accept().await.unwrap();
             let mut reader = BufReader::new(socket);
@@ -13363,6 +13706,173 @@ mod error_outcome_emission_tests {
         assert_eq!(threading.parent_event_id, Some(parent.to_hex()));
     }
 
+    #[tokio::test]
+    async fn claude_cli_version_error_posts_one_recovery_notice_without_retrying() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let keys = Keys::generate();
+        let root = nostr::EventId::from_byte_array([0xaa; 32]);
+        let parent = nostr::EventId::from_byte_array([0xbb; 32]);
+        let event = EventBuilder::new(Kind::Custom(9), "test")
+            .tags([
+                nostr::Tag::parse(["e", &root.to_hex(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", &parent.to_hex(), "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            attempt: 1,
+            channel_id,
+            scope: scope::SessionScope::Conversation { channel_id },
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let raw_error = "Internal error: API Error: 400 Claude Code 2.1.257 does not support this model; version 2.1.280 or newer is required. Run 'claude update', ...";
+        let model_error = AcpError::AgentError {
+            code: -32603,
+            message: raw_error.to_string(),
+        };
+        let expected_error = model_error.to_string();
+        let observer = ObserverHandle::in_process();
+
+        let mut agent = dummy_agent(0).await;
+        agent.desired_model = Some("claude-opus-5-5".into());
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashMap::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(model_error),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            Some(&rest),
+        );
+
+        // The batch must not be requeued: pending_channels returns 0.
+        assert_eq!(
+            queue.pending_channels(),
+            0,
+            "CLI version failure must stop immediately — batch must not be requeued"
+        );
+        assert_eq!(
+            queue.queued_event_count(channel_id),
+            0,
+            "CLI version failure must stop immediately — no events should be pending"
+        );
+
+        assert!(
+            pool.agents_mut()[0].is_some(),
+            "healthy process remains reusable"
+        );
+        assert!(respawn_tasks.is_empty());
+        let errors: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == "turn_error")
+            .collect();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].payload["code"], -32603);
+        assert_eq!(errors[0].payload["error"], expected_error);
+
+        // Capture the real signed notice sent by handle_prompt_result, without a live relay.
+        let notice: nostr::Event = tokio::time::timeout(Duration::from_secs(3), async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "POST /events HTTP/1.1\r\n");
+            let mut content_length = None;
+            for _ in 0..64 {
+                line.clear();
+                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let size = content_length.expect("request Content-Length");
+            assert!(size < 65536);
+            let mut body = vec![0; size];
+            reader.read_exact(&mut body).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        })
+        .await
+        .expect("failure notice must be posted on the first failure");
+        notice.verify().unwrap();
+        assert_eq!(notice.pubkey, rest.keys.public_key());
+        assert_eq!(notice.kind, Kind::Custom(9));
+        assert_eq!(
+            notice.content,
+            "I can't run right now: Claude Code 2.1.257 doesn't support claude-opus-5-5 (needs 2.1.280+). An owner can fix this from my settings in Buzz."
+        );
+        let tags = serde_json::to_value(&notice.tags).unwrap();
+        assert!(tags
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag[0] == "h" && tag[1] == channel_id.to_string()));
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, Some(root.to_hex()));
+        assert_eq!(threading.parent_event_id, Some(parent.to_hex()));
+    }
+
     /// A non-auth application error (e.g. usage credits) must still follow the
     /// standard requeue path so today's behavior is unchanged.
     #[tokio::test]
@@ -13379,6 +13889,15 @@ mod error_outcome_emission_tests {
         assert_application_error_is_requeued(acp::AcpError::AgentError {
             code: -32002,
             message: "Resource not found: session no longer exists".to_string(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn non_model_permission_403_is_requeued_without_account_quiesce() {
+        assert_application_error_is_requeued(acp::AcpError::AgentError {
+            code: -32603,
+            message: "API Error: 403 permission_error: this operation is forbidden".to_string(),
         })
         .await;
     }
@@ -13460,6 +13979,10 @@ mod error_outcome_emission_tests {
             queue.queued_event_count(channel_id),
             1,
             "non-auth application error must preserve the event for retry"
+        );
+        assert!(
+            pool.any_idle(),
+            "non-auth application errors must not quiesce the account"
         );
     }
 }

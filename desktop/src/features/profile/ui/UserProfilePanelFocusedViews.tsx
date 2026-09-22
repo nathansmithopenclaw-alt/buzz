@@ -7,6 +7,8 @@ import {
 } from "lucide-react";
 
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
+import { CLAUDE_CLI_TOO_OLD_ERROR_CODE } from "@/features/agents/lib/claudeCliBlocker";
+import { ClaudeCliVersionBlocker } from "@/features/agents/ui/ClaudeCliVersionBlocker";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
@@ -246,6 +248,18 @@ export function DiagnosticsFocusedView({
             <AlertDescription className="wrap-break-word">
               {lastErrorField.displayValue}
             </AlertDescription>
+            {canOpenAgentLogs &&
+            managedAgent?.lastErrorCode === CLAUDE_CLI_TOO_OLD_ERROR_CODE ? (
+              <div className="mt-3">
+                <ClaudeCliVersionBlocker
+                  disabled={false}
+                  model={managedAgent.model ?? "claude-opus-5-5"}
+                  reportedError={managedAgent.lastError}
+                  runtimeId="claude"
+                  showMessage={false}
+                />
+              </div>
+            ) : null}
           </div>
         </Alert>
       ) : null}

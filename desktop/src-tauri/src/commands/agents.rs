@@ -255,14 +255,20 @@ pub(super) async fn start_local_agent_with_preflight(
             }
         }
     }
-    start_managed_agent_process(
+    if let Err(error) = start_managed_agent_process(
         app,
         record,
         &mut runtimes,
         Some(workspace_owner.as_str()),
         &workspace_relay_url,
         replay_floor_unix,
-    )?;
+    ) {
+        // Spawn-time compatibility refusals annotate the record before
+        // returning. Persist that status so the profile explains why no child
+        // exists instead of looking silently dead.
+        save_managed_agents(app, &records)?;
+        return Err(error);
+    }
     save_managed_agents(app, &records)?;
     if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
         retain_managed_agent_pending(app, state, saved_record);
@@ -716,6 +722,12 @@ pub async fn create_managed_agent(
         };
 
         crate::subscription_accounts::defaults::initialize_agent(&app, &mut record, &personas)?;
+        let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+        if let Some(blocker) =
+            crate::managed_agents::claude_cli::blocker_for_record(&record, &personas, &global)?
+        {
+            return Err(blocker.message);
+        }
         records.push(record);
         crate::managed_agents::sync_catalog_and_save_agents(&app, &records, &personas)?;
 
@@ -841,6 +853,75 @@ pub async fn create_managed_agent(
         profile_sync_error,
         spawn_error,
     })
+}
+
+#[tauri::command]
+pub fn get_claude_cli_blocker(
+    model: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::managed_agents::claude_cli::ClaudeCliBlocker>, String> {
+    crate::managed_agents::require_fleet_host(&state)?;
+    Ok(crate::managed_agents::claude_cli::blocker_for_model(
+        model.as_deref(),
+    ))
+}
+
+/// Explicit owner action. This mutates the global Claude Code installation
+/// resolved for managed agents; it is never invoked by discovery or save.
+#[tauri::command]
+pub async fn update_claude_code(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::managed_agents::claude_cli::ClaudeCliUpdateResult, String> {
+    crate::managed_agents::require_fleet_host(&state)?;
+    let mut result = tokio::time::timeout(
+        std::time::Duration::from_secs(10 * 60 + 10),
+        tauri::async_runtime::spawn_blocking(
+            crate::managed_agents::claude_cli::update_resolved_binary,
+        ),
+    )
+    .await
+    .map_err(|_| "Claude Code update timed out after 10 minutes and was stopped".to_string())?
+    .map_err(|error| format!("Claude Code update worker failed: {error}"))??;
+    let candidates = {
+        let _guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let mut candidates = Vec::new();
+        for record in &mut records {
+            if record.last_error_code == Some(crate::managed_agents::claude_cli::TOO_OLD_ERROR_CODE)
+            {
+                crate::managed_agents::stop_managed_agent_process(&app, record, &mut runtimes)?;
+                record.last_error = None;
+                record.last_error_code = None;
+                record.updated_at = now_iso();
+                if crate::managed_agents::decide_apply_restart(record, false)
+                    == crate::managed_agents::ApplyRestartDecision::Start
+                {
+                    candidates.push(record.pubkey.clone());
+                }
+            }
+        }
+        save_managed_agents(&app, &records)?;
+        candidates
+    };
+    for pubkey in candidates {
+        match start_local_agent_with_preflight(&app, &state, &pubkey, true, None, None, None).await
+        {
+            Ok(_) => {
+                crate::managed_agents::note_automatic_spawn(&pubkey);
+                result.restarted_agents += 1;
+            }
+            Err(error) => result.restart_failures.push(format!("{pubkey}: {error}")),
+        }
+    }
+    Ok(result)
 }
 
 /// Data needed for background profile reconciliation after agent start.

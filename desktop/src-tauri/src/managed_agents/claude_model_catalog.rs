@@ -17,23 +17,35 @@ const BASE_ALIASES: &[&str] = &["opus", "sonnet", "haiku"];
 /// SDK-recognizable allowlist entry and optional API target override. Keeping
 /// the recognizable entry lets the adapter carry capability metadata (native
 /// effort levels) onto dated targets.
-const CURATED: &[(&str, Option<&str>)] = &[
-    ("claude-fable-5-1", None),
-    ("fable", Some("claude-fable-5")),
-    ("claude-opus-5-5", None),
-    ("claude-opus-5", None),
-    ("claude-opus-4-8", None),
-    ("claude-opus-4-7", None),
-    ("claude-opus-4-6", None),
-    ("claude-opus-4-5", Some("claude-opus-4-5-20251101")),
-    ("claude-opus-4-1", Some("claude-opus-4-1-20250805")),
-    ("claude-opus-4", Some("claude-opus-4-20250514")),
-    ("claude-sonnet-5", None),
-    ("claude-sonnet-4-6", None),
-    ("claude-sonnet-4-5", Some("claude-sonnet-4-5-20250929")),
-    ("claude-sonnet-4", Some("claude-sonnet-4-20250514")),
-    ("claude-haiku-4-5", Some("claude-haiku-4-5-20251001")),
+const CURATED: &[(&str, Option<&str>, Option<&str>)] = &[
+    ("claude-fable-5-1", None, None),
+    ("fable", Some("claude-fable-5"), None),
+    ("claude-opus-5-5", None, Some("2.1.280")),
+    ("claude-opus-5", None, None),
+    ("claude-opus-4-8", None, None),
+    ("claude-opus-4-7", None, None),
+    ("claude-opus-4-6", None, None),
+    ("claude-opus-4-5", Some("claude-opus-4-5-20251101"), None),
+    ("claude-opus-4-1", Some("claude-opus-4-1-20250805"), None),
+    ("claude-opus-4", Some("claude-opus-4-20250514"), None),
+    ("claude-sonnet-5", None, None),
+    ("claude-sonnet-4-6", None, None),
+    (
+        "claude-sonnet-4-5",
+        Some("claude-sonnet-4-5-20250929"),
+        None,
+    ),
+    ("claude-sonnet-4", Some("claude-sonnet-4-20250514"), None),
+    ("claude-haiku-4-5", Some("claude-haiku-4-5-20251001"), None),
 ];
+
+pub(crate) fn minimum_cli_version(model: &str) -> Option<&'static str> {
+    CURATED.iter().find_map(|(entry, target, minimum)| {
+        (*entry == model || target.is_some_and(|target| target == model))
+            .then_some(*minimum)
+            .flatten()
+    })
+}
 
 pub(crate) fn sync_claude_model_catalog(
     nest: &Path,
@@ -59,7 +71,7 @@ pub(crate) fn sync_claude_model_catalog(
         BASE_ALIASES.iter().map(|value| value.to_string()).collect();
     let mut overrides = BTreeMap::<String, String>::new();
     let mut advertised_targets = BTreeSet::<String>::new();
-    for (entry, target) in CURATED {
+    for (entry, target, _) in CURATED {
         available.insert((*entry).to_string());
         advertised_targets.insert(target.unwrap_or(entry).to_string());
         if let Some(target) = target {
@@ -210,5 +222,12 @@ mod tests {
             advertised.contains("opus"),
             "Anvil's opus[1m] value canonicalizes to an advertised opus alias"
         );
+    }
+
+    #[test]
+    fn minimum_cli_version_is_only_declared_for_verified_model() {
+        assert_eq!(minimum_cli_version("claude-opus-5-5"), Some("2.1.280"));
+        assert_eq!(minimum_cli_version("claude-opus-5"), None);
+        assert_eq!(minimum_cli_version("opus"), None);
     }
 }

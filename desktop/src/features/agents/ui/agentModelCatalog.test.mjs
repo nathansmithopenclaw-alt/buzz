@@ -82,6 +82,11 @@ test("Claude catalog canonicalizes aliases, keeps 1m variants selectable, and or
     true,
     "Claude curated rows are selectable because save makes them advertised",
   );
+  assert.equal(
+    options.some((option) => /\b\d+\.\d+\.\d+\b/.test(option.label)),
+    false,
+    "CLI versions belong in the dialog blocker, never model option labels",
+  );
 });
 
 test("dead effort bracket qualifiers fail closed while Claude 1m stays compatible", () => {

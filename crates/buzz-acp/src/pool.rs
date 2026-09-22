@@ -645,6 +645,10 @@ pub struct AgentPool {
     /// `Thread` scopes (the sole variant [`hold_decision`](Self::hold_decision)
     /// stamps).
     held_since: HashMap<SessionScope, tokio::time::Instant>,
+    /// Last user-visible permanent failure notice by normalized error key.
+    /// Kept at pool scope so parallel workers for one managed agent cannot
+    /// spam a channel when a shared provider/CLI configuration is broken.
+    permanent_error_notices: HashMap<String, tokio::time::Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1217,6 +1221,21 @@ impl AgentPool {
             live_effort: Default::default(),
             next_scope_owner_generation: 1,
             held_since: HashMap::new(),
+            permanent_error_notices: HashMap::new(),
+        }
+    }
+
+    /// Returns true once per error key in the ten-minute notice window.
+    pub fn should_post_permanent_error_notice(&mut self, key: &str) -> bool {
+        const WINDOW: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+        let now = tokio::time::Instant::now();
+        self.permanent_error_notices
+            .retain(|_, seen| now.duration_since(*seen) < WINDOW);
+        if self.permanent_error_notices.contains_key(key) {
+            false
+        } else {
+            self.permanent_error_notices.insert(key.to_string(), now);
+            true
         }
     }
 
@@ -7401,6 +7420,16 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn permanent_error_notice_is_deduped_for_ten_minutes() {
+        let mut pool = AgentPool::from_slots(Vec::new());
+        assert!(pool.should_post_permanent_error_notice("same-error"));
+        assert!(!pool.should_post_permanent_error_notice("same-error"));
+        assert!(pool.should_post_permanent_error_notice("different-error"));
+        tokio::time::advance(std::time::Duration::from_secs(10 * 60 + 1)).await;
+        assert!(pool.should_post_permanent_error_notice("same-error"));
+    }
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
