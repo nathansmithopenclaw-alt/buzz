@@ -6266,9 +6266,95 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     };
     message.contains("Re-authenticate")
         || message.contains("API Error: 401")
+        || message.contains("API Error: 403")
         || message.contains("refresh token was already used")
         || message.contains("refresh token has expired")
         || message.contains("refresh token has been revoked")
+}
+
+const CLAUDE_CLI_TOO_OLD_CODE: i64 = -32550;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PermanentPromptError {
+    code: i64,
+    dedupe_key: String,
+    user_message: String,
+}
+
+fn version_after<'a>(message: &'a str, marker: &str) -> Option<&'a str> {
+    let tail = message.split_once(marker)?.1.trim_start();
+    let version = tail
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .next()?;
+    (!version.is_empty() && version.matches('.').count() >= 1).then_some(version)
+}
+
+/// Classify only high-confidence deterministic failures. Unknown errors stay
+/// retryable: a false permanent classification would discard a user message.
+fn classify_permanent_prompt_error(
+    error: &acp::AcpError,
+    configured_model: Option<&str>,
+) -> Option<PermanentPromptError> {
+    let (provider_code, message) = match error {
+        acp::AcpError::AgentError { code, message } => (*code, message.as_str()),
+        acp::AcpError::Io(error) => {
+            let message = error.to_string();
+            let lower = message.to_ascii_lowercase();
+            return (lower.contains("no such file")
+                || lower.contains("permission denied")
+                || lower.contains("not executable"))
+            .then(|| PermanentPromptError {
+                code: -32551,
+                dedupe_key: "cli_unavailable".into(),
+                user_message: "I can't run right now: the configured CLI is missing or cannot be executed. An owner can fix this from my settings in Buzz.".into(),
+            });
+        }
+        _ => return None,
+    };
+
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("does not support this model") && lower.contains("or newer is required") {
+        let installed = version_after(message, "Claude Code ").unwrap_or("the installed version");
+        let required = version_after(message, "version ").unwrap_or("a newer version");
+        let model = configured_model.unwrap_or("the configured model");
+        return Some(PermanentPromptError {
+            code: CLAUDE_CLI_TOO_OLD_CODE,
+            dedupe_key: format!("claude_cli_too_old:{installed}:{required}:{model}"),
+            user_message: format!(
+                "I can't run right now: Claude Code {installed} doesn't support {model} (needs {required}+). An owner can fix this from my settings in Buzz."
+            ),
+        });
+    }
+
+    let invalid_model = lower.contains("unrecognized_model")
+        || lower.contains("unrecognized model")
+        || lower.contains("invalid model")
+        || lower.contains("model not found");
+    let invalid_request = lower.contains("api error: 400")
+        && (lower.contains("invalid_request") || lower.contains("invalid request"));
+    if is_auth_error(error) || lower.contains("status 403") {
+        return None;
+    }
+    (invalid_model || invalid_request).then(|| PermanentPromptError {
+        code: if provider_code == 0 { -32552 } else { provider_code },
+        dedupe_key: format!("provider:{provider_code}:{message}"),
+        user_message: if lower.contains("model not found") {
+            "⚠️ I couldn't process the last request: the configured model wasn't found at the provider's endpoint. Open agent settings, select a different model from the dropdown, and save your changes. Restart the agent to apply the new configuration, then re-send your request.".into()
+        } else {
+            "I can't run right now: the provider rejected my configured model or request. An owner can fix this from my settings in Buzz.".into()
+        },
+    })
+}
+
+/// The Claude ACP adapter can keep its stdio pipe alive after its nested
+/// `claude` child exits. Replacing the adapter is the only safe recovery.
+fn adapter_process_died(message: &str) -> bool {
+    let normalized = message.trim().to_ascii_lowercase();
+    normalized == "internal error"
+        || normalized.ends_with(": internal error")
+        || normalized.contains("process exited")
+        || normalized.contains("process died")
+        || normalized.contains("child process") && normalized.contains("exited")
 }
 
 /// Spawn a task that posts a user-visible failure notice to the relay.
@@ -6457,6 +6543,32 @@ fn handle_prompt_result(
         "unrecoverable"
     };
 
+    // Local Claude intentionally uses ANTHROPIC_MODEL as its sole startup
+    // authority, so BUZZ_ACP_MODEL/desired_model is absent. Preserve that
+    // single-authority contract while reporting the actual configured model.
+    let inherited_claude_model = std::env::var("ANTHROPIC_MODEL").ok();
+    let configured_model = result
+        .agent
+        .desired_model
+        .as_deref()
+        .or(inherited_claude_model.as_deref());
+    let permanent_error = match &result.outcome {
+        PromptOutcome::Error(error) => classify_permanent_prompt_error(error, configured_model),
+        _ => None,
+    };
+    let adapter_must_restart = matches!(
+        &result.outcome,
+        PromptOutcome::Error(acp::AcpError::AgentError { message, .. })
+            if adapter_process_died(message)
+    );
+    if let Some(permanent) = permanent_error.as_ref() {
+        tracing::error!(
+            "Agent reported error (code {}): {}",
+            permanent.code,
+            permanent.user_message
+        );
+    }
+
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
     // retry_counts. If mark_complete runs first, retry_counts is cleared and
@@ -6562,23 +6674,21 @@ fn handle_prompt_result(
                 spawn_failure_notice(rest_client, &batch,
                     "⚠️ I couldn't process the last request: authentication failed. Re-authenticate the CLI and then re-send.".into());
                 delivery_fate = "dead_letter";
-            } else if matches!(
-                &result.outcome,
-                PromptOutcome::Error(acp::AcpError::AgentError { code: -32002, message })
-                    if message.contains("model not found")
-            ) {
-                // Retrying the same missing model cannot repair its configuration.
+            } else if let Some(permanent) = permanent_error.as_ref() {
+                // Retrying deterministic configuration failures loses time and
+                // makes a healthy harness look silently dead. Retire the batch
+                // and surface one actionable reply; the pool-level ten-minute
+                // dedupe covers bursts across parallel workers.
                 tracing::warn!(
                     channel_id = %batch.channel_id,
                     events = batch.events.len(),
-                    "dead-lettering batch immediately — model not found"
+                    error_code = permanent.code,
+                    "dead-lettering batch immediately — permanent prompt error"
                 );
-                let content = "⚠️ I couldn't process the last request: the configured model \
-                    wasn't found at the provider's endpoint. Open agent settings, select a \
-                    different model from the dropdown, and save your changes. Restart the agent \
-                    to apply the new configuration, then re-send your request."
-                    .to_string();
-                spawn_failure_notice(rest_client, &batch, content);
+                if pool.should_post_permanent_error_notice(&permanent.dedupe_key) {
+                    spawn_failure_notice(rest_client, &batch, permanent.user_message.clone());
+                }
+                delivery_fate = "dead_letter_permanent";
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 let notice_batch = batch.clone();
                 pool.set_account_quiesced(true);
@@ -6666,6 +6776,7 @@ fn handle_prompt_result(
         .agent
         .desired_model
         .as_deref()
+        .or(inherited_claude_model.as_deref())
         .unwrap_or("<none>")
         .to_string();
     let harness_pid = std::process::id();
@@ -6846,14 +6957,14 @@ fn handle_prompt_result(
                 acp::AcpError::AgentError { code, .. } => Some(*code),
                 _ => None,
             };
-            if is_transport_error {
+            if is_transport_error || adapter_must_restart {
                 tracing::warn!(
                     agent = agent_index,
                     outcome = outcome_label,
                     configured_model = %harness_configured_model,
                     pid = harness_pid,
                     error = %e,
-                    "transport/protocol error — respawning agent"
+                    "transport/protocol/dead-child error — respawning agent"
                 );
                 emit_turn_error(&e.to_string(), error_code);
 
@@ -13011,6 +13122,47 @@ mod error_outcome_emission_tests {
         );
     }
 
+    #[test]
+    fn permanent_error_classifies_literal_claude_cli_version_failure() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error: API Error: 400 Claude Code 2.1.257 does not support this model; version 2.1.280 or newer is required. Run 'claude update', ...".into(),
+        };
+        let classified = classify_permanent_prompt_error(&error, Some("claude-opus-5-5"))
+            .expect("version incompatibility is permanent");
+        assert_eq!(classified.code, CLAUDE_CLI_TOO_OLD_CODE);
+        assert_eq!(
+            classified.dedupe_key,
+            "claude_cli_too_old:2.1.257:2.1.280:claude-opus-5-5"
+        );
+        assert!(classified.user_message.contains("2.1.257"));
+        assert!(classified.user_message.contains("2.1.280+"));
+        assert!(classified.user_message.contains("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn permanent_error_classification_is_narrow_and_unknown_stays_retryable() {
+        for message in [
+            "API Error: 429 rate_limit_error",
+            "API Error: 503 overloaded",
+            "network timeout",
+            "Internal provider surprise",
+        ] {
+            let error = acp::AcpError::AgentError {
+                code: -32603,
+                message: message.into(),
+            };
+            assert!(
+                classify_permanent_prompt_error(&error, Some("model")).is_none(),
+                "{message}"
+            );
+        }
+        assert!(adapter_process_died("Internal error"));
+        assert!(!adapter_process_died(
+            "Internal error: API Error: 503 overloaded"
+        ));
+    }
+
     // ── auth error dead-letter behavior ────────────────────────────────────
 
     /// An auth-class `PromptOutcome::Error` must dead-letter immediately
@@ -13198,7 +13350,7 @@ mod error_outcome_emission_tests {
     }
 
     #[tokio::test]
-    async fn model_not_found_posts_recovery_notice_without_retrying() {
+    async fn claude_cli_version_error_posts_one_recovery_notice_without_retrying() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -13232,15 +13384,16 @@ mod error_outcome_emission_tests {
             cancel_reason: None,
         };
 
-        let raw_error = r#"llm model not found: (gpt-6-astra) 404 Not Found: {"error_code":"NOT_FOUND","message":"'gpt-6-astra' does not exist."}"#;
+        let raw_error = "Internal error: API Error: 400 Claude Code 2.1.257 does not support this model; version 2.1.280 or newer is required. Run 'claude update', ...";
         let model_error = AcpError::AgentError {
-            code: -32002,
+            code: -32603,
             message: raw_error.to_string(),
         };
         let expected_error = model_error.to_string();
         let observer = ObserverHandle::in_process();
 
-        let agent = dummy_agent(0).await;
+        let mut agent = dummy_agent(0).await;
+        agent.desired_model = Some("claude-opus-5-5".into());
         let mut pool = AgentPool::from_slots(vec![None]);
         let task_id = pool.join_set.spawn(async {}).id();
         pool.task_map_mut().insert(
@@ -13292,12 +13445,12 @@ mod error_outcome_emission_tests {
         assert_eq!(
             queue.pending_channels(),
             0,
-            "model-not-found must stop immediately — batch must not be requeued"
+            "CLI version failure must stop immediately — batch must not be requeued"
         );
         assert_eq!(
             queue.queued_event_count(channel_id),
             0,
-            "model-not-found must stop immediately — no events should be pending"
+            "CLI version failure must stop immediately — no events should be pending"
         );
 
         assert!(
@@ -13311,7 +13464,7 @@ mod error_outcome_emission_tests {
             .filter(|event| event.kind == "turn_error")
             .collect();
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].payload["code"], -32002);
+        assert_eq!(errors[0].payload["code"], -32603);
         assert_eq!(errors[0].payload["error"], expected_error);
 
         // Capture the real signed notice sent by handle_prompt_result, without a live relay.
@@ -13350,7 +13503,7 @@ mod error_outcome_emission_tests {
         assert_eq!(notice.kind, Kind::Custom(9));
         assert_eq!(
             notice.content,
-            "⚠️ I couldn't process the last request: the configured model wasn't found at the provider's endpoint. Open agent settings, select a different model from the dropdown, and save your changes. Restart the agent to apply the new configuration, then re-send your request."
+            "I can't run right now: Claude Code 2.1.257 doesn't support claude-opus-5-5 (needs 2.1.280+). An owner can fix this from my settings in Buzz."
         );
         let tags = serde_json::to_value(&notice.tags).unwrap();
         assert!(tags

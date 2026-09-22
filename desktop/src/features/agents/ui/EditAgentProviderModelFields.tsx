@@ -1,5 +1,6 @@
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
+import { ClaudeCliVersionBlocker } from "./ClaudeCliVersionBlocker";
 
 import {
   PERSONA_FIELD_CONTROL_CLASS,
@@ -46,6 +47,7 @@ export function EditAgentProviderModelFields({
   model,
   onModelChange,
   modelStatusMessage,
+  runtimeId,
 }: {
   disabled: boolean;
   llmProviderFieldVisible: boolean;
@@ -72,6 +74,7 @@ export function EditAgentProviderModelFields({
   model: string;
   onModelChange: (value: string) => void;
   modelStatusMessage: string | null;
+  runtimeId: string;
 }) {
   return (
     <>
@@ -185,6 +188,11 @@ export function EditAgentProviderModelFields({
         {modelStatusMessage ? (
           <p className="text-xs text-muted-foreground">{modelStatusMessage}</p>
         ) : null}
+        <ClaudeCliVersionBlocker
+          disabled={disabled}
+          model={model}
+          runtimeId={runtimeId}
+        />
       </div>
     </>
   );

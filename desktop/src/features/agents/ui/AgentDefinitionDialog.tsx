@@ -942,6 +942,7 @@ export function AgentDefinitionDialog({
                 onModelValueChange={handleModelDropdownChange}
                 showCustomModelInput={showCustomModelInput}
                 transition={advancedFieldsTransition}
+                runtimeId={runtime}
               />
             ) : null}
           </AnimatePresence>

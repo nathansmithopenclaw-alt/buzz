@@ -78,6 +78,27 @@ pub fn sync_managed_agent_processes(
         };
 
         let Some(status) = status else {
+            // A permanent provider/CLI rejection does not kill buzz-acp: the
+            // harness remains available for settings repair. Promote the
+            // stable error marker while the process is still alive so the
+            // profile is not forced to wait for a later harness exit.
+            if let Some(error) = super::super::meaningful_agent_error_from_log(&runtime.log_path)
+                .filter(|error| error.code == Some(super::super::claude_cli::TOO_OLD_ERROR_CODE))
+            {
+                if let Some(record) = records
+                    .iter_mut()
+                    .find(|record| record.pubkey == key.pubkey)
+                {
+                    if record.last_error.as_deref() != Some(error.message.as_str())
+                        || record.last_error_code != error.code
+                    {
+                        record.last_error = Some(error.message);
+                        record.last_error_code = error.code;
+                        record.updated_at = now_iso();
+                        changed = true;
+                    }
+                }
+            }
             continue;
         };
 

@@ -352,6 +352,16 @@ pub async fn update_managed_agent(
 
         stamp_record_updated_at(record, applied);
 
+        let personas = load_personas(&app).unwrap_or_default();
+        let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+        if let Some(blocker) =
+            crate::managed_agents::claude_cli::blocker_for_record(record, &personas, &global)?
+        {
+            record.last_error = Some(blocker.message.clone());
+            record.last_error_code = Some(blocker.code);
+            return Err(blocker.message);
+        }
+
         save_managed_agents(&app, &records)?;
 
         let record = records

@@ -759,6 +759,8 @@ pub fn run() {
             reconcile_managed_agent_runtimes,
             put_managed_agent_runtime_lifecycle,
             create_managed_agent,
+            get_claude_cli_blocker,
+            update_claude_code,
             start_managed_agent,
             open_external_agent_task,
             ensure_managed_agent_for_inbound,

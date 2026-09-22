@@ -5,6 +5,7 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { PersonaModelCombobox } from "./PersonaModelCombobox";
 import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
+import { ClaudeCliVersionBlocker } from "./ClaudeCliVersionBlocker";
 import {
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -24,6 +25,7 @@ type PersonaModelFieldProps = {
   onModelValueChange: (value: string) => void;
   showCustomModelInput: boolean;
   transition: React.ComponentProps<typeof motion.div>["transition"];
+  runtimeId: string;
 };
 
 export function PersonaModelField({
@@ -38,6 +40,7 @@ export function PersonaModelField({
   onModelValueChange,
   showCustomModelInput,
   transition,
+  runtimeId,
 }: PersonaModelFieldProps) {
   return (
     <motion.div
@@ -110,6 +113,11 @@ export function PersonaModelField({
             {modelDiscoveryStatus.message}
           </p>
         ) : null}
+        <ClaudeCliVersionBlocker
+          disabled={disabled}
+          model={model}
+          runtimeId={runtimeId}
+        />
       </div>
     </motion.div>
   );

@@ -405,7 +405,7 @@ pub(crate) fn configure_runtime_cli(
     if runtime.id != "claude" {
         return;
     }
-    if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
+    if let Some(cli_path) = super::claude_cli::resolved_claude_cli() {
         // On Windows, `.cmd` and `.bat` files are batch shims — they cannot be
         // passed directly to `CreateProcess` and cause EINVAL when the Claude
         // adapter tries to spawn them (issue #2397). Skip setting
@@ -534,6 +534,13 @@ pub fn spawn_agent_child(
             })?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
+    if known_acp_runtime(effective_command).is_some_and(|runtime| runtime.id == "claude") {
+        if let Some(blocker) =
+            super::claude_cli::blocker_for_model(effective_cfg.model.value.as_deref())
+        {
+            return Err(blocker.message);
+        }
+    }
 
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
@@ -1194,6 +1201,14 @@ pub fn start_managed_agent_process(
     workspace_relay: &crate::relay::ScopedWorkspaceRelay,
     replay_floor_unix: Option<u64>,
 ) -> Result<(), String> {
+    let personas = super::load_personas(app).unwrap_or_default();
+    let global = super::load_global_agent_config(app).unwrap_or_default();
+    if let Some(blocker) = super::claude_cli::blocker_for_record(record, &personas, &global)? {
+        record.last_error = Some(blocker.message.clone());
+        record.last_error_code = Some(blocker.code);
+        record.updated_at = now_iso();
+        return Err(blocker.message);
+    }
     let key = bound_runtime_key(record, workspace_relay)?;
     if let Some(runtime) = runtimes.get_mut(&key) {
         if runtime

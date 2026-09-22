@@ -1083,6 +1083,7 @@ export function AgentInstanceEditDialog({
               model={model}
               onModelChange={setModel}
               modelStatusMessage={modelStatusMessage}
+              runtimeId={selectedRuntimeId}
             />
 
             <AgentDialogEffortSection
