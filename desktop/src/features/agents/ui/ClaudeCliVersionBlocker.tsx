@@ -10,16 +10,21 @@ import { useAgentRunLocation } from "./AgentRunLocationContext";
 export function ClaudeCliVersionBlocker({
   disabled,
   model,
+  reportedError,
   runtimeId,
+  showMessage = true,
 }: {
   disabled: boolean;
   model: string;
+  reportedError?: string | null;
   runtimeId: string;
+  showMessage?: boolean;
 }) {
   const runLocation = useAgentRunLocation();
   const [blocker, setBlocker] = useState<ClaudeCliBlocker | null>(null);
   const [updating, setUpdating] = useState(false);
   const [resultText, setResultText] = useState<string | null>(null);
+  const [reportedResolved, setReportedResolved] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -55,6 +60,7 @@ export function ClaudeCliVersionBlocker({
         { model },
       );
       setBlocker(next);
+      setReportedResolved(next === null);
       const restartSuffix = result.restartFailures.length
         ? ` Restart failed: ${result.restartFailures.join("; ")}`
         : result.restartedAgents
@@ -72,11 +78,26 @@ export function ClaudeCliVersionBlocker({
     }
   };
 
+  const visibleBlocker =
+    blocker ??
+    (reportedError && !reportedResolved
+      ? {
+          binaryPath: "",
+          code: -32550,
+          installed: "unknown",
+          message: reportedError,
+          model,
+          required: "unknown",
+        }
+      : null);
+
   return (
     <>
-      {blocker ? (
+      {visibleBlocker ? (
         <div className="space-y-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
-          <p className="text-sm text-destructive">{blocker.message}</p>
+          {showMessage ? (
+            <p className="text-sm text-destructive">{visibleBlocker.message}</p>
+          ) : null}
           <p className="text-xs text-muted-foreground">
             Updating changes the global Claude Code install used by other Buzz
             agents and may affect other apps using the same install.

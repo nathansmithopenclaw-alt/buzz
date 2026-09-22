@@ -7,6 +7,8 @@ export type ClaudeCliBlocker = {
   binaryPath: string;
 };
 
+export const CLAUDE_CLI_TOO_OLD_ERROR_CODE = -32550;
+
 export function shouldCheckClaudeCli(
   runtimeId: string,
   model: string,

@@ -874,7 +874,15 @@ pub async fn update_claude_code(
     state: State<'_, AppState>,
 ) -> Result<crate::managed_agents::claude_cli::ClaudeCliUpdateResult, String> {
     crate::managed_agents::require_fleet_host(&state)?;
-    let mut result = crate::managed_agents::claude_cli::update_resolved_binary()?;
+    let mut result = tokio::time::timeout(
+        std::time::Duration::from_secs(10 * 60 + 10),
+        tauri::async_runtime::spawn_blocking(
+            crate::managed_agents::claude_cli::update_resolved_binary,
+        ),
+    )
+    .await
+    .map_err(|_| "Claude Code update timed out after 10 minutes and was stopped".to_string())?
+    .map_err(|error| format!("Claude Code update worker failed: {error}"))??;
     let candidates = {
         let _guard = state
             .managed_agents_store_lock

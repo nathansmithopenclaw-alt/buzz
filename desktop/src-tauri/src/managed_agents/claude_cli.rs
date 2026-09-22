@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 pub(crate) const TOO_OLD_ERROR_CODE: i64 = -32550;
 
@@ -131,7 +132,45 @@ fn output_tail(bytes: &[u8]) -> String {
     lines.join("\n")
 }
 
-fn update_binary(path: &Path) -> Result<ClaudeCliUpdateResult, String> {
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+fn update_path(prefix_bin: &Path) -> Result<std::ffi::OsString, String> {
+    let nvm_bin = dirs::home_dir()
+        .as_deref()
+        .and_then(super::find_nvm_default_bin);
+    let augmented = super::runtime::build_augmented_path(
+        dirs::home_dir(),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf)),
+        super::login_shell_path(),
+        nvm_bin,
+    );
+    let mut entries = vec![prefix_bin.to_path_buf()];
+    if let Some(augmented) = augmented {
+        entries.extend(std::env::split_paths(&augmented));
+    }
+    entries.dedup();
+    std::env::join_paths(entries).map_err(|error| format!("build Claude Code update PATH: {error}"))
+}
+
+fn run_update_command(command: Command, timeout: Duration) -> Result<std::process::Output, String> {
+    super::output_with_timeout(command, timeout).ok_or_else(|| {
+        format!(
+            "Claude Code update was stopped after failing to complete within {} or exceeding safe output limits",
+            if timeout.as_secs() >= 60 {
+                format!("{} minutes", timeout.as_secs() / 60)
+            } else {
+                format!("{}ms", timeout.as_millis())
+            }
+        )
+    })
+}
+
+fn update_binary_with_timeout(
+    path: &Path,
+    timeout: Duration,
+) -> Result<ClaudeCliUpdateResult, String> {
     let _guard = update_lock()
         .try_lock()
         .map_err(|_| "A Claude Code update is already running".to_string())?;
@@ -149,10 +188,10 @@ fn update_binary(path: &Path) -> Result<ClaudeCliUpdateResult, String> {
             path.display()
         ));
     };
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| format!("run Claude Code update: {error}"))?;
+    let path_env = update_path(parent)?;
+    let mut command = Command::new(program);
+    command.args(args).env("PATH", path_env);
+    let output = run_update_command(command, timeout)?;
     let stderr_tail = output_tail(&output.stderr);
     let stdout_tail = output_tail(&output.stdout);
     let combined = [stdout_tail, stderr_tail]
@@ -179,6 +218,10 @@ fn update_binary(path: &Path) -> Result<ClaudeCliUpdateResult, String> {
         restarted_agents: 0,
         restart_failures: Vec::new(),
     })
+}
+
+fn update_binary(path: &Path) -> Result<ClaudeCliUpdateResult, String> {
+    update_binary_with_timeout(path, UPDATE_TIMEOUT)
 }
 
 pub(crate) fn update_resolved_binary() -> Result<ClaudeCliUpdateResult, String> {
@@ -232,6 +275,11 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    fn update_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
     #[test]
     fn parses_and_compares_semantic_versions() {
         assert_eq!(
@@ -261,6 +309,7 @@ mod tests {
 
     #[test]
     fn npm_prefix_update_rechecks_the_changed_binary() {
+        let _guard = update_test_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -280,5 +329,97 @@ mod tests {
         let result = update_binary(&claude).unwrap();
         assert_eq!(result.installed.as_deref(), Some("2.1.280"));
         assert!(result.output_tail.contains("updated"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_prefix_update_finds_its_node_with_minimal_process_path() {
+        let _guard = update_test_lock();
+        const CHILD_MARKER: &str = "BUZZ_TEST_CLAUDE_UPDATE_MINIMAL_PATH_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let test_name = std::thread::current()
+                .name()
+                .expect("libtest thread name")
+                .to_string();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(CHILD_MARKER, "1")
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "minimal-PATH subprocess failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let claude = bin.join("claude");
+        let npm = bin.join("npm");
+        let fake_node = bin.join("buzz-test-prefix-node");
+        std::fs::write(&claude, "#!/bin/sh\necho '2.1.257 (Claude Code)'\n").unwrap();
+        std::fs::write(
+            &npm,
+            "#!/usr/bin/env buzz-test-prefix-node\n# npm fixture body is consumed by the fake interpreter\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &fake_node,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"#!/bin/sh\" \"echo '2.1.280 (Claude Code)'\" > '{}'\nchmod +x '{}'\necho updated-via-prefix-node\n",
+                claude.display(),
+                claude.display()
+            ),
+        )
+        .unwrap();
+        for path in [&claude, &npm, &fake_node] {
+            let mut permissions = path.metadata().unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+
+        let result = update_binary(&claude).unwrap();
+        assert_eq!(result.installed.as_deref(), Some("2.1.280"));
+        assert!(result.output_tail.contains("updated-via-prefix-node"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_timeout_kills_child_and_releases_single_flight_lock() {
+        let _guard = update_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let claude = bin.join("claude");
+        let npm = bin.join("npm");
+        std::fs::write(&claude, "#!/bin/sh\necho '2.1.257 (Claude Code)'\n").unwrap();
+        std::fs::write(&npm, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
+        for path in [&claude, &npm] {
+            let mut permissions = path.metadata().unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        let error = update_binary_with_timeout(&claude, Duration::from_millis(100)).unwrap_err();
+        assert!(error.contains("within 100ms"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        std::fs::write(
+            &npm,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"#!/bin/sh\" \"echo '2.1.280 (Claude Code)'\" > '{}'\nchmod +x '{}'\n",
+                claude.display(),
+                claude.display()
+            ),
+        )
+        .unwrap();
+        let result = update_binary_with_timeout(&claude, Duration::from_secs(2)).unwrap();
+        assert_eq!(result.installed.as_deref(), Some("2.1.280"));
     }
 }

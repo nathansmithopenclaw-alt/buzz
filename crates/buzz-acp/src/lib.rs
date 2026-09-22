@@ -6266,7 +6266,6 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     };
     message.contains("Re-authenticate")
         || message.contains("API Error: 401")
-        || message.contains("API Error: 403")
         || message.contains("refresh token was already used")
         || message.contains("refresh token has expired")
         || message.contains("refresh token has been revoked")
@@ -6329,13 +6328,21 @@ fn classify_permanent_prompt_error(
     let invalid_model = lower.contains("unrecognized_model")
         || lower.contains("unrecognized model")
         || lower.contains("invalid model")
-        || lower.contains("model not found");
-    let invalid_request = lower.contains("api error: 400")
-        && (lower.contains("invalid_request") || lower.contains("invalid request"));
-    if is_auth_error(error) || lower.contains("status 403") {
+        || lower.contains("model not found")
+        || lower.contains("unknown model")
+        || lower.contains("unsupported model")
+        || lower.contains("model is not supported");
+    let is_403 = lower.contains("api error: 403") || lower.contains("status 403");
+    let model_access_denied = is_403
+        && lower.contains("model")
+        && (lower.contains("does not have access")
+            || lower.contains("permission")
+            || lower.contains("not authorized")
+            || lower.contains("not available"));
+    if is_auth_error(error) {
         return None;
     }
-    (invalid_model || invalid_request).then(|| PermanentPromptError {
+    (invalid_model || model_access_denied).then(|| PermanentPromptError {
         code: if provider_code == 0 { -32552 } else { provider_code },
         dedupe_key: format!("provider:{provider_code}:{message}"),
         user_message: if lower.contains("model not found") {
@@ -13109,6 +13116,15 @@ mod error_outcome_emission_tests {
     }
 
     #[test]
+    fn is_auth_error_rejects_permission_error_403() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "API Error: 403 {\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"Your organization does not have access to model claude-opus-5-5\"}}".into(),
+        };
+        assert!(!is_auth_error(&error));
+    }
+
+    #[test]
     fn is_auth_error_rejects_transport_errors() {
         let io = acp::AcpError::Io(std::io::Error::other("pipe broke"));
         assert!(
@@ -13147,6 +13163,9 @@ mod error_outcome_emission_tests {
             "API Error: 503 overloaded",
             "network timeout",
             "Internal provider surprise",
+            "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 215000 tokens > 200000 maximum\"}}",
+            "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"tool_use ids were found without tool_result blocks immediately after\"}}",
+            "API Error: 403 {\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"This action is forbidden\"}}",
         ] {
             let error = acp::AcpError::AgentError {
                 code: -32603,
@@ -13161,6 +13180,192 @@ mod error_outcome_emission_tests {
         assert!(!adapter_process_died(
             "Internal error: API Error: 503 overloaded"
         ));
+    }
+
+    #[test]
+    fn permanent_error_classifies_model_access_403_without_auth_quiesce() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "API Error: 403 {\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"Your organization does not have access to model claude-opus-5-5\"}}".into(),
+        };
+        let classified = classify_permanent_prompt_error(&error, Some("claude-opus-5-5"))
+            .expect("model-access denial is a permanent model configuration error");
+        assert_eq!(classified.code, -32603);
+        assert!(classified.user_message.contains("configured model"));
+        assert!(!is_auth_error(&error));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bare_internal_error_after_nested_child_death_replaces_adapter_for_next_prompt() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = dir.path().join("fake-dead-child-adapter.py");
+        let generations = dir.path().join("generations");
+        std::fs::write(
+            &adapter,
+            r#"#!/usr/bin/python3
+import json, pathlib, subprocess, sys
+state = pathlib.Path(sys.argv[1])
+generation = int(state.read_text()) + 1 if state.exists() else 1
+state.write_text(str(generation))
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        body = {"protocolVersion": 1, "agentInfo": {"name": "fake-dead-child"}, "agentCapabilities": {}}
+        reply = {"jsonrpc": "2.0", "id": request["id"], "result": body}
+    elif method == "session/new":
+        reply = {"jsonrpc": "2.0", "id": request["id"], "result": {"sessionId": f"session-{generation}"}}
+    elif method == "session/prompt" and generation == 1:
+        subprocess.run(["/bin/sh", "-c", "exit 17"], check=False)
+        reply = {"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32603, "message": "Internal error"}}
+    elif method == "session/prompt":
+        reply = {"jsonrpc": "2.0", "id": request["id"], "result": {"stopReason": "end_turn"}}
+    else:
+        reply = {"jsonrpc": "2.0", "id": request.get("id"), "result": {}}
+    print(json.dumps(reply), flush=True)
+"#,
+        )
+        .unwrap();
+        let mut permissions = adapter.metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&adapter, permissions).unwrap();
+        let command = adapter.to_string_lossy().into_owned();
+        let args = vec![generations.to_string_lossy().into_owned()];
+
+        let (mut acp, protocol_version, agent_name) =
+            spawn_and_init(&command, &args, &[], false, 0, None)
+                .await
+                .unwrap();
+        let first_session = acp
+            .session_new_full("/tmp", vec![], None, None)
+            .await
+            .unwrap()
+            .session_id;
+        let first_error = acp
+            .session_prompt_with_idle_timeout(
+                &first_session,
+                "first prompt",
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect_err("first adapter loses its nested child");
+        assert!(matches!(
+            &first_error,
+            AcpError::AgentError { message, .. } if message == "Internal error"
+        ));
+
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: Default::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name,
+            goose_system_prompt_supported: None,
+            protocol_version,
+        };
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "dead-child-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashMap::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let mut config = test_config();
+        config.agent_command = command;
+        config.agent_args = args;
+        let mut heartbeat_in_flight = false;
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, mut respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let action = handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            PromptResult {
+                agent,
+                source: PromptSource::Heartbeat,
+                turn_id: "dead-child-turn".into(),
+                outcome: PromptOutcome::Error(first_error),
+                batch: None,
+            },
+            &mut heartbeat_in_flight,
+            &HashSet::new(),
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+        assert!(matches!(action, LoopAction::Continue));
+        assert_eq!(pool.live_count(), 0, "poisoned adapter is not reused");
+
+        let replacement = tokio::time::timeout(Duration::from_secs(5), respawn_rx.recv())
+            .await
+            .expect("replacement deadline")
+            .expect("replacement result");
+        let (acp, protocol_version, agent_name) = replacement.result.unwrap();
+        crash_history[replacement.index].respawn_in_flight = false;
+        pool.return_agent(OwnedAgent {
+            index: replacement.index,
+            acp,
+            state: Default::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name,
+            goose_system_prompt_supported: None,
+            protocol_version,
+        });
+        assert_eq!(std::fs::read_to_string(&generations).unwrap(), "2");
+
+        let mut fresh = pool.agents_mut()[0].take().expect("fresh adapter in slot");
+        let next_session = fresh
+            .acp
+            .session_new_full("/tmp", vec![], None, None)
+            .await
+            .unwrap()
+            .session_id;
+        assert_eq!(next_session, "session-2");
+        assert_eq!(
+            fresh
+                .acp
+                .session_prompt_with_idle_timeout(
+                    &next_session,
+                    "next prompt",
+                    Duration::from_secs(2),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap(),
+            acp::StopReason::EndTurn
+        );
+        fresh.acp.shutdown().await;
+        respawn_tasks.shutdown().await;
     }
 
     // ── auth error dead-letter behavior ────────────────────────────────────
@@ -13350,6 +13555,158 @@ mod error_outcome_emission_tests {
     }
 
     #[tokio::test]
+    async fn model_not_found_posts_recovery_notice_without_retrying() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let keys = Keys::generate();
+        let root = nostr::EventId::from_byte_array([0xaa; 32]);
+        let parent = nostr::EventId::from_byte_array([0xbb; 32]);
+        let event = EventBuilder::new(Kind::Custom(9), "test")
+            .tags([
+                nostr::Tag::parse(["e", &root.to_hex(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", &parent.to_hex(), "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            attempt: 1,
+            channel_id,
+            scope: scope::SessionScope::Conversation { channel_id },
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let raw_error = r#"llm model not found: (gpt-6-astra) 404 Not Found: {"error_code":"NOT_FOUND","message":"'gpt-6-astra' does not exist."}"#;
+        let model_error = AcpError::AgentError {
+            code: -32002,
+            message: raw_error.to_string(),
+        };
+        let expected_error = model_error.to_string();
+        let observer = ObserverHandle::in_process();
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashMap::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(model_error),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            Some(&rest),
+        );
+
+        assert_eq!(queue.pending_channels(), 0);
+        assert_eq!(queue.queued_event_count(channel_id), 0);
+        assert!(pool.agents_mut()[0].is_some());
+        assert!(respawn_tasks.is_empty());
+        let errors: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == "turn_error")
+            .collect();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].payload["code"], -32002);
+        assert_eq!(errors[0].payload["error"], expected_error);
+
+        let notice: nostr::Event = tokio::time::timeout(Duration::from_secs(3), async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "POST /events HTTP/1.1\r\n");
+            let mut content_length = None;
+            for _ in 0..64 {
+                line.clear();
+                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let size = content_length.expect("request Content-Length");
+            assert!(size < 65536);
+            let mut body = vec![0; size];
+            reader.read_exact(&mut body).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        })
+        .await
+        .expect("failure notice must be posted on the first failure");
+        notice.verify().unwrap();
+        assert_eq!(notice.pubkey, rest.keys.public_key());
+        assert_eq!(notice.kind, Kind::Custom(9));
+        assert_eq!(
+            notice.content,
+            "⚠️ I couldn't process the last request: the configured model wasn't found at the provider's endpoint. Open agent settings, select a different model from the dropdown, and save your changes. Restart the agent to apply the new configuration, then re-send your request."
+        );
+        let tags = serde_json::to_value(&notice.tags).unwrap();
+        assert!(tags
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag[0] == "h" && tag[1] == channel_id.to_string()));
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, Some(root.to_hex()));
+        assert_eq!(threading.parent_event_id, Some(parent.to_hex()));
+    }
+
+    #[tokio::test]
     async fn claude_cli_version_error_posts_one_recovery_notice_without_retrying() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -13536,6 +13893,15 @@ mod error_outcome_emission_tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn non_model_permission_403_is_requeued_without_account_quiesce() {
+        assert_application_error_is_requeued(acp::AcpError::AgentError {
+            code: -32603,
+            message: "API Error: 403 permission_error: this operation is forbidden".to_string(),
+        })
+        .await;
+    }
+
     async fn assert_application_error_is_requeued(error: acp::AcpError) {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
@@ -13613,6 +13979,10 @@ mod error_outcome_emission_tests {
             queue.queued_event_count(channel_id),
             1,
             "non-auth application error must preserve the event for retry"
+        );
+        assert!(
+            pool.any_idle(),
+            "non-auth application errors must not quiesce the account"
         );
     }
 }
