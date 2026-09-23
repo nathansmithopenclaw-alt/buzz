@@ -84,8 +84,8 @@ explicit live pick keeps the existing recovery path and correlated failure.
    read-only explanation. Claude's deferred descriptor is not an omission: its
    read-only copy (`unrenderedEffortExplanation`) names the discovery state from
    `effortDiscoveryState` (checking, couldn't load, model offers none, or set
-   from the deployed agent's profile Edit) and the remote-agent case, never that
-   the harness lacks effort. New absences get new named reasons in
+   from a deployed agent's card or profile Edit) and the remote-agent case, never
+   that the harness lacks effort. New absences get new named reasons in
    `AgentConfigOmission` / `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:
    "resetDependentValues"` (user changed harness/provider → dependent values
@@ -320,6 +320,24 @@ explicit live pick keeps the existing recovery path and correlated failure.
    the instance dialog or profile editor; it writes `effortLevel` through the normal locked
    `update_managed_agent` call. Cancel and failed Save keep persisted effort
    unchanged. The former standalone persistence command is removed.
+   A deployed agent's Agents-page card Edit behaves exactly like the profile
+   Edit. The card passes its `ManagedAgent`. Access is seeded from that agent
+   (rule 12), and the editor offers that agent's thinking level while the agent
+   still belongs to the edited definition (`resolvePersonaDialogAgent`, keyed by
+   `PersonaDialogState.agentPubkey`). Save order is fixed: the definition saves
+   first (with catalog publish-on-save), then one `update_managed_agent` built by
+   `linkedAgentUpdateAfterDefinitionSave` carries the definition-to-agent sync,
+   the agent's access if the dialog changed it, and its thinking level. When
+   nothing on the agent changes, no call is made. If only the agent write
+   fails, the dialog stays open and says the definition saved; a retry of the
+   same Save re-issues only the agent write. That order matters for restarts.
+   An access change restarts the agent inside `update_managed_agent`, after the
+   definition saved, so the respawn runs both halves and clears the drift. Any
+   other change only sets `needsRestart`, which the idle auto-restart applies
+   once. The editor (`AgentsPersonaDialog`) mounts per dialog, keyed by
+   `personaDialogKey`, so a draft cannot outlive it. Editors with no deployed
+   agent (an undeployed template, a duplicate, agent-management review) keep
+   the read-only pointer and never write an agent.
    When discovered native options make this picker available, it replaces the
    legacy dialog effort field rather than appearing beside it; the Fast mode
    control stays present. A saved canonical value remains visible if discovery
@@ -480,7 +498,25 @@ new audit channels must be private.
   `effortDiscoveryState` and `unrenderedEffortExplanation`: Claude's deferred
   copy names each discovery state and the remote case, and never claims the
   harness lacks effort. `desktop/tests/e2e/edit-agent.spec.ts` drives the real
-  dialog through failed and effort-less discovery.
+  dialog through failed and effort-less discovery. It also pins the linked-agent
+  Save for both the profile and the Agents card Edit:
+  - An untouched access field never overwrites the agent's policy.
+  - An unchanged Save writes nothing to the agent.
+  - Writes are ordered definition first, then one `update_managed_agent`.
+  - Explicit access and definition edits reach the agent.
+  - A failed agent write retries only the agent half.
+  - A template with no deployed agent keeps the pointer.
+- `../profile/ui/UserProfilePanelUtils.test.mjs` —
+  `linkedAgentUpdateAfterDefinitionSave` omits access unless submitted, returns
+  null for a no-op, and carries effort alone when only effort changed.
+- Rust `spawn_snapshot/tests_ext.rs` — a card Save's access restart after the
+  definition save leaves no restart drift (the reverse order would), and the
+  spawn and launch re-pin (`apply_persona_snapshot`) keeps the agent's access
+  and effort.
+- `ui/personaDialogState.test.mjs` — `resolvePersonaDialogAgent` returns a
+  card's agent only for its own definition (template, duplicate, and
+  other-definition editors resolve nothing) and `personaDialogKey` remounts
+  the editor when its target changes.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, session-draft
   restoration, zero-write Skip, Next save failure/retry, navigation, and

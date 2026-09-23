@@ -8,6 +8,8 @@ import {
   editPersonaDialogState,
   formatPersonaNamePoolText,
   parsePersonaNamePoolText,
+  personaDialogKey,
+  resolvePersonaDialogAgent,
 } from "./personaDialogState.ts";
 
 test("canSubmitPersonaDialog requires a display name but not a system prompt", () => {
@@ -330,5 +332,95 @@ test("a non-allowlist mode does not seed a stale allowlist into the dialog", () 
     state.initialValues.behavior.respondToAllowlist,
     undefined,
     "stale pubkeys must not resurrect through the dialog seed",
+  );
+});
+
+const cardPersona = {
+  id: "persona-card",
+  displayName: "Card",
+  systemPrompt: "",
+};
+const cardAgent = { pubkey: "a".repeat(64), personaId: "persona-card" };
+const otherAgent = { pubkey: "b".repeat(64), personaId: "persona-other" };
+
+test("resolvePersonaDialogAgent returns the card's agent for its own definition", () => {
+  const state = {
+    ...editPersonaDialogState(cardPersona),
+    agentPubkey: cardAgent.pubkey,
+  };
+  assert.equal(
+    resolvePersonaDialogAgent(state, [otherAgent, cardAgent]),
+    cardAgent,
+  );
+});
+
+test("resolvePersonaDialogAgent picks the card's own agent among siblings of one definition", () => {
+  const sibling = { pubkey: "c".repeat(64), personaId: "persona-card" };
+  const state = {
+    ...editPersonaDialogState(cardPersona),
+    agentPubkey: cardAgent.pubkey,
+  };
+  assert.equal(
+    resolvePersonaDialogAgent(state, [sibling, cardAgent]),
+    cardAgent,
+  );
+  assert.equal(
+    resolvePersonaDialogAgent({ ...state, agentPubkey: sibling.pubkey }, [
+      cardAgent,
+      sibling,
+    ]),
+    sibling,
+  );
+});
+
+test("resolvePersonaDialogAgent resolves nothing for editors with no deployed agent", () => {
+  // Undeployed template card: no agentPubkey.
+  assert.equal(
+    resolvePersonaDialogAgent(editPersonaDialogState(cardPersona), [cardAgent]),
+    undefined,
+  );
+  // Duplicate is create-shaped (no definition id), even if a pubkey leaks in.
+  assert.equal(
+    resolvePersonaDialogAgent(
+      {
+        ...duplicatePersonaDialogState(cardPersona),
+        agentPubkey: cardAgent.pubkey,
+      },
+      [cardAgent],
+    ),
+    undefined,
+  );
+  assert.equal(resolvePersonaDialogAgent(null, [cardAgent]), undefined);
+});
+
+test("resolvePersonaDialogAgent refuses an agent of another definition or a missing agent", () => {
+  const state = {
+    ...editPersonaDialogState(cardPersona),
+    agentPubkey: otherAgent.pubkey,
+  };
+  assert.equal(resolvePersonaDialogAgent(state, [otherAgent]), undefined);
+  assert.equal(
+    resolvePersonaDialogAgent(
+      { ...editPersonaDialogState(cardPersona), agentPubkey: cardAgent.pubkey },
+      [otherAgent],
+    ),
+    undefined,
+  );
+});
+
+test("personaDialogKey changes with the edited definition and deployed agent", () => {
+  const template = editPersonaDialogState(cardPersona);
+  const card = { ...template, agentPubkey: cardAgent.pubkey };
+  assert.notEqual(personaDialogKey(template), personaDialogKey(card));
+  assert.equal(
+    personaDialogKey(card),
+    personaDialogKey({
+      ...editPersonaDialogState(cardPersona),
+      agentPubkey: cardAgent.pubkey,
+    }),
+  );
+  assert.notEqual(
+    personaDialogKey(template),
+    personaDialogKey(duplicatePersonaDialogState(cardPersona)),
   );
 });

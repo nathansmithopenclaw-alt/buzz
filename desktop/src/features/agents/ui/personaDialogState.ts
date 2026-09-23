@@ -6,6 +6,12 @@ import type {
 } from "@/shared/api/types";
 
 export type PersonaDialogState = {
+  /**
+   * Deployed agent whose Agents-page card opened this editor. The dialog edits
+   * that agent's thinking level beside the definition, as the profile Edit
+   * does. Absent for editors that have no single deployed agent.
+   */
+  agentPubkey?: string;
   description: string;
   initialValues: CreatePersonaInput | UpdatePersonaInput;
   submitLabel: string;
@@ -50,6 +56,31 @@ export function createPersonaDialogState(): PersonaDialogState {
       model: undefined,
     },
   };
+}
+
+/**
+ * The deployed agent an Agents-page editor edits beside its definition: the
+ * card's agent, and only while that agent still belongs to the edited
+ * definition. Editors with no deployed agent resolve to `undefined`.
+ */
+export function resolvePersonaDialogAgent<
+  Agent extends { pubkey: string; personaId?: string | null },
+>(
+  state: PersonaDialogState | null,
+  agents: readonly Agent[],
+): Agent | undefined {
+  if (!state?.agentPubkey || !("id" in state.initialValues)) return undefined;
+  const personaId = state.initialValues.id;
+  return agents.find(
+    (agent) =>
+      agent.pubkey === state.agentPubkey && agent.personaId === personaId,
+  );
+}
+
+/** Remount key for an editor: its definition and deployed agent, if any. */
+export function personaDialogKey(state: PersonaDialogState): string {
+  const personaId = "id" in state.initialValues ? state.initialValues.id : "";
+  return `${personaId}:${state.agentPubkey ?? ""}`;
 }
 
 export function duplicatePersonaDialogState(

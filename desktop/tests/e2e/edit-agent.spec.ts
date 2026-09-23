@@ -1026,6 +1026,11 @@ async function pickEffort(
   await page.getByRole("menuitemradio", { name: level, exact: true }).click();
 }
 
+async function openAdvanced(dialog: import("@playwright/test").Locator) {
+  await dialog.getByRole("button", { name: "Advanced" }).click();
+  await expect(dialog.locator("#agent-respond-to")).toBeVisible();
+}
+
 const UPDATE_PERSONA = { command: "update_persona" };
 
 test("profile Edit never copies an untouched definition access over the agent", async ({
@@ -1047,4 +1052,143 @@ test("profile Edit never copies an untouched definition access over the agent", 
       input: { pubkey: AGENT_PUBKEY, effortLevel: "high" },
     },
   ]);
+});
+
+// Agents-page card Edit on a deployed agent behaves exactly like the profile
+// Edit: it seeds the agent's own access and thinking level, and Save updates
+// the agent after the definition in one update_managed_agent. A template with
+// no deployed agent keeps the read-only pointer and never writes an agent.
+const CARD_TEMPLATE_NAME = "Card Template Persona";
+const CARD_TEMPLATE = {
+  id: "persona-card-template-e2e",
+  displayName: CARD_TEMPLATE_NAME,
+  systemPrompt: "You are the undeployed card template e2e persona.",
+  runtime: "claude",
+  model: "claude-opus-5-5",
+};
+
+async function openCardEdit(
+  page: import("@playwright/test").Page,
+  displayName: string,
+) {
+  await page.getByTestId("open-agents-view").click();
+  const menu = page.getByRole("button", {
+    name: `Open actions for ${displayName}`,
+  });
+  await expect(menu).toBeVisible({ timeout: 10_000 });
+  await menu.click();
+  await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+  return expectPersonaDialog(page, displayName);
+}
+
+test.describe("Agents card Edit", () => {
+  test("seeds the agent's own access and thinking level; an unchanged Save writes nothing to the agent", async ({
+    page,
+  }) => {
+    await installLinkedAgentFixture(page);
+    const writes = await recordAgentWrites(page);
+
+    const dialog = await openCardEdit(page, LINKED_PERSONA_NAME);
+    await expect(dialog.locator("#edit-agent-effort")).toContainText("low", {
+      timeout: 10_000,
+    });
+    await openAdvanced(dialog);
+    await expect(dialog.locator("#agent-respond-to")).toContainText("Only me");
+    await dialog.getByTestId("persona-dialog-submit").click();
+    await expect(dialog).toHaveCount(0);
+    expect(await writes()).toEqual([UPDATE_PERSONA]);
+  });
+
+  test("saves the thinking level after the definition in one agent write", async ({
+    page,
+  }) => {
+    await installLinkedAgentFixture(page);
+    const writes = await recordAgentWrites(page);
+
+    const dialog = await openCardEdit(page, LINKED_PERSONA_NAME);
+    await pickEffort(page, dialog, "high");
+    await dialog.getByTestId("persona-dialog-submit").click();
+    await expect(dialog).toHaveCount(0);
+    expect(await writes()).toEqual([
+      UPDATE_PERSONA,
+      {
+        command: "update_managed_agent",
+        input: { pubkey: AGENT_PUBKEY, effortLevel: "high" },
+      },
+    ]);
+  });
+
+  test("sends an explicit access change and definition edits to the agent", async ({
+    page,
+  }) => {
+    await installLinkedAgentFixture(page);
+    const writes = await recordAgentWrites(page);
+
+    const dialog = await openCardEdit(page, LINKED_PERSONA_NAME);
+    await dialog
+      .locator("#persona-system-prompt")
+      .fill("Edited from the card.");
+    await openAdvanced(dialog);
+    await dialog.locator("#agent-respond-to").click();
+    await page.getByRole("menuitemradio", { name: "Anyone" }).click();
+    await dialog.getByTestId("persona-dialog-submit").click();
+    await expect(dialog).toHaveCount(0);
+    expect(await writes()).toEqual([
+      UPDATE_PERSONA,
+      {
+        command: "update_managed_agent",
+        input: {
+          pubkey: AGENT_PUBKEY,
+          systemPrompt: "Edited from the card.",
+          respondTo: "anyone",
+        },
+      },
+    ]);
+  });
+
+  test("a failed agent write keeps the definition and a retry re-issues only the agent write", async ({
+    page,
+  }) => {
+    await installLinkedAgentFixture(page);
+    const writes = await recordAgentWrites(page, 1);
+    const agentWrite = {
+      command: "update_managed_agent",
+      input: { pubkey: AGENT_PUBKEY, effortLevel: "high" },
+    };
+
+    const dialog = await openCardEdit(page, LINKED_PERSONA_NAME);
+    await pickEffort(page, dialog, "high");
+    await dialog.getByTestId("persona-dialog-submit").click();
+    const message = `Saved the ${LINKED_PERSONA_NAME} definition, but the agent was not updated: Agent update failed for test. Save again to retry the agent update.`;
+    await expect(dialog.getByText(message, { exact: true })).toBeVisible();
+    await expect(dialog).toBeVisible();
+    expect(await writes()).toEqual([UPDATE_PERSONA, agentWrite]);
+
+    await dialog.getByTestId("persona-dialog-submit").click();
+    await expect(dialog).toHaveCount(0);
+    expect(await writes()).toEqual([UPDATE_PERSONA, agentWrite, agentWrite]);
+  });
+
+  test("a template with no deployed agent keeps the pointer and writes no agent", async ({
+    page,
+  }) => {
+    await installLinkedAgentFixture(page, [LINKED_PERSONA, CARD_TEMPLATE]);
+    const writes = await recordAgentWrites(page);
+
+    // Leave an unsaved thinking-level draft behind on a deployed agent's card.
+    const deployed = await openCardEdit(page, LINKED_PERSONA_NAME);
+    await pickEffort(page, deployed, "max");
+    await deployed.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(deployed).toHaveCount(0);
+
+    const dialog = await openCardEdit(page, CARD_TEMPLATE_NAME);
+    await expect(dialog.getByTestId("agent-effort-read-only")).toContainText(
+      "Thinking level is set on each deployed agent, not on its template.",
+      { timeout: 10_000 },
+    );
+    await expect(dialog.locator("#edit-agent-effort")).toHaveCount(0);
+    await dialog.getByTestId("persona-dialog-submit").click();
+    await expect(dialog).toHaveCount(0);
+    expect(await writes()).toEqual([UPDATE_PERSONA]);
+  });
 });

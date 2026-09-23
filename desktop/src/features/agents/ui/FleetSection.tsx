@@ -75,7 +75,8 @@ type HostFleetSectionProps = {
   onDeletePersona: (persona: AgentPersona) => void;
   onDeployPersona: (persona: AgentPersona) => void;
   onDuplicatePersona: (persona: AgentPersona) => void;
-  onEditPersona: (persona: AgentPersona) => void;
+  /** `agent` is set when a deployed agent's card opens the editor. */
+  onEditPersona: (persona: AgentPersona, agent?: ManagedAgent) => void;
   onMessageAgent: (pubkey: string) => void;
   onOpenAgentProfile: (
     pubkey: string,
@@ -378,7 +379,8 @@ function FleetAgentCard({
   onDeactivatePersona: (persona: AgentPersona) => void;
   onDeletePersona: (persona: AgentPersona) => void;
   onDuplicatePersona: (persona: AgentPersona) => void;
-  onEditPersona: (persona: AgentPersona) => void;
+  /** `agent` is set when a deployed agent's card opens the editor. */
+  onEditPersona: (persona: AgentPersona, agent?: ManagedAgent) => void;
   onMessageAgent: (pubkey: string) => void;
   onOpenAgentProfile: (
     pubkey: string,
@@ -517,7 +519,7 @@ function FleetAgentCard({
                   onDeactivate={onDeactivatePersona}
                   onDelete={onDeletePersona}
                   onDuplicate={onDuplicatePersona}
-                  onEdit={onEditPersona}
+                  onEdit={(edited) => onEditPersona(edited, agent)}
                   onShare={onSharePersona}
                   onSnapshot={onSnapshotPersona}
                 />
