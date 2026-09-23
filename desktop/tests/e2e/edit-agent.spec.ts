@@ -876,3 +876,175 @@ for (const channelName of ["general", "alice-tyler"]) {
     ).toHaveValue("Edited from conversation");
   });
 }
+
+// Definition editor bound to a deployed agent. Fixture: the agent is
+// owner-only while its definition's mint-time access default is "anyone";
+// every other synced field matches, so an unchanged Save has nothing to write
+// to the agent.
+const LINKED_PERSONA_NAME = "Linked Persona";
+const LINKED_PROMPT = "You are the linked-agent e2e persona.";
+const LINKED_CLAUDE_RUNTIME = {
+  id: "claude",
+  label: "Claude Code",
+  avatar_url: "",
+  availability: "available",
+  command: "claude-agent-acp",
+  binary_path: "/usr/local/bin/claude-agent-acp",
+  default_args: [],
+  mcp_command: null,
+  install_hint: "",
+  install_instructions_url: null,
+  can_auto_install: false,
+  requires_external_cli: true,
+  underlying_cli_path: "/usr/local/bin/claude",
+  source: "builtin",
+  // The Rust catalog declares no Claude effort env key; the mock's legacy
+  // default would route effort through an env-var control.
+  thinking_env_var: null,
+};
+const LINKED_CLAUDE_DISCOVERY = {
+  models: [{ id: "claude-opus-5-5", name: "Claude Opus 5.5" }],
+  supportsSwitching: true,
+  effortConfigId: "effort",
+  effortOptions: ["default", "low", "medium", "high", "xhigh", "max"].map(
+    (id) => ({ id, name: id === "default" ? "Default" : id }),
+  ),
+};
+const LINKED_PERSONA = {
+  id: PERSONA_ID,
+  displayName: LINKED_PERSONA_NAME,
+  systemPrompt: LINKED_PROMPT,
+  runtime: "claude",
+  model: "claude-opus-5-5",
+  respondTo: "anyone" as const,
+};
+const LINKED_AGENT = {
+  pubkey: AGENT_PUBKEY,
+  name: LINKED_PERSONA_NAME,
+  personaId: PERSONA_ID,
+  runtime: "claude",
+  model: "claude-opus-5-5",
+  systemPrompt: LINKED_PROMPT,
+  respondTo: "owner-only" as const,
+  effortLevel: "low",
+  status: "stopped" as const,
+  channelNames: ["agents"],
+};
+
+async function installLinkedAgentFixture(
+  page: import("@playwright/test").Page,
+  personas: Array<{ id: string; displayName: string; systemPrompt: string }> = [
+    LINKED_PERSONA,
+  ],
+) {
+  await installMockBridge(page, {
+    acpRuntimesCatalog: [LINKED_CLAUDE_RUNTIME],
+    managedAgents: [LINKED_AGENT],
+    personas,
+    discoverAgentModels: LINKED_CLAUDE_DISCOVERY,
+  });
+  await page.goto("/");
+}
+
+async function openProfileEdit(
+  page: import("@playwright/test").Page,
+  displayName: string,
+) {
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByRole("button", { name: `${displayName} agent profile` })
+    .click();
+  await page.getByTestId("user-profile-edit-agent").click();
+  return expectPersonaDialog(page, displayName);
+}
+
+async function expectPersonaDialog(
+  page: import("@playwright/test").Page,
+  displayName: string,
+) {
+  const dialog = page.getByTestId("persona-dialog");
+  await expect(dialog).toBeVisible({ timeout: 10_000 });
+  await expect(dialog.locator("#persona-display-name")).toHaveValue(
+    displayName,
+  );
+  return dialog;
+}
+
+/**
+ * Record the definition and agent writes, in order, at the IPC boundary.
+ * Install after the first load and never navigate or reload afterwards.
+ * `failAgentWrites` makes that many update_managed_agent calls throw first.
+ */
+async function recordAgentWrites(
+  page: import("@playwright/test").Page,
+  failAgentWrites = 0,
+) {
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function",
+  );
+  await page.evaluate((failures) => {
+    const win = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          args?: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      __agentWrites: { calls: unknown[]; failures: number };
+    };
+    const original = win.__TAURI_INTERNALS__.invoke;
+    const state = { calls: [] as unknown[], failures };
+    win.__agentWrites = state;
+    win.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "update_persona") {
+        state.calls.push({ command });
+      }
+      if (command === "update_managed_agent") {
+        state.calls.push({ command, input: args?.input });
+        if (state.failures > 0) {
+          state.failures--;
+          throw new Error("Agent update failed for test");
+        }
+      }
+      return original(command, args);
+    };
+  }, failAgentWrites);
+  return () =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __agentWrites: { calls: unknown[] } })
+          .__agentWrites.calls,
+    );
+}
+
+async function pickEffort(
+  page: import("@playwright/test").Page,
+  dialog: import("@playwright/test").Locator,
+  level: string,
+) {
+  await dialog.locator("#edit-agent-effort").click();
+  await page.getByRole("menuitemradio", { name: level, exact: true }).click();
+}
+
+const UPDATE_PERSONA = { command: "update_persona" };
+
+test("profile Edit never copies an untouched definition access over the agent", async ({
+  page,
+}) => {
+  // Before the fix an effort-only Save sent the definition's "anyone" default
+  // as the agent's access, widening an owner-only agent and restarting it.
+  await installLinkedAgentFixture(page);
+  const writes = await recordAgentWrites(page);
+
+  const dialog = await openProfileEdit(page, LINKED_PERSONA_NAME);
+  await pickEffort(page, dialog, "high");
+  await dialog.getByTestId("persona-dialog-submit").click();
+  await expect(dialog).toHaveCount(0);
+  expect(await writes()).toEqual([
+    UPDATE_PERSONA,
+    {
+      command: "update_managed_agent",
+      input: { pubkey: AGENT_PUBKEY, effortLevel: "high" },
+    },
+  ]);
+});

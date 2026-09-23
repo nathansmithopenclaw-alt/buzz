@@ -151,6 +151,8 @@ export type MockManagedAgentSeed = {
   envVars?: Record<string, string>;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
+  /** Instance prompt copy; `null` (default) = none recorded. */
+  systemPrompt?: string | null;
 };
 
 type MockManagedAgentRuntimeSeed = {
@@ -2648,7 +2650,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     idle_timeout_seconds: null,
     max_turn_duration_seconds: null,
     parallelism: 1,
-    system_prompt: null,
+    system_prompt: seed.systemPrompt ?? null,
     avatar_url: seed.avatarUrl ?? null,
     model: seed.model ?? null,
     effort_level: seed.effortLevel ?? null,

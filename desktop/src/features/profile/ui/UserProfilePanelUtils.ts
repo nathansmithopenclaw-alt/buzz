@@ -355,6 +355,49 @@ export function personaManagedAgentUpdate(
   return hasChanges ? input : null;
 }
 
+/**
+ * The one `update_managed_agent` a definition editor bound to a deployed agent
+ * sends after the definition saves: the definition-to-agent sync, the agent's
+ * thinking level when it was touched, and its access only when the dialog
+ * submitted an access change. The dialog seeds access from the agent, and an
+ * untouched access field is omitted from the definition save, so the saved
+ * definition's own default must not be copied over the agent's policy. Null
+ * when nothing on the agent changes: an unchanged Save makes no call and so
+ * restarts nothing.
+ */
+export function linkedAgentUpdateAfterDefinitionSave(
+  agent: ManagedAgent,
+  savedPersona: AgentPersona,
+  options: {
+    /** The definition save carried a behavior group (`input.behavior`). */
+    accessSubmitted: boolean;
+    effortLevel?: string | null;
+    previousPersona?: AgentPersona;
+    runtimes?: readonly AcpRuntimeCatalogEntry[];
+  },
+): UpdateManagedAgentInput | null {
+  let update = personaManagedAgentUpdate(agent, savedPersona, {
+    previousPersona: options.previousPersona,
+    runtimes: options.runtimes,
+  });
+  if (update && !options.accessSubmitted) {
+    const {
+      respondTo: _respondTo,
+      respondToAllowlist: _respondToAllowlist,
+      ...rest
+    } = update;
+    update = Object.keys(rest).length > 1 ? rest : null;
+  }
+  if (options.effortLevel !== undefined) {
+    update = {
+      ...update,
+      pubkey: agent.pubkey,
+      effortLevel: options.effortLevel,
+    };
+  }
+  return update;
+}
+
 function stringArrayEqual(left: readonly string[], right: readonly string[]) {
   if (left.length !== right.length) return false;
 

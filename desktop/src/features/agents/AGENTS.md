@@ -204,7 +204,11 @@ explicit live pick keeps the existing recovery path and correlated failure.
    dialog seeds access from the exact clicked instance and saves access through
    `update_managed_agent`; persona behavior remains the definition default, but
    must never bypass the instance command's stop, persist, publish, and restart
-   boundary.** An unknown location falls back to the local wording — never hedge
+   boundary.** The saved definition's access is copied onto that agent only when
+   the dialog submitted an access change (`linkedAgentUpdateAfterDefinitionSave`).
+   An untouched access field is omitted from the definition save, so the
+   definition keeps its own mint-time default, and that default must never
+   overwrite the agent's policy. An unknown location falls back to the local wording — never hedge
    with "computer or server". A remote host requires an
    installed `buzz-backend-*` provider, and without one `WhereToRunSection`
    never renders, so "server" would name a concept the owner has never been
