@@ -18,6 +18,11 @@ import {
 } from "./agentModelCatalog";
 import { getProviderEffortConfig } from "./buzzAgentConfig";
 import {
+  type EffortDiscoveryState,
+  unrenderedEffortExplanation,
+} from "./effortPicker";
+import { useAgentRunLocation } from "./AgentRunLocationContext";
+import {
   EffortSelectField,
   useEffortAutoClear,
 } from "./buzzAgentModelTuningFields";
@@ -25,6 +30,7 @@ import { AgentDialogFastModeSection } from "./AgentDialogFastModeField";
 
 export function AgentDialogEffortField({
   disabled,
+  effortDiscovery,
   envVars,
   inheritedEnvVars = {},
   model,
@@ -37,6 +43,7 @@ export function AgentDialogEffortField({
   scope,
 }: {
   disabled: boolean;
+  effortDiscovery: EffortDiscoveryState;
   envVars: EnvVarsValue;
   inheritedEnvVars?: EnvVarsValue;
   model: string;
@@ -56,20 +63,18 @@ export function AgentDialogEffortField({
     model,
     provider,
   } as GlobalAgentConfig;
+  const runLocation = useAgentRunLocation();
   const fieldModel = deriveAgentConfigFieldModel({ config, runtime, scope });
   const effortField = getRenderableEffortField(fieldModel);
 
   if (!effortField) {
-    const omission = fieldModel.omissions.find(
-      (item) => item.kind === "effort",
-    );
     return (
       <ReadOnlyEffortRow
-        explanation={
-          omission?.reason === "ownedByModelId"
-            ? "Codex owns reasoning effort in ~/.codex/config.toml (model_reasoning_effort). Buzz leaves that harness-level setting unchanged."
-            : "This harness does not advertise or expose a reasoning-effort setting."
-        }
+        explanation={unrenderedEffortExplanation(
+          fieldModel,
+          effortDiscovery,
+          runLocation,
+        )}
       />
     );
   }
@@ -197,13 +202,18 @@ export function AgentDialogEffortSection({
   ...fieldProps
 }: Omit<
   React.ComponentProps<typeof AgentDialogEffortField>,
-  "envVars" | "nativeDefaultModel" | "nativeEffortOptions" | "onEnvVarChange"
+  | "effortDiscovery"
+  | "envVars"
+  | "nativeDefaultModel"
+  | "nativeEffortOptions"
+  | "onEnvVarChange"
 > & {
   envVars: EnvVarsValue;
   instanceEffort?: ReturnType<typeof useInstanceEffort>;
   nativeTuning: {
     effortConfigId?: string | null;
     effortOptions: ReadonlyArray<{ id: string; name?: string | null }> | null;
+    effortDiscovery: EffortDiscoveryState;
     inheritedModel: string | null;
     fastMode: {
       configId: string | null;
@@ -241,6 +251,7 @@ export function AgentDialogEffortSection({
       {effortControl ?? (
         <AgentDialogEffortField
           {...fieldProps}
+          effortDiscovery={nativeTuning.effortDiscovery}
           envVars={fieldProps.envVars}
           nativeDefaultModel={nativeTuning.inheritedModel}
           nativeEffortOptions={nativeTuning.effortOptions}

@@ -81,7 +81,11 @@ explicit live pick keeps the existing recovery path and correlated failure.
    `ownedByModelId`; unsupported harnesses are `unsupportedByHarness`. Claude's
    control uses the selected model's live native values verbatim (including
    `default`); when either adapter omits effort for that model, render an explicit
-   read-only explanation. New absences get new named reasons in
+   read-only explanation. Claude's deferred descriptor is not an omission: its
+   read-only copy (`unrenderedEffortExplanation`) names the discovery state from
+   `effortDiscoveryState` (checking, couldn't load, model offers none, or set
+   from the deployed agent's profile Edit) and the remote-agent case, never that
+   the harness lacks effort. New absences get new named reasons in
    `AgentConfigOmission` / `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:
    "resetDependentValues"` (user changed harness/provider → dependent values
@@ -286,8 +290,15 @@ explicit live pick keeps the existing recovery path and correlated failure.
    `persistAgentEffortLevel` setter. Its gating and option compute live in the
    pure helper `ui/effortPicker.ts` (`effortPickerState`): the picker renders
    only when `agent.backend.type === "local"` **AND** a `thought_level`
-   `effortConfigId` has been discovered from the running session (absent
-   pre-first-session and for runtimes/models without effort support). Local-only
+   `effortConfigId` has been discovered, by model discovery for the selected
+   model or from the running session (absent for runtimes/models without effort
+   support). Model discovery selects the saved model the way spawn does, so it
+   reports the options a launched session advertises: Claude Code through
+   `ANTHROPIC_MODEL`, its sole startup authority, never an ACP `--model` switch.
+   The switch rejects ids outside claude-agent-acp's settings allowlist and
+   always runs the adapter's `setModel`, which can fail an account check that a
+   launch skips when the CLI already runs the saved id. An id the adapter cannot
+   resolve yields the default model's advertised levels, as at launch. Local-only
    is load-bearing, not cosmetic — the Rust command rejects non-local backends
    because remote effort is set at deploy time via `policy_env`. Because the
    control reads its inputs from the config surface the dialog already fetches
@@ -461,7 +472,11 @@ new audit channels must be private.
   `effortConfigId` renders; provider backend or missing configId hides) and
   option/preselect compute, plus `effortSelectionToPersistedValue` sentinel →
   null. This is where the v4 provider regression is pinned: the write control
-  must never render for a provider backend.
+  must never render for a provider backend. It also pins
+  `effortDiscoveryState` and `unrenderedEffortExplanation`: Claude's deferred
+  copy names each discovery state and the remote case, and never claims the
+  harness lacks effort. `desktop/tests/e2e/edit-agent.spec.ts` drives the real
+  dialog through failed and effort-less discovery.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, session-draft
   restoration, zero-write Skip, Next save failure/retry, navigation, and
@@ -472,6 +487,10 @@ new audit channels must be private.
 - `lib/agentDescription.test.mjs` — authored-description resolution: trim,
   blank/missing → null.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
+- Rust: `agent_model_process` tests pin spawn-parity model selection for
+  discovery: Claude receives the saved model as `ANTHROPIC_MODEL` with no
+  `--model` (including a resolved Windows `.cmd` shim path), and switch
+  runtimes keep `--model`.
 - Rust: `claude_model_catalog` tests pin comprehensive allowlisting, unknown-key
   preservation, existing-agent aliases, and custom saved-model union behavior.
 - Rust: `spawn_hash` tests pin the restart-required badge for both model and

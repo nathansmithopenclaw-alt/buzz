@@ -588,6 +588,83 @@ test.describe("edit agent dialog", () => {
       timeout: 10_000,
     });
   });
+
+  for (const scenario of [
+    {
+      name: "live discovery fails",
+      discovery: { discoverAgentModelsError: "Claude Code discovery failed" },
+      copy: "Buzz couldn’t load thinking levels for the selected model.",
+    },
+    {
+      name: "the model offers no effort control",
+      discovery: {
+        discoverAgentModels: {
+          models: [
+            {
+              id: "claude-haiku-4-5-20251001",
+              name: "Claude Haiku 4.5 (2025-10-01)",
+            },
+          ],
+          supportsSwitching: true,
+          effortConfigId: null,
+          effortOptions: [],
+        },
+      },
+      copy: "The selected model doesn’t offer thinking levels.",
+    },
+  ]) {
+    test(`Claude Edit Agent explains missing effort when ${scenario.name}`, async ({
+      page,
+    }) => {
+      await installMockBridge(page, {
+        acpRuntimesCatalog: [
+          {
+            id: "claude",
+            label: "Claude Code",
+            avatar_url: "",
+            availability: "available",
+            command: "claude-agent-acp",
+            binary_path: "/usr/local/bin/claude-agent-acp",
+            default_args: [],
+            mcp_command: null,
+            install_hint: "",
+            install_instructions_url: null,
+            can_auto_install: false,
+            requires_external_cli: true,
+            underlying_cli_path: "/usr/local/bin/claude",
+            source: "builtin",
+            // The Rust catalog declares no Claude effort env key; the mock's
+            // legacy default would route effort through an env-var control.
+            thinking_env_var: null,
+          },
+        ],
+        managedAgents: [
+          {
+            pubkey: AGENT_PUBKEY,
+            name: AGENT_NAME,
+            runtime: "claude",
+            status: "stopped",
+            channelNames: ["agents"],
+          },
+        ],
+        ...scenario.discovery,
+      });
+
+      await page.goto("/");
+      await page.getByTestId("open-agents-view").click();
+      await page
+        .getByRole("button", { name: `${AGENT_NAME} agent profile` })
+        .click();
+      await page.getByTestId("user-profile-edit-agent").click();
+
+      const dialog = page.getByTestId("edit-agent-dialog");
+      await expect(dialog).toBeVisible({ timeout: 10_000 });
+      const readOnly = dialog.getByTestId("agent-effort-read-only");
+      await expect(readOnly).toContainText(scenario.copy, { timeout: 10_000 });
+      await expect(readOnly).not.toContainText("does not advertise");
+      await expect(dialog.locator("#edit-agent-effort")).toHaveCount(0);
+    });
+  }
 });
 
 // The real dialog and IPC mapper are exercised; persistence/failure is mocked
