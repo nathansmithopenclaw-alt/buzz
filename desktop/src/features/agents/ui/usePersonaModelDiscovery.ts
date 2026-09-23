@@ -6,7 +6,7 @@ import type {
   AgentModelsResponse,
 } from "@/shared/api/types";
 import type { EnvVarsValue } from "./EnvVarsEditor";
-import { discoveredEffortCatalog } from "./effortPicker";
+import { discoveredEffortCatalog, effortDiscoveryState } from "./effortPicker";
 import {
   formatModelDiscoveryErrorStatus,
   type PersonaModelDiscoveryStatus,
@@ -431,6 +431,11 @@ export function usePersonaModelDiscovery({
     nativeTuning: {
       effortConfigId: activeModelDiscoveryData?.effortConfigId ?? null,
       effortOptions: nativeEffortOptions,
+      effortDiscovery: effortDiscoveryState({
+        pending: modelDiscoveryPending,
+        discovered: activeModelDiscoveryData !== null,
+        effortOptions: nativeEffortOptions,
+      }),
       inheritedModel: activeModelDiscoveryData?.agentDefaultModel ?? null,
       fastMode: {
         configId: activeModelDiscoveryData?.fastModeConfigId ?? null,

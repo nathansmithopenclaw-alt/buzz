@@ -275,11 +275,20 @@ test("Fast mode uses native capability gating and explicit unavailable copy", as
 });
 
 test("computed effort omissions are rendered instead of discarded", async () => {
-  const source = await readFile(
+  const dialog = await readFile(
     new URL("./AgentDialogEffortField.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /fieldModel\.omissions/);
-  assert.match(source, /model_reasoning_effort/);
-  assert.match(source, /does not advertise or expose/);
+  assert.match(
+    dialog,
+    /unrenderedEffortExplanation\(\s*fieldModel,\s*effortDiscovery,\s*runLocation,?\s*\)/,
+  );
+  assert.match(dialog, /effortDiscovery=\{nativeTuning\.effortDiscovery\}/);
+  const explanation = await readFile(
+    new URL("./effortPicker.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(explanation, /fieldModel\.omissions/);
+  assert.match(explanation, /model_reasoning_effort/);
+  assert.match(explanation, /does not advertise or expose/);
 });
