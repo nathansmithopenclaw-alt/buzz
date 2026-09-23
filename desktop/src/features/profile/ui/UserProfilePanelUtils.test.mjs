@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  linkedAgentUpdateAfterDefinitionSave,
   resolvePanelProfile,
   parseProfilePanelTab,
   parseProfilePanelView,
@@ -261,4 +262,61 @@ test("managed profile uses the exact instance selection and preserves removal", 
     assert.equal(result.avatarUrl, avatarUrl || null);
     assert.equal(result.displayName, "Relay");
   }
+});
+
+// The agent is owner-only while its definition's mint-time default is
+// "anyone". Every other synced field matches.
+function narrowerThanDefinition() {
+  const shared = {
+    systemPrompt: "Same prompt",
+    model: "same-model",
+    envVars: {},
+  };
+  return {
+    agent: agent({ ...shared, respondTo: "owner-only" }),
+    savedPersona: persona({
+      ...shared,
+      displayName: "Fizz",
+      respondTo: "anyone",
+    }),
+  };
+}
+
+test("linkedAgentUpdateAfterDefinitionSave never copies an untouched definition access over the agent", () => {
+  const { agent: linked, savedPersona } = narrowerThanDefinition();
+  assert.equal(
+    linkedAgentUpdateAfterDefinitionSave(linked, savedPersona, {
+      accessSubmitted: false,
+    }),
+    null,
+    "an unchanged Save writes nothing to the agent",
+  );
+  assert.deepEqual(
+    linkedAgentUpdateAfterDefinitionSave(linked, savedPersona, {
+      accessSubmitted: false,
+      effortLevel: "high",
+    }),
+    { pubkey: linked.pubkey, effortLevel: "high" },
+    "an effort-only Save sends only the effort",
+  );
+  assert.deepEqual(
+    linkedAgentUpdateAfterDefinitionSave(
+      linked,
+      { ...savedPersona, model: "new-model" },
+      { accessSubmitted: false },
+    ),
+    { pubkey: linked.pubkey, model: "new-model" },
+    "other synced fields still reach the agent without its access",
+  );
+});
+
+test("linkedAgentUpdateAfterDefinitionSave syncs access the dialog submitted", () => {
+  const { agent: linked, savedPersona } = narrowerThanDefinition();
+  assert.deepEqual(
+    linkedAgentUpdateAfterDefinitionSave(linked, savedPersona, {
+      accessSubmitted: true,
+      effortLevel: null,
+    }),
+    { pubkey: linked.pubkey, respondTo: "anyone", effortLevel: null },
+  );
 });

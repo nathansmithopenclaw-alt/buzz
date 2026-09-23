@@ -1,6 +1,6 @@
 import { toast } from "sonner";
 
-import { personaManagedAgentUpdate } from "@/features/profile/ui/UserProfilePanelUtils";
+import { linkedAgentUpdateAfterDefinitionSave } from "@/features/profile/ui/UserProfilePanelUtils";
 import type {
   AcpRuntimeCatalogEntry,
   AgentPersona,
@@ -90,19 +90,14 @@ export async function submitProfilePersonaDialog({
       }
 
       const persona = await updatePersona(input);
-      let agentUpdate = managedAgent
-        ? personaManagedAgentUpdate(managedAgent, persona, {
+      const agentUpdate = managedAgent
+        ? linkedAgentUpdateAfterDefinitionSave(managedAgent, persona, {
+            accessSubmitted: input.behavior !== undefined,
+            effortLevel,
             previousPersona,
             runtimes,
           })
         : null;
-      if (managedAgent && effortLevel !== undefined) {
-        agentUpdate = {
-          ...agentUpdate,
-          pubkey: managedAgent.pubkey,
-          effortLevel,
-        };
-      }
       const result = agentUpdate ? await updateManagedAgent(agentUpdate) : null;
       if (result?.profileSyncError) {
         toast.warning(

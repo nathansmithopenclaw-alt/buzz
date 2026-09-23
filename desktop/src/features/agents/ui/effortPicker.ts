@@ -153,7 +153,7 @@ export function unrenderedEffortExplanation(
       case "none":
         return "The selected model doesn’t offer thinking levels.";
       case "available":
-        return "Thinking level is set on each deployed agent. Open the agent’s profile and choose Edit to change it.";
+        return "Thinking level is set on each deployed agent, not on its template. Choose Edit on a deployed agent’s card or profile to change it.";
     }
   }
   const omission = fieldModel.omissions.find((item) => item.kind === "effort");

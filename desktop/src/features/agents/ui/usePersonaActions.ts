@@ -1,5 +1,6 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import {
   managedAgentsQueryKey,
@@ -13,6 +14,7 @@ import {
   usePreviewAgentSnapshotImportMutation,
   useConfirmAgentSnapshotImportMutation,
   useSetPersonaActiveMutation,
+  useUpdateManagedAgentMutation,
   useUpdatePersonaMutation,
   type AgentSnapshotImportPreview,
   type AgentSnapshotImportResult,
@@ -36,6 +38,8 @@ import {
 import { personaSaveNotice } from "@/features/agents/lib/personaSaveNotice";
 import { useCreatedAgentChannelAttachment } from "@/features/agents/useCreatedAgentChannelAttachment";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { validateLinkedAgentRuntimeEdit } from "@/features/profile/ui/UserProfilePanelPersonaSubmit";
+import { linkedAgentUpdateAfterDefinitionSave } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type {
   SnapshotFormat,
@@ -46,6 +50,7 @@ import type {
   AgentPersona,
   Channel,
   CreatePersonaInput,
+  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import type { AgentDeployment } from "./agentDeployments";
@@ -86,6 +91,7 @@ export function usePersonaActions() {
   const updatePersonaMutation = useUpdatePersonaMutation();
   const updatePersonaAndPublishMutation =
     useUpdatePersonaAndPublishMutation(communityId);
+  const updateManagedAgentMutation = useUpdateManagedAgentMutation();
   const deletePersonaMutation = useDeletePersonaMutation();
   const setPersonaActiveMutation = useSetPersonaActiveMutation();
   const exportAgentSnapshotMutation = useExportAgentSnapshotMutation();
@@ -94,6 +100,20 @@ export function usePersonaActions() {
 
   const [personaDialogState, setPersonaDialogState] =
     React.useState<PersonaDialogState | null>(null);
+  /** Shown inside the open definition editor (e.g. a Save that half-failed). */
+  const [personaDialogError, setPersonaDialogError] = React.useState<
+    string | null
+  >(null);
+  /**
+   * A definition that saved while its deployed agent's update failed. A retry
+   * of the same Save re-issues only the agent write.
+   */
+  const [pendingAgentWrite, setPendingAgentWrite] = React.useState<{
+    key: string;
+    savedPersona: AgentPersona;
+    previousPersona: AgentPersona | undefined;
+    notice: string;
+  } | null>(null);
   const [personaToDelete, setPersonaToDelete] =
     React.useState<AgentPersona | null>(null);
   const [personaToShare, setPersonaToShare] = React.useState<{
@@ -177,34 +197,115 @@ export function usePersonaActions() {
     intent?: AgentCreateIntent,
     backendIntent?: BackendIntent | null,
     targetChannel?: Pick<Channel, "id" | "name"> | null,
-    options?: { publishCatalogUpdates?: boolean },
+    options?: {
+      publishCatalogUpdates?: boolean;
+      effortLevel?: string | null;
+      /** The deployed agent a card's Edit is editing, as the dialog resolved it. */
+      linkedAgent?: ManagedAgent;
+    },
   ): Promise<boolean> {
     if (isPersonaSubmitPending) {
       return false;
     }
 
     clearFeedback("library");
+    setPersonaDialogError(null);
     setIsPersonaSubmitPending(true);
     try {
       if ("id" in input) {
-        // "Save and publish" promises the community catalog sees this edit, so
-        // it must use the command that awaits the relay. A plain save only
-        // enqueues the head and cannot report the outcome.
-        if (options?.publishCatalogUpdates) {
-          const result =
-            await updatePersonaAndPublishMutation.mutateAsync(input);
-          if (result.publicationStatus === "queued" && result.relayMessage) {
-            console.warn(
-              `[updatePersonaAndPublish] relay publication queued: ${result.relayMessage}`,
-            );
-          }
-          setPersonaNoticeMessage(
-            personaSaveNotice(input.displayName, result.publicationStatus),
-          );
+        const linkedAgent = options?.linkedAgent;
+        const runtimes = acpRuntimesQuery.data ?? [];
+        // A retry of the same Save after the agent half failed re-issues only
+        // the agent write; the definition already saved.
+        const retryKey = JSON.stringify([
+          linkedAgent?.pubkey ?? null,
+          input,
+          options?.publishCatalogUpdates ?? false,
+        ]);
+        const retry =
+          linkedAgent && pendingAgentWrite?.key === retryKey
+            ? pendingAgentWrite
+            : null;
+        let savedPersona: AgentPersona;
+        let previousPersona: AgentPersona | undefined;
+        let notice: string;
+        if (retry) {
+          ({ savedPersona, previousPersona, notice } = retry);
         } else {
-          await updatePersonaMutation.mutateAsync(input);
-          setPersonaNoticeMessage(personaSaveNotice(input.displayName, null));
+          previousPersona = personas.find((persona) => persona.id === input.id);
+          const runtimeEditError = validateLinkedAgentRuntimeEdit({
+            input,
+            managedAgent: linkedAgent,
+            previousPersona,
+            runtimes,
+          });
+          if (runtimeEditError) {
+            setPersonaErrorMessage(runtimeEditError);
+            return false;
+          }
+          // "Save and publish" promises the community catalog sees this edit,
+          // so it must use the command that awaits the relay. A plain save
+          // only enqueues the head and cannot report the outcome.
+          if (options?.publishCatalogUpdates) {
+            const result =
+              await updatePersonaAndPublishMutation.mutateAsync(input);
+            if (result.publicationStatus === "queued" && result.relayMessage) {
+              console.warn(
+                `[updatePersonaAndPublish] relay publication queued: ${result.relayMessage}`,
+              );
+            }
+            savedPersona = result.persona;
+            notice = personaSaveNotice(
+              input.displayName,
+              result.publicationStatus,
+            );
+          } else {
+            savedPersona = await updatePersonaMutation.mutateAsync(input);
+            notice = personaSaveNotice(input.displayName, null);
+          }
         }
+        // A card's Edit edits that deployed agent exactly as the profile Edit
+        // does: after the definition saves, one update_managed_agent carries
+        // the definition-to-agent sync, the agent's access when the dialog
+        // changed it, and its thinking level. No change, no call.
+        if (linkedAgent) {
+          const agentUpdate = linkedAgentUpdateAfterDefinitionSave(
+            linkedAgent,
+            savedPersona,
+            {
+              accessSubmitted: input.behavior !== undefined,
+              effortLevel: options?.effortLevel,
+              previousPersona,
+              runtimes,
+            },
+          );
+          if (agentUpdate) {
+            try {
+              const result =
+                await updateManagedAgentMutation.mutateAsync(agentUpdate);
+              if (result.profileSyncError) {
+                toast.warning(
+                  `${result.agent.name} was updated, but profile sync failed: ${result.profileSyncError}`,
+                );
+              }
+            } catch (error) {
+              const reason =
+                error instanceof Error ? error.message : String(error);
+              setPendingAgentWrite({
+                key: retryKey,
+                savedPersona,
+                previousPersona,
+                notice,
+              });
+              const message = `Saved the ${input.displayName} definition, but the agent was not updated: ${reason}. Save again to retry the agent update.`;
+              setPersonaDialogError(message);
+              setPersonaErrorMessage(message);
+              return false;
+            }
+          }
+        }
+        setPendingAgentWrite(null);
+        setPersonaNoticeMessage(notice);
       } else {
         const runtime = availableRuntimes.find(
           (candidate) => candidate.id === input.runtime,
@@ -429,16 +530,35 @@ export function usePersonaActions() {
     setShouldLoadAcpRuntimes(true);
   }
 
-  function openEdit(persona: AgentPersona) {
+  /**
+   * `agent` is the deployed agent when a fleet card opens the editor: access
+   * is seeded from that agent, as the profile Edit does, and Save updates it.
+   */
+  function openEdit(persona: AgentPersona, agent?: ManagedAgent) {
     clearFeedback("library");
     setShouldLoadAcpRuntimes(true);
-    setPersonaDialogState(editPersonaDialogState(persona));
+    resetPersonaDialogSession();
+    setPersonaDialogState({
+      ...editPersonaDialogState(persona, agent),
+      agentPubkey: agent?.pubkey,
+    });
   }
 
   function openDuplicate(persona: AgentPersona) {
     clearFeedback("library");
     setShouldLoadAcpRuntimes(true);
+    resetPersonaDialogSession();
     setPersonaDialogState(duplicatePersonaDialogState(persona));
+  }
+
+  function closePersonaDialog() {
+    resetPersonaDialogSession();
+    setPersonaDialogState(null);
+  }
+
+  function resetPersonaDialogSession() {
+    setPersonaDialogError(null);
+    setPendingAgentWrite(null);
   }
 
   function openDelete(persona: AgentPersona) {
@@ -603,6 +723,8 @@ export function usePersonaActions() {
     handleSetActive,
     prepareCreate,
     openEdit,
+    closePersonaDialog,
+    personaDialogError,
     openDuplicate,
     openDelete,
     openShare,

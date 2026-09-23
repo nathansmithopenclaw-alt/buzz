@@ -489,3 +489,132 @@ fn definitionless_instance_retains_its_stored_session_policy() {
         AcpSessionPolicy::Thread
     );
 }
+
+/// The stamped/current pair the runtime compares, as real snapshots rather
+/// than canonical JSON, so the card-Save tests below run the exact
+/// `needs_restart` computation.
+fn prospective(record: &ManagedAgentRecord, personas: &[AgentDefinition]) -> SpawnConfigSnapshot {
+    prospective_spawn_config_snapshot(ProspectiveSpawnConfigInputs {
+        record,
+        personas,
+        teams: &[],
+        workspace_relay: "wss://ws.example",
+        global: &Default::default(),
+        enforced_owner_only: false,
+        session_residency_enabled: false,
+    })
+}
+
+fn restart_diff(stamped: &SpawnConfigSnapshot, current: &SpawnConfigSnapshot) -> Vec<String> {
+    eligible_restart_diff(
+        false,
+        Some(TrackedSpawnState {
+            stamped,
+            current,
+            stamped_availability: None,
+            current_availability: None,
+        }),
+    )
+    .into_iter()
+    .map(|entry| entry.field)
+    .collect()
+}
+
+/// A Save from an Agents-page card is two writes: the definition save, then one
+/// `update_managed_agent`, here carrying an access change. That access change
+/// stops the agent's pairs and restarts them (`start_local_agent_pairs_with_preflight`,
+/// which re-pins the record before it spawns). A linked agent's spawn resolves
+/// the definition live, so a restart that runs after the definition save stamps
+/// exactly the config the badge predicts and leaves nothing for the idle
+/// auto-restart: one Save, one restart. The order is load-bearing: a restart
+/// taken before the definition save would leave a second one pending.
+#[test]
+fn card_save_access_restart_after_definition_save_leaves_no_drift() {
+    use crate::managed_agents::persona_events::{
+        apply_persona_snapshot, persona_content_hash, persona_event_content,
+    };
+    let mut old_def = persona("pers", Some("goose"), "old prompt");
+    old_def.model = Some("model-a".into());
+    let mut new_def = persona("pers", Some("goose"), "new prompt");
+    new_def.model = Some("model-b".into());
+
+    // The running pair was spawned, and re-pinned, under the old definition.
+    let mut rec = record();
+    rec.persona_id = Some("pers".into());
+    apply_persona_snapshot(&mut rec, &old_def);
+    let stamped = prospective(&rec, std::slice::from_ref(&old_def));
+
+    // Card Save: the definition saves first, then update_managed_agent writes
+    // the agent's own access and thinking level.
+    rec.respond_to = RespondTo::Anyone;
+    rec.effort_level = Some("high".into());
+    let predicted = prospective(&rec, std::slice::from_ref(&new_def));
+    assert!(
+        !restart_diff(&stamped, &predicted).is_empty(),
+        "both halves of the Save are pending until the restart"
+    );
+
+    // Wrong order, for contrast: an access restart taken before the definition
+    // save stamps the old definition, so a second restart stays pending.
+    let restarted_first = prospective(&rec, std::slice::from_ref(&old_def));
+    assert!(
+        !restart_diff(&restarted_first, &predicted).is_empty(),
+        "restarting before the definition save leaves drift behind"
+    );
+
+    // Real order: the access restart re-pins, then spawns under the saved
+    // definition and stamps what it runs.
+    apply_persona_snapshot(&mut rec, &new_def);
+    let restamped = prospective(&rec, std::slice::from_ref(&new_def));
+    assert_eq!(
+        restamped.canonical(),
+        predicted.canonical(),
+        "the restart runs exactly the config the badge predicted"
+    );
+    assert_eq!(
+        restart_diff(
+            &restamped,
+            &prospective(&rec, std::slice::from_ref(&new_def))
+        ),
+        Vec::<String>::new(),
+        "no needs_restart is left for the idle auto-restart"
+    );
+    assert_eq!(
+        rec.persona_source_version.as_deref(),
+        Some(persona_content_hash(&persona_event_content(&new_def)).as_str()),
+        "the restart consumed the new definition version"
+    );
+}
+
+/// The launch backfill (`backfill_persona_snapshots`) and every local spawn
+/// re-pin a definition-linked record through `apply_persona_snapshot`. The
+/// definition quad (model, prompt, provider, runtime) is definition-
+/// authoritative and is re-derived there by design. The agent's own access and
+/// thinking level are not: a card Save writes them with `update_managed_agent`,
+/// and they must survive both re-pins even when the definition's mint-time
+/// access default differs.
+#[test]
+fn definition_repin_keeps_the_agents_access_and_thinking_level() {
+    use crate::managed_agents::persona_events::apply_persona_snapshot;
+    let mut def = persona("pers", Some("goose"), "prompt");
+    def.model = Some("model-b".into());
+    def.respond_to = Some("owner-only".into());
+    let allowlist = vec!["a".repeat(64)];
+
+    let mut rec = record();
+    rec.persona_id = Some("pers".into());
+    // As written by the card Save's update_managed_agent.
+    rec.model = Some("model-b".into());
+    rec.respond_to = RespondTo::Allowlist;
+    rec.respond_to_allowlist = allowlist.clone();
+    rec.effort_level = Some("high".into());
+
+    apply_persona_snapshot(&mut rec, &def);
+    // Launch backfill and a later spawn re-pin again: idempotent.
+    apply_persona_snapshot(&mut rec, &def);
+
+    assert_eq!(rec.respond_to, RespondTo::Allowlist);
+    assert_eq!(rec.respond_to_allowlist, allowlist);
+    assert_eq!(rec.effort_level.as_deref(), Some("high"));
+    assert_eq!(rec.model.as_deref(), Some("model-b"));
+}

@@ -4,7 +4,8 @@ import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
 } from "@/features/agents/openSnapshotImportFromUrlEvent";
-import type { AgentPersona } from "@/shared/api/types";
+import { useAgentConfigSurface } from "@/features/agents/hooks";
+import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -14,6 +15,10 @@ import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { buildAgentMemorySources } from "./agentDeployments";
 import { CommunityCatalogDialog } from "./CommunityCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
+import {
+  personaDialogKey,
+  resolvePersonaDialogAgent,
+} from "./personaDialogState";
 import { PersonaShareDialog } from "./PersonaShareDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
@@ -23,6 +28,7 @@ import { TeamSnapshotImportDialog } from "./TeamSnapshotImportDialog";
 import type { useManagedAgentActions } from "./useManagedAgentActions";
 import type { usePersonaActions } from "./usePersonaActions";
 import type { useTeamActions } from "./useTeamActions";
+import { useInstanceEffort } from "./useInstanceEffort";
 
 type AgentsDialogsProps = {
   agents: ReturnType<typeof useManagedAgentActions>;
@@ -105,49 +111,13 @@ export function AgentsDialogs({
       ) : null}
 
       {personas.personaDialogState ? (
-        <AgentDialog
-          description={personas.personaDialogState.description}
-          error={
-            personas.updatePersonaMutation.error instanceof Error
-              ? personas.updatePersonaMutation.error
-              : personas.updatePersonaAndPublishMutation.error instanceof Error
-                ? personas.updatePersonaAndPublishMutation.error
-                : personas.createPersonaMutation.error instanceof Error
-                  ? personas.createPersonaMutation.error
-                  : null
-          }
-          initialValues={personas.personaDialogState.initialValues}
-          isPending={personas.isPending}
-          mode="definition-edit"
-          onOpenChange={(open) => {
-            if (!open) personas.setPersonaDialogState(null);
-          }}
-          onSubmit={(input, options) =>
-            personas.handleSubmit(
-              input,
-              undefined,
-              undefined,
-              undefined,
-              options,
-            )
-          }
-          open
-          publishCatalogUpdatesOnSave={
-            "id" in personas.personaDialogState.initialValues &&
-            personas.sharedCatalogPersonaIdSet.has(
-              personas.personaDialogState.initialValues.id,
-            )
-          }
-          runtimes={personas.acpRuntimesQuery.data ?? []}
-          runtimeCatalogStatus={
-            personas.acpRuntimesQuery.isLoading
-              ? "loading"
-              : personas.acpRuntimesQuery.isError
-                ? "error"
-                : "ready"
-          }
-          submitLabel={personas.personaDialogState.submitLabel}
-          title={personas.personaDialogState.title}
+        <AgentsPersonaDialog
+          agent={resolvePersonaDialogAgent(
+            personas.personaDialogState,
+            agents.managedAgents,
+          )}
+          key={personaDialogKey(personas.personaDialogState)}
+          personas={personas}
         />
       ) : null}
 
@@ -479,5 +449,68 @@ export function AgentsDialogs({
         type="file"
       />
     </>
+  );
+}
+
+/**
+ * The Agents-page definition editor. A card's Edit passes that deployed
+ * agent, and the editor then seeds, offers and saves the agent's own access and
+ * thinking level exactly as the profile Edit does. Mounted only while it is
+ * open, so an effort draft cannot outlive its dialog.
+ */
+function AgentsPersonaDialog({
+  agent,
+  personas,
+}: {
+  agent: ManagedAgent | undefined;
+  personas: ReturnType<typeof usePersonaActions>;
+}) {
+  const { data: effortConfig } = useAgentConfigSurface(agent?.pubkey ?? null);
+  const instanceEffort = useInstanceEffort(agent, true, effortConfig);
+  const personaDialog = personas.personaDialogState;
+  if (!personaDialog) return null;
+  return (
+    <AgentDialog
+      instanceEffort={agent ? instanceEffort : undefined}
+      description={personaDialog.description}
+      error={
+        personas.personaDialogError
+          ? new Error(personas.personaDialogError)
+          : personas.updatePersonaMutation.error instanceof Error
+            ? personas.updatePersonaMutation.error
+            : personas.updatePersonaAndPublishMutation.error instanceof Error
+              ? personas.updatePersonaAndPublishMutation.error
+              : personas.createPersonaMutation.error instanceof Error
+                ? personas.createPersonaMutation.error
+                : null
+      }
+      initialValues={personaDialog.initialValues}
+      isPending={personas.isPending}
+      mode="definition-edit"
+      onOpenChange={(open) => {
+        if (!open) personas.closePersonaDialog();
+      }}
+      onSubmit={(input, options) =>
+        personas.handleSubmit(input, undefined, undefined, undefined, {
+          ...options,
+          linkedAgent: agent,
+        })
+      }
+      open
+      publishCatalogUpdatesOnSave={
+        "id" in personaDialog.initialValues &&
+        personas.sharedCatalogPersonaIdSet.has(personaDialog.initialValues.id)
+      }
+      runtimes={personas.acpRuntimesQuery.data ?? []}
+      runtimeCatalogStatus={
+        personas.acpRuntimesQuery.isLoading
+          ? "loading"
+          : personas.acpRuntimesQuery.isError
+            ? "error"
+            : "ready"
+      }
+      submitLabel={personaDialog.submitLabel}
+      title={personaDialog.title}
+    />
   );
 }
