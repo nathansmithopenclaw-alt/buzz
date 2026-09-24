@@ -269,6 +269,7 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/commands/team_snapshot.rs", 1, 1), // boundary 6
     ("src/commands/personas/snapshot/import.rs", 2, 1), // boundary 7 + its in-file injection-test fixture URL
     ("src/native_websocket.rs", 0, 2),                  // boundary 8 (WS frames; no events URL)
+    ("src/dictation/cleanup.rs", 0, 1), // dictation cleanup payload (no events URL)
     // Test-only fixtures — no production egress, no guard:
     // Delegation create/reuse loopback test; real creation uses submit_event_with_keys.
     ("src/commands/agent_management_grant.rs", 1, 0),
