@@ -8,11 +8,17 @@ type HuddleStateSnapshot = { phase?: string };
 /**
  * `true` while a huddle holds (or is acquiring) the microphone, from the
  * backend's authoritative huddle phase. Safe outside the huddle provider;
- * defaults to `false` where huddles are unavailable.
+ * defaults to `false` where huddles are unavailable. Inert (no invoke, no
+ * listener) while `enabled` is false, so composers pay nothing when the
+ * dictation experiment is off.
  */
-export function useHuddleIsLive(): boolean {
+export function useHuddleIsLive(enabled: boolean): boolean {
   const [live, setLive] = React.useState(false);
   React.useEffect(() => {
+    if (!enabled) {
+      setLive(false);
+      return;
+    }
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     const apply = (state: HuddleStateSnapshot | null | undefined) => {
@@ -33,6 +39,6 @@ export function useHuddleIsLive(): boolean {
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [enabled]);
   return live;
 }

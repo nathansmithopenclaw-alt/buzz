@@ -34,7 +34,7 @@ export function useMessageComposerDictation(
   input: MessageComposerDictationInput,
 ) {
   const enabled = useFeatureEnabled("dictation");
-  const huddleActive = useHuddleIsLive();
+  const huddleActive = useHuddleIsLive(enabled);
   const { settings } = useDictationSettings(enabled);
   const dictation = useComposerDictation({
     ...input,
