@@ -868,7 +868,10 @@ impl ModelManager {
         let archive_path = self.models_dir.join(format!("{}.tar.bz2", spec.dir_name));
         let temp_dir = self.models_dir.join(format!("{}.tmp", spec.dir_name));
 
-        eprintln!("buzz-desktop: downloading {} model from {}", spec.label, spec.url);
+        eprintln!(
+            "buzz-desktop: downloading {} model from {}",
+            spec.label, spec.url
+        );
         let response = fetch_url(&http_client, spec.url, spec.progress_label).await?;
 
         let progress_slot = slot.clone();

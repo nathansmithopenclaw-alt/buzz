@@ -17,15 +17,32 @@ fn feed(seg: &mut Segmenter, count: usize, probability: f32, value: f32) -> Vec<
 #[test]
 fn a_pause_cuts_a_chunk_with_lead_in_and_trailing_pause() {
     let mut seg = Segmenter::default();
-    assert!(feed(&mut seg, 40, SILENT, 0.0).is_empty(), "silence alone never cuts");
-    assert!(feed(&mut seg, 50, SPEECH, 0.5).is_empty(), "speech alone never cuts early");
+    assert!(
+        feed(&mut seg, 40, SILENT, 0.0).is_empty(),
+        "silence alone never cuts"
+    );
+    assert!(
+        feed(&mut seg, 50, SPEECH, 0.5).is_empty(),
+        "speech alone never cuts early"
+    );
     let chunks = feed(&mut seg, PAUSE_CUT_FRAMES, SILENT, 0.0);
-    assert_eq!(chunks.len(), 1, "a ≥500 ms pause after speech cuts exactly once");
+    assert_eq!(
+        chunks.len(),
+        1,
+        "a ≥500 ms pause after speech cuts exactly once"
+    );
     let chunk = &chunks[0];
     let speech_samples = chunk.iter().filter(|&&s| s == 0.5).count();
-    assert_eq!(speech_samples, 50 * VAD_FRAME_SAMPLES, "every speech sample is kept");
+    assert_eq!(
+        speech_samples,
+        50 * VAD_FRAME_SAMPLES,
+        "every speech sample is kept"
+    );
     let lead_in = chunk.iter().take_while(|&&s| s == 0.0).count();
-    assert_eq!(lead_in, LEAD_IN_SAMPLES, "300 ms of lead-in precedes the speech");
+    assert_eq!(
+        lead_in, LEAD_IN_SAMPLES,
+        "300 ms of lead-in precedes the speech"
+    );
 }
 
 #[test]
@@ -58,7 +75,10 @@ fn short_pauses_inside_speech_do_not_split() {
 fn pure_silence_is_never_decoded() {
     let mut seg = Segmenter::default();
     assert!(feed(&mut seg, 500, SILENT, 0.0).is_empty());
-    assert!(seg.chunk.len() <= LEAD_IN_SAMPLES * 2, "silence is trimmed, not accumulated");
+    assert!(
+        seg.chunk.len() <= LEAD_IN_SAMPLES * 2,
+        "silence is trimmed, not accumulated"
+    );
     assert_eq!(seg.finish(), None);
 }
 
@@ -78,7 +98,10 @@ fn long_speech_is_capped_at_thirty_seconds_per_chunk() {
     let chunks = feed(&mut seg, frames, SPEECH, 0.5);
     assert_eq!(chunks.len(), 1);
     assert!(chunks[0].len() <= MAX_CHUNK_SAMPLES);
-    assert!(seg.finish().is_some(), "speech after the cap continues in a new chunk");
+    assert!(
+        seg.finish().is_some(),
+        "speech after the cap continues in a new chunk"
+    );
 }
 
 #[test]
@@ -105,7 +128,10 @@ fn chunks_join_with_single_spaces() {
         "  ".to_string(),
         "the patch  Codex sent?".to_string(),
     ];
-    assert_eq!(join_chunks(&texts), "Anvil, can you review the patch Codex sent?");
+    assert_eq!(
+        join_chunks(&texts),
+        "Anvil, can you review the patch Codex sent?"
+    );
 }
 
 #[test]

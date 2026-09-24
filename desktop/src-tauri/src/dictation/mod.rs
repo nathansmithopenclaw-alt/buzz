@@ -76,7 +76,13 @@ fn free_bytes(path: &Path) -> Option<u64> {
 
 /// Parses the "Available" column (KiB) from POSIX `df -Pk` output.
 fn parse_df_available_kib(output: &str) -> Option<u64> {
-    output.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()
+    output
+        .lines()
+        .nth(1)?
+        .split_whitespace()
+        .nth(3)?
+        .parse()
+        .ok()
 }
 
 /// Dictation model readiness plus the disk-space check shown before download.
@@ -280,7 +286,9 @@ pub async fn dictation_cleanup(
         mode_instructions: None,
     };
     let timeout = Duration::from_millis(u64::from(settings.timeout_ms));
-    if !matches!(settings.cleanup, CleanupSource::ClaudePlan { .. }) || !settings.cloud_cleanup_enabled {
+    if !matches!(settings.cleanup, CleanupSource::ClaudePlan { .. })
+        || !settings.cloud_cleanup_enabled
+    {
         // The source changed since start (or cloud is off): end any launch.
         claude_plan::discard(request.session_id);
     }
@@ -347,11 +355,9 @@ mod tests {
         assert_eq!(parse_df_available_kib("header only\n"), None);
     }
 
-    #[test]
-    fn required_space_includes_a_gigabyte_margin() {
-        assert!(MODEL_REQUIRED_BYTES > 2_000_000_000);
-        assert!(MODEL_REQUIRED_BYTES < 2_500_000_000);
-    }
+    // Compile-time: the requirement stays archive + extracted + ~1 GB margin.
+    const _: () = assert!(MODEL_REQUIRED_BYTES > 2_000_000_000);
+    const _: () = assert!(MODEL_REQUIRED_BYTES < 2_500_000_000);
 
     #[test]
     fn one_session_at_a_time_and_release_is_scoped() {
@@ -360,7 +366,11 @@ mod tests {
             *guard = Some(41);
         }
         release_session(40);
-        assert_eq!(current_session(), Some(41), "a stale id cannot release another session");
+        assert_eq!(
+            current_session(),
+            Some(41),
+            "a stale id cannot release another session"
+        );
         release_session(41);
         assert_eq!(current_session(), None);
     }

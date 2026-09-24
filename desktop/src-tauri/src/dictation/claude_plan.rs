@@ -185,7 +185,11 @@ pub(crate) fn prewarm(
 
 /// Aborts a session's launch and drops (kills) its process, if any.
 pub(crate) fn discard(session: u64) {
-    if let Some(launch) = launches().lock().ok().and_then(|mut map| map.remove(&session)) {
+    if let Some(launch) = launches()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&session))
+    {
         launch.abort();
     }
 }
@@ -201,7 +205,11 @@ pub(crate) fn parse_result_line(line: &str) -> Option<Result<String, CleanupFail
             message: "Claude Code reported an error".into(),
         }));
     }
-    let text = value.get("result").and_then(Value::as_str)?.trim().to_string();
+    let text = value
+        .get("result")
+        .and_then(Value::as_str)?
+        .trim()
+        .to_string();
     Some(if text.is_empty() {
         Err(CleanupFailure::BadResponse)
     } else {
@@ -242,7 +250,10 @@ pub(crate) async fn run(
 ) -> Result<String, CleanupFailure> {
     cleanup::check_outbound(input)?;
     let deadline = tokio::time::Instant::now() + timeout;
-    let launch = launches().lock().ok().and_then(|mut map| map.remove(&session));
+    let launch = launches()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&session));
     let mut process = match launch {
         Some(launch) => match tokio::time::timeout_at(deadline, launch).await {
             Err(_) => return Err(CleanupFailure::Timeout),
@@ -292,15 +303,24 @@ mod tests {
         assert_eq!(pair("--model").as_deref(), Some("claude-haiku-4-5"));
         assert_eq!(pair("--tools").as_deref(), Some(""));
         assert_eq!(pair("--setting-sources").as_deref(), Some(""));
-        assert_eq!(pair("--mcp-config").as_deref(), Some(r#"{"mcpServers":{}}"#));
+        assert_eq!(
+            pair("--mcp-config").as_deref(),
+            Some(r#"{"mcpServers":{}}"#)
+        );
         assert!(args.contains(&"--strict-mcp-config".to_string()));
     }
 
     #[test]
     fn thinking_is_off_and_token_stays_out_of_argv() {
         let home = std::path::Path::new("/tmp/iso");
-        let env = cli_env(home, Some("/usr/bin".into()), "sk-ant-oat01-secret", |_| None);
-        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        let env = cli_env(home, Some("/usr/bin".into()), "sk-ant-oat01-secret", |_| {
+            None
+        });
+        let get = |k: &str| {
+            env.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
         assert_eq!(get("MAX_THINKING_TOKENS"), Some("0"));
         assert_eq!(get("HOME"), Some("/tmp/iso"));
         assert_eq!(get("CLAUDE_CONFIG_DIR"), Some("/tmp/iso"));
@@ -315,7 +335,9 @@ mod tests {
         assert!(parse_result_line(r#"{"type":"system","subtype":"init"}"#).is_none());
         assert!(parse_result_line("not json").is_none());
         assert_eq!(
-            parse_result_line(r#"{"type":"result","is_error":false,"result":" Tell @[Ember] the build is green. "}"#),
+            parse_result_line(
+                r#"{"type":"result","is_error":false,"result":" Tell @[Ember] the build is green. "}"#
+            ),
             Some(Ok("Tell @[Ember] the build is green.".into()))
         );
         assert!(matches!(

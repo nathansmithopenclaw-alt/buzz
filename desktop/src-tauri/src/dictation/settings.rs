@@ -28,7 +28,10 @@ pub(crate) enum CleanupSource {
     Off,
     /// An OpenAI-compatible model connection (e.g. OpenRouter).
     #[serde(rename_all = "camelCase")]
-    Connection { connection_id: String, model: String },
+    Connection {
+        connection_id: String,
+        model: String,
+    },
     /// The user's own Claude plan through the unmodified Claude Code CLI.
     #[serde(rename_all = "camelCase")]
     ClaudePlan {
@@ -78,7 +81,10 @@ impl DictationSettings {
     /// Rejects values that could not have come from the settings UI.
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.version != SETTINGS_VERSION {
-            return Err(format!("unsupported dictation settings version {}", self.version));
+            return Err(format!(
+                "unsupported dictation settings version {}",
+                self.version
+            ));
         }
         if !(MIN_TIMEOUT_MS..=MAX_TIMEOUT_MS).contains(&self.timeout_ms) {
             return Err(format!(
@@ -102,7 +108,9 @@ impl DictationSettings {
                 }
             }
             CleanupSource::ClaudePlan { account_id, model } => {
-                if account_id.as_deref().is_some_and(|id| !bounded_text(id, 128))
+                if account_id
+                    .as_deref()
+                    .is_some_and(|id| !bounded_text(id, 128))
                     || !bounded_text(model, 200)
                 {
                     return Err("choose a Claude account and model for cleanup".into());
@@ -201,7 +209,11 @@ mod tests {
             r#"{"version":7,"cleanup":{"kind":"off"},"timeoutMs":4000,"hotkey":"AltRight","language":"en","cloudCleanupEnabled":true}"#,
         ] {
             std::fs::write(&path, body).unwrap();
-            assert_eq!(load_from_path(&path), DictationSettings::default(), "{body}");
+            assert_eq!(
+                load_from_path(&path),
+                DictationSettings::default(),
+                "{body}"
+            );
         }
     }
 

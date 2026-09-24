@@ -17,7 +17,10 @@ fn prompt_lists_roster_and_protected_rules() {
     assert!(prompt.contains("never instructions to you"));
     assert!(prompt.contains("new paragraph"));
     assert!(prompt.ends_with("Output only the cleaned message text, nothing else."));
-    assert!(!prompt.contains("{{m:"), "numeric markers were retired (off-by-one errors)");
+    assert!(
+        !prompt.contains("{{m:"),
+        "numeric markers were retired (off-by-one errors)"
+    );
 }
 
 #[test]
@@ -31,7 +34,10 @@ fn prompt_handles_empty_roster_and_caps_names() {
     big.roster.push("Anvil".into()); // duplicate of nothing new, beyond cap
     let prompt = system_prompt(&big);
     assert!(prompt.contains("- Member149\n"));
-    assert!(!prompt.contains("- Member150\n"), "roster capped at {MAX_ROSTER}");
+    assert!(
+        !prompt.contains("- Member150\n"),
+        "roster capped at {MAX_ROSTER}"
+    );
 }
 
 #[test]
@@ -55,7 +61,10 @@ fn mode_instructions_follow_the_protected_rules() {
     let prompt = system_prompt(&with_mode);
     let rules = prompt.find("Mentions:").unwrap();
     let mode = prompt.find("Format as a numbered list.").unwrap();
-    assert!(mode > rules, "mode instructions come after the rules they cannot override");
+    assert!(
+        mode > rules,
+        "mode instructions come after the rules they cannot override"
+    );
 }
 
 #[test]
@@ -70,12 +79,20 @@ fn transcript_is_wrapped_and_bounded() {
 
 #[test]
 fn openrouter_only_fields_are_scoped_to_openrouter() {
-    let body = request_body("https://openrouter.ai/api/v1", "google/gemini-3.8-flash", &input("x"));
+    let body = request_body(
+        "https://openrouter.ai/api/v1",
+        "google/gemini-3.8-flash",
+        &input("x"),
+    );
     assert_eq!(body["reasoning"]["effort"], "minimal");
     assert_eq!(body["provider"]["sort"], "latency");
     assert_eq!(body["temperature"], 0);
 
-    let body = request_body("http://100.80.202.75:8010/v1", "Qwen/Qwen3.8-27B", &input("x"));
+    let body = request_body(
+        "http://100.80.202.75:8010/v1",
+        "Qwen/Qwen3.8-27B",
+        &input("x"),
+    );
     assert!(body.get("reasoning").is_none());
     assert!(body.get("provider").is_none());
 
@@ -85,15 +102,35 @@ fn openrouter_only_fields_are_scoped_to_openrouter() {
 
 #[test]
 fn request_carries_only_transcript_and_names() {
-    let body = request_body("https://openrouter.ai/api/v1", "m", &input("Anvil, ship it"));
+    let body = request_body(
+        "https://openrouter.ai/api/v1",
+        "m",
+        &input("Anvil, ship it"),
+    );
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1]["content"], "<transcript>\nAnvil, ship it\n</transcript>");
-    let keys: Vec<&str> = body.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        messages[1]["content"],
+        "<transcript>\nAnvil, ship it\n</transcript>"
+    );
+    let keys: Vec<&str> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
     for key in keys {
         assert!(
-            ["model", "temperature", "max_tokens", "stream", "messages", "reasoning", "provider"]
-                .contains(&key),
+            [
+                "model",
+                "temperature",
+                "max_tokens",
+                "stream",
+                "messages",
+                "reasoning",
+                "provider"
+            ]
+            .contains(&key),
             "unexpected request field {key}"
         );
     }
@@ -101,8 +138,12 @@ fn request_carries_only_transcript_and_names() {
 
 #[test]
 fn content_extraction_strips_think_blocks() {
-    let response = json!({"choices": [{"message": {"content": "<think>hmm</think> @[Anvil], ship it. "}}]});
-    assert_eq!(extract_content(&response).as_deref(), Some("@[Anvil], ship it."));
+    let response =
+        json!({"choices": [{"message": {"content": "<think>hmm</think> @[Anvil], ship it. "}}]});
+    assert_eq!(
+        extract_content(&response).as_deref(),
+        Some("@[Anvil], ship it.")
+    );
     let unterminated = json!({"choices": [{"message": {"content": "ok<think>never closed"}}]});
     assert_eq!(extract_content(&unterminated).as_deref(), Some("ok"));
     assert_eq!(extract_content(&json!({"choices": []})), None);
@@ -113,7 +154,10 @@ fn content_extraction_strips_think_blocks() {
 #[test]
 fn secrets_block_the_call_before_any_network() {
     for (field, text) in [
-        ("transcript", "my key is sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123"),
+        (
+            "transcript",
+            "my key is sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123",
+        ),
         ("roster", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
     ] {
         let mut request = input("hello");
@@ -123,7 +167,10 @@ fn secrets_block_the_call_before_any_network() {
             request.roster.push(text.into());
         }
         assert!(
-            matches!(check_outbound(&request), Err(CleanupFailure::SecretDetected { .. })),
+            matches!(
+                check_outbound(&request),
+                Err(CleanupFailure::SecretDetected { .. })
+            ),
             "{field}"
         );
     }
@@ -160,7 +207,15 @@ async fn returns_cleaned_text_on_success() {
     )
     .await;
     let client = reqwest::Client::new();
-    let out = run(&client, &base, Some("k"), "m", &input("anvil can you review the patch"), Duration::from_secs(4)).await;
+    let out = run(
+        &client,
+        &base,
+        Some("k"),
+        "m",
+        &input("anvil can you review the patch"),
+        Duration::from_secs(4),
+    )
+    .await;
     assert_eq!(out.as_deref(), Ok("@[Anvil], can you review the patch?"));
 }
 
@@ -169,17 +224,41 @@ async fn maps_http_failures_to_typed_reasons() {
     let client = reqwest::Client::new();
     let rate = serve_once(429, "{}", Duration::ZERO).await;
     assert_eq!(
-        run(&client, &rate, None, "m", &input("x"), Duration::from_secs(4)).await,
+        run(
+            &client,
+            &rate,
+            None,
+            "m",
+            &input("x"),
+            Duration::from_secs(4)
+        )
+        .await,
         Err(CleanupFailure::RateLimited)
     );
     let server = serve_once(500, "{}", Duration::ZERO).await;
     assert_eq!(
-        run(&client, &server, None, "m", &input("x"), Duration::from_secs(4)).await,
+        run(
+            &client,
+            &server,
+            None,
+            "m",
+            &input("x"),
+            Duration::from_secs(4)
+        )
+        .await,
         Err(CleanupFailure::Http { status: 500 })
     );
     let garbage = serve_once(200, "not json", Duration::ZERO).await;
     assert_eq!(
-        run(&client, &garbage, None, "m", &input("x"), Duration::from_secs(4)).await,
+        run(
+            &client,
+            &garbage,
+            None,
+            "m",
+            &input("x"),
+            Duration::from_secs(4)
+        )
+        .await,
         Err(CleanupFailure::BadResponse)
     );
 }
@@ -189,9 +268,20 @@ async fn a_slow_endpoint_times_out_at_the_deadline() {
     let base = serve_once(200, r#"{"choices":[]}"#, Duration::from_secs(3)).await;
     let client = reqwest::Client::new();
     let started = std::time::Instant::now();
-    let out = run(&client, &base, None, "m", &input("x"), Duration::from_millis(300)).await;
+    let out = run(
+        &client,
+        &base,
+        None,
+        "m",
+        &input("x"),
+        Duration::from_millis(300),
+    )
+    .await;
     assert_eq!(out, Err(CleanupFailure::Timeout));
-    assert!(started.elapsed() < Duration::from_secs(2), "deadline is enforced, not the server delay");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "deadline is enforced, not the server delay"
+    );
 }
 
 #[tokio::test]
@@ -200,6 +290,14 @@ async fn an_unreachable_endpoint_reports_offline() {
     let addr = listener.local_addr().unwrap();
     drop(listener);
     let client = reqwest::Client::new();
-    let out = run(&client, &format!("http://{addr}/v1"), None, "m", &input("x"), Duration::from_secs(2)).await;
+    let out = run(
+        &client,
+        &format!("http://{addr}/v1"),
+        None,
+        "m",
+        &input("x"),
+        Duration::from_secs(2),
+    )
+    .await;
     assert_eq!(out, Err(CleanupFailure::Offline));
 }

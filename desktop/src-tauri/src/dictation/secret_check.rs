@@ -31,9 +31,15 @@ fn patterns() -> &'static [Pattern] {
     PATTERNS.get_or_init(|| {
         let table: &[(&str, &str)] = &[
             ("Nostr private key", r"(?i)\bnsec1[02-9ac-hj-np-z]{20,}"),
-            ("encrypted Nostr key", r"(?i)\bncryptsec1[02-9ac-hj-np-z]{20,}"),
+            (
+                "encrypted Nostr key",
+                r"(?i)\bncryptsec1[02-9ac-hj-np-z]{20,}",
+            ),
             ("Anthropic key", r"\bsk-ant-[A-Za-z0-9_\-]{16,}"),
-            ("API key", r"\bsk-(?:proj-|or-v1-|live-|test-)?[A-Za-z0-9_\-]{20,}"),
+            (
+                "API key",
+                r"\bsk-(?:proj-|or-v1-|live-|test-)?[A-Za-z0-9_\-]{20,}",
+            ),
             (
                 "GitHub token",
                 r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})",
@@ -98,9 +104,7 @@ fn is_key_like(token: &str) -> bool {
 /// Returns the first credential-shaped substring in `text`, if any.
 pub(crate) fn find_secret(text: &str) -> Option<SecretMatch> {
     if let Some(pattern) = patterns().iter().find(|p| p.regex.is_match(text)) {
-        return Some(SecretMatch {
-            kind: pattern.kind,
-        });
+        return Some(SecretMatch { kind: pattern.kind });
     }
     text.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '"' | '\'' | '(' | ')'))
         .map(|token| token.trim_end_matches(['.', ':', '!', '?']))
