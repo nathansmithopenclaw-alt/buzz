@@ -4,6 +4,8 @@ import { invokeTauri } from "@/shared/api/tauri";
 export type DictationCleanupSource =
   | { kind: "off" }
   | { kind: "connection"; connectionId: string; model: string }
+  /** OpenRouter using the key already in global Agent settings. */
+  | { kind: "agent_open_router"; model: string }
   | { kind: "claude_plan"; accountId: string | null; model: string };
 
 /** Persisted dictation settings; mirrors `DictationSettings`. */
@@ -60,6 +62,12 @@ export const getDictationModelInfo = () =>
 
 export const downloadDictationModel = () =>
   invokeTauri<void>("dictation_download_model");
+
+/** Keyless cleanup sources this install can use (presence only, no keys). */
+export type DictationCleanupSources = { agentOpenRouter: boolean };
+
+export const getDictationCleanupSources = () =>
+  invokeTauri<DictationCleanupSources>("dictation_cleanup_sources");
 
 export const getDictationSettings = () =>
   invokeTauri<DictationSettings>("get_dictation_settings");

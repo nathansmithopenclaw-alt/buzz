@@ -32,6 +32,11 @@ pub(crate) enum CleanupSource {
         connection_id: String,
         model: String,
     },
+    /// OpenRouter with the `OPENROUTER_API_KEY` already in the user's global
+    /// agent settings, so no key is entered twice. The key is read at request
+    /// time and never stored or returned by dictation.
+    #[serde(rename_all = "camelCase")]
+    AgentOpenRouter { model: String },
     /// The user's own Claude plan through the unmodified Claude Code CLI.
     #[serde(rename_all = "camelCase")]
     ClaudePlan {
@@ -107,6 +112,11 @@ impl DictationSettings {
                     return Err("choose a model connection and model for cleanup".into());
                 }
             }
+            CleanupSource::AgentOpenRouter { model } => {
+                if !bounded_text(model, 200) {
+                    return Err("choose an OpenRouter model for cleanup".into());
+                }
+            }
             CleanupSource::ClaudePlan { account_id, model } => {
                 if account_id
                     .as_deref()
@@ -177,6 +187,26 @@ mod tests {
         assert_eq!(settings.cleanup, CleanupSource::Off);
         assert_eq!(settings.timeout_ms, 4_000);
         assert_eq!(settings.hotkey, "AltRight");
+    }
+
+    #[test]
+    fn round_trips_the_agent_openrouter_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SETTINGS_FILE);
+        let settings = DictationSettings {
+            cleanup: CleanupSource::AgentOpenRouter {
+                model: "google/gemini-3.8-flash".into(),
+            },
+            ..DictationSettings::default()
+        };
+        save_to_path(&path, &settings).unwrap();
+        assert_eq!(load_from_path(&path), settings);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["cleanup"]["kind"], "agent_open_router");
+        let mut blank = settings.clone();
+        blank.cleanup = CleanupSource::AgentOpenRouter { model: " ".into() };
+        assert!(blank.validate().is_err());
     }
 
     #[test]

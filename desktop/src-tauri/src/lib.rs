@@ -789,6 +789,7 @@ pub fn run() {
             dictation::dictation_stop,
             dictation::dictation_cancel,
             dictation::dictation_cleanup,
+            dictation::dictation_cleanup_sources,
             model_connections::network::discover_model_servers,
             get_agent_models,
             discover_agent_models,

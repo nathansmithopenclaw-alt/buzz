@@ -248,6 +248,36 @@ pub fn dictation_cancel(session_id: u64) {
     release_session(session_id);
 }
 
+/// OpenRouter's OpenAI-compatible endpoint (the agent-settings source).
+const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+/// Env var that holds the user's OpenRouter key in global agent settings.
+const OPENROUTER_KEY_VAR: &str = "OPENROUTER_API_KEY";
+
+/// The OpenRouter key from global agent env vars, if one is set.
+fn agent_openrouter_key(env_vars: &std::collections::BTreeMap<String, String>) -> Option<&str> {
+    env_vars
+        .get(OPENROUTER_KEY_VAR)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+}
+
+/// Which keyless cleanup sources this install can use. Reports presence
+/// only; never a key.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationCleanupSources {
+    agent_open_router: bool,
+}
+
+/// Reports whether the global agent settings hold an OpenRouter key.
+#[tauri::command]
+pub fn dictation_cleanup_sources(app: AppHandle) -> Result<DictationCleanupSources, String> {
+    let config = crate::managed_agents::global_config::load_global_agent_config(&app)?;
+    Ok(DictationCleanupSources {
+        agent_open_router: agent_openrouter_key(&config.env_vars).is_some(),
+    })
+}
+
 /// Cleanup outcome; `text` is `None` when the UI should use the raw words.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -314,6 +344,27 @@ pub async fn dictation_cleanup(
                 }
                 Err(message) => Err(CleanupFailure::Unavailable { message }),
             },
+            CleanupSource::AgentOpenRouter { model } => {
+                match crate::managed_agents::global_config::load_global_agent_config(&app) {
+                    Ok(config) => match agent_openrouter_key(&config.env_vars) {
+                        Some(key) => {
+                            cleanup::run(
+                                &state.http_client,
+                                OPENROUTER_BASE_URL,
+                                Some(key),
+                                model,
+                                &input,
+                                timeout,
+                            )
+                            .await
+                        }
+                        None => Err(CleanupFailure::Unavailable {
+                            message: "no OPENROUTER_API_KEY in Agent settings".into(),
+                        }),
+                    },
+                    Err(message) => Err(CleanupFailure::Unavailable { message }),
+                }
+            }
             CleanupSource::ClaudePlan { account_id, model } => {
                 claude_plan::run(
                     &app,
@@ -345,6 +396,16 @@ pub async fn dictation_cleanup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_openrouter_key_requires_a_non_blank_value() {
+        let mut vars = std::collections::BTreeMap::new();
+        assert_eq!(agent_openrouter_key(&vars), None);
+        vars.insert(OPENROUTER_KEY_VAR.to_string(), "   ".to_string());
+        assert_eq!(agent_openrouter_key(&vars), None);
+        vars.insert(OPENROUTER_KEY_VAR.to_string(), " sk-or-v1-x ".to_string());
+        assert_eq!(agent_openrouter_key(&vars), Some("sk-or-v1-x"));
+    }
 
     #[test]
     fn parses_df_available_column() {

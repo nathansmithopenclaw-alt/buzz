@@ -23,6 +23,7 @@ import {
   type DictationModelInfo,
   type DictationSettings,
   downloadDictationModel,
+  getDictationCleanupSources,
   getDictationModelInfo,
 } from "../api";
 import { useDictationSettings } from "../useDictationSettings";
@@ -81,12 +82,16 @@ export function DictationSettingsSection() {
   const { info, refresh } = useModelInfo(enabled);
   const [connections, setConnections] = React.useState<ModelConnection[]>([]);
   const [accounts, setAccounts] = React.useState<SubscriptionAccount[]>([]);
+  const [agentOpenRouter, setAgentOpenRouter] = React.useState(false);
 
   React.useEffect(() => {
     if (!enabled) return;
     void listConnections()
       .then(setConnections)
       .catch(() => setConnections([]));
+    void getDictationCleanupSources()
+      .then((sources) => setAgentOpenRouter(sources.agentOpenRouter))
+      .catch(() => setAgentOpenRouter(false));
     void listSubscriptionAccounts()
       .then((all) =>
         setAccounts(
@@ -112,7 +117,12 @@ export function DictationSettingsSection() {
 
   const onSourceChange = (kind: string) => {
     if (kind === "off") setCleanup({ kind: "off" });
-    else if (kind === "connection") {
+    else if (kind === "agent_open_router") {
+      setCleanup({
+        kind: "agent_open_router",
+        model: RECOMMENDED_CONNECTION_MODEL,
+      });
+    } else if (kind === "connection") {
       const first = connections[0];
       if (!first) {
         toast.info(
@@ -187,6 +197,11 @@ export function DictationSettingsSection() {
             value={cleanup.kind}
           >
             <option value="off">Off (as spoken)</option>
+            {agentOpenRouter || cleanup.kind === "agent_open_router" ? (
+              <option value="agent_open_router">
+                OpenRouter (key from Agent settings)
+              </option>
+            ) : null}
             <option value="connection">Model connection</option>
             <option value="claude_plan">My Claude plan (personal use)</option>
           </select>
@@ -218,6 +233,19 @@ export function DictationSettingsSection() {
                 }}
               />
             </>
+          ) : null}
+          {cleanup.kind === "agent_open_router" ? (
+            <Input
+              aria-label="Cleanup model"
+              className="h-7 w-56 text-xs"
+              defaultValue={cleanup.model}
+              key={`agent-openrouter:${cleanup.model}`}
+              onBlur={(e) => {
+                const model = e.target.value.trim();
+                if (model && model !== cleanup.model)
+                  setCleanup({ ...cleanup, model });
+              }}
+            />
           ) : null}
           {cleanup.kind === "claude_plan" ? (
             <select
