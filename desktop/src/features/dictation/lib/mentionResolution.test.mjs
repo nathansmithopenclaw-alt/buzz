@@ -90,7 +90,10 @@ test("verbatim: explicit 'at <name>' becomes a mention; everything else never do
   const r = roster();
   const cases = [
     ["At patch, please rebase your branch onto main.", ["Patch"]],
-    ["Quill, draft the change log, and at ledger, reconcile the invoices.", ["Ledger"]],
+    [
+      "Quill, draft the change log, and at ledger, reconcile the invoices.",
+      ["Ledger"],
+    ],
     ["At Helm, can you check the deploy?", ["Helm"]],
     ["at helm, can you check the deploy", ["Helm"]],
     ["At Theron please review this", ["Theron"]],
@@ -107,10 +110,10 @@ test("verbatim: explicit 'at <name>' becomes a mention; everything else never do
 });
 
 test("verbatim: the spoken 'at' is consumed, the rest of the sentence kept", () => {
-  assert.deepEqual(summarize(resolveVerbatim("At Helm, can you check that?", roster())), [
-    "<@Helm>",
-    ", can you check that?",
-  ]);
+  assert.deepEqual(
+    summarize(resolveVerbatim("At Helm, can you check that?", roster())),
+    ["<@Helm>", ", can you check that?"],
+  );
   assert.deepEqual(
     summarize(resolveVerbatim("Look at that. And at Anvil, verify.", roster())),
     ["Look at that. And ", "<@Anvil>", ", verify."],
@@ -118,7 +121,10 @@ test("verbatim: the spoken 'at' is consumed, the rest of the sentence kept", () 
 });
 
 test("verbatim: other addressed names are suggestions, never mentions", () => {
-  const out = resolveVerbatim("Anvil, can you review the patch Codex sent?", roster());
+  const out = resolveVerbatim(
+    "Anvil, can you review the patch Codex sent?",
+    roster(),
+  );
   assert.deepEqual(mentionsIn(out), []);
   assert.deepEqual(suggestionsIn(out), ["Anvil"]);
 });
@@ -127,22 +133,35 @@ test("verbatim: other addressed names are suggestions, never mentions", () => {
 
 test("address detection follows the benchmark's addressed/referenced labels", () => {
   const r = roster();
-  const names = (text) => findAddressedNames(text, r).map((h) => h.entry.displayName);
+  const names = (text) =>
+    findAddressedNames(text, r).map((h) => h.entry.displayName);
   const cases = [
     ["Anvil, can you review the patch Codex sent this morning?", ["Anvil"]],
     ["Ask Helm to check whether Titus finished the deploy.", ["Helm"]],
     ["Can you patch the login bug before the demo?", []],
-    ["Theron and Vela, I need both of you on the release notes.", ["Theron", "Vela"]],
+    [
+      "Theron and Vela, I need both of you on the release notes.",
+      ["Theron", "Vela"],
+    ],
     ["Bolt's last run failed, so let's hold off.", []],
     ["Hey Qwen, summarize the thread for Nathan.", ["Qwen"]],
     ["I think we should move the demo to Friday, Wren.", ["Wren"]],
     ["The ledger doesn't balance and the keel of the boat is cracked.", []],
     ["Grok, what does Sable think about the pricing?", ["Grok"]],
-    ["Vesper, loop in Morty and Nemo on this one.", ["Vesper", "Morty", "Nemo"]],
+    [
+      "Vesper, loop in Morty and Nemo on this one.",
+      ["Vesper", "Morty", "Nemo"],
+    ],
     ["Proof, check the proof of concept Fizz wrote.", ["Proof"]],
-    ["Honey, Pollen and Nectar, standup is in five minutes.", ["Honey", "Pollen", "Nectar"]],
+    [
+      "Honey, Pollen and Nectar, standup is in five minutes.",
+      ["Honey", "Pollen", "Nectar"],
+    ],
     ["Scratch that, tell Ember the build is green.", ["Ember"]],
-    ["Keel, Ridge, and Lumen, please review Beacon's design doc.", ["Keel", "Ridge", "Lumen"]],
+    [
+      "Keel, Ridge, and Lumen, please review Beacon's design doc.",
+      ["Keel", "Ridge", "Lumen"],
+    ],
     ["Helm, add the Game Studio team to this channel.", ["Helm"]],
   ];
   for (const [text, expected] of cases) {
@@ -152,16 +171,29 @@ test("address detection follows the benchmark's addressed/referenced labels", ()
 
 test("near-spellings resolve through the sound-alike matcher", () => {
   const r = roster();
-  const names = (text) => findAddressedNames(text, r).map((h) => h.entry.displayName);
-  assert.deepEqual(names("Theeron and Vella, I need both of you."), ["Theron", "Vela"]);
-  assert.deepEqual(names("Vespa, loop in Morty on this one."), ["Vesper", "Morty"]);
+  const names = (text) =>
+    findAddressedNames(text, r).map((h) => h.entry.displayName);
+  assert.deepEqual(names("Theeron and Vella, I need both of you."), [
+    "Theron",
+    "Vela",
+  ]);
+  assert.deepEqual(names("Vespa, loop in Morty on this one."), [
+    "Vesper",
+    "Morty",
+  ]);
 });
 
 // ── Model output validation ───────────────────────────────────────────────────
 
 test("model markers become mentions only for auto-mentionable roster entries", () => {
-  const out = resolveModelOutput("@[Anvil], can you review the patch Codex sent?", roster());
-  assert.deepEqual(summarize(out), ["<@Anvil>", ", can you review the patch Codex sent?"]);
+  const out = resolveModelOutput(
+    "@[Anvil], can you review the patch Codex sent?",
+    roster(),
+  );
+  assert.deepEqual(summarize(out), [
+    "<@Anvil>",
+    ", can you review the patch Codex sent?",
+  ]);
 });
 
 test("invented or ambiguous names from the model never become mentions", () => {
@@ -176,16 +208,22 @@ test("invented or ambiguous names from the model never become mentions", () => {
 
 test("the exact spoken name wins over a longer overlapping name", () => {
   const r = roster();
-  assert.deepEqual(mentionsIn(resolveModelOutput("@[Codex] and @[Codex Desktop], sync up", r)), [
-    "Codex",
-    "Codex Desktop",
-  ]);
+  assert.deepEqual(
+    mentionsIn(resolveModelOutput("@[Codex] and @[Codex Desktop], sync up", r)),
+    ["Codex", "Codex Desktop"],
+  );
 });
 
 test("personas, non-members and out-of-channel teams are only suggestions", () => {
   const r = roster({
     extra: [
-      { kind: "persona", personaId: "p1", displayName: "Scout", isMember: false, isAgent: true },
+      {
+        kind: "persona",
+        personaId: "p1",
+        displayName: "Scout",
+        isMember: false,
+        isAgent: true,
+      },
       member("Outsider", 70, { isMember: false }),
       {
         kind: "team",
@@ -200,7 +238,10 @@ test("personas, non-members and out-of-channel teams are only suggestions", () =
       },
     ],
   });
-  const out = resolveModelOutput("@[Scout], @[Outsider] and @[Game Studio], hello", r);
+  const out = resolveModelOutput(
+    "@[Scout], @[Outsider] and @[Game Studio], hello",
+    r,
+  );
   assert.deepEqual(mentionsIn(out), []);
   assert.deepEqual(suggestionsIn(out), ["Scout", "Outsider", "Game Studio"]);
 });
@@ -221,9 +262,10 @@ test("a team whose members are all in the channel is auto-mentionable", () => {
       },
     ],
   });
-  assert.deepEqual(mentionsIn(resolveModelOutput("@[Release Crew], ship it", r)), [
-    "Release Crew",
-  ]);
+  assert.deepEqual(
+    mentionsIn(resolveModelOutput("@[Release Crew], ship it", r)),
+    ["Release Crew"],
+  );
   const withPersona = roster({
     extra: [
       {
@@ -239,13 +281,19 @@ test("a team whose members are all in the channel is auto-mentionable", () => {
       },
     ],
   });
-  assert.deepEqual(mentionsIn(resolveModelOutput("@[Half Built], go", withPersona)), []);
+  assert.deepEqual(
+    mentionsIn(resolveModelOutput("@[Half Built], go", withPersona)),
+    [],
+  );
 });
 
 test("the speaker is never in the roster, so never mentioned", () => {
   const r = roster();
   assert.ok(!r.some((e) => e.pubkey === SELF));
-  assert.deepEqual(mentionsIn(resolveModelOutput("@[Me Myself], note to self", r)), []);
+  assert.deepEqual(
+    mentionsIn(resolveModelOutput("@[Me Myself], note to self", r)),
+    [],
+  );
 });
 
 test("unique first names are aliases; shared first names are not", () => {
@@ -254,23 +302,32 @@ test("unique first names are aliases; shared first names are not", () => {
   assert.deepEqual(nathan.aliases, [], "two members share 'Nathan'");
   const solo = roster().find((e) => e.displayName === "Nathan Smith");
   assert.deepEqual(solo.aliases, ["nathan"]);
-  assert.deepEqual(mentionsIn(resolveModelOutput("@[Nathan], hi", roster())), ["Nathan Smith"]);
+  assert.deepEqual(mentionsIn(resolveModelOutput("@[Nathan], hi", roster())), [
+    "Nathan Smith",
+  ]);
 });
 
 test("addressed names the model left unmarked become suggestions", () => {
   const r = roster({ extra: [member("Outsider", 70, { isMember: false })] });
-  const out = resolveModelOutput("@[Anvil], and Outsider, can you both look?", r);
+  const out = resolveModelOutput(
+    "@[Anvil], and Outsider, can you both look?",
+    r,
+  );
   assert.deepEqual(mentionsIn(out), ["Anvil"]);
   assert.deepEqual(suggestionsIn(out), ["Outsider"]);
 });
 
 test("the model roster lists auto-mentionable names only, capped at 150", () => {
-  const names = modelRosterNames(roster({ extra: [member("Outsider", 70, { isMember: false })] }));
+  const names = modelRosterNames(
+    roster({ extra: [member("Outsider", 70, { isMember: false })] }),
+  );
   assert.ok(names.includes("Anvil"));
   assert.ok(!names.includes("Outsider"));
   assert.ok(!names.includes("Me Myself"));
   const big = buildDictationRoster({
-    candidates: Array.from({ length: 300 }, (_, i) => member(`M${i}`, 1000 + i)),
+    candidates: Array.from({ length: 300 }, (_, i) =>
+      member(`M${i}`, 1000 + i),
+    ),
     currentPubkey: null,
     memberPubkeys: new Set(Array.from({ length: 300 }, (_, i) => pk(1000 + i))),
   });
@@ -295,7 +352,10 @@ test("spoken 'new line' / 'new paragraph' commands become breaks", () => {
     applySpokenFormatting("Ship it today. New paragraph. then tell the team."),
     "Ship it today.\n\nThen tell the team.",
   );
-  assert.equal(applySpokenFormatting("First item, new line, second item"), "First item,\nSecond item");
+  assert.equal(
+    applySpokenFormatting("First item, new line, second item"),
+    "First item,\nSecond item",
+  );
   assert.equal(
     applySpokenFormatting("We need a new line of products this quarter."),
     "We need a new line of products this quarter.",

@@ -99,7 +99,10 @@ export async function startDictationCapture(
     release();
     throw error instanceof MicrophoneUnavailableError
       ? error
-      : new MicrophoneUnavailableError("Buzz could not start dictation audio.", false);
+      : new MicrophoneUnavailableError(
+          "Buzz could not start dictation audio.",
+          false,
+        );
   }
 
   const source = context.createMediaStreamSource(stream);

@@ -15,7 +15,8 @@ export function applySpokenFormatting(text: string): string {
   const replaced = text.replace(
     COMMAND,
     (_match, boundary: string, command: string) => {
-      const breakText = command.toLowerCase() === "new paragraph" ? "\n\n" : "\n";
+      const breakText =
+        command.toLowerCase() === "new paragraph" ? "\n\n" : "\n";
       return `${boundary}${breakText}`;
     },
   );

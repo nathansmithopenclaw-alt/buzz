@@ -70,8 +70,7 @@ export const saveDictationSettings = (settings: DictationSettings) =>
 export const startDictation = (context: {
   roster: string[];
   vocabulary: string[];
-}) =>
-  invokeTauri<{ sessionId: number }>("dictation_start", { context });
+}) => invokeTauri<{ sessionId: number }>("dictation_start", { context });
 
 export const stopDictation = (sessionId: number) =>
   invokeTauri<DictationTranscript>("dictation_stop", { sessionId });

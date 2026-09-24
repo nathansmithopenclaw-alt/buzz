@@ -17,6 +17,10 @@ import {
   type FormattingSelectionRange,
 } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
+import {
+  DictationButton,
+  type DictationButtonProps,
+} from "@/features/dictation/ui/DictationButton";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
 const presenceSpring = {
@@ -52,6 +56,7 @@ export const MessageComposerToolbar = React.memo(
     isVoiceNoteRecording = false,
     hasVoiceNoteAttachment = false,
     voiceNoteRecorder,
+    dictation,
     onCaptureSelection,
     onAutoPinConfirmationDismiss,
     onAutoPinConfirmationHoverChange,
@@ -85,6 +90,8 @@ export const MessageComposerToolbar = React.memo(
     isVoiceNoteRecording?: boolean;
     hasVoiceNoteAttachment?: boolean;
     voiceNoteRecorder?: React.ReactNode;
+    /** Dictation control props; absent when the experiment is off. */
+    dictation?: Omit<DictationButtonProps, "onCaptureSelection">;
     onCaptureSelection: () => void;
     onAutoPinConfirmationDismiss?: () => void;
     onAutoPinConfirmationHoverChange?: (hovered: boolean) => void;
@@ -277,7 +284,12 @@ export const MessageComposerToolbar = React.memo(
                     <TooltipTrigger asChild>
                       <Button
                         aria-label="Record voice note"
-                        disabled={composerDisabled || isUploading}
+                        disabled={
+                          composerDisabled ||
+                          isUploading ||
+                          (dictation !== undefined &&
+                            dictation.status !== "idle")
+                        }
                         onClick={onVoiceNote}
                         onMouseDown={onCaptureSelection}
                         size="icon"
@@ -291,6 +303,12 @@ export const MessageComposerToolbar = React.memo(
                     </TooltipTrigger>
                     <TooltipContent>Record voice note</TooltipContent>
                   </Tooltip>
+                ) : null}
+                {dictation ? (
+                  <DictationButton
+                    {...dictation}
+                    onCaptureSelection={onCaptureSelection}
+                  />
                 ) : null}
                 <ComposerEmojiPicker
                   disabled={composerDisabled || isVoiceNoteRecording}

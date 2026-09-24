@@ -8,6 +8,8 @@ import { AppShellProvider } from "@/app/AppShellContext";
 import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
 import { AppShellChannelSurface } from "@/app/AppShellChannelSurface";
 import { AppHuddleShell } from "@/app/AppHuddleShell";
+import { useDictationHotkey } from "@/features/dictation/useDictationHotkey";
+import { useFeatureEnabled } from "@/shared/features";
 import { AppTopChrome } from "@/app/AppTopChrome";
 import {
   type TerminalContextOverride,
@@ -679,6 +681,8 @@ export function AppShell() {
     () => setIsCreateChannelOpen(true),
     [],
   );
+  const dictationEnabled = useFeatureEnabled("dictation");
+  useDictationHotkey(dictationEnabled && !settingsOpen && !isHuddleRoom);
   useAppShellKeyboardShortcuts({
     activeChannelId: selectedView === "channel" ? selectedChannelId : null,
     canSearchCurrentChannel:

@@ -9,6 +9,7 @@ import {
   getDefaultRelayUrl,
 } from "@/shared/api/tauri";
 import { applyCommunity } from "@/shared/api/tauriWorkspace";
+import { resetDictationState } from "@/features/dictation/lib/dictationSession";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { clearTrayAgentActivity } from "@/shared/api/trayMenu";
 import { getOverrides } from "@/shared/features";
@@ -96,6 +97,8 @@ async function resetCommunityState({
   // round-trip is valid again once A is re-applied — the map entry is its only
   // duplicate guard.
   resetDetachedToastScope();
+  // An in-flight dictation belongs to the old community's composers.
+  resetDictationState();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
   resetMessageLinkMetadataCache();

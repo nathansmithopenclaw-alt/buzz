@@ -143,8 +143,12 @@ function orderByRecency(
   return entries
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) => {
-      const ra = a.entry.pubkey ? (rank.get(a.entry.pubkey) ?? Infinity) : Infinity;
-      const rb = b.entry.pubkey ? (rank.get(b.entry.pubkey) ?? Infinity) : Infinity;
+      const ra = a.entry.pubkey
+        ? (rank.get(a.entry.pubkey) ?? Infinity)
+        : Infinity;
+      const rb = b.entry.pubkey
+        ? (rank.get(b.entry.pubkey) ?? Infinity)
+        : Infinity;
       if (ra !== rb) return ra - rb;
       if (a.entry.autoMention !== b.entry.autoMention) {
         return a.entry.autoMention ? -1 : 1;

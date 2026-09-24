@@ -21,7 +21,9 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
  * Ranges follow the same rule as pasted-mention occurrences: edits outside a
  * range move it, any edit overlapping it kills it (fail closed).
  */
-export const dictationMarksKey = new PluginKey<DictationMarks>("dictationMarks");
+export const dictationMarksKey = new PluginKey<DictationMarks>(
+  "dictationMarks",
+);
 
 export type DictationMarkKind = "pending" | "suggestion" | "flash";
 
@@ -59,7 +61,8 @@ function remap(mark: DictationMark, tr: Transaction): DictationMark | null {
   for (const map of tr.mapping.maps) {
     let overlapped = false;
     map.forEach((oldStart, oldEnd) => {
-      if (oldEnd > oldStart && oldStart < to && oldEnd > from) overlapped = true;
+      if (oldEnd > oldStart && oldStart < to && oldEnd > from)
+        overlapped = true;
     });
     if (overlapped) return null;
     const mappedFrom = map.mapResult(from, 1);
@@ -81,7 +84,9 @@ function apply(current: DictationMarks, tr: Transaction): DictationMarks {
       if (mapped) next.set(id, mapped);
     }
   }
-  const command = tr.getMeta(dictationMarksKey) as DictationMarkCommand | undefined;
+  const command = tr.getMeta(dictationMarksKey) as
+    | DictationMarkCommand
+    | undefined;
   if (!command) return next ?? current;
   next ??= new Map(current);
   if (command.type === "release") {

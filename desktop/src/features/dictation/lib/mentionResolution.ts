@@ -85,7 +85,10 @@ function lookupFuzzy(
   word: string,
   roster: readonly DictationRosterEntry[],
 ): Lookup {
-  if (word.length < MIN_FUZZY_WORD_LENGTH || STOPWORDS.has(word.toLowerCase())) {
+  if (
+    word.length < MIN_FUZZY_WORD_LENGTH ||
+    STOPWORDS.has(word.toLowerCase())
+  ) {
     return { type: "none" };
   }
   let best: DictationRosterEntry | null = null;
@@ -110,7 +113,7 @@ function lookupFuzzy(
 
 type Token = { raw: string; core: string; start: number; end: number };
 
-const LEADING = /^["'(\[]+/;
+const LEADING = /^["'([]+/;
 const TRAILING = /[,.!?;:"')\]]+$/;
 
 function tokenize(text: string): Token[] {
@@ -121,7 +124,12 @@ function tokenize(text: string): Token[] {
     const lead = raw.match(LEADING)?.[0].length ?? 0;
     const trail = raw.match(TRAILING)?.[0].length ?? 0;
     const core = raw.slice(lead, raw.length - trail);
-    tokens.push({ raw, core, start: start + lead, end: start + raw.length - trail });
+    tokens.push({
+      raw,
+      core,
+      start: start + lead,
+      end: start + raw.length - trail,
+    });
   }
   return tokens;
 }
@@ -191,10 +199,12 @@ export function findAddressedNames(
     if (!how && capitalized) {
       const clauseStart = endsClause(prev);
       const listContinues = lower(next) === "and" || lower(next) === "&";
-      const vocativeStart = clauseStart && (punct.startsWith(",") || listContinues);
+      const vocativeStart =
+        clauseStart && (punct.startsWith(",") || listContinues);
       const listMember =
         lower(prev) === "and" && i - 2 >= 0 && i - 2 <= lastHitTokenEnd;
-      const trailingVocative = /[.!?]/.test(punct) && /,$/.test(prev?.raw ?? "");
+      const trailingVocative =
+        /[.!?]/.test(punct) && /,$/.test(prev?.raw ?? "");
       const cue =
         CUE_WORDS.has(lower(prev)) ||
         (lower(tokens[i - 2]) === "loop" && lower(prev) === "in") ||
@@ -271,7 +281,8 @@ export function resolveModelOutput(
   text: string,
   roster: readonly DictationRosterEntry[],
 ): DictationSegment[] {
-  type Marker = { start: number; end: number; segment: DictationSegment | null };
+  type EntrySegment = Exclude<DictationSegment, { type: "text" }>;
+  type Marker = { start: number; end: number; segment: EntrySegment | null };
   const markers: Marker[] = [];
   let plain = "";
   let cursor = 0;
@@ -280,13 +291,17 @@ export function resolveModelOutput(
     plain += text.slice(cursor, index);
     const name = match[1].trim();
     const lookup = lookupExact(name, roster);
-    const segment: DictationSegment | null =
+    const segment: EntrySegment | null =
       lookup.type !== "one"
         ? null
         : lookup.entry.autoMention
           ? { type: "mention", entry: lookup.entry }
           : { type: "suggestion", entry: lookup.entry, text: name };
-    markers.push({ start: plain.length, end: plain.length + name.length, segment });
+    markers.push({
+      start: plain.length,
+      end: plain.length + name.length,
+      segment,
+    });
     plain += name;
     cursor = index + match[0].length;
   }
@@ -305,7 +320,9 @@ export function resolveModelOutput(
 
   type Span = { start: number; end: number; segment: DictationSegment };
   const spans: Span[] = [
-    ...markers.flatMap((m) => (m.segment ? [{ start: m.start, end: m.end, segment: m.segment }] : [])),
+    ...markers.flatMap((m) =>
+      m.segment ? [{ start: m.start, end: m.end, segment: m.segment }] : [],
+    ),
     ...suggestions.map((hit) => ({
       start: hit.start,
       end: hit.end,

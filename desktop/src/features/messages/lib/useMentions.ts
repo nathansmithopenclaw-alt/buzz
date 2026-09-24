@@ -288,6 +288,22 @@ export function useMentions(
       teamsQuery.data,
     ],
   );
+  // Dictation reads the same candidates the @ picker offers, through a stable
+  // getter so composers never re-render on candidate identity churn.
+  const dictationCandidatesRef = React.useRef({
+    candidates: mentionCandidatesWithTeams,
+    currentPubkey: currentPubkey ?? null,
+    memberPubkeys,
+  });
+  dictationCandidatesRef.current = {
+    candidates: mentionCandidatesWithTeams,
+    currentPubkey: currentPubkey ?? null,
+    memberPubkeys,
+  };
+  const getDictationCandidates = React.useCallback(
+    () => dictationCandidatesRef.current,
+    [],
+  );
   const ownerPubkeys = React.useMemo(
     () => [
       ...new Set(
@@ -918,6 +934,7 @@ export function useMentions(
     mentionStartIndex,
     openMentionPicker,
     registerMentionPubkey,
+    getDictationCandidates,
     restoreDraftMentionRefs,
     settlePendingMentionBindings: pasteBinding.settlePendingMentionBindings,
     suggestions,

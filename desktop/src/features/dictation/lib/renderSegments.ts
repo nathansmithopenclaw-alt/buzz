@@ -83,7 +83,11 @@ export function renderSegments(
 
 function renderMention(
   entry: DictationRosterEntry,
-  bind: (displayName: string, pubkey: string, isAgent: boolean) => string | null,
+  bind: (
+    displayName: string,
+    pubkey: string,
+    isAgent: boolean,
+  ) => string | null,
 ): string | null {
   if (entry.kind === "identity" && entry.pubkey) {
     const label = bind(entry.displayName, entry.pubkey, entry.isAgent);
@@ -111,5 +115,7 @@ export function replaceLastOccurrence(
 ): string | null {
   const index = content.lastIndexOf(raw);
   if (index < 0 || !raw) return null;
-  return content.slice(0, index) + replacement + content.slice(index + raw.length);
+  return (
+    content.slice(0, index) + replacement + content.slice(index + raw.length)
+  );
 }

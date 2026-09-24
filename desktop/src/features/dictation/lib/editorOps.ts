@@ -1,5 +1,6 @@
 import { closeHistory } from "@tiptap/pm/history";
 import { Fragment, type Schema } from "@tiptap/pm/model";
+import { TextSelection } from "@tiptap/pm/state";
 
 import type { DictationMarksView } from "./dictationMarks";
 
@@ -32,7 +33,8 @@ export function insertAtSelection(
 ): { from: number; to: number } | null {
   if (view.isDestroyed || !text) return null;
   const { from, to } = view.state.selection;
-  const before = from > 1 ? view.state.doc.textBetween(from - 1, from, "\n", "\n") : "";
+  const before =
+    from > 1 ? view.state.doc.textBetween(from - 1, from, "\n", "\n") : "";
   const lead = before && !/\s/.test(before) ? " " : "";
   const tr = view.state.tr.insertText(lead + text, from, to);
   closeHistory(tr);
@@ -50,7 +52,8 @@ export function replaceRange(
   to: number,
   text: string,
 ): number | null {
-  if (view.isDestroyed || to <= from || to > view.state.doc.content.size) return null;
+  if (view.isDestroyed || to <= from || to > view.state.doc.content.size)
+    return null;
   const fragment = textToFragment(view.state.schema, text);
   const tr = view.state.tr.replaceWith(from, to, fragment);
   closeHistory(tr);
@@ -70,6 +73,7 @@ export function suggestionToPickerQuery(
   if (view.isDestroyed || to <= from) return false;
   const name = view.state.doc.textBetween(from, to, "", "");
   const tr = view.state.tr.insertText(`@${name}`, from, to);
+  tr.setSelection(TextSelection.create(tr.doc, from + name.length + 1));
   view.dispatch(tr);
   return true;
 }

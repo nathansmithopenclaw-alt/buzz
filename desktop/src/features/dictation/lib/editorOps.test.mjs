@@ -6,7 +6,12 @@ import { history, undo } from "@tiptap/pm/history";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
 
-import { insertAtSelection, replaceRange, suggestionToPickerQuery, textToFragment } from "./editorOps.ts";
+import {
+  insertAtSelection,
+  replaceRange,
+  suggestionToPickerQuery,
+  textToFragment,
+} from "./editorOps.ts";
 
 const schema = getSchema([
   StarterKit.configure({ heading: false, trailingNode: false, link: false }),
@@ -18,7 +23,9 @@ function makeView(text, cursor) {
   ]);
   let state = EditorState.create({ doc, plugins: [history()] });
   if (cursor !== undefined) {
-    state = state.apply(state.tr.setSelection(TextSelection.create(state.doc, cursor + 1)));
+    state = state.apply(
+      state.tr.setSelection(TextSelection.create(state.doc, cursor + 1)),
+    );
   }
   const view = {
     state,
@@ -29,13 +36,17 @@ function makeView(text, cursor) {
   return view;
 }
 
-const plain = (view) => view.state.doc.textBetween(0, view.state.doc.content.size, "\n", "⏎");
+const plain = (view) =>
+  view.state.doc.textBetween(0, view.state.doc.content.size, "\n", "⏎");
 
 test("raw words insert at the caret with a separating space", () => {
   const view = makeView("Hello", 5);
   const range = insertAtSelection(view, "anvil can you review");
   assert.equal(plain(view), "Hello anvil can you review");
-  assert.equal(view.state.doc.textBetween(range.from, range.to), "anvil can you review");
+  assert.equal(
+    view.state.doc.textBetween(range.from, range.to),
+    "anvil can you review",
+  );
 });
 
 test("no extra space at the start of an empty composer", () => {
@@ -46,7 +57,10 @@ test("no extra space at the start of an empty composer", () => {
 
 test("undo right after the swap restores exactly the raw words", () => {
   const view = makeView("Note: ", 6);
-  const range = insertAtSelection(view, "um anvil can you uh review the the patch");
+  const range = insertAtSelection(
+    view,
+    "um anvil can you uh review the the patch",
+  );
   replaceRange(view, range.from, range.to, "@Anvil, can you review the patch?");
   assert.equal(plain(view), "Note: @Anvil, can you review the patch?");
   undo(view.state, view.dispatch);
@@ -74,4 +88,5 @@ test("a suggestion becomes an @ query for the picker", () => {
   const view = makeView("Hey Theron, hi", 0);
   suggestionToPickerQuery(view, 5, 11);
   assert.equal(plain(view), "Hey @Theron, hi");
+  assert.equal(view.state.selection.from, 12, "caret sits right after @Theron");
 });
