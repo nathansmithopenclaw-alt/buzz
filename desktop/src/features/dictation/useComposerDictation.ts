@@ -4,7 +4,6 @@ import type { Editor } from "@tiptap/core";
 import { toast } from "sonner";
 
 import type { MentionCandidate } from "@/features/messages/lib/mentionCandidates";
-import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import {
   loadDraftEntry,
   saveDraftEntry,
@@ -33,13 +32,16 @@ import {
   DICTATION_SUGGESTION_EVENT,
   readDictationMark,
   releaseDictationMark,
+  suggestionKeyLabel,
   trackDictationMark,
 } from "./lib/dictationMarks";
 import {
+  backendIdle,
   claimRecorder,
   type DictationStatus,
   registerDictationTarget,
   releaseRecorder,
+  trackBackendRelease,
 } from "./lib/dictationSession";
 import {
   insertAtSelection,
@@ -84,6 +86,8 @@ export type UseComposerDictationParams = {
   isMain: boolean;
   disabled: boolean;
   huddleActive: boolean;
+  /** A voice note is recording or processing (it owns the mic). */
+  voiceNoteActive: boolean;
   getCandidates: () => DictationCandidates;
   registerMention: RegisterMention;
   recentMentionPubkeys?: readonly string[];
@@ -100,7 +104,22 @@ type Session = {
   originChannelId: string | null;
   originEditTargetId: string | null;
   stopRequested: boolean;
+  /** The raw words were put in the editor (under `rawMarkId`). */
+  rawInserted: boolean;
+  rawMarkId: number | null;
 };
+
+/** A finished dictation waiting for (or being handed to) its destination. */
+type Outcome = {
+  session: Session;
+  raw: string;
+  segments: DictationSegment[];
+  note: string | null;
+};
+
+/** Extra time past the cleanup timeout before the UI stops waiting. */
+const CLEANUP_BACKSTOP_GRACE_MS = 5000;
+const DEFAULT_CLEANUP_TIMEOUT_MS = 4000;
 
 function readStoredDevice(): string | null {
   try {
@@ -108,6 +127,12 @@ function readStoredDevice(): string | null {
   } catch {
     return null;
   }
+}
+
+/** Ends a backend session; a later start waits until this has landed. */
+function releaseBackend(sessionId: number | null) {
+  if (sessionId === null) return;
+  trackBackendRelease(cancelDictation(sessionId));
 }
 
 class DictationSetupError extends Error {}
@@ -132,25 +157,47 @@ function showStartError(error: unknown) {
   toast.error(message);
 }
 
-/** Adds dictated text to a saved draft (its composer is no longer showing it). */
+/**
+ * Adds dictated text to a saved draft whose composer is no longer showing
+ * it. Words that were already inserted before the composer moved away are
+ * swapped in place (whole-word match); otherwise the text is appended. A
+ * mention whose label another identity already holds in this draft is
+ * written as a plain name, so restoring the draft never rebinds it.
+ */
 function deliverToDraft(
   draftKey: string,
   channelId: string | null,
-  raw: string,
-  text: string,
-  mentionRefs: DraftMentionRef[],
+  outcome: Outcome,
 ) {
   const existing = loadDraftEntry(draftKey);
+  const boundLabels = new Map<string, string>();
+  for (const ref of existing?.mentionRefs ?? [])
+    boundLabels.set(ref.displayName, ref.pubkey);
+  const rendered = renderSegments(outcome.segments, (displayName, pubkey) => {
+    const holder = boundLabels.get(displayName);
+    if (holder && holder !== pubkey) return null;
+    boundLabels.set(displayName, pubkey);
+    return displayName;
+  });
   const now = new Date().toISOString();
   const base = existing?.content ?? "";
+  const swapped = outcome.session.rawInserted
+    ? replaceLastOccurrence(base, outcome.raw, rendered.text)
+    : null;
   const content =
-    replaceLastOccurrence(base, raw, text) ??
-    (base.trim() ? `${base.replace(/\s+$/, "")} ${text}` : text);
+    swapped ??
+    (base.trim()
+      ? `${base.replace(/\s+$/, "")} ${rendered.text}`
+      : rendered.text);
+  const refs = [...(existing?.mentionRefs ?? [])];
+  for (const ref of rendered.mentionRefs) {
+    if (!refs.some((r) => r.displayName === ref.displayName)) refs.push(ref);
+  }
   saveDraftEntry(draftKey, {
     channelId: existing?.channelId ?? channelId ?? draftKey,
     content,
     createdAt: existing?.createdAt ?? now,
-    mentionRefs: [...(existing?.mentionRefs ?? []), ...mentionRefs],
+    mentionRefs: refs,
     pendingImeta: existing?.pendingImeta ?? [],
     selectionStart: content.length,
     selectionEnd: content.length,
@@ -164,7 +211,10 @@ function deliverToDraft(
  * Composer dictation controller: record → local transcript → raw words at the
  * caret (greyed) → cleanup → Buzz-validated mentions → swap (one undo step).
  * Every async step is fenced by a generation so a cancelled or superseded
- * dictation can never write into the composer.
+ * dictation can never write into the composer. A result always reaches the
+ * draft it was spoken into: the live editor, the saved draft once the
+ * composer has moved on, or — while an edit is open over that same draft —
+ * held until the composer returns to it.
  */
 export function useComposerDictation(params: UseComposerDictationParams) {
   const [status, setStatusState] = React.useState<DictationStatus>("idle");
@@ -174,7 +224,7 @@ export function useComposerDictation(params: UseComposerDictationParams) {
   paramsRef.current = params;
   const generationRef = React.useRef(0);
   const sessionRef = React.useRef<Session | null>(null);
-  const pendingMarkRef = React.useRef<number | null>(null);
+  const parkedRef = React.useRef<Outcome | null>(null);
   const targetIdRef = React.useRef(0);
   const focusedAtRef = React.useRef(0);
   const mountedRef = React.useRef(true);
@@ -198,19 +248,10 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     );
   }, []);
 
-  const clearPendingMark = React.useCallback(() => {
+  const releaseMark = React.useCallback((id: number | null) => {
     const editor = paramsRef.current.editor;
-    if (editor && !editor.isDestroyed) {
-      releaseDictationMark(editor.view, pendingMarkRef.current);
-    }
-    pendingMarkRef.current = null;
+    if (editor && !editor.isDestroyed) releaseDictationMark(editor.view, id);
   }, []);
-
-  const finish = React.useCallback(() => {
-    sessionRef.current = null;
-    clearPendingMark();
-    setStatus("idle");
-  }, [clearPendingMark, setStatus]);
 
   const cancel = React.useCallback(() => {
     const session = sessionRef.current;
@@ -218,13 +259,12 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     sessionRef.current = null;
     if (session) {
       session.capture?.cancel();
-      if (session.backendId !== null)
-        void cancelDictation(session.backendId).catch(() => {});
+      releaseBackend(session.backendId);
+      releaseMark(session.rawMarkId);
     }
     releaseRecorder(targetIdRef.current);
-    clearPendingMark();
     setStatus("idle");
-  }, [clearPendingMark, setStatus]);
+  }, [releaseMark, setStatus]);
 
   const cleanUp = React.useCallback(async (session: Session, raw: string) => {
     const formattedRaw = applySpokenFormatting(raw);
@@ -236,17 +276,34 @@ export function useComposerDictation(params: UseComposerDictationParams) {
       !settings.cloudCleanupEnabled ||
       session.backendId === null
     ) {
-      if (session.backendId !== null)
-        void cancelDictation(session.backendId).catch(() => {});
+      releaseBackend(session.backendId);
       return { segments: verbatim(), note: null as string | null };
     }
+    let backstop: number | undefined;
     try {
-      const result = await cleanupDictation({
-        sessionId: session.backendId,
-        transcript: raw,
-        roster: session.modelNames,
-        vocabulary: [],
+      const deadline = new Promise<"backstop">((resolve) => {
+        backstop = window.setTimeout(
+          () => resolve("backstop"),
+          (settings.timeoutMs || DEFAULT_CLEANUP_TIMEOUT_MS) +
+            CLEANUP_BACKSTOP_GRACE_MS,
+        );
       });
+      const result = await Promise.race([
+        cleanupDictation({
+          sessionId: session.backendId,
+          transcript: raw,
+          roster: session.modelNames,
+          vocabulary: [],
+        }),
+        deadline,
+      ]);
+      if (result === "backstop") {
+        releaseBackend(session.backendId);
+        return {
+          segments: verbatim(),
+          note: "Cleanup took too long, so here are your words as spoken.",
+        };
+      }
       if (result.text) {
         return {
           segments: resolveModelOutput(
@@ -265,68 +322,102 @@ export function useComposerDictation(params: UseComposerDictationParams) {
         segments: verbatim(),
         note: "Cleanup failed, so here are your words as spoken.",
       };
+    } finally {
+      window.clearTimeout(backstop);
     }
   }, []);
 
-  const deliver = React.useCallback(
-    (
-      session: Session,
-      raw: string,
-      segments: DictationSegment[],
-      note: string | null,
-    ) => {
-      if (sameContext(session)) {
-        const editor = paramsRef.current.editor;
-        if (!editor) return;
-        const view = editor.view;
-        const pendingId = pendingMarkRef.current;
-        const mark = readDictationMark(view, pendingId);
-        if (!mark) {
-          if (pendingId !== null) {
-            toast.info(
-              "You edited the dictated words, so cleanup was not applied.",
-            );
-          }
-          return;
-        }
-        const rendered = renderSegments(
-          segments,
-          paramsRef.current.registerMention,
+  /** Puts a result into the live editor (swap the raw words, or insert). */
+  const applyInEditor = React.useCallback((outcome: Outcome) => {
+    const editor = paramsRef.current.editor;
+    if (!editor || editor.isDestroyed) return;
+    const view = editor.view;
+    const { session } = outcome;
+    let range: { from: number; to: number } | null = null;
+    if (session.rawInserted) {
+      const mark = readDictationMark(view, session.rawMarkId);
+      session.rawMarkId = null;
+      if (!mark) {
+        toast.info(
+          "The dictated words changed before cleanup finished, so they were kept as spoken.",
         );
-        const start = replaceRange(view, mark.from, mark.to, rendered.text);
-        pendingMarkRef.current = null;
-        if (start === null) return;
-        for (const span of rendered.spans) {
-          const id = trackDictationMark(view, {
-            from: start + span.from,
-            to: start + span.to,
-            kind: span.kind === "mention" ? "flash" : "suggestion",
-            entryKey: span.entryKey,
-          });
-          if (span.kind === "mention" && id !== null) {
-            window.setTimeout(() => releaseDictationMark(view, id), FLASH_MS);
-          }
-        }
-        if (note) toast.info(note);
         return;
+      }
+      range = mark;
+    }
+    const rendered = renderSegments(
+      outcome.segments,
+      paramsRef.current.registerMention,
+    );
+    const start = range
+      ? replaceRange(view, range.from, range.to, rendered.text)
+      : (insertAtSelection(view, rendered.text)?.from ?? null);
+    if (start === null) return;
+    for (const span of rendered.spans) {
+      const id = trackDictationMark(view, {
+        from: start + span.from,
+        to: start + span.to,
+        kind: span.kind === "mention" ? "flash" : "suggestion",
+        entryKey: span.entryKey,
+      });
+      if (span.kind === "mention" && id !== null) {
+        window.setTimeout(() => releaseDictationMark(view, id), FLASH_MS);
+      }
+    }
+    const suggestions = rendered.spans.filter(
+      (span) => span.kind === "suggestion",
+    ).length;
+    if (suggestions > 0) {
+      toast.info(
+        `${suggestions === 1 ? "A name" : `${suggestions} names`} may be meant as a mention. Click the underlined ${suggestions === 1 ? "name" : "names"}, or put the caret in one and press ${suggestionKeyLabel()}.`,
+      );
+    }
+    if (outcome.note) toast.info(outcome.note);
+  }, []);
+
+  /**
+   * Hands a result to where it was spoken. `parked` means the composer still
+   * shows the origin draft but an edit is open over it: the composer holds
+   * that draft in memory and will restore it, so the result waits.
+   */
+  const deliver = React.useCallback(
+    (outcome: Outcome): "done" | "parked" => {
+      const { session } = outcome;
+      if (sameContext(session)) {
+        applyInEditor(outcome);
+        return "done";
       }
       if (session.originEditTargetId) {
         toast.info("Dictation was discarded because the message edit closed.");
-        return;
+        return "done";
       }
-      if (!session.originDraftKey) return;
-      const rendered = renderSegments(segments, (displayName) => displayName);
-      deliverToDraft(
-        session.originDraftKey,
-        session.originChannelId,
-        raw,
-        rendered.text,
-        rendered.mentionRefs,
-      );
+      if (!session.originDraftKey) return "done";
+      if (
+        mountedRef.current &&
+        paramsRef.current.draftKey === session.originDraftKey
+      ) {
+        return "parked";
+      }
+      deliverToDraft(session.originDraftKey, session.originChannelId, outcome);
       toast.info("Your dictation was added to the draft where you started it.");
+      return "done";
     },
-    [sameContext],
+    [applyInEditor, sameContext],
   );
+
+  /** Retries a held result after the composer's context changed. */
+  const flushParked = React.useCallback(() => {
+    const outcome = parkedRef.current;
+    if (!outcome) return;
+    const attempt = () => {
+      if (parkedRef.current !== outcome) return;
+      if (deliver(outcome) === "done") parkedRef.current = null;
+    };
+    // Back on the origin draft: let the composer restore its own content
+    // for this context first (its effects run after ours in this commit).
+    if (sameContext(outcome.session)) window.requestAnimationFrame(attempt);
+    else attempt();
+  }, [deliver, sameContext]);
 
   const stop = React.useCallback(async () => {
     const session = sessionRef.current;
@@ -337,47 +428,71 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     }
     if (statusRef.current !== "recording" || session.backendId === null) return;
     const generation = session.generation;
+    const backendId = session.backendId;
     setStatus("transcribing");
     let rawText: string;
+    let droppedBatches = 0;
     try {
-      await session.capture?.stop();
-      rawText = (await stopDictation(session.backendId)).text.trim();
+      droppedBatches = (await session.capture?.stop())?.droppedBatches ?? 0;
+      rawText = (await stopDictation(backendId)).text.trim();
     } catch (error) {
-      releaseRecorder(targetIdRef.current);
+      // A cancel in the meantime already released everything.
       if (generation !== generationRef.current) return;
-      void cancelDictation(session.backendId).catch(() => {});
-      finish();
+      releaseRecorder(targetIdRef.current);
+      releaseBackend(backendId);
+      sessionRef.current = null;
+      setStatus("idle");
       showStartError(error);
       return;
     }
-    releaseRecorder(targetIdRef.current);
     if (generation !== generationRef.current) return;
+    releaseRecorder(targetIdRef.current);
     if (!rawText) {
-      void cancelDictation(session.backendId).catch(() => {});
-      finish();
+      releaseBackend(backendId);
+      sessionRef.current = null;
+      setStatus("idle");
       toast.info(
         "Didn't catch anything. Try again a little closer to the mic.",
       );
       return;
     }
+    if (droppedBatches > 0) {
+      toast.warning(
+        "Some audio didn't reach dictation, so part of what you said may be missing.",
+      );
+    }
     if (sameContext(session)) {
       const editor = paramsRef.current.editor;
       const range = editor ? insertAtSelection(editor.view, rawText) : null;
       if (editor && range) {
-        pendingMarkRef.current = trackDictationMark(editor.view, {
+        session.rawInserted = true;
+        session.rawMarkId = trackDictationMark(editor.view, {
           ...range,
           kind: "pending",
         });
       }
     }
     setStatus("cleaning");
-    const { segments, note } = await cleanUp(session, rawText);
-    if (generation !== generationRef.current) return;
-    deliver(session, rawText, segments, note);
-    sessionRef.current = null;
-    pendingMarkRef.current = null;
-    setStatus("idle");
-  }, [cleanUp, deliver, finish, sameContext, setStatus]);
+    try {
+      const { segments, note } = await cleanUp(session, rawText);
+      if (generation !== generationRef.current) return;
+      const outcome: Outcome = { session, raw: rawText, segments, note };
+      if (deliver(outcome) === "parked") parkedRef.current = outcome;
+    } catch {
+      if (generation === generationRef.current) {
+        toast.error(
+          "Dictation could not finish, so your words were kept as spoken.",
+        );
+      }
+    } finally {
+      // Never strand the composer (sends are held while not idle).
+      if (generation === generationRef.current) {
+        releaseMark(session.rawMarkId);
+        sessionRef.current = null;
+        setStatus("idle");
+      }
+    }
+  }, [cleanUp, deliver, releaseMark, sameContext, setStatus]);
 
   const start = React.useCallback(async () => {
     const current = paramsRef.current;
@@ -389,6 +504,10 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     if (statusRef.current !== "idle") return;
     if (current.huddleActive) {
       toast.info("Dictation is off during a huddle.");
+      return;
+    }
+    if (current.voiceNoteActive) {
+      toast.info("Finish or discard the voice note before dictating.");
       return;
     }
     const targetId = targetIdRef.current;
@@ -409,14 +528,19 @@ export function useComposerDictation(params: UseComposerDictationParams) {
       originChannelId: current.channelId,
       originEditTargetId: current.editTargetId,
       stopRequested: false,
+      rawInserted: false,
+      rawMarkId: null,
     };
     sessionRef.current = session;
     setStatus("starting");
+    // After each await: a cancel in the meantime (Esc, a typing chord, a
+    // huddle) bumped the generation and already released what it could see.
     try {
       const [info, settings] = await Promise.all([
         getDictationModelInfo(),
         getDictationSettings(),
       ]);
+      if (generation !== generationRef.current) return;
       if (info.status !== "ready") {
         throw new DictationSetupError(
           "Set up dictation first: download its speech model in Settings → Experiments → Dictation.",
@@ -429,15 +553,25 @@ export function useComposerDictation(params: UseComposerDictationParams) {
       });
       session.modelNames = modelRosterNames(session.roster);
       session.settings = settings;
-      const { sessionId } = await startDictation({
+      // The backend has one session slot: wait out any stale session's
+      // release instead of racing it.
+      await backendIdle();
+      if (generation !== generationRef.current) return;
+      const started = startDictation({
         roster: session.modelNames,
         vocabulary: [],
       });
+      // If this start lands after a cancel, it frees its own slot.
+      trackBackendRelease(
+        started.then(({ sessionId }) =>
+          generation !== generationRef.current
+            ? cancelDictation(sessionId)
+            : undefined,
+        ),
+      );
+      const { sessionId } = await started;
+      if (generation !== generationRef.current) return;
       session.backendId = sessionId;
-      if (generation !== generationRef.current) {
-        void cancelDictation(sessionId).catch(() => {});
-        return;
-      }
       const capture = await startDictationCapture({
         deviceId: readStoredDevice(),
         onLevel: (level) => {
@@ -450,7 +584,6 @@ export function useComposerDictation(params: UseComposerDictationParams) {
       });
       if (generation !== generationRef.current) {
         capture.cancel();
-        void cancelDictation(sessionId).catch(() => {});
         return;
       }
       session.capture = capture;
@@ -461,8 +594,7 @@ export function useComposerDictation(params: UseComposerDictationParams) {
       if (session.stopRequested) void stop();
     } catch (error) {
       if (generation !== generationRef.current) return;
-      if (session.backendId !== null)
-        void cancelDictation(session.backendId).catch(() => {});
+      releaseBackend(session.backendId);
       releaseRecorder(targetId);
       sessionRef.current = null;
       setStatus("idle");
@@ -478,7 +610,24 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     }
   }, [start, stop]);
 
-  const isBusy = React.useCallback(() => statusRef.current !== "idle", []);
+  /** Dictation in progress for the draft this composer is showing now. */
+  const originMatches = React.useCallback(() => {
+    const session = sessionRef.current;
+    const current = paramsRef.current;
+    return (
+      session !== null &&
+      session.originDraftKey === current.draftKey &&
+      session.originEditTargetId === current.editTargetId
+    );
+  }, []);
+  const isBusy = React.useCallback(
+    () => statusRef.current !== "idle" && originMatches(),
+    [originMatches],
+  );
+  const discard = React.useCallback(() => {
+    parkedRef.current = null;
+    cancel();
+  }, [cancel]);
   const getLevel = React.useCallback(() => levelRef.current, []);
   const notifyBusy = React.useCallback(() => {
     toast.info("Finishing dictation…", { id: "dictation-busy" });
@@ -494,10 +643,11 @@ export function useComposerDictation(params: UseComposerDictationParams) {
       start: () => void start(),
       stop: () => void stop(),
       cancel,
+      discard,
     });
     targetIdRef.current = id;
     return unregister;
-  }, [cancel, start, stop]);
+  }, [cancel, discard, start, stop]);
 
   // Track focus (hotkey routing) and suggestion clicks on this editor.
   const editor = params.editor;
@@ -524,12 +674,13 @@ export function useComposerDictation(params: UseComposerDictationParams) {
   }, [editor]);
 
   // Leaving the composer's context mid-recording stops and delivers to the
-  // draft where dictation started.
+  // draft where dictation started; a held result gets another chance.
   // biome-ignore lint/correctness/useExhaustiveDependencies: identity fields are the triggers
   React.useEffect(() => {
     if (statusRef.current === "recording" || statusRef.current === "starting") {
       void stop();
     }
+    flushParked();
   }, [params.draftKey, params.editTargetId]);
 
   // A huddle takes the mic: dictation yields immediately.
@@ -558,7 +709,8 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     return () => window.clearInterval(timer);
   }, [status, stop]);
 
-  // Unmounting mid-recording discards; mid-cleanup still delivers to the draft.
+  // Unmounting mid-recording discards; mid-cleanup still delivers to the
+  // draft, and so does a held result (the composer has persisted it by now).
   React.useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -569,11 +721,14 @@ export function useComposerDictation(params: UseComposerDictationParams) {
       ) {
         cancel();
       }
+      flushParked();
     };
-  }, [cancel]);
+  }, [cancel, flushParked]);
 
   return {
     status,
+    /** Render-time twin of `isBusy`: hold sends for this draft only. */
+    blocksSend: status !== "idle" && originMatches(),
     startedAt,
     getLevel,
     notifyBusy,

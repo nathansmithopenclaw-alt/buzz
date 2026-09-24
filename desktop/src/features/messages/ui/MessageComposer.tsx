@@ -322,6 +322,7 @@ function MessageComposerImpl({
     editTargetId: editTarget?.id ?? null,
     isMain: !draftKey,
     disabled: composerDisabled,
+    voiceNoteActive: voiceNote.status !== "idle",
     getCandidates: mentions.getDictationCandidates,
     registerMention: mentions.registerMentionPubkey,
     recentMentionPubkeys,
@@ -834,7 +835,7 @@ function MessageComposerImpl({
     composerDisabled ||
     media.isUploading ||
     voiceNote.status !== "idle" ||
-    dictation.status !== "idle" ||
+    dictation.blocksSend ||
     mentionSendFlow.isPreparingMentionSend ||
     (isContentEmpty &&
       media.pendingImeta.length === 0 &&

@@ -25,11 +25,19 @@ export type DictationTarget = {
   start: (mode: "hold" | "toggle") => void;
   stop: () => void;
   cancel: () => void;
+  /** Cancels and also drops any result still waiting to be delivered. */
+  discard: () => void;
 };
 
 const targets = new Map<number, DictationTarget>();
 let nextTargetId = 1;
 let recorderOwner: number | null = null;
+/**
+ * Settles once every backend release requested so far has landed. The
+ * backend allows one session at a time, so a new start waits on this rather
+ * than racing a stale session's cancel for the slot.
+ */
+let backendReleased: Promise<unknown> = Promise.resolve();
 
 /** Registers a composer as a dictation target; returns its unregister. */
 export function registerDictationTarget(target: DictationTarget): {
@@ -71,6 +79,27 @@ export function recordingDictationTarget(): DictationTarget | undefined {
   );
 }
 
+/** What the hotkey machine asks for (see `dictationHotkey.ts`). */
+export type HotkeyRoute = "start-hold" | "stop-hold" | "toggle" | "cancel";
+
+/**
+ * Routes one hotkey action to the right composer. A typing chord's `cancel`
+ * only ever stops a capture in progress: it must never abort another
+ * composer's in-flight transcription or cleanup.
+ */
+export function routeHotkeyAction(action: HotkeyRoute): void {
+  if (action === "cancel") {
+    recordingDictationTarget()?.cancel();
+    return;
+  }
+  const target = pickDictationTarget();
+  if (!target) return;
+  if (action === "start-hold") target.start("hold");
+  else if (action === "stop-hold") target.stop();
+  else if (["starting", "recording"].includes(target.status())) target.stop();
+  else target.start("toggle");
+}
+
 /** Claims the window's single recorder for target `id`. */
 export function claimRecorder(id: number): boolean {
   if (recorderOwner !== null && recorderOwner !== id) return false;
@@ -82,8 +111,22 @@ export function releaseRecorder(id: number): void {
   if (recorderOwner === id) recorderOwner = null;
 }
 
+/**
+ * Records backend work that frees the session slot (a cancel, or a start
+ * that will cancel itself once it lands stale). Never rejects.
+ */
+export function trackBackendRelease(work: Promise<unknown>): void {
+  const settled = work.catch(() => {});
+  backendReleased = Promise.all([backendReleased, settled]);
+}
+
+/** Resolves once every tracked backend release has settled. */
+export function backendIdle(): Promise<unknown> {
+  return backendReleased;
+}
+
 /** Cancels every dictation and clears the recorder slot. */
 export function resetDictationState(): void {
-  for (const target of targets.values()) target.cancel();
+  for (const target of targets.values()) target.discard();
   recorderOwner = null;
 }

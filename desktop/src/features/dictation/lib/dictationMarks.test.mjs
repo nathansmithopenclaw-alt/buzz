@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { getSchema } from "@tiptap/core";
-import { EditorState } from "@tiptap/pm/state";
+import { EditorState, TextSelection } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
 
 import {
@@ -11,6 +11,7 @@ import {
   MAX_DICTATION_MARKS,
   readDictationMark,
   releaseDictationMark,
+  suggestionAtSelection,
   trackDictationMark,
 } from "./dictationMarks.ts";
 
@@ -141,4 +142,76 @@ test("the mark set is capped", () => {
     dictationMarksKey.getState(view.state).size,
     MAX_DICTATION_MARKS,
   );
+});
+
+test("typing strictly inside a pending range kills it (the swap must not erase it)", () => {
+  const view = makeView("lets meet tomorrow");
+  const id = trackDictationMark(view, {
+    from: at(0),
+    to: at(18),
+    kind: "pending",
+  });
+  // A pure insertion (no deleted text) in the middle of the raw words.
+  view.dispatch(view.state.tr.insertText("not ", at(10)));
+  assert.equal(readDictationMark(view, id), null);
+});
+
+test("a line break typed inside a pending range kills it too", () => {
+  const view = makeView("first second");
+  const id = trackDictationMark(view, {
+    from: at(0),
+    to: at(12),
+    kind: "pending",
+  });
+  view.dispatch(
+    view.state.tr.replaceWith(at(5), at(5), schema.nodes.hardBreak.create()),
+  );
+  assert.equal(readDictationMark(view, id), null);
+});
+
+test("the caret inside (or at the edge of) a suggestion finds it; elsewhere nothing", () => {
+  const view = makeView("ask Ember now");
+  const id = trackDictationMark(view, {
+    from: at(4),
+    to: at(9),
+    kind: "suggestion",
+    entryKey: "pk:ember",
+  });
+  const caret = (offset) =>
+    view.dispatch(
+      view.state.tr.setSelection(
+        TextSelection.create(view.state.doc, at(offset)),
+      ),
+    );
+  caret(6);
+  assert.equal(suggestionAtSelection(view.state), id);
+  caret(9);
+  assert.equal(suggestionAtSelection(view.state), id);
+  caret(1);
+  assert.equal(suggestionAtSelection(view.state), null);
+});
+
+test("Alt+Enter in a suggestion opens it; plain Enter is left to the composer", () => {
+  const view = makeView("ask Ember now");
+  const id = trackDictationMark(view, {
+    from: at(4),
+    to: at(9),
+    kind: "suggestion",
+    entryKey: "pk:ember",
+  });
+  view.dispatch(
+    view.state.tr.setSelection(TextSelection.create(view.state.doc, at(6))),
+  );
+  const events = [];
+  view.dom = { dispatchEvent: (event) => events.push(event) };
+  const handleKeyDown = plugins[0].props.handleKeyDown;
+  const key = (init) => ({ key: "Enter", isComposing: false, ...init });
+  assert.equal(handleKeyDown(view, key({ altKey: false })), false);
+  assert.equal(
+    handleKeyDown(view, key({ altKey: true, metaKey: true })),
+    false,
+  );
+  assert.equal(handleKeyDown(view, key({ altKey: true })), true);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].detail.id, id);
 });

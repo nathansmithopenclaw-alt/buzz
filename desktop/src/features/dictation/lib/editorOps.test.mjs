@@ -90,3 +90,20 @@ test("a suggestion becomes an @ query for the picker", () => {
   assert.equal(plain(view), "Hey @Theron, hi");
   assert.equal(view.state.selection.from, 12, "caret sits right after @Theron");
 });
+
+test("inserted text turns line breaks into hard breaks with matching offsets", () => {
+  const view = makeView("Hi", 2);
+  const range = insertAtSelection(view, "one\ntwo");
+  assert.equal(plain(view), "Hi one⏎two");
+  // One position per character, including the break.
+  assert.equal(range.to - range.from, "one\ntwo".length);
+  assert.equal(
+    view.state.doc.textBetween(range.from, range.to, "\n", "\n"),
+    "one\ntwo",
+  );
+  assert.equal(
+    view.state.selection.from,
+    range.to,
+    "caret lands after the words",
+  );
+});

@@ -92,28 +92,25 @@ export function DictationButton({
     startedAt,
   );
   const processing = status === "transcribing" || status === "cleaning";
-  const label = recording
-    ? "Stop dictation"
-    : processing
-      ? status === "transcribing"
-        ? "Transcribing dictation"
-        : "Cleaning up dictation"
-      : "Dictate";
-  const tooltip =
-    disabledReason ??
-    (recording
-      ? `Stop dictation (${shortcut})`
-      : `Dictate (tap or hold ${shortcut})`);
+  // One stable name; state is carried by aria-pressed/aria-busy and the live
+  // region, so assistive tech never hears the state twice.
+  const tooltip = recording
+    ? `Stop dictation (${shortcut})`
+    : (disabledReason ?? `Dictate (tap or hold ${shortcut})`);
+  // A recording can always be stopped, even if the composer became disabled
+  // mid-recording (the only other ways out are the hotkey and Esc).
+  const disabled = processing || (Boolean(disabledReason) && !recording);
   return (
     <>
       <Tooltip disableHoverableContent>
         <TooltipTrigger asChild>
           <Button
-            aria-label={label}
+            aria-busy={processing || undefined}
+            aria-label="Dictate"
             aria-pressed={recording}
             className={recording ? "gap-1.5 px-2 text-primary" : undefined}
             data-testid="composer-dictation-button"
-            disabled={Boolean(disabledReason) || processing}
+            disabled={disabled}
             onClick={onToggle}
             onMouseDown={onCaptureSelection}
             size={recording ? "sm" : "icon"}

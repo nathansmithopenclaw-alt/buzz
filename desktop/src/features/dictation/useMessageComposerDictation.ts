@@ -20,6 +20,8 @@ export type MessageComposerDictationInput = {
   editTargetId: string | null;
   isMain: boolean;
   disabled: boolean;
+  /** A voice note owns the mic (recording or processing). */
+  voiceNoteActive: boolean;
   getCandidates: () => DictationCandidates;
   registerMention: RegisterMention;
   recentMentionPubkeys?: readonly string[];
@@ -55,9 +57,11 @@ export function useMessageComposerDictation(
             onToggle: dictation.toggle,
             disabledReason: huddleActive
               ? "Dictation is off during a huddle"
-              : input.disabled
-                ? "Composer is disabled"
-                : null,
+              : input.voiceNoteActive
+                ? "Finish the voice note first"
+                : input.disabled
+                  ? "Composer is disabled"
+                  : null,
             shortcut,
           }
         : null,
@@ -69,12 +73,14 @@ export function useMessageComposerDictation(
       enabled,
       huddleActive,
       input.disabled,
+      input.voiceNoteActive,
       shortcut,
     ],
   );
   return {
     enabled,
     status: dictation.status,
+    blocksSend: dictation.blocksSend,
     isBusy: dictation.isBusy,
     notifyBusy: dictation.notifyBusy,
     buttonProps,

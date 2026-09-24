@@ -2,8 +2,8 @@ import * as React from "react";
 
 import { DictationHotkeyMachine } from "./lib/dictationHotkey";
 import {
-  pickDictationTarget,
   recordingDictationTarget,
+  routeHotkeyAction,
 } from "./lib/dictationSession";
 import { useDictationSettings } from "./useDictationSettings";
 
@@ -23,16 +23,7 @@ export function useDictationHotkey(enabled: boolean) {
     if (!enabled) return;
     const machine = new DictationHotkeyMachine(
       () => hotkeyRef.current,
-      (action) => {
-        const target = pickDictationTarget();
-        if (!target) return;
-        if (action === "start-hold") target.start("hold");
-        else if (action === "stop-hold") target.stop();
-        else if (action === "cancel") target.cancel();
-        else if (["starting", "recording"].includes(target.status()))
-          target.stop();
-        else target.start("toggle");
-      },
+      routeHotkeyAction,
       {
         now: () => performance.now(),
         set: (fn, ms) => window.setTimeout(fn, ms),

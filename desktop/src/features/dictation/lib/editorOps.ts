@@ -24,8 +24,10 @@ export function textToFragment(schema: Schema, text: string): Fragment {
 
 /**
  * Inserts dictated words at the selection (replacing any selected text) as
- * one undo step, adding a separating space after a word. Returns the range
- * the words occupy.
+ * one undo step, adding a separating space after a word. "\n" becomes a hard
+ * break (one position, like the character), so offsets into `text` stay
+ * valid document offsets from the returned `from`. Returns the range the
+ * words occupy.
  */
 export function insertAtSelection(
   view: DictationMarksView,
@@ -36,10 +38,16 @@ export function insertAtSelection(
   const before =
     from > 1 ? view.state.doc.textBetween(from - 1, from, "\n", "\n") : "";
   const lead = before && !/\s/.test(before) ? " " : "";
-  const tr = view.state.tr.insertText(lead + text, from, to);
+  const tr = view.state.tr.replaceWith(
+    from,
+    to,
+    textToFragment(view.state.schema, lead + text),
+  );
+  const end = from + lead.length + text.length;
+  tr.setSelection(TextSelection.create(tr.doc, end));
   closeHistory(tr);
   view.dispatch(tr);
-  return { from: from + lead.length, to: from + lead.length + text.length };
+  return { from: from + lead.length, to: end };
 }
 
 /**

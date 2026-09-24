@@ -24,9 +24,14 @@ export type DictationCaptureOptions = {
   onSilence?: () => void;
 };
 
+export type DictationCaptureResult = {
+  /** 100 ms batches the backend refused (the transcript is missing them). */
+  droppedBatches: number;
+};
+
 export type DictationCapture = {
   /** Releases the mic, then waits for queued audio to reach the backend. */
-  stop: () => Promise<void>;
+  stop: () => Promise<DictationCaptureResult>;
   /** Releases the mic without waiting. */
   cancel: () => void;
 };
@@ -81,12 +86,17 @@ export async function startDictationCapture(
     );
   }
 
-  const context = new AudioContext({ sampleRate: 48_000 });
+  // Every setup step can throw; each failure releases what was opened so
+  // the system microphone indicator never stays on.
+  let context: AudioContext | null = null;
   const release = () => {
     for (const track of stream.getTracks()) track.stop();
-    void context.close().catch(() => {});
+    void context?.close().catch(() => {});
   };
+  let source: MediaStreamAudioSourceNode;
+  let node: AudioWorkletNode;
   try {
+    context = new AudioContext({ sampleRate: 48_000 });
     if (context.state === "suspended") await context.resume();
     if (context.sampleRate !== 48_000) {
       throw new MicrophoneUnavailableError(
@@ -95,6 +105,9 @@ export async function startDictationCapture(
       );
     }
     await context.audioWorklet.addModule("/worklet.js");
+    source = context.createMediaStreamSource(stream);
+    node = new AudioWorkletNode(context, "stt-tap-processor");
+    source.connect(node);
   } catch (error) {
     release();
     throw error instanceof MicrophoneUnavailableError
@@ -105,11 +118,8 @@ export async function startDictationCapture(
         );
   }
 
-  const source = context.createMediaStreamSource(stream);
-  const node = new AudioWorkletNode(context, "stt-tap-processor");
-  source.connect(node);
-
   let queue: Promise<unknown> = Promise.resolve();
+  let droppedBatches = 0;
   let batch: Float32Array[] = [];
   let released = false;
   const startedAt = performance.now();
@@ -127,7 +137,11 @@ export async function startDictationCapture(
     }
     batch = [];
     const bytes = new Uint8Array(joined.buffer);
-    queue = queue.then(() => pushDictationAudio(bytes)).catch(() => {});
+    queue = queue
+      .then(() => pushDictationAudio(bytes))
+      .catch(() => {
+        droppedBatches += 1;
+      });
   };
 
   node.port.onmessage = (event: MessageEvent<Float32Array>) => {
@@ -160,6 +174,7 @@ export async function startDictationCapture(
       releaseMic();
       flush();
       await queue;
+      return { droppedBatches };
     },
     cancel() {
       batch = [];

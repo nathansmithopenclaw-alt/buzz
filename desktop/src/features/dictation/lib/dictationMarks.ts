@@ -7,6 +7,8 @@ import {
 } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
+import { isMacPlatform } from "@/shared/lib/platform";
+
 /**
  * Composer ranges that belong to a dictation:
  *
@@ -19,7 +21,8 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
  *   one is noticed before sending (a mention can wake an agent).
  *
  * Ranges follow the same rule as pasted-mention occurrences: edits outside a
- * range move it, any edit overlapping it kills it (fail closed).
+ * range move it, any edit overlapping it (including typing strictly inside
+ * it) kills it (fail closed). Text typed at either edge stays outside.
  */
 export const dictationMarksKey = new PluginKey<DictationMarks>(
   "dictationMarks",
@@ -54,15 +57,45 @@ export const MAX_DICTATION_MARKS = 60;
 /** Name of the DOM event fired when a suggestion is clicked. */
 export const DICTATION_SUGGESTION_EVENT = "buzz-dictation-suggestion";
 
+/** Keyboard path to a suggestion (the caret inside it + Alt/Option+Enter). */
+export function suggestionKeyLabel(): string {
+  return isMacPlatform() ? "⌥↩" : "Alt+Enter";
+}
+
 let nextMarkId = 1;
+
+/** The suggestion mark the caret sits in (edges included), if any. */
+export function suggestionAtSelection(state: EditorState): number | null {
+  const marks = dictationMarksKey.getState(state);
+  if (!marks) return null;
+  const { from, to } = state.selection;
+  for (const [id, mark] of marks) {
+    if (mark.kind === "suggestion" && from >= mark.from && to <= mark.to)
+      return id;
+  }
+  return null;
+}
+
+function openSuggestion(dom: HTMLElement, id: number) {
+  dom.dispatchEvent(
+    new CustomEvent(DICTATION_SUGGESTION_EVENT, {
+      bubbles: true,
+      detail: { id },
+    }),
+  );
+}
 
 function remap(mark: DictationMark, tr: Transaction): DictationMark | null {
   let { from, to } = mark;
   for (const map of tr.mapping.maps) {
     let overlapped = false;
     map.forEach((oldStart, oldEnd) => {
-      if (oldEnd > oldStart && oldStart < to && oldEnd > from)
-        overlapped = true;
+      // A replacement touching the range, or text inserted strictly inside
+      // it (typing in the middle of pending words must not be swapped away).
+      const replaces = oldEnd > oldStart && oldStart < to && oldEnd > from;
+      const insertsInside =
+        oldEnd === oldStart && oldStart > from && oldStart < to;
+      if (replaces || insertsInside) overlapped = true;
     });
     if (overlapped) return null;
     const mappedFrom = map.mapResult(from, 1);
@@ -118,7 +151,7 @@ function decorations(state: EditorState): DecorationSet {
     if (mark.kind === "pending") attrs["aria-busy"] = "true";
     if (mark.kind === "suggestion") {
       attrs["data-dictation-suggestion"] = String(id);
-      attrs.title = "Suggested mention — click to choose who you meant";
+      attrs.title = `Suggested mention — click, or press ${suggestionKeyLabel()} with the caret in it, to choose who you meant`;
     }
     items.push(Decoration.inline(mark.from, mark.to, attrs));
   }
@@ -143,12 +176,23 @@ export const DictationMarksExtension = Extension.create({
             const hit = target?.closest?.("[data-dictation-suggestion]");
             const id = Number(hit?.getAttribute("data-dictation-suggestion"));
             if (!hit || !Number.isFinite(id)) return false;
-            view.dom.dispatchEvent(
-              new CustomEvent(DICTATION_SUGGESTION_EVENT, {
-                bubbles: true,
-                detail: { id },
-              }),
-            );
+            openSuggestion(view.dom, id);
+            return true;
+          },
+          // Keyboard path: Alt/Option+Enter with the caret in a suggestion.
+          handleKeyDown(view, event) {
+            if (
+              event.key !== "Enter" ||
+              !event.altKey ||
+              event.metaKey ||
+              event.ctrlKey ||
+              event.shiftKey ||
+              event.isComposing
+            )
+              return false;
+            const id = suggestionAtSelection(view.state);
+            if (id === null) return false;
+            openSuggestion(view.dom, id);
             return true;
           },
         },

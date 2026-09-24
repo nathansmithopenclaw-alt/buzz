@@ -107,15 +107,37 @@ function renderMention(
   return null;
 }
 
-/** Replaces the last occurrence of `raw` in `content` (draft delivery). */
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/**
+ * Replaces the last whole-word occurrence of `raw` in `content` (draft
+ * delivery of words that were inserted before the composer moved away).
+ * `null` when there is none, so "no" never matches inside "know".
+ */
 export function replaceLastOccurrence(
   content: string,
   raw: string,
   replacement: string,
 ): string | null {
-  const index = content.lastIndexOf(raw);
-  if (index < 0 || !raw) return null;
-  return (
-    content.slice(0, index) + replacement + content.slice(index + raw.length)
-  );
+  if (!raw) return null;
+  let index = content.lastIndexOf(raw);
+  while (index >= 0) {
+    const before = index > 0 ? content[index - 1] : "";
+    const after = content[index + raw.length] ?? "";
+    const startOk =
+      !WORD_CHAR.test(raw[0] ?? "") || !before || !WORD_CHAR.test(before);
+    const endOk =
+      !WORD_CHAR.test(raw[raw.length - 1] ?? "") ||
+      !after ||
+      !WORD_CHAR.test(after);
+    if (startOk && endOk) {
+      return (
+        content.slice(0, index) +
+        replacement +
+        content.slice(index + raw.length)
+      );
+    }
+    index = index > 0 ? content.lastIndexOf(raw, index - 1) : -1;
+  }
+  return null;
 }
