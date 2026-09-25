@@ -863,6 +863,12 @@ pub fn spawn_agent_child(
         }
     }
 
+    crate::model_connections::source::validate_account(
+        crate::model_connections::source::selected(&descriptor.env, effective_provider.as_deref())?,
+        record.subscription_account_id.as_deref(),
+        record.subscription_account_inherit_default,
+    )?;
+
     crate::model_connections::runtime::apply(
         app,
         &mut command,

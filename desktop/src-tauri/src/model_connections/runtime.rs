@@ -1,5 +1,5 @@
 //! Native projection of a saved connection into each supported harness.
-use super::{resolve, CONNECTION_ENV};
+use super::{resolve, source};
 use std::{collections::BTreeMap, io::Write, path::Path, process::Command};
 use tauri::{AppHandle, Manager};
 pub(super) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -29,6 +29,42 @@ fn prime_args(existing: &str, model: &str) -> Result<String, String> {
     // selection wins over both and errors instead of choosing a default model.
     Ok(format!("{existing},--provider,buzz-local,--model,{model}"))
 }
+/// Private launch data; deliberately neither Debug nor Serialize because it
+/// owns the resolved credential. Hosted selections do not resolve a secret.
+struct ConnectionLaunch {
+    runtime: &'static str,
+    connection: super::ModelConnection,
+    key: Option<String>,
+    model: String,
+}
+
+fn launch_plan(
+    harness: &str,
+    env: &BTreeMap<String, String>,
+    model: Option<&str>,
+    resolve: impl FnOnce(&str) -> Result<(super::ModelConnection, Option<String>), String>,
+) -> Result<Option<ConnectionLaunch>, String> {
+    let meta = crate::managed_agents::known_acp_runtime(harness);
+    let provider = meta
+        .and_then(|meta| meta.provider_env_var)
+        .and_then(|key| env.get(key));
+    let Some(id) = source::selected(env, provider.map(String::as_str))? else {
+        return Ok(None);
+    };
+    let meta = meta.ok_or("This harness does not support saved model connections")?;
+    if !matches!(meta.id, "deepseek" | "prime") {
+        return Err("This harness does not support saved model connections".into());
+    }
+    let (connection, key) = resolve(id)?;
+    let model = source::model(&connection, model)?.to_owned();
+    Ok(Some(ConnectionLaunch {
+        runtime: meta.id,
+        connection,
+        key,
+        model,
+    }))
+}
+
 pub(crate) fn apply(
     app: &AppHandle,
     command: &mut Command,
@@ -37,25 +73,13 @@ pub(crate) fn apply(
     model: Option<&str>,
     agent_key: &str,
 ) -> Result<(), String> {
-    let Some(meta) = crate::managed_agents::known_acp_runtime(harness) else {
+    let Some(plan) = launch_plan(harness, env, model, |id| resolve(app, id))? else {
         return Ok(());
     };
-    let provider = meta.provider_env_var.and_then(|key| env.get(key));
-    if provider.map(String::as_str) != Some("buzz-local") {
-        return Ok(());
-    }
-    let id = env
-        .get(CONNECTION_ENV)
-        .filter(|s| !s.is_empty())
-        .ok_or("Choose a saved model connection")?;
-    let (row, key) = resolve(app, id)?;
-    let model = model
-        .filter(|s| !s.is_empty())
-        .ok_or("Choose a model from the saved connection")?;
-    if model.len() > 256 || model.chars().any(char::is_control) {
-        return Err("Invalid model name".into());
-    }
-    match meta.id {
+    let row = plan.connection;
+    let key = plan.key;
+    let model = plan.model.as_str();
+    match plan.runtime {
         "deepseek" => {
             command.env("DSH_PROVIDER", "deepseek-compatible");
             command.env("DSH_LLM_BASE_URL", &row.base_url);
@@ -107,6 +131,58 @@ pub(crate) fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launch_plan_requires_the_selected_source_without_a_provider_marker() {
+        let env = BTreeMap::from([(super::super::CONNECTION_ENV.into(), "source-b".into())]);
+        let plan = launch_plan("prime-agent", &env, Some("same-model"), |id| {
+            assert_eq!(id, "source-b");
+            Ok((
+                super::super::ModelConnection {
+                    id: id.into(),
+                    name: "Second server".into(),
+                    base_url: "http://127.0.0.1/v1".into(),
+                    models: vec!["same-model".into()],
+                    has_key: false,
+                    secret_ref: None,
+                    tested_model: None,
+                    tested_at: None,
+                },
+                None,
+            ))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(plan.runtime, "prime");
+        assert_eq!(plan.connection.id, "source-b");
+        assert_eq!(plan.model, "same-model");
+        assert!(
+            launch_plan("prime-agent", &env, Some("same-model"), |_| Err(
+                "removed".into()
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn hosted_and_unsupported_routes_do_not_read_connection_credentials() {
+        fn no_credentials(
+            _: &str,
+        ) -> Result<(super::super::ModelConnection, Option<String>), String> {
+            panic!("must not resolve connection credentials")
+        }
+        assert!(launch_plan(
+            "claude-agent-acp",
+            &BTreeMap::new(),
+            Some("sonnet"),
+            no_credentials
+        )
+        .unwrap()
+        .is_none());
+        let env = BTreeMap::from([(super::super::CONNECTION_ENV.into(), "source-a".into())]);
+        assert!(launch_plan("claude-agent-acp", &env, Some("model"), no_credentials).is_err());
+        assert!(launch_plan("unknown-adapter", &env, Some("model"), no_credentials).is_err());
+    }
+
     #[test]
     fn prime_selection_is_explicit_even_with_inherited_provider_arguments() {
         let args =

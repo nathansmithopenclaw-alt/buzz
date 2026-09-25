@@ -230,11 +230,15 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
     )
     .require_resolved()?;
 
-    ensure_remote_provider_supported(effective.provider.value.as_deref())?;
-
     let descriptor =
         crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
             .map_err(|error| crate::managed_agents::user_facing_harness_error(&error))?;
+    crate::model_connections::source::validate_remote(crate::model_connections::source::selected(
+        &descriptor.env,
+        effective.provider.value.as_deref(),
+    )?)?;
+    ensure_remote_provider_supported(effective.provider.value.as_deref())?;
+
     let owner_pubkey = super::workspace_owner_hex(state)?;
     let launch = build_launch_block_for_policy(
         record,
