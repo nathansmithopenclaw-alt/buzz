@@ -1,3 +1,4 @@
+import { dictationMockCommand } from "./e2eDictation";
 import { dispatchPopulationProbeFilter } from "./e2eDispatchPopulation";
 import { dispatchMockCommand } from "./dispatchMockCommands";
 import { applyDispatchMockEvent } from "./dispatchMockProjection";
@@ -12667,6 +12668,9 @@ export function maybeInstallE2eTauriMocks() {
       payload: loggedPayload,
     });
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
+
+    const dictation = dictationMockCommand(command, payload);
+    if (dictation) return dictation.result;
 
     switch (command) {
       case "computer_use_status":

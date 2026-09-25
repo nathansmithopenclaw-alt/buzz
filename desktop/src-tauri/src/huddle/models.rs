@@ -186,62 +186,6 @@ const STT_ARCHIVE: ArchiveModelSpec = ArchiveModelSpec {
     license_text: STT_LICENSE_TEXT,
 };
 
-// ── Dictation STT model ───────────────────────────────────────────────────────
-
-/// NVIDIA Parakeet TDT 0.6B v2 (English, int8), packaged for sherpa-onnx by
-/// k2-fsa. Transducer (encoder/decoder/joiner). Chosen for composer dictation
-/// on measured accuracy: ~10.6% WER and ~79% roster-name accuracy on the Buzz
-/// dictation eval versus ~20% / ~59% for the 110M huddle model, at ~1 s for
-/// 49 s of speech on Apple Silicon. Downloaded only when dictation is used.
-const DICTATION_STT_DOWNLOAD_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\
-     sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2";
-
-/// SHA-256 of `sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2`
-/// (482,468,385 bytes), computed from a known-good download on 2026-09-24.
-const DICTATION_STT_ARCHIVE_SHA256: &str =
-    "157c157bc51155e03e37d2466522a3a737dd9c72bb25f36eb18912964161e1ad";
-
-const DICTATION_STT_ARCHIVE_SUBDIR: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8";
-const DICTATION_STT_MODEL_DIR_NAME: &str = "parakeet-tdt-0.6b-v2-en";
-const DICTATION_STT_MODEL_VERSION: &str = "1";
-/// Maximum expected archive size (600 MB — actual is ~482 MB).
-const MAX_DICTATION_STT_DOWNLOAD_BYTES: u64 = 600 * 1024 * 1024;
-const DICTATION_STT_EXPECTED_FILES: &[&str] = &[
-    "encoder.int8.onnx",
-    "decoder.int8.onnx",
-    "joiner.int8.onnx",
-    "tokens.txt",
-    STT_LICENSE_FILE_NAME,
-];
-const DICTATION_STT_LICENSE_TEXT: &str = "\
-NVIDIA Parakeet TDT 0.6B v2 (English)
-© NVIDIA Corporation.
-
-Licensed under the Creative Commons Attribution 4.0 International License
-(CC-BY-4.0). License text: https://creativecommons.org/licenses/by/4.0/
-
-Original model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2
-Converted to ONNX with int8 quantization by the sherpa-onnx project
-(https://github.com/k2-fsa/sherpa-onnx); Buzz ships this conversion
-unmodified.
-
-Provided \"AS IS\", without warranty of any kind, express or implied. See the
-license text for full warranty disclaimer.
-";
-
-const DICTATION_STT_ARCHIVE: ArchiveModelSpec = ArchiveModelSpec {
-    label: "dictation STT",
-    progress_label: "dictation stt archive",
-    url: DICTATION_STT_DOWNLOAD_URL,
-    sha256: DICTATION_STT_ARCHIVE_SHA256,
-    archive_subdir: DICTATION_STT_ARCHIVE_SUBDIR,
-    dir_name: DICTATION_STT_MODEL_DIR_NAME,
-    max_bytes: MAX_DICTATION_STT_DOWNLOAD_BYTES,
-    license_file_name: STT_LICENSE_FILE_NAME,
-    license_text: DICTATION_STT_LICENSE_TEXT,
-};
-
 // ── Pocket TTS model ──────────────────────────────────────────────────────────
 
 /// Final directory name under `~/.buzz/models/`.
@@ -688,7 +632,6 @@ pub struct ModelManager {
     models_dir: PathBuf,
     stt: ModelSlot,
     tts: ModelSlot,
-    dictation_stt: ModelSlot,
 }
 
 impl ModelManager {
@@ -701,11 +644,6 @@ impl ModelManager {
             models_dir,
             stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
             tts: tts_model_slot(),
-            dictation_stt: ModelSlot::new(
-                DICTATION_STT_MODEL_DIR_NAME,
-                DICTATION_STT_EXPECTED_FILES,
-                DICTATION_STT_MODEL_VERSION,
-            ),
         };
         manager.tts.recover_interrupted_install(&manager.models_dir);
         Some(manager)
@@ -749,38 +687,12 @@ impl ModelManager {
         self.tts.take_ready()
     }
 
-    // ── Dictation STT accessors ──────────────────────────────────────────────
-
-    /// Path to the dictation STT model directory, or `None` if not ready.
-    pub fn dictation_stt_model_dir(&self) -> Option<PathBuf> {
-        self.dictation_stt.dir_if_ready(&self.models_dir)
-    }
-    /// Current dictation STT download status (`Ready` when files are on disk).
-    pub fn dictation_stt_status(&self) -> ModelStatus {
-        if self.dictation_stt.is_ready(&self.models_dir) {
-            ModelStatus::Ready
-        } else {
-            self.dictation_stt.status()
-        }
-    }
     /// Root directory holding every voice model (used for free-space checks).
     pub fn models_dir_path(&self) -> &Path {
         &self.models_dir
     }
 
     // ── Download triggers ─────────────────────────────────────────────────────
-
-    /// Start a background dictation STT download. No-op if ready or downloading.
-    /// Never started at launch: the ~480 MB model is fetched only on demand.
-    pub fn start_dictation_stt_download(&self, http_client: reqwest::Client) {
-        let manager = self.clone();
-        self.dictation_stt.start_download(
-            &self.models_dir,
-            http_client,
-            "dictation-stt",
-            move |client| async move { manager.download_dictation_stt_model(client).await },
-        );
-    }
 
     /// Start a background STT model download. No-op if already ready or downloading.
     ///
@@ -840,15 +752,6 @@ impl ModelManager {
         // cover users who already have the new model installed.
         cleanup_legacy_moonshine_dir(&self.models_dir).await;
         Ok(())
-    }
-
-    /// Download the dictation STT model archive (Parakeet TDT 0.6B v2).
-    async fn download_dictation_stt_model(
-        &self,
-        http_client: reqwest::Client,
-    ) -> Result<(), String> {
-        self.download_archive_model(&self.dictation_stt, &DICTATION_STT_ARCHIVE, http_client)
-            .await
     }
 
     /// Download, extract, verify and atomically install a single-archive model

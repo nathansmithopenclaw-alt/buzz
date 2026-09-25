@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 const SETTINGS_FILE: &str = "dictation-settings.json";
-const SETTINGS_VERSION: u32 = 1;
+const SETTINGS_VERSION: u32 = 2;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 /// Default cleanup deadline; past it the user gets the on-device result.
@@ -46,11 +46,37 @@ pub(crate) enum CleanupSource {
     },
 }
 
+/// Local speech model selection; the tag permits future engine families.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum SpeechSource {
+    #[serde(rename_all = "camelCase")]
+    Local { model_id: String },
+}
+
+impl Default for SpeechSource {
+    fn default() -> Self {
+        Self::Local {
+            model_id: super::catalog::DEFAULT_MODEL_ID.into(),
+        }
+    }
+}
+
+impl SpeechSource {
+    pub(crate) fn model_id(&self) -> &str {
+        match self {
+            Self::Local { model_id } => model_id,
+        }
+    }
+}
+
 /// Persisted dictation settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DictationSettings {
     pub version: u32,
+    #[serde(default)]
+    pub speech: SpeechSource,
     pub cleanup: CleanupSource,
     pub timeout_ms: u32,
     /// `KeyboardEvent.code` for push-to-talk / tap-to-toggle.
@@ -65,6 +91,7 @@ impl Default for DictationSettings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
+            speech: SpeechSource::default(),
             cleanup: CleanupSource::Off,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             hotkey: DEFAULT_HOTKEY.to_string(),
@@ -75,7 +102,12 @@ impl Default for DictationSettings {
 }
 
 fn is_valid_key_code(code: &str) -> bool {
-    !code.is_empty() && code.len() <= 32 && code.chars().all(|c| c.is_ascii_alphanumeric())
+    // Typing, navigation, help, reload, menus and developer shortcuts stay free.
+    matches!(code, "AltLeft" | "AltRight" | "F8" | "F9")
+        || code
+            .strip_prefix('F')
+            .and_then(|n| n.parse::<u8>().ok())
+            .is_some_and(|n| (13..=24).contains(&n) && code == format!("F{n}"))
 }
 
 fn bounded_text(value: &str, max: usize) -> bool {
@@ -96,8 +128,9 @@ impl DictationSettings {
                 "cleanup timeout must be between {MIN_TIMEOUT_MS} and {MAX_TIMEOUT_MS} ms"
             ));
         }
+        super::catalog::model(self.speech.model_id())?;
         if !is_valid_key_code(&self.hotkey) {
-            return Err("dictation key must be a keyboard key code".into());
+            return Err("This key conflicts with typing or another shortcut. Choose an Option/Alt key or F8, F9, F13–F24.".into());
         }
         if !bounded_text(&self.language, 16) {
             return Err("dictation language is invalid".into());
@@ -152,7 +185,19 @@ pub(crate) fn load_from_path(path: &Path) -> DictationSettings {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<DictationSettings>(&bytes).ok());
     match parsed {
-        Some(settings) if settings.validate().is_ok() => settings,
+        Some(mut settings) => {
+            if settings.version == 1 {
+                settings.version = SETTINGS_VERSION;
+                if !is_valid_key_code(&settings.hotkey) {
+                    settings.hotkey = DEFAULT_HOTKEY.into();
+                }
+            }
+            if settings.validate().is_ok() {
+                settings
+            } else {
+                DictationSettings::default()
+            }
+        }
         _ => {
             eprintln!("buzz-desktop: dictation settings invalid; using defaults");
             DictationSettings::default()
@@ -245,6 +290,67 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_file_migrates_without_losing_cleanup_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SETTINGS_FILE);
+        std::fs::write(&path, r#"{"version":1,"cleanup":{"kind":"agent_open_router","model":"custom"},"timeoutMs":6000,"hotkey":"KeyA","language":"en","cloudCleanupEnabled":false}"#).unwrap();
+        let saved = load_from_path(&path);
+        assert_eq!(saved.version, 2);
+        assert_eq!(saved.speech, SpeechSource::default());
+        assert_eq!(saved.hotkey, "AltRight");
+        assert_eq!(saved.timeout_ms, 6000);
+        assert_eq!(
+            saved.cleanup,
+            CleanupSource::AgentOpenRouter {
+                model: "custom".into()
+            }
+        );
+        assert!(!saved.cloud_cleanup_enabled);
+        save_to_path(&path, &saved).unwrap();
+        assert_eq!(load_from_path(&path), saved);
+    }
+
+    #[test]
+    fn save_rejects_conflicting_keys_and_unknown_model_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SETTINGS_FILE);
+        for key in [
+            "KeyA",
+            "Space",
+            "Enter",
+            "Tab",
+            "Escape",
+            "ControlLeft",
+            "MetaRight",
+            "AltGraph",
+            "F5",
+            "F11",
+            "F12",
+            "F013",
+        ] {
+            let settings = DictationSettings {
+                hotkey: key.into(),
+                ..DictationSettings::default()
+            };
+            assert!(save_to_path(&path, &settings).is_err(), "{key}");
+        }
+        for key in ["AltRight", "AltLeft", "F8", "F9", "F13", "F24"] {
+            let settings = DictationSettings {
+                hotkey: key.into(),
+                ..DictationSettings::default()
+            };
+            save_to_path(&path, &settings).unwrap();
+        }
+        let settings = DictationSettings {
+            speech: SpeechSource::Local {
+                model_id: "unknown".into(),
+            },
+            ..DictationSettings::default()
+        };
+        assert!(save_to_path(&path, &settings).is_err());
     }
 
     #[test]

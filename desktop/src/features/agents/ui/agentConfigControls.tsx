@@ -32,6 +32,8 @@ export const MODEL_NO_MODELS_VALUE = "__no_models__";
 
 export type AgentDropdownOption = {
   disabled?: boolean;
+  group?: string;
+  badge?: string;
   label: React.ReactNode;
   value: string;
 };
@@ -247,40 +249,56 @@ export function AgentDropdownSelect({
                 : emptyOptionsLabel}
             </p>
           ) : null}
-          {filteredOptions.map((option) => {
+          {filteredOptions.map((option, index) => {
             const selected = option.value === value;
             return (
-              <button
-                aria-disabled={option.disabled || undefined}
-                aria-selected={selected}
-                className={cn(
-                  "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm leading-5 text-black opacity-100 transition-colors hover:bg-black/5 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-black/30",
-                  selected && "bg-[var(--buzz-welcome-chartreuse)]/35",
-                  option.disabled && "cursor-not-allowed text-black/35",
-                )}
-                data-testid={optionTestId(testId, option.value)}
-                data-value={option.value}
-                disabled={option.disabled}
-                key={option.value}
-                onClick={() => {
-                  if (option.disabled) return;
-                  onValueChange(option.value);
-                  setOpen(false);
-                }}
-                role="option"
-                type="button"
-              >
-                <span className="min-w-0 truncate">{option.label}</span>
-                <Check
-                  aria-hidden="true"
+              <React.Fragment key={option.value}>
+                {option.group &&
+                option.group !== filteredOptions[index - 1]?.group ? (
+                  <div
+                    className="px-3 pb-1 pt-2 text-xs font-medium text-foreground/60"
+                    role="presentation"
+                  >
+                    {option.group}
+                  </div>
+                ) : null}
+                <button
+                  aria-disabled={option.disabled || undefined}
+                  aria-selected={selected}
                   className={cn(
-                    "h-4 w-4 shrink-0 text-black transition-opacity",
-                    option.disabled && "text-black/35",
-                    selected ? "opacity-100" : "opacity-0",
+                    "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm leading-5 text-black opacity-100 transition-colors hover:bg-black/5 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-black/30",
+                    selected && "bg-[var(--buzz-welcome-chartreuse)]/35",
+                    option.disabled && "cursor-not-allowed text-black/35",
                   )}
-                  strokeWidth={2.5}
-                />
-              </button>
+                  data-testid={optionTestId(testId, option.value)}
+                  data-value={option.value}
+                  disabled={option.disabled}
+                  key={option.value}
+                  onClick={() => {
+                    if (option.disabled) return;
+                    onValueChange(option.value);
+                    setOpen(false);
+                  }}
+                  role="option"
+                  type="button"
+                >
+                  <span className="min-w-0 truncate">{option.label}</span>
+                  {option.badge ? (
+                    <span className="ml-auto shrink-0 rounded bg-primary/10 px-1.5 text-xs text-primary">
+                      {option.badge}
+                    </span>
+                  ) : null}
+                  <Check
+                    aria-hidden="true"
+                    className={cn(
+                      "h-4 w-4 shrink-0 text-black transition-opacity",
+                      option.disabled && "text-black/35",
+                      selected ? "opacity-100" : "opacity-0",
+                    )}
+                    strokeWidth={2.5}
+                  />
+                </button>
+              </React.Fragment>
             );
           })}
         </div>

@@ -11,6 +11,7 @@ export type DictationCleanupSource =
 /** Persisted dictation settings; mirrors `DictationSettings`. */
 export type DictationSettings = {
   version: number;
+  speech: { kind: "local"; modelId: string };
   cleanup: DictationCleanupSource;
   timeoutMs: number;
   /** `KeyboardEvent.code` for push-to-talk / tap-to-toggle. */
@@ -60,8 +61,32 @@ export type DictationCleanupResult = {
 export const getDictationModelInfo = () =>
   invokeTauri<DictationModelInfo>("dictation_model_status");
 
-export const downloadDictationModel = () =>
-  invokeTauri<void>("dictation_download_model");
+export const downloadDictationModel = (modelId?: string) =>
+  invokeTauri<void>("dictation_download_model", { modelId });
+
+export type SpeechModel = DictationModelInfo & {
+  id: string;
+  name: string;
+  family: string;
+  language: string;
+  repository: string;
+  revision: string;
+  license: string;
+  recommended: boolean;
+  sizeBytes: number;
+};
+export const listSpeechModels = () =>
+  invokeTauri<SpeechModel[]>("dictation_speech_catalog");
+export const removeSpeechModel = (modelId: string) =>
+  invokeTauri<void>("dictation_remove_model", { modelId });
+export type CleanupCatalog = {
+  agentOpenRouter: boolean;
+  openRouter: { id: string; name: string }[];
+  localConnectionIds: string[];
+  error: string | null;
+};
+export const getCleanupCatalog = () =>
+  invokeTauri<CleanupCatalog>("dictation_cleanup_catalog");
 
 /** Keyless cleanup sources this install can use (presence only, no keys). */
 export type DictationCleanupSources = { agentOpenRouter: boolean };

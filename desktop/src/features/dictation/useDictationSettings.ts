@@ -26,5 +26,10 @@ export function useDictationSettings(enabled = true) {
     },
     [queryClient],
   );
-  return { settings: query.data ?? null, isLoading: query.isLoading, save };
+  return {
+    settings: query.data ?? null,
+    isLoading: query.isLoading,
+    refetch: query.refetch,
+    save,
+  };
 }

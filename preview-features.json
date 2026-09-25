@@ -11,9 +11,7 @@
       "id": "workflows",
       "name": "Workflows",
       "description": "YAML-defined automations with approval gates",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "agentSessionResidency",
@@ -31,70 +29,54 @@
       "id": "projects",
       "name": "Projects",
       "description": "Git repository browser and collaboration",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "dispatch",
       "name": "Dispatch",
       "description": "Workspace issue boards, triage, and assignment",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "pulse",
       "name": "Pulse",
       "description": "Activity feed with notes, social posts, and agent activity",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "summary",
       "name": "Summary",
       "description": "Personal daily briefing in Pulse, from the channels and DMs you belong to",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "forum",
       "name": "Forum Channels",
       "description": "Forum-style threaded channels for long-form discussions",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "agentManagedProfiles",
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "remoteControl",
       "name": "Remote Control",
       "description": "See and manage agents that run on another Mac from this device",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "agentUsage",
       "name": "Agent usage",
       "description": "Per-agent token usage, sessions, and turn provenance read from this device's local archive",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "dictation",
       "name": "Dictation",
-      "description": "Speak into any composer: local speech-to-text, optional cleanup, and spoken names become mentions. Verified on Apple Silicon Macs.",
+      "description": "Configure in Settings → Voice.",
       "platforms": ["desktop"]
     }
   ]

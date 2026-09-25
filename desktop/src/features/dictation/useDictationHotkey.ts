@@ -1,4 +1,10 @@
 import * as React from "react";
+import { isMacPlatform } from "@/shared/lib/platform";
+import {
+  isAltGraphEvent,
+  isCapturingDictationKey,
+  KEY_CAPTURE_EVENT,
+} from "./hotkeyCapture";
 
 import { DictationHotkeyMachine } from "./lib/dictationHotkey";
 import {
@@ -31,6 +37,12 @@ export function useDictationHotkey(enabled: boolean) {
       },
     );
     const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        isCapturingDictationKey() ||
+        event.isComposing ||
+        isAltGraphEvent(event, isMacPlatform())
+      )
+        return;
       if (event.key === "Escape" && !event.defaultPrevented) {
         const recording = recordingDictationTarget();
         if (recording) {
@@ -43,16 +55,20 @@ export function useDictationHotkey(enabled: boolean) {
       if (machine.keydown(event)) event.preventDefault();
     };
     const onKeyUp = (event: KeyboardEvent) => {
+      if (isCapturingDictationKey() || isAltGraphEvent(event, isMacPlatform()))
+        return;
       if (machine.keyup(event)) event.preventDefault();
     };
     const onBlur = () => machine.blur();
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
     window.addEventListener("blur", onBlur);
+    window.addEventListener(KEY_CAPTURE_EVENT, onBlur);
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("keyup", onKeyUp, true);
       window.removeEventListener("blur", onBlur);
+      window.removeEventListener(KEY_CAPTURE_EVENT, onBlur);
       machine.blur();
     };
   }, [enabled]);
