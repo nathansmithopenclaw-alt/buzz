@@ -94,7 +94,7 @@
     {
       "id": "dictation",
       "name": "Dictation",
-      "description": "Speak into any composer: local speech-to-text, optional cleanup, and spoken names become mentions. Verified on Apple Silicon Macs.",
+      "description": "Configure in Settings → Voice.",
       "platforms": ["desktop"]
     }
   ]

@@ -7,14 +7,17 @@
 //! `dictation_cancel` discards a session. Mention validation, insertion and
 //! the send-time checks live in the frontend mention pipeline.
 
+mod catalog;
 mod claude_plan;
 mod cleanup;
+pub(crate) mod cleanup_catalog;
+mod disk_space;
 mod engine;
+mod model_store;
 mod secret_check;
 mod settings;
 
 use std::{
-    path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
@@ -26,16 +29,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::app_state::AppState;
-use crate::huddle::{
-    models::{global_model_manager, ModelStatus},
-    HuddlePhase,
-};
+use crate::huddle::HuddlePhase;
 use cleanup::{CleanupFailure, CleanupInput};
 pub(crate) use settings::{CleanupSource, DictationSettings};
-
-/// Bytes the dictation model needs: archive (482 MB) + extracted files
-/// (661 MB) + a 1 GiB margin so the download never fills the disk.
-const MODEL_REQUIRED_BYTES: u64 = 482_468_385 + 661_438_464 + 1024 * 1024 * 1024;
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
@@ -56,73 +52,45 @@ fn release_session(id: u64) {
     }
 }
 
-/// Free bytes on the volume holding `path` (via `df`; `None` when unknown).
-fn free_bytes(path: &Path) -> Option<u64> {
-    if cfg!(windows) {
-        return None;
-    }
-    let probe = if path.exists() {
-        path.to_path_buf()
-    } else {
-        path.ancestors().find(|p| p.exists())?.to_path_buf()
-    };
-    let output = std::process::Command::new("df")
-        .arg("-Pk")
-        .arg(&probe)
-        .output()
-        .ok()?;
-    parse_df_available_kib(&String::from_utf8_lossy(&output.stdout)).map(|kib| kib * 1024)
-}
-
-/// Parses the "Available" column (KiB) from POSIX `df -Pk` output.
-fn parse_df_available_kib(output: &str) -> Option<u64> {
-    output
-        .lines()
-        .nth(1)?
-        .split_whitespace()
-        .nth(3)?
-        .parse()
-        .ok()
-}
-
-/// Dictation model readiness plus the disk-space check shown before download.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DictationModelInfo {
-    status: ModelStatus,
-    required_bytes: u64,
-    free_bytes: Option<u64>,
-    enough_space: bool,
-}
-
-/// Returns the dictation model status and free disk space.
+/// Lists curated speech models with readiness and available disk space.
 #[tauri::command]
-pub fn dictation_model_status() -> Result<DictationModelInfo, String> {
-    let manager = global_model_manager().ok_or("model storage is unavailable")?;
-    let free = free_bytes(manager.models_dir_path());
-    Ok(DictationModelInfo {
-        status: manager.dictation_stt_status(),
-        required_bytes: MODEL_REQUIRED_BYTES,
-        free_bytes: free,
-        enough_space: free.is_none_or(|bytes| bytes >= MODEL_REQUIRED_BYTES),
-    })
+pub fn dictation_speech_catalog() -> Result<Vec<model_store::CatalogEntry>, String> {
+    model_store::list()
 }
 
-/// Starts the one-time dictation model download after a free-space check.
+/// The selected model's status, retained for composer compatibility.
 #[tauri::command]
-pub fn dictation_download_model(state: State<'_, AppState>) -> Result<(), String> {
-    let manager = global_model_manager().ok_or("model storage is unavailable")?;
-    if let Some(free) = free_bytes(manager.models_dir_path()) {
-        if free < MODEL_REQUIRED_BYTES {
-            return Err(format!(
-                "Dictation needs about {:.1} GB free to download its speech model; this Mac has {:.1} GB.",
-                MODEL_REQUIRED_BYTES as f64 / 1e9,
-                free as f64 / 1e9
-            ));
-        }
+pub fn dictation_model_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    let settings = settings::load(&app)?;
+    model_store::list()?
+        .into_iter()
+        .find(|entry| entry.id() == settings.speech.model_id())
+        .map(|entry| serde_json::to_value(entry).map_err(|e| e.to_string()))
+        .ok_or_else(|| "Unknown speech model".to_string())?
+}
+
+/// Starts a selected catalog download, using the saved model when omitted.
+#[tauri::command]
+pub fn dictation_download_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: Option<String>,
+) -> Result<(), String> {
+    let settings = settings::load(&app)?;
+    model_store::start_download(
+        model_id.as_deref().unwrap_or(settings.speech.model_id()),
+        state.http_client.clone(),
+    )
+}
+
+/// Removes one downloaded speech model while no dictation is using it.
+#[tauri::command]
+pub fn dictation_remove_model(model_id: String) -> Result<(), String> {
+    let guard = active_session().lock().map_err(|e| e.to_string())?;
+    if guard.is_some() {
+        return Err("Stop dictation before removing a speech model".into());
     }
-    manager.start_dictation_stt_download(state.http_client.clone());
-    Ok(())
+    model_store::remove(&model_id)
 }
 
 /// Reads dictation settings (defaults when none are saved).
@@ -173,18 +141,16 @@ pub async fn dictation_start(
     if huddle_is_live(&state)? {
         return Err("Dictation is off during a huddle.".into());
     }
-    let manager = global_model_manager().ok_or("model storage is unavailable")?;
-    let model_dir = manager
-        .dictation_stt_model_dir()
-        .ok_or("The dictation speech model is not downloaded yet.")?;
-    let id = {
+    let settings = settings::load(&app)?;
+    let (id, model_dir) = {
         let mut guard = active_session().lock().map_err(|e| e.to_string())?;
         if guard.is_some() {
             return Err("Dictation is already recording.".into());
         }
+        let model_dir = model_store::resolve(settings.speech.model_id())?;
         let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         *guard = Some(id);
-        id
+        (id, model_dir)
     };
     let started = tauri::async_runtime::spawn_blocking(move || engine::start(&model_dir, id))
         .await
@@ -299,6 +265,10 @@ pub struct DictationCleanupRequest {
     vocabulary: Vec<String>,
 }
 
+fn connection_cleanup_enabled(cloud_enabled: bool, base_url: &str) -> bool {
+    cloud_enabled || crate::model_connections::is_local_model_host(base_url)
+}
+
 /// Cleans up a transcript with the configured source. Never errors for
 /// expected failures: they come back as a typed `failure` for the fallback note.
 #[tauri::command]
@@ -322,7 +292,9 @@ pub async fn dictation_cleanup(
         // The source changed since start (or cloud is off): end any launch.
         claude_plan::discard(request.session_id);
     }
-    let outcome = if !settings.cloud_cleanup_enabled {
+    let outcome = if !settings.cloud_cleanup_enabled
+        && !matches!(settings.cleanup, CleanupSource::Connection { .. })
+    {
         Err(CleanupFailure::NotConfigured)
     } else {
         match &settings.cleanup {
@@ -331,7 +303,12 @@ pub async fn dictation_cleanup(
                 connection_id,
                 model,
             } => match crate::model_connections::resolve(&app, connection_id) {
-                Ok((connection, key)) => {
+                Ok((connection, key))
+                    if connection_cleanup_enabled(
+                        settings.cloud_cleanup_enabled,
+                        &connection.base_url,
+                    ) =>
+                {
                     cleanup::run(
                         &state.http_client,
                         &connection.base_url,
@@ -342,6 +319,7 @@ pub async fn dictation_cleanup(
                     )
                     .await
                 }
+                Ok(_) => Err(CleanupFailure::NotConfigured),
                 Err(message) => Err(CleanupFailure::Unavailable { message }),
             },
             CleanupSource::AgentOpenRouter { model } => {
@@ -398,6 +376,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cloud_switch_does_not_disable_a_local_connection() {
+        assert!(connection_cleanup_enabled(
+            false,
+            "http://100.80.202.75:8010/v1"
+        ));
+        assert!(!connection_cleanup_enabled(
+            false,
+            "https://openrouter.ai/api/v1"
+        ));
+        assert!(connection_cleanup_enabled(
+            true,
+            "https://openrouter.ai/api/v1"
+        ));
+    }
+
+    #[test]
     fn agent_openrouter_key_requires_a_non_blank_value() {
         let mut vars = std::collections::BTreeMap::new();
         assert_eq!(agent_openrouter_key(&vars), None);
@@ -406,19 +400,6 @@ mod tests {
         vars.insert(OPENROUTER_KEY_VAR.to_string(), " sk-or-v1-x ".to_string());
         assert_eq!(agent_openrouter_key(&vars), Some("sk-or-v1-x"));
     }
-
-    #[test]
-    fn parses_df_available_column() {
-        let output = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
-                      /dev/disk3s5 1942700360 1300000000 409600000 77% /System/Volumes/Data\n";
-        assert_eq!(parse_df_available_kib(output), Some(409_600_000));
-        assert_eq!(parse_df_available_kib(""), None);
-        assert_eq!(parse_df_available_kib("header only\n"), None);
-    }
-
-    // Compile-time: the requirement stays archive + extracted + ~1 GB margin.
-    const _: () = assert!(MODEL_REQUIRED_BYTES > 2_000_000_000);
-    const _: () = assert!(MODEL_REQUIRED_BYTES < 2_500_000_000);
 
     #[test]
     fn one_session_at_a_time_and_release_is_scoped() {

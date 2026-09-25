@@ -1,4 +1,6 @@
 //! Device-local model connections. Secrets never appear in catalog IPC responses.
+mod local_host;
+pub(crate) use local_host::is_local_model_host;
 mod local_permission;
 pub(crate) mod network;
 mod private_network;

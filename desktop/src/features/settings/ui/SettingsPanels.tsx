@@ -67,7 +67,6 @@ import {
 } from "./AppearanceSettingsControls";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
-import { DictationSettingsSection } from "@/features/dictation/ui/DictationSettingsSection";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
 import { MobilePairingCard } from "./MobilePairingCard";
@@ -861,12 +860,7 @@ export function renderSettingsSection(
     case "dispatch-service":
       return null; // The gated workspace service panel is supplied by SettingsView.
     case "experimental":
-      return (
-        <>
-          <ExperimentalFeaturesCard />
-          <DictationSettingsSection />
-        </>
-      );
+      return <ExperimentalFeaturesCard />;
     case "agents":
       return <AgentsSettingsPanel />;
     case "channel-templates":
