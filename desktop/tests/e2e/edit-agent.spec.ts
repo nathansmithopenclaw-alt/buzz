@@ -1192,3 +1192,94 @@ test.describe("Agents card Edit", () => {
     expect(await writes()).toEqual([UPDATE_PERSONA]);
   });
 });
+
+// A deployed Codex agent keeps its definition's model ID, `[level]` qualifier
+// included, while card Edit saves the thinking level on the agent. Spawn
+// applies the agent's level after the model switch, so the card must show the
+// saved level, not the definition's qualifier (D-a6e6906d).
+const CODEX_PERSONA_NAME = "Codex Card Persona";
+const CODEX_PERSONA_ID = "persona-codex-card-e2e";
+const CODEX_PROMPT = "You are the Codex card e2e persona.";
+const CODEX_MODEL = "gpt-6-astra[medium]";
+const CODEX_RUNTIME = {
+  ...LINKED_CLAUDE_RUNTIME,
+  id: "codex",
+  label: "Codex",
+  command: "codex",
+  binary_path: "/usr/local/bin/codex-acp",
+  underlying_cli_path: "/usr/local/bin/codex",
+  effort_model_qualifier: true,
+};
+
+async function installCodexCardFixture(page: import("@playwright/test").Page) {
+  await installMockBridge(page, {
+    acpRuntimesCatalog: [CODEX_RUNTIME],
+    managedAgents: [
+      {
+        pubkey: AGENT_PUBKEY,
+        name: CODEX_PERSONA_NAME,
+        personaId: CODEX_PERSONA_ID,
+        runtime: "codex",
+        model: CODEX_MODEL,
+        modelSource: "definition",
+        systemPrompt: CODEX_PROMPT,
+        status: "stopped",
+        channelNames: ["agents"],
+      },
+    ],
+    personas: [
+      {
+        id: CODEX_PERSONA_ID,
+        displayName: CODEX_PERSONA_NAME,
+        systemPrompt: CODEX_PROMPT,
+        runtime: "codex",
+        model: CODEX_MODEL,
+        respondTo: "owner-only",
+      },
+    ],
+    discoverAgentModels: {
+      models: [{ id: "gpt-6-astra", name: "GPT-6-Astra" }],
+      supportsSwitching: true,
+      effortConfigId: "reasoning_effort",
+      effortOptions: ["low", "medium", "high"].map((id) => ({
+        id,
+        name: id[0].toUpperCase() + id.slice(1),
+      })),
+    },
+  });
+  await page.goto("/");
+}
+
+test("Agents card shows a Codex agent's saved thinking level after Save", async ({
+  page,
+}) => {
+  await installCodexCardFixture(page);
+  const writes = await recordAgentWrites(page);
+
+  await page.getByTestId("open-agents-view").click();
+  const card = page.getByTestId(`managed-agent-${AGENT_PUBKEY}`);
+  // Fixture sanity: before Save the card shows the definition's qualifier.
+  await expect(card).toContainText(`codex · ${CODEX_MODEL}`, {
+    timeout: 10_000,
+  });
+
+  const dialog = await openCardEdit(page, CODEX_PERSONA_NAME);
+  await pickEffort(page, dialog, "High");
+  await dialog.getByTestId("persona-dialog-submit").click();
+  await expect(dialog).toHaveCount(0);
+  expect(await writes()).toEqual([
+    UPDATE_PERSONA,
+    {
+      command: "update_managed_agent",
+      input: { pubkey: AGENT_PUBKEY, effortLevel: "high" },
+    },
+  ]);
+
+  await expect(card).toContainText("codex · gpt-6-astra[high]");
+  await expect(card).not.toContainText(CODEX_MODEL);
+
+  const reopened = await openCardEdit(page, CODEX_PERSONA_NAME);
+  await expect(reopened.locator("#edit-agent-effort")).toContainText("High", {
+    timeout: 10_000,
+  });
+});

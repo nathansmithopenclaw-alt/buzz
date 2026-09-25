@@ -9,6 +9,7 @@ import {
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
 import {
+  useAcpRuntimesQuery,
   useRelayAgentsQuery,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
@@ -44,6 +45,10 @@ import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
+import {
+  agentEffortModelQualifier,
+  effectiveAgentModelId,
+} from "@/features/agents/lib/agentCardModelLabel";
 
 import type { ManagedAgent } from "@/shared/api/types";
 
@@ -331,6 +336,7 @@ function UserProfilePopoverBody({
   const managedAgent = managedAgentsQuery.data?.find(
     (a) => a.pubkey === pubkey,
   );
+  const runtimesQuery = useAcpRuntimesQuery({ enabled: Boolean(managedAgent) });
   const profile = profileQuery.data;
   const ownerPubkey = profile?.ownerPubkey ?? null;
   const ownerProfileQuery = useUsersBatchQuery(
@@ -526,7 +532,11 @@ function UserProfilePopoverBody({
             {managedAgent?.model ? (
               <InfoBadge>
                 {resolveModelLabel(
-                  managedAgent.model,
+                  effectiveAgentModelId(
+                    managedAgent.model,
+                    managedAgent.effortLevel,
+                    agentEffortModelQualifier(managedAgent, runtimesQuery.data),
+                  ),
                   null,
                   managedAgent.provider,
                 )}

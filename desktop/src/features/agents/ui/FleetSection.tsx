@@ -9,7 +9,11 @@ import {
   TerminalSquare,
 } from "lucide-react";
 
-import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import {
+  agentEffortModelQualifier,
+  resolveAgentCardModelLabel,
+} from "@/features/agents/lib/agentCardModelLabel";
+import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { fleetAgentHost } from "@/features/agents/fleetProjection/selectors";
 import type { FleetProjectionOwnerPresentation } from "@/features/agents/fleetProjection/useFleetProjectionPresentation";
@@ -413,10 +417,12 @@ function FleetAgentCard({
   const opensRuntimeTab = Boolean(friendlyError && !isActive);
   const status = hostFleetAgentStatus(agent);
   const runtimeLabel = resolveFleetAgentRuntimeLabel({ agent, persona });
+  const runtimesQuery = useAcpRuntimesQuery();
   const modelLabel = resolveAgentCardModelLabel({
     agent,
     personaModel: persona?.model,
     defaultModel,
+    effortModelQualifier: agentEffortModelQualifier(agent, runtimesQuery.data),
   });
 
   return (

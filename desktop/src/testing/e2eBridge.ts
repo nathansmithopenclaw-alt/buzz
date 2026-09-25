@@ -147,6 +147,8 @@ export type MockManagedAgentSeed = {
   restartDiff?: Array<{ field: string; change: unknown }>;
   autoRestartOnConfigChange?: boolean;
   model?: string | null;
+  /** Where the effective model came from; the backend always sends it. */
+  modelSource?: RawManagedAgent["model_source"];
   effortLevel?: string | null;
   envVars?: Record<string, string>;
   respondTo?: RawManagedAgent["respond_to"];
@@ -1018,6 +1020,7 @@ type RawRelayAgent = {
 type RawManagedAgent = {
   external_execution?: { type: "codex_desktop"; thread_id: string } | null;
   effort_level?: string | null;
+  model_source?: "definition" | "global" | "instance_legacy" | null;
   subscription_account_id?: string | null;
   subscription_account_inherit_default?: boolean;
   subscription_account_harness?: string | null;
@@ -2077,6 +2080,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     system_prompt: agent.system_prompt,
     avatar_url: agent.avatar_url ?? null,
     model: agent.model,
+    model_source: agent.model_source ?? null,
     effort_level: agent.effort_level ?? null,
     provider: agent.provider ?? null,
     claude_account_id: agent.claude_account_id ?? null,
@@ -2653,6 +2657,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     system_prompt: seed.systemPrompt ?? null,
     avatar_url: seed.avatarUrl ?? null,
     model: seed.model ?? null,
+    model_source: seed.modelSource ?? null,
     effort_level: seed.effortLevel ?? null,
     claude_account_id:
       seed.claudeAccountId !== undefined

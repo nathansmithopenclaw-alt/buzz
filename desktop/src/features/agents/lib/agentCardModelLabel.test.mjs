@@ -255,3 +255,97 @@ test("resolveAgentCardModelLabel — unspawned openai persona with Databricks-na
   });
   assert.equal(label, "Default model (databricks-gpt-5-5)");
 });
+
+import {
+  agentEffortModelQualifier,
+  effectiveAgentModelId,
+} from "./agentCardModelLabel.ts";
+
+// A deployed Codex agent keeps its definition's model ID, qualifier and all,
+// while its thinking level is saved on the agent. Spawn applies the agent's
+// level after the model switch, so the card must show that level.
+const codexAgent = {
+  modelSource: "definition",
+  model: "gpt-6-astra[medium]",
+  effortLevel: "high",
+};
+
+test("resolveAgentCardModelLabel — an effort-qualifier harness shows the agent's saved level over the model ID's", () => {
+  assert.equal(
+    resolveAgentCardModelLabel({
+      agent: codexAgent,
+      personaModel: "gpt-6-astra[medium]",
+      defaultModel: "unused-default",
+      effortModelQualifier: true,
+    }),
+    "gpt-6-astra[high]",
+  );
+});
+
+test("resolveAgentCardModelLabel — with no saved level the model ID's qualifier stands", () => {
+  assert.equal(
+    resolveAgentCardModelLabel({
+      agent: { ...codexAgent, effortLevel: null },
+      personaModel: null,
+      defaultModel: "unused-default",
+      effortModelQualifier: true,
+    }),
+    "gpt-6-astra[medium]",
+  );
+});
+
+test("resolveAgentCardModelLabel — an inherited default model also shows the agent's saved level", () => {
+  assert.equal(
+    resolveAgentCardModelLabel({
+      agent: { ...codexAgent, modelSource: "global" },
+      personaModel: null,
+      defaultModel: "gpt-6-astra[low]",
+      effortModelQualifier: true,
+    }),
+    "Default model (gpt-6-astra[high])",
+  );
+});
+
+test("resolveAgentCardModelLabel — a harness without effort qualifiers keeps its model ID untouched", () => {
+  // Claude's [1m] is a context-window variant, not an effort level.
+  assert.equal(
+    resolveAgentCardModelLabel({
+      agent: {
+        modelSource: "definition",
+        model: "claude-opus-5-5[1m]",
+        effortLevel: "max",
+      },
+      personaModel: null,
+      defaultModel: "unused-default",
+      effortModelQualifier: false,
+    }),
+    "claude-opus-5-5[1m]",
+  );
+});
+
+test("effectiveAgentModelId — adds the saved level to an unqualified model ID and leaves a blank one blank", () => {
+  assert.equal(
+    effectiveAgentModelId("gpt-6-astra", "low", true),
+    "gpt-6-astra[low]",
+  );
+  assert.equal(effectiveAgentModelId("  ", "low", true), "  ");
+});
+
+test("agentEffortModelQualifier — reads the capability from the catalog entry the agent launches", () => {
+  const runtimes = [
+    { id: "codex", command: "codex-acp", effortModelQualifier: true },
+    { id: "claude", command: "claude-agent-acp", effortModelQualifier: false },
+  ];
+  assert.equal(
+    agentEffortModelQualifier({ agentCommand: "codex-acp" }, runtimes),
+    true,
+  );
+  assert.equal(
+    agentEffortModelQualifier({ agentCommand: "claude-agent-acp" }, runtimes),
+    false,
+  );
+  assert.equal(
+    agentEffortModelQualifier({ agentCommand: "codex-acp" }, undefined),
+    false,
+  );
+});
