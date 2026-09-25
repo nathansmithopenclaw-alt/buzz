@@ -78,3 +78,22 @@ test("Buzz shared compute dropdown contains Default plus live models and no cust
     ["Auto (collective when available)", "mesh/model"],
   );
 });
+
+test("hosted custom models precede saved-connection groups on every dropdown", () => {
+  for (const globalModel of [undefined, "hosted"]) {
+    const options = modelDropdownOptions({
+      options: [
+        { id: "saved", label: "Qwen", group: "Source" },
+        { id: "hosted", label: "Hosted" },
+      ],
+      loading: false,
+      loadingValue: "loading",
+      allowCustom: true,
+      globalModel,
+    });
+    const custom = options.findIndex((row) => row.label === "Custom model...");
+    const connection = options.findIndex((row) => row.group === "Source");
+    assert.ok(custom >= 0 && custom < connection);
+    assert.ok(options.findIndex((row) => row.label === "Hosted") < custom);
+  }
+});

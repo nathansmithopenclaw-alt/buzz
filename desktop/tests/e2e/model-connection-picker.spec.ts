@@ -162,6 +162,22 @@ for (const runtime of runtimes) {
     const dialog = page.getByTestId("edit-agent-dialog");
     await page.locator("#edit-agent-model").click();
     await expect(page.getByText("opus", { exact: true })).toBeVisible();
+    // Custom IDs belong to the hosted catalog, before any saved source header.
+    expect(
+      await page.getByText("opus", { exact: true }).evaluate((header) => {
+        const custom = Array.from(
+          header.parentElement?.querySelectorAll('[role="menuitemradio"]') ??
+            [],
+        ).find((row) => row.textContent?.includes("Custom model..."));
+        return (
+          !!custom &&
+          !!(
+            custom.compareDocumentPosition(header) &
+            Node.DOCUMENT_POSITION_FOLLOWING
+          )
+        );
+      }),
+    ).toBe(true);
     const choice = page.getByRole("menuitemradio", {
       name: MODEL,
       exact: true,

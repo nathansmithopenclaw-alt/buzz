@@ -519,12 +519,6 @@ export function AgentModelField({
   };
 
   const modelOptions: AgentDropdownOption[] = [
-    ...connectionOptions.map((option) => ({
-      ...option,
-      label: [option.group, option.label, option.badge]
-        .filter(Boolean)
-        .join(" · "),
-    })),
     ...effectiveModelOptions.map((option) => ({
       label: option.label,
       value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
@@ -542,6 +536,12 @@ export function AgentModelField({
     (showCustomModelOption || modelSelectValue === CUSTOM_MODEL_DROPDOWN_VALUE)
       ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]
       : []),
+    ...connectionOptions.map((option) => ({
+      ...option,
+      label: [option.group, option.label, option.badge]
+        .filter(Boolean)
+        .join(" · "),
+    })),
   ];
   // An opened dropdown must never show a blank popover. When all the above
   // yields an empty list and discovery has finished, add a disabled sentinel

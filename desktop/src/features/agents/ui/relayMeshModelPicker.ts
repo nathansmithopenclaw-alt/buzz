@@ -91,12 +91,13 @@ export function modelDropdownOptions({
           globalModelLabel,
         );
   return [
-    ...modelOptions,
+    ...modelOptions.filter((option) => !option.group),
     ...(loading
       ? [{ disabled: true, label: "Loading models...", value: loadingValue }]
       : []),
     ...(allowCustom
       ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]
       : []),
+    ...modelOptions.filter((option) => option.group),
   ];
 }
