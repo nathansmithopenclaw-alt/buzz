@@ -22,7 +22,7 @@ pub(super) fn normalize_url(raw: &str) -> Result<String, String> {
     }
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
-fn client(seconds: u64) -> Result<Client, String> {
+pub(super) fn client(seconds: u64) -> Result<Client, String> {
     Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -30,7 +30,7 @@ fn client(seconds: u64) -> Result<Client, String> {
         .build()
         .map_err(|_| "Cannot initialize model connection".into())
 }
-async fn json(mut response: reqwest::Response) -> Result<serde_json::Value, String> {
+pub(super) async fn response_bytes(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
     if !response.status().is_success() {
         return Err(format!(
             "Server returned HTTP {}. Check the address or API key.",
@@ -48,7 +48,10 @@ async fn json(mut response: reqwest::Response) -> Result<serde_json::Value, Stri
         }
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes)
+    Ok(bytes)
+}
+async fn json(response: reqwest::Response) -> Result<serde_json::Value, String> {
+    serde_json::from_slice(&response_bytes(response).await?)
         .map_err(|_| "Server did not return a supported model response".into())
 }
 pub(super) async fn catalog(
@@ -56,6 +59,13 @@ pub(super) async fn catalog(
     key: Option<&str>,
     seconds: u64,
 ) -> Result<Vec<String>, String> {
+    Ok(catalog_with_context(base, key, seconds).await?.0)
+}
+pub(super) async fn catalog_with_context(
+    base: &str,
+    key: Option<&str>,
+    seconds: u64,
+) -> Result<(Vec<String>, std::collections::BTreeMap<String, u64>), String> {
     let mut request = client(seconds)?.get(format!("{}/models", normalize_url(base)?));
     if let Some(key) = key {
         request = request.bearer_auth(key);
@@ -83,28 +93,7 @@ pub(super) async fn catalog(
     if models.is_empty() {
         return Err("Server reported no models".into());
     }
-    Ok(models)
-}
-pub(super) async fn test(base: &str, key: Option<&str>, model: &str) -> Result<(), String> {
-    let mut request = client(30)?.post(format!("{}/chat/completions", normalize_url(base)?)).json(&serde_json::json!({"model":model,"messages":[{"role":"user","content":"Reply with OK."}],"max_tokens":16,"stream":false}));
-    if let Some(key) = key {
-        request = request.bearer_auth(key);
-    }
-    let value = json(
-        request
-            .send()
-            .await
-            .map_err(|_| "Model test timed out or server disconnected")?,
-    )
-    .await?;
-    if value
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .is_none_or(|s| s.trim().is_empty())
-    {
-        return Err("Model did not return a text response".into());
-    }
-    Ok(())
+    Ok((models, super::qualification::context_windows(&value)))
 }
 #[cfg(test)]
 mod tests {
@@ -175,22 +164,6 @@ mod tests {
             assert!(catalog(&url, None, 2).await.is_err());
             task.join().unwrap();
         }
-    }
-    #[tokio::test]
-    async fn explicit_model_test_requires_a_real_text_response() {
-        let (url, task) = endpoint(
-            "200 OK",
-            r#"{"choices":[{"message":{"content":"OK"}}]}"#,
-            "",
-        );
-        test(&url, None, "Qwen/model").await.unwrap();
-        assert!(task
-            .join()
-            .unwrap()
-            .starts_with("POST /v1/chat/completions "));
-        let (url, task) = endpoint("200 OK", r#"{"choices":[{"message":{"content":""}}]}"#, "");
-        assert!(test(&url, None, "Qwen/model").await.is_err());
-        task.join().unwrap();
     }
     #[test]
     fn normalizes_common_addresses_without_leaking_credentials() {

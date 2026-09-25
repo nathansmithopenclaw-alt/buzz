@@ -116,10 +116,37 @@ export function ModelConnectionsSettingsCard() {
           </div>
           <p className="text-sm">
             {row.models.length} models ·{" "}
-            {row.tested_model
-              ? `Text response tested: ${row.tested_model}`
-              : "Model not tested"}
+            {row.qualification
+              ? `Compatibility tested: ${row.qualification.model}`
+              : row.tested_model
+                ? `Text response tested: ${row.tested_model}`
+                : "Model not tested"}
           </p>
+          {row.qualification && (
+            <div className="space-y-1 text-xs text-muted-foreground">
+              {row.qualification.protocols.map((check) => (
+                <p key={check.protocol}>
+                  {
+                    {
+                      chat_completions: "Chat Completions",
+                      responses: "Responses",
+                      anthropic_messages: "Anthropic Messages",
+                    }[check.protocol]
+                  }
+                  :{" "}
+                  {check.tool_round_trip
+                    ? "Streaming tools and replies passed"
+                    : (check.reason ?? "Not available")}
+                </p>
+              ))}
+              {row.qualification.context_window && (
+                <p>
+                  Context: {row.qualification.context_window.toLocaleString()}{" "}
+                  tokens
+                </p>
+              )}
+            </div>
+          )}
           <ConnectionHealth id={row.id} revision={row.base_url} />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -139,8 +166,8 @@ export function ModelConnectionsSettingsCard() {
             </DropdownMenuContent>
           </DropdownMenu>
           <p className="text-xs text-muted-foreground">
-            Testing sends a short prompt. It does not verify tool calling or
-            every harness.
+            Testing sends several short requests, one at a time, to check tools,
+            replies and thinking levels. It can take up to three minutes.
           </p>
           {removing === row.id && (
             <div className="rounded-md border p-3 text-sm">

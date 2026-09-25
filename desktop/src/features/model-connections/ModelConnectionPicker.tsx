@@ -72,7 +72,11 @@ export function ModelConnectionPicker({
       {selected && (
         <p className="text-xs text-muted-foreground">
           {selected.models.length} models ·{" "}
-          {selected.tested_model ? "Text response tested" : "Model not tested"}
+          {selected.qualification && selected.tested_model
+            ? "Tools and replies tested"
+            : selected.tested_model
+              ? "Text response tested"
+              : "Model not tested"}
         </p>
       )}
       {!rows.length && (

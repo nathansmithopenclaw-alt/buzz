@@ -100,6 +100,7 @@ mod tests {
             secret_ref: None,
             tested_model: None,
             tested_at: None,
+            qualification: None,
         };
         for id in ["source-a", "source-b"] {
             let env = BTreeMap::from([(CONNECTION_ENV.into(), id.into())]);
