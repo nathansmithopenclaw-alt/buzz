@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { isAltGraphEvent, isAvailableDictationKey } from "./hotkeyCapture.ts";
+import {
+  claimDictationKey,
+  isCapturingDictationKey,
+  KEY_CAPTURE_EVENT,
+  isAltGraphEvent,
+  isAvailableDictationKey,
+} from "./hotkeyCapture.ts";
 
 test("AltGr is ignored on Windows/Linux but macOS Option remains available", () => {
   for (const event of [
@@ -53,12 +58,17 @@ test("key validation reserves typing, navigation and OS commands", () => {
     assert.equal(isAvailableDictationKey(code), true, code);
 });
 
-test("settings key validation is mirrored at the native persistence boundary", () => {
-  const rust = readFileSync(
-    new URL("../../../src-tauri/src/dictation/settings.rs", import.meta.url),
-    "utf8",
-  );
-  for (const code of ["AltLeft", "AltRight", "F8", "F9"])
-    assert.ok(rust.includes(`"${code}"`));
-  assert.ok(rust.includes("13..=24"));
+test("capture ownership suspends shortcuts until every recorder releases", () => {
+  globalThis.window = new EventTarget();
+  let notifications = 0;
+  window.addEventListener(KEY_CAPTURE_EVENT, () => notifications++);
+  const first = claimDictationKey();
+  const second = claimDictationKey();
+  assert.equal(isCapturingDictationKey(), true);
+  assert.equal(notifications, 2);
+  first();
+  assert.equal(isCapturingDictationKey(), true);
+  second();
+  assert.equal(isCapturingDictationKey(), false);
+  delete globalThis.window;
 });

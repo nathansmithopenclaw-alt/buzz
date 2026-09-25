@@ -242,6 +242,7 @@ test.describe("Dictation settings", () => {
         );
     });
     await expect(key).toHaveText("Press a key…");
+    await expect(page.getByRole("alert")).toBeHidden();
     await page.keyboard.press("Escape");
     await shot(page, "microphone-find");
     await page.getByRole("button", { name: "Find microphones" }).click();
