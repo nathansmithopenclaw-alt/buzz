@@ -21,6 +21,7 @@ pub use codex_model_config::resolve_model_switch_method;
 mod provider;
 #[path = "acp_session_close.rs"]
 mod session_close;
+mod session_failure;
 mod subscription_token;
 
 use crate::observer::{ObserverContext, ObserverHandle};
@@ -132,7 +133,8 @@ pub(crate) struct TurnDeliveryEvidence {
     pub final_answer_present: bool,
     /// Whitespace-normalized, bounded final-answer text. Never tool content.
     pub final_answer_snippet: Option<String>,
-    /// Whether goose synthesized a provider/runtime failure as final output.
+    /// Whether negotiated typed failure metadata or goose's provenance-gated
+    /// terminal-output prefix reported a provider/runtime failure.
     pub adapter_runtime_failure_present: bool,
     /// Number of distinct `buzz messages send` tool calls observed.
     pub publish_attempt_count: usize,
@@ -502,6 +504,8 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// AIR v1 sessionFailure was advertised by the adapter at initialize.
+    typed_session_failure_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -726,7 +730,13 @@ fn build_client_capabilities() -> serde_json::Value {
             // Non-standard extension used by claude-agent-acp to advertise the
             // exact terminal login argv for subscription auth. Unknown `_meta`
             // keys are ignored by other adapters.
-            "terminal-auth": true
+            "terminal-auth": true,
+            // Vendor extension implemented by both Codex and Claude adapters.
+            // Only consume it when the adapter also advertises support.
+            "jetbrains": { "air": {
+                "version": 1,
+                "capabilities": ["sessionFailure"]
+            }}
         }
     })
 }
@@ -1167,6 +1177,7 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            typed_session_failure_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             turn_delivery_evidence: TurnDeliveryEvidence::default(),
@@ -1234,6 +1245,7 @@ impl AcpClient {
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
         let params = build_initialize_params();
         let result = self.send_request("initialize", params).await?;
+        self.typed_session_failure_supported = session_failure::advertised(&result);
         self.claude_adapter = result
             .get("agentInfo")
             .or_else(|| result.get("serverInfo"))
@@ -3202,6 +3214,12 @@ impl AcpClient {
                 ),
                 Err(_) => {}
             }
+        }
+        if self.typed_session_failure_supported && session_failure::terminal_error(result)? {
+            if self.private_capture.is_some() {
+                return Err(AcpError::AgentRuntimeFailure);
+            }
+            self.turn_delivery_evidence.adapter_runtime_failure_present = true;
         }
         Ok(stop_reason)
     }
