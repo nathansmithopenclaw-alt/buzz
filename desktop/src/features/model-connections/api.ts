@@ -8,6 +8,18 @@ export type ModelConnection = {
   has_key: boolean;
   tested_model: string | null;
   tested_at: number | null;
+  qualification?: {
+    revision: number;
+    model: string;
+    context_window: number | null;
+    output_token_limit: number | null;
+    protocols: {
+      protocol: "chat_completions" | "responses" | "anthropic_messages";
+      tool_round_trip: boolean;
+      reason: string | null;
+      effort_levels: string[];
+    }[];
+  } | null;
 };
 export type DiscoveredServer = {
   name: string;

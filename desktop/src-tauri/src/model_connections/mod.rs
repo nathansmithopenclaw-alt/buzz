@@ -5,6 +5,7 @@ mod local_permission;
 pub(crate) mod network;
 mod private_network;
 mod probe;
+pub(crate) mod qualification;
 pub(crate) mod runtime;
 pub(crate) mod source;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,8 @@ pub struct ModelConnection {
     pub tested_model: Option<String>,
     #[serde(default)]
     pub tested_at: Option<u64>,
+    #[serde(default)]
+    pub qualification: Option<qualification::Qualification>,
     #[serde(default, skip_serializing)]
     secret_ref: Option<String>,
 }
@@ -210,6 +213,7 @@ pub async fn save_model_connection(
         secret_ref,
         tested_model: None,
         tested_at: None,
+        qualification: None,
     };
     rows.retain(|existing| existing.id != row.id);
     rows.push(row.clone());
@@ -252,23 +256,55 @@ pub async fn test_model_connection(
     id: String,
     model: String,
 ) -> Result<ModelConnection, String> {
+    // A shared local endpoint may also serve production agents. Explicit tests
+    // are bounded and serialized across connection dialogs and windows.
+    static LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _permit = LIMIT
+        .acquire()
+        .await
+        .map_err(|_| "Model tests are unavailable")?;
     let (mut row, key) = resolve(&app, &id)?;
-    let models = probe::catalog(&row.base_url, key.as_deref(), 5).await?;
+    let (models, limits) = probe::catalog_with_context(&row.base_url, key.as_deref(), 5).await?;
     if !models.contains(&model) {
         return Err("This model is no longer available. Refresh the connection.".into());
     }
-    probe::test(&row.base_url, key.as_deref(), &model).await?;
+    let qualified = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        qualification::qualify(
+            &row.base_url,
+            key.as_deref(),
+            &model,
+            limits.get(&model).copied(),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        "Model qualification exceeded three minutes. Try again when the server is less busy."
+    })?;
     let _guard = STORE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut rows = load(&app)?;
     let current = rows
         .iter_mut()
         .find(|r| r.id == id)
         .ok_or("Connection was removed during test")?;
-    if current.base_url != row.base_url || current.secret_ref != row.secret_ref {
+    if current.base_url != row.base_url
+        || current.secret_ref != row.secret_ref
+        || current.name != row.name
+    {
         return Err("Connection changed during test. Test again.".into());
     }
     row.models = models;
-    row.tested_model = Some(model);
+    row.qualification = Some(qualified);
+    row.tested_model = row
+        .qualification
+        .as_ref()
+        .filter(|q| {
+            q.protocols.iter().any(|check| {
+                q.check(&model, check.protocol.clone())
+                    .is_some_and(|check| check.tool_round_trip)
+            })
+        })
+        .map(|_| model);
     row.tested_at = Some(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -320,6 +356,7 @@ mod tests {
             secret_ref: Some("key-reference".into()),
             tested_model: None,
             tested_at: None,
+            qualification: None,
         };
         persist_file(&path, &[row]).unwrap();
         let restored = load_file(&path).unwrap();

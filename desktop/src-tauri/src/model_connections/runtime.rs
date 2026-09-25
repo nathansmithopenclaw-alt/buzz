@@ -146,6 +146,7 @@ mod tests {
                     secret_ref: None,
                     tested_model: None,
                     tested_at: None,
+                    qualification: None,
                 },
                 None,
             ))
@@ -201,6 +202,7 @@ mod tests {
             secret_ref: Some("private-reference".into()),
             tested_model: None,
             tested_at: None,
+            qualification: None,
         };
         assert!(!serde_json::to_string(&row)
             .unwrap()

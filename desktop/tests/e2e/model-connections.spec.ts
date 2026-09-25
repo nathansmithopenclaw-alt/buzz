@@ -244,7 +244,38 @@ test("manual connection failure preserves input, availability retries, and remov
         return row.models;
       }
       if (command === "test_model_connection")
-        return { ...row, tested_model: "Qwen/model", tested_at: 1 };
+        return {
+          ...row,
+          tested_model: "Qwen/model",
+          tested_at: 1,
+          qualification: {
+            revision: 1,
+            model: "Qwen/model",
+            context_window: 65536,
+            output_token_limit: 8192,
+            protocols: [
+              {
+                protocol: "chat_completions",
+                tool_round_trip: true,
+                reason: null,
+                effort_levels: [],
+              },
+              {
+                protocol: "responses",
+                tool_round_trip: false,
+                reason:
+                  "Server returned HTTP 404. Check the address or API key.",
+                effort_levels: [],
+              },
+              {
+                protocol: "anthropic_messages",
+                tool_round_trip: true,
+                reason: null,
+                effort_levels: ["low", "medium", "xhigh"],
+              },
+            ],
+          },
+        };
       if (command === "remove_model_connection") {
         rows = [];
         return null;
@@ -293,7 +324,14 @@ test("manual connection failure preserves input, availability retries, and remov
   ).toBeVisible();
   await page.getByRole("button", { name: "Test a model", exact: true }).click();
   await page.getByRole("menuitem", { name: "Qwen/model", exact: true }).click();
-  await expect(page.getByText(/Text response tested: Qwen/)).toBeVisible();
+  await expect(page.getByText(/Compatibility tested: Qwen/)).toBeVisible();
+  await expect(
+    page.getByText("Chat Completions: Streaming tools and replies passed"),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/Responses: Server returned HTTP 404/),
+  ).toBeVisible();
+  await expect(page.getByText("Context: 65,536 tokens")).toBeVisible();
   await page.getByRole("button", { name: "Remove", exact: true }).click();
   await expect(page.getByText("My compute", { exact: true })).toBeVisible();
   await page
