@@ -94,3 +94,44 @@ test("providerApiKeyFieldState_explicitLocalEmptyShadowsRuntimeConfig", () => {
   assert.equal(state.isRequired, true);
   assert.equal(state.isInherited, false);
 });
+
+test("saved connection suppresses hosted secret controls without changing credentials", () => {
+  const env = {
+    BUZZ_MODEL_CONNECTION_ID: "saved",
+    ANTHROPIC_API_KEY: "inactive",
+  };
+  const result = getProviderApiKeyFieldState({
+    bakedEnvKeys: [],
+    effectiveEnvVars: env,
+    envVars: env,
+    globalEnvVars: {},
+    provider: "anthropic",
+    requiredEnvKeys: ["ANTHROPIC_API_KEY", "UNRELATED_REQUIREMENT"],
+  });
+  assert.equal(result.secretEnvVar, null);
+  assert.equal(result.isRequired, false);
+  assert.deepEqual(result.advancedRequiredEnvKeys, ["UNRELATED_REQUIREMENT"]);
+  assert.equal(env.ANTHROPIC_API_KEY, "inactive");
+});
+
+test("inherited source suppresses hosted credentials until explicitly cleared", () => {
+  const common = {
+    bakedEnvKeys: [],
+    envVars: {},
+    globalEnvVars: { BUZZ_MODEL_CONNECTION_ID: "inherited" },
+    provider: "anthropic",
+    requiredEnvKeys: ["ANTHROPIC_API_KEY"],
+  };
+  assert.equal(
+    getProviderApiKeyFieldState({ ...common, effectiveEnvVars: {} })
+      .secretEnvVar,
+    null,
+  );
+  assert.equal(
+    getProviderApiKeyFieldState({
+      ...common,
+      effectiveEnvVars: { BUZZ_MODEL_CONNECTION_ID: "" },
+    }).secretEnvVar,
+    "ANTHROPIC_API_KEY",
+  );
+});

@@ -107,6 +107,10 @@ pub(crate) struct KnownAcpRuntime {
     pub model_env_var: Option<&'static str>,
     pub provider_env_var: Option<&'static str>,
     pub provider_locked: bool,
+    /// Native protocol used for a saved model connection; the UI reads this catalog.
+    pub model_connection_protocol: Option<crate::model_connections::qualification::Protocol>,
+    /// Explicit initial effort when the endpoint default cannot be inherited safely.
+    pub model_connection_default_effort: Option<&'static str>,
     pub default_env: &'static [(&'static str, &'static str)],
     pub config_file_path: Option<&'static str>,
     #[allow(dead_code)] // reserved for format-based dispatch when readers are unified
@@ -165,6 +169,16 @@ pub(crate) struct KnownAcpRuntime {
 }
 
 impl KnownAcpRuntime {
+    pub(crate) fn model_connection(&self) -> Option<crate::managed_agents::ModelConnectionSupport> {
+        self.model_connection_protocol.map(|protocol| {
+            crate::managed_agents::ModelConnectionSupport {
+                protocol: Some(protocol),
+                setup_reason: None,
+                default_effort: self.model_connection_default_effort.map(str::to_owned),
+            }
+        })
+    }
+
     pub(crate) fn provider_options(&self) -> Option<Vec<(String, String)>> {
         if self.id == "prime" {
             return Some(vec![("buzz-local".into(), "Saved model connection".into())]);

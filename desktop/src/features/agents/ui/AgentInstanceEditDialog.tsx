@@ -1,3 +1,9 @@
+import {
+  connectionAccountReason,
+  connectionEffortError,
+} from "@/features/model-connections/modelChoices";
+import { useConnectionModels } from "@/features/model-connections/useConnectionModels";
+import { instanceModelSelectionHandlers } from "./instanceModelSelectionHandlers";
 import { EditAgentCommandField } from "./EditAgentCommandField";
 import { ProviderEndpointField } from "./ProviderEndpointField";
 import {
@@ -69,8 +75,6 @@ import {
   resolveRuntimeProviderCapability,
 } from "./personaRuntimeModel";
 import {
-  selectionOnModelDropdownChange,
-  selectionOnProviderDropdownChange,
   selectionOnRuntimeChange,
   type RuntimeModelProviderSelection,
 } from "./runtimeModelProviderSelection";
@@ -563,9 +567,9 @@ export function AgentInstanceEditDialog({
 
     applySelection(
       selectionOnRuntimeChange(selection, {
-        nextRuntimeSupportsConnections: nextRuntime?.providerOptions?.some(
-          ([id]) => id === "buzz-local",
-        ),
+        nextRuntimeSupportsConnections:
+          Boolean(nextRuntime?.modelConnection?.protocol) ||
+          nextRuntime?.providerOptions?.some(([id]) => id === "buzz-local"),
         previousRuntime: previousRuntimeId,
         nextRuntime: nextRuntime?.id ?? nextRuntimeId,
         nextRuntimeCanChooseProvider: runtimeSupportsLlmProviderSelection(
@@ -584,39 +588,6 @@ export function AgentInstanceEditDialog({
     open,
   );
 
-  function handleProviderDropdownChange(nextValue: string) {
-    const nextProvider =
-      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
-    if (nextProvider === "relay-mesh" && selectedRuntimeId !== "buzz-agent") {
-      handleRuntimeDropdownChange("buzz-agent");
-    }
-    const nextSelection = selectionOnProviderDropdownChange(selection, {
-      runtime:
-        nextProvider === "relay-mesh"
-          ? "buzz-agent"
-          : (selectedRuntime?.id ?? selectedRuntimeId),
-      nextValue,
-      clearModelWhenApiKeyMissing: false,
-    });
-    applySelection({
-      ...nextSelection,
-      model: nextProvider === "relay-mesh" ? "auto" : nextSelection.model,
-    });
-  }
-
-  function handleModelDropdownChange(nextValue: string) {
-    applySelection(
-      selectionOnModelDropdownChange(selection, {
-        nextValue,
-        clearKnownModelOnCustomEntry: false,
-        isModelCustom: false,
-        effortModelQualifier:
-          selectedRuntime?.effortModelQualifier &&
-          agent.effortLevel == null &&
-          instanceEffort.value == null,
-      }),
-    );
-  }
   const inheritedModelLabel =
     inheritedModelDefault.source === "build"
       ? getBakedModelInheritLabel(inheritedModelDefault.value)
@@ -637,6 +608,24 @@ export function AgentInstanceEditDialog({
     globalProvider: inheritedProviderDefault.value,
     originalRuntimeSupportsProvider,
   });
+  const connectionModels = useConnectionModels(
+    open,
+    selectedRuntime,
+    { ...inheritedEnvVars, ...envVars },
+    model,
+    connectionAccountReason(agent),
+  );
+  const { handleProviderDropdownChange, handleModelDropdownChange } =
+    instanceModelSelectionHandlers({
+      selection,
+      applySelection,
+      handleRuntimeDropdownChange,
+      selectedRuntime,
+      selectedRuntimeId,
+      connections: connectionModels,
+      instanceEffort,
+      savedEffort: agent.effortLevel,
+    });
   const {
     effortValidationError,
     isRelayMesh,
@@ -645,6 +634,8 @@ export function AgentInstanceEditDialog({
     selectValue: modelSelectValue,
     showCustomInput: showCustomModelInput,
   } = useAgentDialogModelPicker({
+    connectionOptions: connectionModels.options,
+    connectionValue: connectionModels.value,
     discoveredOptions: discoveredModelOptions,
     effort: selectedRuntime?.effortModelQualifier
       ? (parseModelEffortQualifier(model).effort ?? "")
@@ -673,12 +664,12 @@ export function AgentInstanceEditDialog({
       Number.isInteger(maxTurnsPerSessionNumber) &&
       maxTurnsPerSessionNumber >= 0 &&
       maxTurnsPerSessionNumber <= 10000);
-  const savedEffortError = instanceEffortError(
-    instanceEffort,
-    model,
-    selectedRuntime,
-    nativeTuning,
-  );
+  const savedEffortError = connectionModels.value
+    ? connectionEffortError(
+        connectionModels.effortLevels,
+        instanceEffort.value ?? agent.effortLevel ?? "",
+      )
+    : instanceEffortError(instanceEffort, model, selectedRuntime, nativeTuning);
   const canSubmit =
     computeEditAgentFormValidity({
       name,
@@ -692,7 +683,8 @@ export function AgentInstanceEditDialog({
       agentCommand,
       requiredEnvKeyMissing,
     }) &&
-    providerValid &&
+    (Boolean(connectionModels.value) || providerValid) &&
+    !connectionModels.error &&
     !modelValidationError &&
     !effortValidationError &&
     !savedEffortError &&
@@ -1049,11 +1041,16 @@ export function AgentInstanceEditDialog({
                     setIsCustomModelEditing(false);
                   }
                 }}
-                disabled={isSaving}
+                disabled={isSaving || linkedPersona != null}
               />
             ) : null}
+            {linkedPersona ? (
+              <p className="text-xs text-muted-foreground">
+                Edit the agent definition to change its provider or model.
+              </p>
+            ) : null}
             <EditAgentProviderModelFields
-              disabled={isSaving}
+              disabled={isSaving || linkedPersona != null}
               llmProviderFieldVisible={llmProviderFieldVisible}
               providerRequired={providerRequired}
               providerDropdownOptions={providerDropdownOptions}
@@ -1086,7 +1083,21 @@ export function AgentInstanceEditDialog({
               runtimeId={selectedRuntimeId}
             />
 
+            {connectionModels.error ? (
+              <p role="alert" className="text-xs text-destructive">
+                {connectionModels.error}
+              </p>
+            ) : null}
             <AgentDialogEffortSection
+              connectionEffort={
+                connectionModels.value
+                  ? {
+                      levels: connectionModels.effortLevels,
+                      value: instanceEffort.value ?? agent.effortLevel ?? "",
+                      onChange: instanceEffort.onChange,
+                    }
+                  : undefined
+              }
               disabled={isSaving || modelDiscoveryLoading}
               envVars={envVars}
               inheritedEnvVars={inheritedEnvVars}

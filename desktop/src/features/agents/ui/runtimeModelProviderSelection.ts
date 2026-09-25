@@ -1,3 +1,4 @@
+import { CONNECTION_ENV } from "@/features/model-connections/api";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { parseModelEffortQualifier } from "./agentModelCatalog";
 import { AGENT_FAST_MODE_ENV_KEY } from "../lib/agentConfigCore";
@@ -86,11 +87,16 @@ export function selectionOnRuntimeChange(
   }
 
   const keepConnectionModel =
-    current.provider === "buzz-local" &&
+    (Boolean(current.envVars[CONNECTION_ENV]?.trim()) ||
+      current.provider === "buzz-local") &&
     params.nextRuntimeSupportsConnections === true;
-  if (current.provider === "buzz-local" && !keepConnectionModel) {
+  if (
+    (current.envVars[CONNECTION_ENV]?.trim() ||
+      current.provider === "buzz-local") &&
+    !keepConnectionModel
+  ) {
     next.provider = "";
-    next.envVars = envVarsWithoutKey(next.envVars, "BUZZ_MODEL_CONNECTION_ID");
+    next.envVars = { ...next.envVars, [CONNECTION_ENV]: "" };
   }
   if (
     !keepConnectionModel &&
@@ -109,7 +115,7 @@ export function selectionOnRuntimeChange(
   }
 
   if (!params.nextRuntimeCanChooseProvider) {
-    if (params.lockedRuntimeReset === "full") {
+    if (params.lockedRuntimeReset === "full" && !keepConnectionModel) {
       next.envVars = envVarsClearingManagedApiKey(
         next.envVars,
         current.provider,
@@ -138,6 +144,14 @@ export function selectionOnProviderDropdownChange(
   },
 ): RuntimeModelProviderSelection {
   const next = { ...current };
+  if (
+    current.envVars[CONNECTION_ENV]?.trim() &&
+    params.nextValue !== "buzz-local"
+  ) {
+    next.envVars = { ...next.envVars, [CONNECTION_ENV]: "" };
+    next.model = "";
+    next.isCustomModelEditing = false;
+  }
 
   if (params.nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
     const previousEnvVar = getProviderApiKeyEnvVar(current.provider);
@@ -200,6 +214,12 @@ export function selectionOnModelDropdownChange(
 ): RuntimeModelProviderSelection {
   const next = { ...current };
   next.envVars = envVarsWithoutKey(next.envVars, AGENT_FAST_MODE_ENV_KEY);
+  if (
+    current.envVars[CONNECTION_ENV]?.trim() &&
+    current.provider !== "buzz-local"
+  ) {
+    next.envVars = { ...next.envVars, [CONNECTION_ENV]: "" };
+  }
 
   if (params.nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
     next.isCustomModelEditing = true;
@@ -222,4 +242,23 @@ export function selectionOnModelDropdownChange(
     next.model = `${next.model}[${previousEffort}]`;
   }
   return next;
+}
+
+/** Selecting a saved source keeps the raw model ID and inactive hosted credentials. */
+export function selectionOnConnectionModel(
+  current: RuntimeModelProviderSelection,
+  connectionId: string,
+  model: string,
+): RuntimeModelProviderSelection {
+  return {
+    ...current,
+    model,
+    provider: current.provider === "buzz-local" ? "" : current.provider,
+    isCustomModelEditing: false,
+    isCustomProviderEditing: false,
+    envVars: {
+      ...envVarsWithoutKey(current.envVars, AGENT_FAST_MODE_ENV_KEY),
+      [CONNECTION_ENV]: connectionId,
+    },
+  };
 }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  selectionOnConnectionModel,
   selectionOnModelDropdownChange,
   selectionOnProviderDropdownChange,
   selectionOnRuntimeChange,
@@ -325,5 +326,83 @@ test("saved connection model survives a supported harness change only", () => {
     nextRuntimeSupportsConnections: false,
   });
   assert.equal(unsupported.provider, "");
-  assert.equal(unsupported.envVars.BUZZ_MODEL_CONNECTION_ID, undefined);
+  assert.equal(unsupported.envVars.BUZZ_MODEL_CONNECTION_ID, "");
+});
+
+test("connection selection preserves exact ID and inactive credentials, hosted selection masks inherited source", () => {
+  const current = {
+    ...base,
+    provider: "openai",
+    model: "gpt-5[high]",
+    envVars: { OPENAI_API_KEY: "fixture", KEEP: "yes" },
+  };
+  const selected = selectionOnConnectionModel(current, "saved", "default");
+  assert.equal(selected.model, "default");
+  assert.equal(selected.envVars.OPENAI_API_KEY, "fixture");
+  assert.equal(selected.envVars.BUZZ_MODEL_CONNECTION_ID, "saved");
+  const hosted = selectionOnModelDropdownChange(selected, {
+    nextValue: "gpt-5",
+    clearKnownModelOnCustomEntry: false,
+    isModelCustom: false,
+  });
+  assert.equal(hosted.model, "gpt-5");
+  assert.equal(
+    { BUZZ_MODEL_CONNECTION_ID: "inherited", ...hosted.envVars }
+      .BUZZ_MODEL_CONNECTION_ID,
+    "",
+  );
+  assert.equal(hosted.envVars.OPENAI_API_KEY, "fixture");
+});
+
+test("provider-locked compatible runtime keeps providerless connection and inactive credentials", () => {
+  const current = {
+    ...base,
+    model: "default",
+    envVars: { BUZZ_MODEL_CONNECTION_ID: "saved", OPENAI_API_KEY: "fixture" },
+  };
+  const next = selectionOnRuntimeChange(current, {
+    previousRuntime: "codex",
+    nextRuntime: "claude-code",
+    nextRuntimeCanChooseProvider: false,
+    nextRuntimeSupportsConnections: true,
+    lockedRuntimeReset: "full",
+  });
+  assert.equal(next.model, "default");
+  assert.deepEqual(next.envVars, current.envVars);
+});
+
+test("explicit hosted provider selection masks an inherited connection", () => {
+  const next = selectionOnProviderDropdownChange(
+    {
+      ...base,
+      model: "Qwen/model",
+      envVars: { BUZZ_MODEL_CONNECTION_ID: "saved" },
+    },
+    {
+      runtime: "goose",
+      nextValue: "openai",
+      clearModelWhenApiKeyMissing: false,
+    },
+  );
+  assert.equal(next.envVars.BUZZ_MODEL_CONNECTION_ID, "");
+  assert.equal(next.model, "");
+});
+
+test("provider-based connection model selection preserves its source and provider", () => {
+  const next = selectionOnModelDropdownChange(
+    {
+      ...base,
+      provider: "buzz-local",
+      model: "old",
+      envVars: { BUZZ_MODEL_CONNECTION_ID: "saved" },
+    },
+    {
+      nextValue: "Qwen/model",
+      clearKnownModelOnCustomEntry: false,
+      isModelCustom: false,
+    },
+  );
+  assert.equal(next.provider, "buzz-local");
+  assert.equal(next.envVars.BUZZ_MODEL_CONNECTION_ID, "saved");
+  assert.equal(next.model, "Qwen/model");
 });

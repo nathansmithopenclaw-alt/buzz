@@ -40,6 +40,23 @@ export function getProviderApiKeyFieldState({
   provider: string;
   requiredEnvKeys: readonly string[];
 }): ProviderApiKeyFieldState {
+  const hostedSecret = getProviderApiKeyEnvVar(provider);
+  if (
+    (
+      effectiveEnvVars.BUZZ_MODEL_CONNECTION_ID ??
+      globalEnvVars.BUZZ_MODEL_CONNECTION_ID
+    )?.trim()
+  )
+    return {
+      advancedRequiredEnvKeys: requiredEnvKeys.filter(
+        (key) => key !== hostedSecret,
+      ),
+      inheritedLabel: "",
+      isInherited: false,
+      isRequired: false,
+      secretEnvVar: null,
+      value: "",
+    };
   const secretEnvVar = getProviderApiKeyEnvVar(provider);
   const advancedRequiredEnvKeys = secretEnvVar
     ? requiredEnvKeys.filter((key) => key !== secretEnvVar)

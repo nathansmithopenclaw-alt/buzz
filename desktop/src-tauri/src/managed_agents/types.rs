@@ -690,8 +690,18 @@ pub enum HarnessSource {
     Custom,
 }
 
+/// Saved-source capability belongs to the runtime catalog, not a UI harness table.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConnectionSupport {
+    pub protocol: Option<crate::model_connections::qualification::Protocol>,
+    pub setup_reason: Option<String>,
+    pub default_effort: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AcpRuntimeCatalogEntry {
+    pub model_connection: Option<ModelConnectionSupport>,
     pub id: String,
     pub label: String,
     pub avatar_url: String,

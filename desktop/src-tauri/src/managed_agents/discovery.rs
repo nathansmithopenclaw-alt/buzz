@@ -1080,6 +1080,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
     PartialEntry {
         runtime,
         entry: AcpRuntimeCatalogEntry {
+            model_connection: runtime.model_connection(),
             id: runtime.id.to_string(),
             label: runtime.label.to_string(),
             avatar_url: runtime.avatar_url.to_string(),
@@ -1220,6 +1221,7 @@ pub fn discover_acp_runtimes_from(
             let default_args = normalize_agent_args(&def.command, def.args.clone());
 
             entries.push(AcpRuntimeCatalogEntry {
+                model_connection: None,
                 id: def.id.clone(),
                 label: def.label.clone(),
                 // F1 security fix: never copy user-supplied avatar URL into the catalog.

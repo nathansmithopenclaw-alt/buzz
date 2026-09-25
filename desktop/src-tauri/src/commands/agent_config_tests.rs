@@ -50,6 +50,8 @@ fn goose_runtime() -> &'static KnownAcpRuntime {
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
+        model_connection_protocol: None,
+        model_connection_default_effort: None,
         default_env: &[],
         config_file_path: Some("~/.config/goose/config.yaml"),
         config_file_format: Some("yaml"),

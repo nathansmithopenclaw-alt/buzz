@@ -68,6 +68,21 @@ pub(super) fn preset_catalog_entry(
 
     let meta = super::known_acp_runtime(def.command);
     AcpRuntimeCatalogEntry {
+        model_connection: meta
+            .and_then(|runtime| runtime.model_connection())
+            .or_else(|| {
+                let reason = match def.id {
+                    "pi" => "Install the Pi ACP adapter to use this connection",
+                    "amp" => "Configure this connection in your Amp account router",
+                    "openclaw" => "Configure this connection in the OpenClaw gateway",
+                    _ => return None,
+                };
+                Some(crate::managed_agents::ModelConnectionSupport {
+                    protocol: None,
+                    setup_reason: Some(reason.into()),
+                    default_effort: None,
+                })
+            }),
         id: def.id.to_string(),
         label: def.label.to_string(),
         // No remote URL — all preset icons are bundled assets.

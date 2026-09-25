@@ -1,4 +1,17 @@
 import { invokeTauri } from "@/shared/api/tauri";
+const connectionListeners = new Set<() => void>();
+export function subscribeConnections(listener: () => void) {
+  connectionListeners.add(listener);
+  return () => {
+    connectionListeners.delete(listener);
+  };
+}
+async function notifyConnectionChange<T>(write: Promise<T>): Promise<T> {
+  const result = await write;
+  for (const listener of connectionListeners) listener();
+  return result;
+}
+
 export const CONNECTION_ENV = "BUZZ_MODEL_CONNECTION_ID";
 export type ModelConnection = {
   id: string;
@@ -50,8 +63,13 @@ export const saveConnection = (input: {
   name: string;
   base_url: string;
   api_key?: string;
-}) => invokeTauri<ModelConnection>("save_model_connection", { input });
+}) =>
+  notifyConnectionChange(
+    invokeTauri<ModelConnection>("save_model_connection", { input }),
+  );
 export const removeConnection = (id: string) =>
-  invokeTauri<void>("remove_model_connection", { id });
+  notifyConnectionChange(invokeTauri<void>("remove_model_connection", { id }));
 export const testConnection = (id: string, model: string) =>
-  invokeTauri<ModelConnection>("test_model_connection", { id, model });
+  notifyConnectionChange(
+    invokeTauri<ModelConnection>("test_model_connection", { id, model }),
+  );

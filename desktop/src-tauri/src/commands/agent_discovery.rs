@@ -1,5 +1,5 @@
 use crate::managed_agents::{
-    command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
+    command_availability, is_npm_global_install, normalize_agent_args, AcpRuntimeCatalogEntry,
     DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
     DEFAULT_ACP_COMMAND,
 };
@@ -133,16 +133,15 @@ pub async fn save_custom_harness(
             None => (AcpAvailabilityStatus::NotInstalled, None, None),
         };
 
-    let default_args =
-        crate::managed_agents::normalize_agent_args(&definition.command, definition.args.clone());
     Ok(AcpRuntimeCatalogEntry {
+        model_connection: None,
         id: definition.id,
         label: definition.label,
         avatar_url: String::new(),
         availability,
         command: command_opt,
         binary_path,
-        default_args,
+        default_args: normalize_agent_args(&definition.command, definition.args.clone()),
         mcp_command: None,
         model_env_var: None,
         provider_env_var: None,

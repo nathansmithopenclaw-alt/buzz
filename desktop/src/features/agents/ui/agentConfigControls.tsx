@@ -351,6 +351,8 @@ export function resolveDefaultModelLabel({
 }
 
 export function AgentModelField({
+  connectionOptions = [],
+  connectionValue,
   disabled,
   discoveredModelOptions,
   globalModel,
@@ -378,6 +380,14 @@ export function AgentModelField({
   useChevronIcon = false,
   usePersonaInputStyle = false,
 }: {
+  connectionOptions?: readonly {
+    value: string;
+    label: string;
+    group?: string;
+    badge?: string;
+    disabled?: boolean;
+  }[];
+  connectionValue?: string | null;
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
   /** Known lower-precedence model used when this field is left empty. */
@@ -442,9 +452,9 @@ export function AgentModelField({
       isSharedCompute,
     }),
   };
-  const discoveredWithoutDefault = (discoveredModelOptions ?? []).filter(
-    (option) => option.id.trim() !== "",
-  );
+  const discoveredWithoutDefault = (
+    connectionValue ? [] : (discoveredModelOptions ?? [])
+  ).filter((option) => option.id.trim() !== "");
   const baseModelOptions = isSharedCompute
     ? [defaultOption, ...discoveredWithoutDefault]
     : [
@@ -473,13 +483,14 @@ export function AgentModelField({
     !hasPersonaModelOption(effectiveModelOptions, trimmedModel);
 
   const modelSelectValue =
-    isSharedCompute && (trimmedModel === "" || trimmedModel === "auto")
+    connectionValue ??
+    (isSharedCompute && (trimmedModel === "" || trimmedModel === "auto")
       ? AUTO_MODEL_DROPDOWN_VALUE
       : getModelSelectValue({
           isCustomModelEditing,
           isModelCustom,
           model,
-        });
+        }));
 
   // The select is only disabled for mutation pending — never for missing discovery.
   // Default/custom options remain usable regardless of discovery state.
@@ -489,7 +500,9 @@ export function AgentModelField({
   // Show the custom model input whenever custom mode is active or the current
   // model is already custom — not gated on discovery having returned.
   const showCustomModelInput =
-    !isSharedCompute && (isCustomModelEditing || isModelCustom);
+    !connectionValue &&
+    !isSharedCompute &&
+    (isCustomModelEditing || isModelCustom);
 
   const handleModelSelectChange = (nextValue: string) => {
     if (nextValue === AUTO_MODEL_DROPDOWN_VALUE) {
@@ -506,6 +519,12 @@ export function AgentModelField({
   };
 
   const modelOptions: AgentDropdownOption[] = [
+    ...connectionOptions.map((option) => ({
+      ...option,
+      label: [option.group, option.label, option.badge]
+        .filter(Boolean)
+        .join(" · "),
+    })),
     ...effectiveModelOptions.map((option) => ({
       label: option.label,
       value: option.id || AUTO_MODEL_DROPDOWN_VALUE,

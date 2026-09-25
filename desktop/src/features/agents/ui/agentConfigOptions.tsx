@@ -758,6 +758,22 @@ export function computeLocalModeGate({
     };
   }
 
+  const source = {
+    ...globalEnvVars,
+    ...envVars,
+  }.BUZZ_MODEL_CONNECTION_ID?.trim();
+  if (source && runtime?.modelConnection?.protocol) {
+    const missingNormalizedFields =
+      model.trim() || globalModel.trim() ? [] : ["model"];
+    return {
+      missingNormalizedFields,
+      missingEnvKeys: [],
+      requiredEnvKeys: [],
+      fileSatisfiedEnvKeys: [],
+      satisfied: missingNormalizedFields.length === 0,
+    };
+  }
+
   const needsProviderSelection = runtimeSupportsLlmProviderSelection(
     runtimeId,
     runtime,

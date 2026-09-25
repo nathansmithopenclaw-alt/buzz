@@ -1,4 +1,8 @@
 import {
+  ConnectionEffortField,
+  type ConnectionEffort,
+} from "@/features/model-connections/ConnectionEffortField";
+import {
   renderInstanceEffort,
   type useInstanceEffort,
 } from "./useInstanceEffort";
@@ -194,6 +198,7 @@ export function AgentDialogEffortField({
 }
 
 export function AgentDialogEffortSection({
+  connectionEffort,
   instanceEffort,
   nativeTuning,
   onBeforeChange,
@@ -208,6 +213,7 @@ export function AgentDialogEffortSection({
   | "nativeEffortOptions"
   | "onEnvVarChange"
 > & {
+  connectionEffort?: ConnectionEffort;
   envVars: EnvVarsValue;
   instanceEffort?: ReturnType<typeof useInstanceEffort>;
   nativeTuning: {
@@ -226,6 +232,20 @@ export function AgentDialogEffortSection({
   setEnvVars: React.Dispatch<React.SetStateAction<EnvVarsValue>>;
   validationError: string | null;
 }) {
+  if (connectionEffort)
+    return (
+      <div className="space-y-2">
+        <ConnectionEffortField
+          effort={connectionEffort}
+          disabled={fieldProps.disabled}
+        />
+        {validationError ? (
+          <p className="text-xs text-destructive" role="alert">
+            {validationError}
+          </p>
+        ) : null}
+      </div>
+    );
   const effortControl = renderInstanceEffort(instanceEffort, {
     model: fieldProps.model,
     runtime: fieldProps.runtime,
