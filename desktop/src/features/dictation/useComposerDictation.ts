@@ -19,6 +19,7 @@ import {
   stopDictation,
 } from "./api";
 import {
+  DICTATION_DEVICE_STORAGE_KEY,
   type DictationCapture,
   MicrophoneUnavailableError,
   startDictationCapture,
@@ -67,8 +68,6 @@ export const DICTATION_WARN_SECONDS = 270;
 const FLASH_MS = 1800;
 const MIC_PERMISSION_SETTINGS_URL =
   "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";
-/** Per-viewer convenience: the chosen dictation microphone. */
-export const DICTATION_DEVICE_STORAGE_KEY = "buzz-dictation-input-device";
 
 /** The composer's mention candidates, as the @ picker sees them. */
 export type DictationCandidates = {
@@ -580,6 +579,10 @@ export function useComposerDictation(params: UseComposerDictationParams) {
         onSilence: () =>
           toast.warning(
             "No audio from your microphone. Check your input device.",
+          ),
+        onDeviceFallback: () =>
+          toast.info(
+            "Your chosen microphone isn't connected, so dictation is using the system default.",
           ),
       });
       if (generation !== generationRef.current) {

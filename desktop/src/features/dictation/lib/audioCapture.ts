@@ -9,6 +9,9 @@ import { pushDictationAudio } from "../api";
  * already in flight, so the system microphone indicator turns off right away.
  */
 
+/** Per-viewer convenience: the chosen dictation microphone ("" = default). */
+export const DICTATION_DEVICE_STORAGE_KEY = "buzz-dictation-input-device";
+
 /** Frames per IPC batch: 5 × 20 ms = 100 ms (19.2 KB). */
 const FRAMES_PER_BATCH = 5;
 /** How long to watch for a dead or muted microphone. */
@@ -22,7 +25,28 @@ export type DictationCaptureOptions = {
   onLevel?: (level: number) => void;
   /** Fired once if the first 1.5 s carries no signal at all. */
   onSilence?: () => void;
+  /** The chosen device was missing, so the system default was used. */
+  onDeviceFallback?: () => void;
 };
+
+/** Audio inputs for the microphone picker (labels need mic permission). */
+export async function listAudioInputs(): Promise<
+  { deviceId: string; label: string }[]
+> {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices
+    .filter(
+      (device) =>
+        device.kind === "audioinput" &&
+        device.deviceId &&
+        device.deviceId !== "default",
+    )
+    .map((device, index) => ({
+      deviceId: device.deviceId,
+      label: device.label || `Microphone ${index + 1}`,
+    }));
+}
 
 export type DictationCaptureResult = {
   /** 100 ms batches the backend refused (the transcript is missing them). */
@@ -64,17 +88,30 @@ export async function startDictationCapture(
       false,
     );
   }
-  let stream: MediaStream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
+  const open = (deviceId: string | null | undefined) =>
+    navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
         sampleRate: 48_000,
-        ...(options.deviceId ? { deviceId: { exact: options.deviceId } } : {}),
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
       },
     });
+  let stream: MediaStream;
+  try {
+    try {
+      stream = await open(options.deviceId);
+    } catch (error) {
+      // The chosen microphone is gone (unplugged headset): fall back to the
+      // system default rather than leaving dictation unusable.
+      const name = (error as DOMException | undefined)?.name;
+      const missing =
+        name === "OverconstrainedError" || name === "NotFoundError";
+      if (!options.deviceId || !missing) throw error;
+      stream = await open(null);
+      options.onDeviceFallback?.();
+    }
   } catch (error) {
     const name = (error as DOMException | undefined)?.name;
     const denied = name === "NotAllowedError" || name === "SecurityError";

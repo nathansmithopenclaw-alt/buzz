@@ -26,6 +26,10 @@ import {
   getDictationCleanupSources,
   getDictationModelInfo,
 } from "../api";
+import {
+  DICTATION_DEVICE_STORAGE_KEY,
+  listAudioInputs,
+} from "../lib/audioCapture";
 import { useDictationSettings } from "../useDictationSettings";
 import { hotkeyLabel } from "./DictationButton";
 
@@ -71,6 +75,46 @@ function useModelInfo(enabled: boolean) {
   return { info, refresh };
 }
 
+function readDevice(): string {
+  try {
+    return window.localStorage.getItem(DICTATION_DEVICE_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The dictation microphone: a per-device convenience kept in local storage
+ * ("" = system default). The list refreshes when devices come and go.
+ */
+function useMicrophoneChoice(enabled: boolean) {
+  const [inputs, setInputs] = React.useState<
+    { deviceId: string; label: string }[]
+  >([]);
+  const [deviceId, setDeviceId] = React.useState(readDevice);
+  React.useEffect(() => {
+    if (!enabled) return;
+    const refresh = () =>
+      void listAudioInputs()
+        .then(setInputs)
+        .catch(() => setInputs([]));
+    refresh();
+    navigator.mediaDevices?.addEventListener?.("devicechange", refresh);
+    return () =>
+      navigator.mediaDevices?.removeEventListener?.("devicechange", refresh);
+  }, [enabled]);
+  const choose = (next: string) => {
+    setDeviceId(next);
+    try {
+      if (next) window.localStorage.setItem(DICTATION_DEVICE_STORAGE_KEY, next);
+      else window.localStorage.removeItem(DICTATION_DEVICE_STORAGE_KEY);
+    } catch {
+      toast.error("Buzz could not save your microphone choice.");
+    }
+  };
+  return { inputs, deviceId, choose };
+}
+
 /**
  * Stage 1 dictation settings (shown under Experiments while the dictation
  * experiment is on): speech model download, cleanup source, timeout and the
@@ -83,6 +127,7 @@ export function DictationSettingsSection() {
   const [connections, setConnections] = React.useState<ModelConnection[]>([]);
   const [accounts, setAccounts] = React.useState<SubscriptionAccount[]>([]);
   const [agentOpenRouter, setAgentOpenRouter] = React.useState(false);
+  const microphone = useMicrophoneChoice(enabled);
 
   React.useEffect(() => {
     if (!enabled) return;
@@ -179,6 +224,32 @@ export function DictationSettingsSection() {
             {info.enoughSpace ? "Download" : "Not enough space"}
           </Button>
         ) : null}
+      </SettingsOptionRow>
+
+      <SettingsOptionRow>
+        <div className="min-w-0">
+          <div className="font-medium">Microphone</div>
+          <div className="text-xs text-muted-foreground">
+            Falls back to the system default if this one is unplugged.
+          </div>
+        </div>
+        <select
+          aria-label="Dictation microphone"
+          className={SELECT_CLASS}
+          onChange={(e) => microphone.choose(e.target.value)}
+          value={
+            microphone.inputs.some((i) => i.deviceId === microphone.deviceId)
+              ? microphone.deviceId
+              : ""
+          }
+        >
+          <option value="">System default</option>
+          {microphone.inputs.map((input) => (
+            <option key={input.deviceId} value={input.deviceId}>
+              {input.label}
+            </option>
+          ))}
+        </select>
       </SettingsOptionRow>
 
       <SettingsOptionRow>
