@@ -149,9 +149,10 @@ fn retain(
 pub(crate) fn reconcile<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     records: &[crate::managed_agents::ManagedAgentRecord],
+    previous: &[crate::managed_agents::ManagedAgentRecord],
 ) -> Result<(), String> {
     let global = crate::managed_agents::load_global_agent_config(app)?;
-    reconcile_with_global(app, records, &global)
+    reconcile_for_records(app, records, &global, Some(previous))
 }
 
 pub(crate) fn reconcile_with_global<R: tauri::Runtime>(
@@ -159,18 +160,34 @@ pub(crate) fn reconcile_with_global<R: tauri::Runtime>(
     records: &[crate::managed_agents::ManagedAgentRecord],
     global: &crate::managed_agents::GlobalAgentConfig,
 ) -> Result<(), String> {
+    reconcile_for_records(app, records, global, None)
+}
+
+fn reconcile_for_records<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    records: &[crate::managed_agents::ManagedAgentRecord],
+    global: &crate::managed_agents::GlobalAgentConfig,
+    previous: Option<&[crate::managed_agents::ManagedAgentRecord]>,
+) -> Result<(), String> {
     let root = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("model-connection-runtimes");
-    reconcile_at(&root, records, global, super::native_goose::runtime_reason)
+    reconcile_at(
+        &root,
+        records,
+        global,
+        previous,
+        super::native_goose::runtime_reason,
+    )
 }
 
 fn reconcile_at(
     root: &Path,
     records: &[crate::managed_agents::ManagedAgentRecord],
     global: &crate::managed_agents::GlobalAgentConfig,
+    previous: Option<&[crate::managed_agents::ManagedAgentRecord]>,
     mut runtime_reason: impl FnMut() -> Option<String>,
 ) -> Result<(), String> {
     let definitions = records
@@ -189,7 +206,7 @@ fn reconcile_at(
         }
         Ok::<_, String>(())
     };
-    if global.preferred_runtime.as_deref() == Some("goose") {
+    if previous.is_none() && global.preferred_runtime.as_deref() == Some("goose") {
         if let Some(id) = global
             .env_vars
             .get(CONNECTION_ENV)
@@ -222,7 +239,11 @@ fn reconcile_at(
         else {
             continue;
         };
-        if runtime == "goose" {
+        // An incompatible existing selection must not block another agent's
+        // save. Global saves validate all inherited selections; store saves
+        // validate changed/new records (including changed definitions).
+        let changed = previous.is_none_or(|old| !old.contains(record));
+        if runtime == "goose" && changed {
             validate_goose(connection)?;
         }
         if record.pubkey.is_empty() {
@@ -371,7 +392,7 @@ mod tests {
                 if instance {
                     candidate.pubkey = "a".repeat(64);
                 }
-                let result = reconcile_at(&homes, &[candidate], &global, || None);
+                let result = reconcile_at(&homes, &[candidate], &global, None, || None);
                 if keyed {
                     assert_eq!(
                         result.unwrap_err(),
@@ -387,7 +408,7 @@ mod tests {
                 env_vars: BTreeMap::from([(CONNECTION_ENV.into(), "connection".into())]),
                 ..Default::default()
             };
-            let result = reconcile_at(&homes, &[], &candidate, || None);
+            let result = reconcile_at(&homes, &[], &candidate, None, || None);
             if keyed {
                 assert_eq!(
                     result.unwrap_err(),
@@ -397,6 +418,27 @@ mod tests {
                 result.unwrap();
             }
         }
+        let previous = vec![record.clone()];
+        // The source is now keyed. An unchanged Goose record cannot prevent
+        // a hosted record from being saved, but editing that Goose record must.
+        let mut hosted = record.clone();
+        hosted.slug = Some("hosted".into());
+        hosted.runtime = Some("codex".into());
+        hosted.env_vars.clear();
+        reconcile_at(
+            &homes,
+            &[record.clone(), hosted],
+            &global,
+            Some(&previous),
+            || None,
+        )
+        .unwrap();
+        let mut changed = record;
+        changed.name = "Changed Goose".into();
+        assert_eq!(
+            reconcile_at(&homes, &[changed], &global, Some(&previous), || None).unwrap_err(),
+            super::super::native_goose::KEYED_REASON
+        );
         assert!(!homes.exists());
     }
 }
