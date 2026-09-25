@@ -1,5 +1,7 @@
 //! Device-local model connections. Secrets never appear in catalog IPC responses.
 mod local_host;
+mod native_codex;
+pub(crate) mod runtime_home;
 pub(crate) use local_host::is_local_model_host;
 mod local_permission;
 pub(crate) mod network;
@@ -129,6 +131,13 @@ fn key_for_save(
 pub fn list_model_connections(app: AppHandle) -> Result<Vec<ModelConnection>, String> {
     load(&app)
 }
+#[tauri::command]
+pub fn codex_connection_workspace_reason() -> Option<String> {
+    let Some(cwd) = crate::managed_agents::default_agent_workdir() else {
+        return Some("Codex connection requires an explicit workspace".into());
+    };
+    buzz_harness_config::codex_project::validate(&cwd).err()
+}
 #[derive(Deserialize)]
 pub struct SaveConnectionInput {
     pub id: Option<String>,
@@ -197,6 +206,18 @@ pub async fn save_model_connection(
     if rows.len() >= 64 && input.id.is_none() {
         return Err("Maximum of 64 model connections reached".into());
     }
+    if let Some(previous) = old
+        .as_ref()
+        .filter(|previous| previous.base_url != base_url || previous.models != models)
+    {
+        runtime_home::remove_connection(
+            &app.path()
+                .app_data_dir()
+                .map_err(|e| e.to_string())?
+                .join("model-connection-runtimes"),
+            &previous.id,
+        )?;
+    }
     let secret_ref = if let Some(key) = &key {
         let reference = format!("model-connection:{}", uuid::Uuid::new_v4());
         crate::secret_store::SecretStore::shared("buzz-desktop").store(&reference, key)?;
@@ -233,6 +254,13 @@ pub fn remove_model_connection(app: AppHandle, id: String) -> Result<(), String>
     let _guard = STORE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut rows = load(&app)?;
     let old = rows.iter().find(|row| row.id == id).cloned();
+    runtime_home::remove_connection(
+        &app.path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("model-connection-runtimes"),
+        &id,
+    )?;
     rows.retain(|row| row.id != id);
     persist(&app, &rows)?;
     if let Some(reference) = old.and_then(|row| row.secret_ref) {

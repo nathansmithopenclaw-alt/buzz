@@ -776,6 +776,7 @@ pub fn run() {
             delete_managed_agent,
             get_managed_agent_log,
             model_connections::list_model_connections,
+            model_connections::codex_connection_workspace_reason,
             model_connections::save_model_connection,
             model_connections::remove_model_connection,
             model_connections::test_model_connection,

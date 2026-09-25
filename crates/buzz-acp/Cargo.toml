@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 # Internal
 buzz-core = { workspace = true }
+buzz-harness-config = { path = "../buzz-harness-config" }
 buzz-sdk = { workspace = true }
 buzz-persona = { path = "../buzz-persona" }
 

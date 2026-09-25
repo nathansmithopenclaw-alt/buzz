@@ -1,3 +1,4 @@
+import { ConnectionRuntimeNotice } from "@/features/model-connections/ConnectionRuntimeNotice";
 import { CONNECTION_ENV } from "@/features/model-connections/api";
 import {
   connectionAccountReason,
@@ -1009,6 +1010,10 @@ export function AgentDefinitionDialog({
             ) : null}
           </AnimatePresence>
 
+          <ConnectionRuntimeNotice
+            runtimeId={runtime}
+            connection={connectionModels.selected}
+          />
           {connectionModels.error ? (
             <p role="alert" className="text-xs text-destructive">
               {connectionModels.error}

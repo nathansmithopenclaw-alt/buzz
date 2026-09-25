@@ -47,6 +47,7 @@ async function fixture(
   page: Page,
   runtime: (typeof runtimes)[number],
   missing = false,
+  reason: string | null = null,
 ) {
   await installMockBridge(page, {
     acpRuntimesCatalog: [
@@ -78,10 +79,10 @@ async function fixture(
         status: "stopped",
         channelNames: ["agents"],
         provider: "openai",
-        model: missing ? MODEL : "hosted-model",
+        model: missing || reason ? MODEL : "hosted-model",
         envVars: {
           OPENAI_API_KEY: "fixture-key",
-          ...(missing ? { [CONNECTION_KEY]: SOURCE } : {}),
+          ...(missing || reason ? { [CONNECTION_KEY]: SOURCE } : {}),
         },
       },
     ],
@@ -97,11 +98,12 @@ async function fixture(
     ),
   );
   await page.evaluate(
-    ({ missing, protocol }) => {
+    ({ missing, protocol, reason }) => {
       const win = window as unknown as BridgeWindow;
       const original = win.__TAURI_INTERNALS__.invoke;
       win.__connectionPicker = { writes: [], inference: 0 };
       win.__TAURI_INTERNALS__.invoke = async (command, args) => {
+        if (command === "codex_connection_workspace_reason") return reason;
         if (command === "list_model_connections")
           return missing
             ? []
@@ -144,7 +146,7 @@ async function fixture(
         return original(command, args);
       };
     },
-    { missing, protocol: runtime.protocol },
+    { missing, protocol: runtime.protocol, reason },
   );
   await page.getByTestId("open-agents-view").click();
   await page
@@ -172,6 +174,14 @@ for (const runtime of runtimes) {
     });
     await choice.click();
     await expect(page.locator("#edit-agent-model")).toContainText(MODEL);
+    if (runtime.id === "codex") {
+      const notice = dialog.getByTestId("connection-runtime-policy");
+      await expect(notice).toContainText("65,536");
+      await expect(notice).toContainText("49,152");
+      await expect(notice).toContainText("Skips user and project MCP servers");
+      await expect(notice).not.toContainText("8,192");
+    }
+
     await dialog
       .getByRole("button", { name: "Save changes", exact: true })
       .click();
@@ -207,4 +217,22 @@ test("missing saved source is named and blocks Save without a hosted fallback", 
       )
     ).writes,
   ).toEqual([]);
+});
+
+test("Codex project MCP refusal names the file and servers and blocks Save", async ({
+  page,
+}) => {
+  const reason =
+    "Saved-connection Codex cannot start: /workspace/.codex/config.toml declares MCP servers (accounts, deployments). Use a workspace without project MCP servers.";
+  await fixture(page, runtimes[1], false, reason);
+  const dialog = page.getByTestId("edit-agent-dialog");
+  await expect(dialog.getByRole("alert")).toContainText(reason);
+  await expect(
+    dialog.getByRole("button", { name: "Save changes", exact: true }),
+  ).toBeDisabled();
+  const result = await page.evaluate(
+    () => (window as unknown as BridgeWindow).__connectionPicker,
+  );
+  expect(result.inference).toBe(0);
+  expect(result.writes).toHaveLength(0);
 });

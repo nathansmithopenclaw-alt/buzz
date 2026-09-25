@@ -40,6 +40,8 @@ export type DiscoveredServer = {
   models: string[];
   needs_key: boolean;
 };
+export const codexWorkspaceReason = () =>
+  invokeTauri<string | null>("codex_connection_workspace_reason");
 export const listConnections = () =>
   invokeTauri<ModelConnection[]>("list_model_connections");
 type DiscoveryResult = { servers: DiscoveredServer[]; notice: string };

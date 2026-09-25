@@ -1,3 +1,5 @@
+import type { ModelConnection } from "@/features/model-connections/api";
+import { ConnectionRuntimeNotice } from "@/features/model-connections/ConnectionRuntimeNotice";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { ClaudeCliVersionBlocker } from "./ClaudeCliVersionBlocker";
@@ -48,6 +50,8 @@ export function EditAgentProviderModelFields({
   onModelChange,
   modelStatusMessage,
   runtimeId,
+  connection,
+  connectionError,
 }: {
   disabled: boolean;
   llmProviderFieldVisible: boolean;
@@ -75,6 +79,8 @@ export function EditAgentProviderModelFields({
   onModelChange: (value: string) => void;
   modelStatusMessage: string | null;
   runtimeId: string;
+  connection?: ModelConnection;
+  connectionError?: string | null;
 }) {
   return (
     <>
@@ -188,6 +194,15 @@ export function EditAgentProviderModelFields({
         {modelStatusMessage ? (
           <p className="text-xs text-muted-foreground">{modelStatusMessage}</p>
         ) : null}
+        {connectionError ? (
+          <p role="alert" className="text-xs text-destructive">
+            {connectionError}
+          </p>
+        ) : null}
+        <ConnectionRuntimeNotice
+          runtimeId={runtimeId}
+          connection={connection}
+        />
         <ClaudeCliVersionBlocker
           disabled={disabled}
           model={model}

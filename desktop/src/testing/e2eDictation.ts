@@ -77,6 +77,8 @@ export function dictationMockCommand(
           error: null,
         },
       };
+    case "codex_connection_workspace_reason":
+      return { result: null };
     case "list_model_connections":
       return {
         result: [

@@ -439,6 +439,8 @@ fn build_initialize_params() -> serde_json::Value {
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
 pub struct AcpClient {
+    /// Recheck native project layers before every connection session.
+    codex_session_only: bool,
     /// Private MCP launch files, retained for reconnects until session teardown.
     mcp_launch_files: HashMap<String, crate::mcp_launch::LaunchFiles>,
     provider_config: Option<provider::ProviderConfig>,
@@ -1011,6 +1013,20 @@ impl AcpClient {
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
         let provider_config = provider::ProviderConfig::from_env(extra_env)?;
+        let codex_session_only = std::env::var(buzz_harness_config::CODEX_SESSION_ONLY_ENV)
+            .ok()
+            .or_else(|| {
+                extra_env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == buzz_harness_config::CODEX_SESSION_ONLY_ENV)
+                    .map(|(_, value)| value.clone())
+            })
+            .is_some_and(|value| value == "1");
+        if codex_session_only {
+            buzz_harness_config::codex_project::validate(&std::env::current_dir()?)
+                .map_err(AcpError::Protocol)?;
+        }
 
         if has_generated_codex_config {
             // Workspace-local exact-prefix allowlist for `buzz messages send`.
@@ -1070,11 +1086,20 @@ impl AcpClient {
         } else {
             None
         };
-        let codex_config_value = build_codex_config_env(
-            extra_env,
-            parent_codex_config.as_deref(),
-            has_generated_codex_config,
-        )?;
+        let codex_config_value = if codex_session_only {
+            // Desktop's generated projection is the entire connection config.
+            // Merging persona/user extras would restore account MCP servers.
+            let generated = std::env::var("CODEX_CONFIG").map_err(|_| {
+                AcpError::Protocol("Codex connection requires generated configuration".into())
+            })?;
+            build_codex_config_env(&[("CODEX_CONFIG".into(), generated)], None, true)?
+        } else {
+            build_codex_config_env(
+                extra_env,
+                parent_codex_config.as_deref(),
+                has_generated_codex_config,
+            )?
+        };
         // When the merge path was not taken (None returned), any persona CODEX_CONFIG
         // entry falls through to the standard operator-wins treatment below.
         let codex_merge_active = codex_config_value.is_some();
@@ -1149,6 +1174,28 @@ impl AcpClient {
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
                 _ => None,
             };
+        if codex_session_only {
+            let child_env = |name: &str| {
+                cmd.as_std()
+                    .get_envs()
+                    .find(|(key, _)| *key == name)
+                    .and_then(|(_, value)| value)
+                    .map(std::ffi::OsString::from)
+                    .or_else(|| std::env::var_os(name))
+            };
+            let cli = child_env("CODEX_PATH").ok_or_else(|| AcpError::Protocol("Saved-connection Codex requires qualified CLI 0.144.0; installed version is unknown".into()))?;
+            let path = child_env("PATH");
+            buzz_harness_config::codex::validate_version(buzz_harness_config::cli_version::probe(
+                std::path::Path::new(&cli),
+                path.as_deref().and_then(|path| path.to_str()),
+            ))
+            .map_err(AcpError::Protocol)?;
+            let home = child_env("CODEX_HOME").ok_or_else(|| {
+                AcpError::Protocol("Codex connection requires its generated home".into())
+            })?;
+            buzz_harness_config::codex::clear_shell_snapshots(std::path::Path::new(&home))
+                .map_err(AcpError::Protocol)?;
+        }
         let mut child = cmd.spawn()?;
 
         let stdin = child
@@ -1161,6 +1208,7 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
         Ok(Self {
+            codex_session_only,
             mcp_launch_files: HashMap::new(),
             provider_config,
             private_provider_rpc: false,
@@ -1308,6 +1356,10 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        if self.codex_session_only {
+            buzz_harness_config::codex_project::validate(std::path::Path::new(cwd))
+                .map_err(AcpError::Protocol)?;
+        }
         if let Ok(harness) = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS") {
             validate_subscription_project_context(&harness, std::path::Path::new(cwd))?;
         }
@@ -1420,6 +1472,10 @@ impl AcpClient {
         cwd: &str,
         mcp_servers: Vec<McpServer>,
     ) -> Result<SessionNewResponse, AcpError> {
+        if self.codex_session_only {
+            buzz_harness_config::codex_project::validate(std::path::Path::new(cwd))
+                .map_err(AcpError::Protocol)?;
+        }
         if let Ok(harness) = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS") {
             validate_subscription_project_context(&harness, std::path::Path::new(cwd))?;
         }
@@ -4812,6 +4868,106 @@ mod tests {
             matches!(result, Err(AcpError::IdleTimeout(_))),
             "expected IdleTimeout after silence, got {result:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connection_spawn_ignores_persona_config_and_preserves_sandbox() {
+        use std::os::unix::fs::PermissionsExt;
+        const MARKER: &str = "BUZZ_TEST_CONNECTION_CONFIG_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let adapter = root.path().join("adapter.py");
+            std::fs::write(&adapter, r#"import json, os, sys
+for line in sys.stdin:
+    req=json.loads(line)
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':json.loads(os.environ['CODEX_CONFIG'])}),flush=True)
+"#).unwrap();
+            let cli = root.path().join("codex");
+            std::fs::write(&cli, "#!/bin/sh\necho 'codex-cli 0.144.0'\n").unwrap();
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "acp::tests::connection_spawn_ignores_persona_config_and_preserves_sandbox",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env(MARKER, adapter)
+                .env(buzz_harness_config::CODEX_SESSION_ONLY_ENV, "1")
+                .env("CODEX_PATH", cli)
+                .env("CODEX_HOME", root.path())
+                .env(
+                    "CODEX_CONFIG",
+                    buzz_harness_config::codex::overrides("exact-model", 65536).to_string(),
+                )
+                .current_dir(root.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let adapter = std::env::var(MARKER).unwrap();
+        let mut client = AcpClient::spawn("/usr/bin/python3", &[adapter], &[
+            (buzz_harness_config::CODEX_SESSION_ONLY_ENV.into(), "0".into()),
+            ("CODEX_CONFIG".into(), r#"{"mcp_servers":{"external":{"command":"must-not-run"}},"sandbox_mode":"danger-full-access","approval_policy":"never","model_provider":"redirect"}"#.into())
+        ], false).await.unwrap();
+        let result = client
+            .send_request("fixture", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(result.get("mcp_servers").is_none());
+        assert_eq!(result["sandbox_mode"], "workspace-write");
+        assert_eq!(result["approval_policy"], "on-request");
+        assert_eq!(result["model_provider"], "custom-gateway");
+        assert_eq!(result["model"], "exact-model");
+        assert_eq!(result["sandbox_workspace_write"]["network_access"], true);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connection_project_added_after_spawn_blocks_new_and_resumed_sessions() {
+        let workspace = tempfile::tempdir().unwrap();
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"before-config-change"}}'
+            sleep 3
+        "#;
+        let mut client = spawn_script(script).await;
+        client.codex_session_only = true;
+        client.initialize().await.unwrap();
+        let cwd = workspace.path().to_str().unwrap();
+        client
+            .session_new_full(cwd, vec![], None, None)
+            .await
+            .unwrap();
+        std::fs::create_dir(workspace.path().join(".codex")).unwrap();
+        std::fs::write(
+            workspace.path().join(".codex/config.toml"),
+            "[mcp_servers.added_after_spawn]\ncommand='must-not-run'\n",
+        )
+        .unwrap();
+        let error = client
+            .session_new_full(cwd, vec![], None, None)
+            .await
+            .err()
+            .expect("project policy must refuse");
+        assert!(error.to_string().contains("added_after_spawn"));
+        let error = client
+            .session_load_full("before-config-change", cwd, vec![])
+            .await
+            .err()
+            .expect("project policy must refuse");
+        assert!(error.to_string().contains("added_after_spawn"));
+        client.shutdown().await;
     }
 
     #[tokio::test]

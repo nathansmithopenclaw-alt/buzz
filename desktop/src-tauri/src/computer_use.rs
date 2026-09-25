@@ -177,13 +177,7 @@ pub(crate) fn list_computer_browser_sessions(
     Ok(results)
 }
 
-/// Inject host-local service paths at the managed runtime boundary, never relay credentials.
-pub(crate) fn configure_runtime(
-    app: &AppHandle,
-    command: &mut std::process::Command,
-    owner: &str,
-    label: &str,
-) -> Result<(), String> {
+pub(crate) fn clear_runtime_env(command: &mut std::process::Command) {
     // Prevent ambient values from enabling a capability the owner disabled in Buzz.
     for key in [
         "BUZZ_COMPUTER_NODE",
@@ -196,6 +190,16 @@ pub(crate) fn configure_runtime(
     ] {
         command.env_remove(key);
     }
+}
+
+/// Inject host-local service paths at the managed runtime boundary, never relay credentials.
+pub(crate) fn configure_runtime(
+    app: &AppHandle,
+    command: &mut std::process::Command,
+    owner: &str,
+    label: &str,
+) -> Result<(), String> {
+    clear_runtime_env(command);
     let config = settings(app)?;
     if !config.enabled {
         return Ok(());

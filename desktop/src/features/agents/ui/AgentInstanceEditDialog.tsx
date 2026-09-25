@@ -1081,13 +1081,10 @@ export function AgentInstanceEditDialog({
               onModelChange={setModel}
               modelStatusMessage={modelStatusMessage}
               runtimeId={selectedRuntimeId}
+              connection={connectionModels.selected}
+              connectionError={connectionModels.error}
             />
 
-            {connectionModels.error ? (
-              <p role="alert" className="text-xs text-destructive">
-                {connectionModels.error}
-              </p>
-            ) : null}
             <AgentDialogEffortSection
               connectionEffort={
                 connectionModels.value

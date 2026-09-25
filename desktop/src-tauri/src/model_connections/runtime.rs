@@ -52,7 +52,7 @@ fn launch_plan(
         return Ok(None);
     };
     let meta = meta.ok_or("This harness does not support saved model connections")?;
-    if !matches!(meta.id, "deepseek" | "prime") {
+    if !matches!(meta.id, "deepseek" | "prime" | "codex") {
         return Err("This harness does not support saved model connections".into());
     }
     let (connection, key) = resolve(id)?;
@@ -73,6 +73,7 @@ pub(crate) fn apply(
     model: Option<&str>,
     agent_key: &str,
 ) -> Result<(), String> {
+    command.env_remove(buzz_harness_config::CODEX_SESSION_ONLY_ENV);
     let Some(plan) = launch_plan(harness, env, model, |id| resolve(app, id))? else {
         return Ok(());
     };
@@ -80,6 +81,19 @@ pub(crate) fn apply(
     let key = plan.key;
     let model = plan.model.as_str();
     match plan.runtime {
+        "codex" => {
+            super::native_codex::apply(
+                &app.path()
+                    .app_data_dir()
+                    .map_err(|e| e.to_string())?
+                    .join("model-connection-runtimes"),
+                command,
+                &row,
+                model,
+                key.as_deref(),
+                agent_key,
+            )?;
+        }
         "deepseek" => {
             command.env("DSH_PROVIDER", "deepseek-compatible");
             command.env("DSH_LLM_BASE_URL", &row.base_url);
