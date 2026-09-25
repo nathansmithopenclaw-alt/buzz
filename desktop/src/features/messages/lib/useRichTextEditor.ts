@@ -29,6 +29,7 @@ import {
 } from "./mentionHighlightExtension";
 import { handleComposerMentionCopy } from "./composerMentionCopy";
 import { PastedMentionOccurrencesExtension } from "./pastedMentionOccurrences";
+import { DictationMarksExtension } from "@/features/dictation/lib/dictationMarks";
 import {
   hardBreakLineBounds,
   MacEmacsTextShortcuts,
@@ -333,6 +334,8 @@ export function useRichTextEditor({
         // Lets a pasted mention's identity check, which can outlive the paste,
         // tell the text it inserted from whatever the user typed next.
         PastedMentionOccurrencesExtension,
+        // Dictation's pending/suggestion/flash ranges (inert when unused).
+        DictationMarksExtension,
         customEmojiWiring.extension,
         messageLinkWiring.extension,
         Placeholder.configure({

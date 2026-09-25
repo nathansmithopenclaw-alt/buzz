@@ -12,7 +12,7 @@ struct Version(u64, u64, u64);
 
 impl Version {
     fn parse(value: &str) -> Option<Self> {
-        let token = value.trim().split_whitespace().next()?;
+        let token = value.split_whitespace().next()?;
         let mut parts = token.split('.');
         let version = Self(
             parts.next()?.parse().ok()?,
@@ -261,8 +261,7 @@ pub(crate) fn blocker_for_record(
     }
     let descriptor = super::resolve_effective_harness_descriptor(record, personas, global)
         .map_err(|error| super::user_facing_harness_error(&error))?;
-    if !super::known_acp_runtime(&descriptor.command).is_some_and(|runtime| runtime.id == "claude")
-    {
+    if super::known_acp_runtime(&descriptor.command).is_none_or(|runtime| runtime.id != "claude") {
         return Ok(None);
     }
     let effective = super::effective_config::resolve_effective_config(record, personas, global)

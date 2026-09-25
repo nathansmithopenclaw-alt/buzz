@@ -156,6 +156,92 @@ Provided \"AS IS\", without warranty of any kind, express or implied. See the
 license text for full warranty disclaimer.
 ";
 
+/// A model shipped as one `.tar.bz2` archive, verified by SHA-256 and
+/// installed atomically with a Buzz-written license sidecar.
+struct ArchiveModelSpec {
+    /// Human label for logs and errors ("STT").
+    label: &'static str,
+    /// Label passed to the fetch/download helpers.
+    progress_label: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    /// Subdirectory produced by extracting the archive.
+    archive_subdir: &'static str,
+    /// Final directory name under `~/.buzz/models/`.
+    dir_name: &'static str,
+    max_bytes: u64,
+    license_file_name: &'static str,
+    license_text: &'static str,
+}
+
+const STT_ARCHIVE: ArchiveModelSpec = ArchiveModelSpec {
+    label: "STT",
+    progress_label: "stt archive",
+    url: STT_DOWNLOAD_URL,
+    sha256: STT_ARCHIVE_SHA256,
+    archive_subdir: STT_ARCHIVE_SUBDIR,
+    dir_name: STT_MODEL_DIR_NAME,
+    max_bytes: MAX_STT_DOWNLOAD_BYTES,
+    license_file_name: STT_LICENSE_FILE_NAME,
+    license_text: STT_LICENSE_TEXT,
+};
+
+// ── Dictation STT model ───────────────────────────────────────────────────────
+
+/// NVIDIA Parakeet TDT 0.6B v2 (English, int8), packaged for sherpa-onnx by
+/// k2-fsa. Transducer (encoder/decoder/joiner). Chosen for composer dictation
+/// on measured accuracy: ~10.6% WER and ~79% roster-name accuracy on the Buzz
+/// dictation eval versus ~20% / ~59% for the 110M huddle model, at ~1 s for
+/// 49 s of speech on Apple Silicon. Downloaded only when dictation is used.
+const DICTATION_STT_DOWNLOAD_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\
+     sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2";
+
+/// SHA-256 of `sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2`
+/// (482,468,385 bytes), computed from a known-good download on 2026-09-24.
+const DICTATION_STT_ARCHIVE_SHA256: &str =
+    "157c157bc51155e03e37d2466522a3a737dd9c72bb25f36eb18912964161e1ad";
+
+const DICTATION_STT_ARCHIVE_SUBDIR: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8";
+const DICTATION_STT_MODEL_DIR_NAME: &str = "parakeet-tdt-0.6b-v2-en";
+const DICTATION_STT_MODEL_VERSION: &str = "1";
+/// Maximum expected archive size (600 MB — actual is ~482 MB).
+const MAX_DICTATION_STT_DOWNLOAD_BYTES: u64 = 600 * 1024 * 1024;
+const DICTATION_STT_EXPECTED_FILES: &[&str] = &[
+    "encoder.int8.onnx",
+    "decoder.int8.onnx",
+    "joiner.int8.onnx",
+    "tokens.txt",
+    STT_LICENSE_FILE_NAME,
+];
+const DICTATION_STT_LICENSE_TEXT: &str = "\
+NVIDIA Parakeet TDT 0.6B v2 (English)
+© NVIDIA Corporation.
+
+Licensed under the Creative Commons Attribution 4.0 International License
+(CC-BY-4.0). License text: https://creativecommons.org/licenses/by/4.0/
+
+Original model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2
+Converted to ONNX with int8 quantization by the sherpa-onnx project
+(https://github.com/k2-fsa/sherpa-onnx); Buzz ships this conversion
+unmodified.
+
+Provided \"AS IS\", without warranty of any kind, express or implied. See the
+license text for full warranty disclaimer.
+";
+
+const DICTATION_STT_ARCHIVE: ArchiveModelSpec = ArchiveModelSpec {
+    label: "dictation STT",
+    progress_label: "dictation stt archive",
+    url: DICTATION_STT_DOWNLOAD_URL,
+    sha256: DICTATION_STT_ARCHIVE_SHA256,
+    archive_subdir: DICTATION_STT_ARCHIVE_SUBDIR,
+    dir_name: DICTATION_STT_MODEL_DIR_NAME,
+    max_bytes: MAX_DICTATION_STT_DOWNLOAD_BYTES,
+    license_file_name: STT_LICENSE_FILE_NAME,
+    license_text: DICTATION_STT_LICENSE_TEXT,
+};
+
 // ── Pocket TTS model ──────────────────────────────────────────────────────────
 
 /// Final directory name under `~/.buzz/models/`.
@@ -602,6 +688,7 @@ pub struct ModelManager {
     models_dir: PathBuf,
     stt: ModelSlot,
     tts: ModelSlot,
+    dictation_stt: ModelSlot,
 }
 
 impl ModelManager {
@@ -614,6 +701,11 @@ impl ModelManager {
             models_dir,
             stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
             tts: tts_model_slot(),
+            dictation_stt: ModelSlot::new(
+                DICTATION_STT_MODEL_DIR_NAME,
+                DICTATION_STT_EXPECTED_FILES,
+                DICTATION_STT_MODEL_VERSION,
+            ),
         };
         manager.tts.recover_interrupted_install(&manager.models_dir);
         Some(manager)
@@ -657,7 +749,38 @@ impl ModelManager {
         self.tts.take_ready()
     }
 
+    // ── Dictation STT accessors ──────────────────────────────────────────────
+
+    /// Path to the dictation STT model directory, or `None` if not ready.
+    pub fn dictation_stt_model_dir(&self) -> Option<PathBuf> {
+        self.dictation_stt.dir_if_ready(&self.models_dir)
+    }
+    /// Current dictation STT download status (`Ready` when files are on disk).
+    pub fn dictation_stt_status(&self) -> ModelStatus {
+        if self.dictation_stt.is_ready(&self.models_dir) {
+            ModelStatus::Ready
+        } else {
+            self.dictation_stt.status()
+        }
+    }
+    /// Root directory holding every voice model (used for free-space checks).
+    pub fn models_dir_path(&self) -> &Path {
+        &self.models_dir
+    }
+
     // ── Download triggers ─────────────────────────────────────────────────────
+
+    /// Start a background dictation STT download. No-op if ready or downloading.
+    /// Never started at launch: the ~480 MB model is fetched only on demand.
+    pub fn start_dictation_stt_download(&self, http_client: reqwest::Client) {
+        let manager = self.clone();
+        self.dictation_stt.start_download(
+            &self.models_dir,
+            http_client,
+            "dictation-stt",
+            move |client| async move { manager.download_dictation_stt_model(client).await },
+        );
+    }
 
     /// Start a background STT model download. No-op if already ready or downloading.
     ///
@@ -707,31 +830,61 @@ impl ModelManager {
 
     /// Download, extract, and verify the STT model archive.
     async fn download_stt_model(&self, http_client: reqwest::Client) -> Result<(), String> {
+        self.download_archive_model(&self.stt, &STT_ARCHIVE, http_client)
+            .await?;
+
+        // Best-effort cleanup of the previous default STT model dir (Moonshine
+        // Tiny, ~70 MB). Runs only after the new install reaches Ready, so a
+        // failed download never removes the previous on-disk model during
+        // migration. The same cleanup also runs from `start_stt_download` to
+        // cover users who already have the new model installed.
+        cleanup_legacy_moonshine_dir(&self.models_dir).await;
+        Ok(())
+    }
+
+    /// Download the dictation STT model archive (Parakeet TDT 0.6B v2).
+    async fn download_dictation_stt_model(
+        &self,
+        http_client: reqwest::Client,
+    ) -> Result<(), String> {
+        self.download_archive_model(&self.dictation_stt, &DICTATION_STT_ARCHIVE, http_client)
+            .await
+    }
+
+    /// Download, extract, verify and atomically install a single-archive model
+    /// described by `spec` into `slot`.
+    async fn download_archive_model(
+        &self,
+        slot: &ModelSlot,
+        spec: &ArchiveModelSpec,
+        http_client: reqwest::Client,
+    ) -> Result<(), String> {
         tokio::fs::create_dir_all(&self.models_dir)
             .await
             .map_err(|e| format!("create models dir: {e}"))?;
 
         // Temp filenames derive from the final directory name to avoid colliding
-        // with leftovers from any previous STT model (e.g. moonshine-tiny.*).
-        let archive_path = self
-            .models_dir
-            .join(format!("{STT_MODEL_DIR_NAME}.tar.bz2"));
-        let temp_dir = self.models_dir.join(format!("{STT_MODEL_DIR_NAME}.tmp"));
+        // with leftovers from any previous model (e.g. moonshine-tiny.*).
+        let archive_path = self.models_dir.join(format!("{}.tar.bz2", spec.dir_name));
+        let temp_dir = self.models_dir.join(format!("{}.tmp", spec.dir_name));
 
-        eprintln!("buzz-desktop: downloading STT model from {STT_DOWNLOAD_URL}");
-        let response = fetch_url(&http_client, STT_DOWNLOAD_URL, "stt archive").await?;
+        eprintln!(
+            "buzz-desktop: downloading {} model from {}",
+            spec.label, spec.url
+        );
+        let response = fetch_url(&http_client, spec.url, spec.progress_label).await?;
 
-        let slot = self.stt.clone();
+        let progress_slot = slot.clone();
         let bytes = download_file(
             response,
             &archive_path,
-            MAX_STT_DOWNLOAD_BYTES,
-            "stt archive",
+            spec.max_bytes,
+            spec.progress_label,
             |downloaded, content_length| {
                 if let Some(pct) =
                     content_length.and_then(|total| (downloaded * 89).checked_div(total))
                 {
-                    slot.set_status(ModelStatus::Downloading {
+                    progress_slot.set_status(ModelStatus::Downloading {
                         progress_percent: pct.min(89) as u8,
                     });
                 }
@@ -742,46 +895,47 @@ impl ModelManager {
 
         // Verify archive integrity before extraction.
         let hash = sha256_file(&archive_path).await?;
-        if hash != STT_ARCHIVE_SHA256 {
+        if hash != spec.sha256 {
             let _ = tokio::fs::remove_file(&archive_path).await;
             return Err(format!(
-                "STT archive integrity check failed: expected {STT_ARCHIVE_SHA256}, got {hash}"
+                "{} archive integrity check failed: expected {}, got {hash}",
+                spec.label, spec.sha256
             ));
         }
 
-        self.stt.set_status(ModelStatus::Downloading {
+        slot.set_status(ModelStatus::Downloading {
             progress_percent: 90,
         });
         fresh_temp_dir(&temp_dir).await?;
 
-        eprintln!("buzz-desktop: extracting STT archive…");
+        eprintln!("buzz-desktop: extracting {} archive…", spec.label);
         let (ap, td) = (archive_path.clone(), temp_dir.clone());
         tokio::task::spawn_blocking(move || extract_archive(&ap, &td))
             .await
             .map_err(|e| format!("tar task panicked: {e}"))??;
 
-        let extracted_subdir = temp_dir.join(STT_ARCHIVE_SUBDIR);
+        let extracted_subdir = temp_dir.join(spec.archive_subdir);
         if !extracted_subdir.is_dir() {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
             return Err(format!(
-                "expected subdir '{STT_ARCHIVE_SUBDIR}' not found after extraction"
+                "expected subdir '{}' not found after extraction",
+                spec.archive_subdir
             ));
         }
 
         // Write the CC-BY-4.0 attribution sidecar before the atomic install,
         // so it lands in the final model dir as part of the same rename. The
-        // upstream tarball ships no LICENSE/NOTICE, so we provide it ourselves
+        // upstream tarballs ship no LICENSE/NOTICE, so we provide it ourselves
         // per §3(a)(1) (license must travel with Shared material).
-        let license_path = extracted_subdir.join(STT_LICENSE_FILE_NAME);
-        if let Err(e) = tokio::fs::write(&license_path, STT_LICENSE_TEXT).await {
+        let license_path = extracted_subdir.join(spec.license_file_name);
+        if let Err(e) = tokio::fs::write(&license_path, spec.license_text).await {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
             let _ = tokio::fs::remove_file(&archive_path).await;
             return Err(format!("write model license sidecar: {e}"));
         }
 
         // verify_and_install takes the subdir (actual model files); temp_cleanup removes outer dir.
-        if let Err(e) = self
-            .stt
+        if let Err(e) = slot
             .verify_and_install(&self.models_dir, &extracted_subdir, Some(&temp_dir))
             .await
         {
@@ -791,16 +945,10 @@ impl ModelManager {
         }
         let _ = tokio::fs::remove_file(&archive_path).await;
 
-        // Best-effort cleanup of the previous default STT model dir (Moonshine
-        // Tiny, ~70 MB). Runs only after the new install reaches Ready, so a
-        // failed download never removes the previous on-disk model during
-        // migration. The same cleanup also runs from `start_stt_download` to
-        // cover users who already have the new model installed.
-        cleanup_legacy_moonshine_dir(&self.models_dir).await;
-
         eprintln!(
-            "buzz-desktop: STT model ready at {}",
-            self.stt.model_dir(&self.models_dir).display()
+            "buzz-desktop: {} model ready at {}",
+            spec.label,
+            slot.model_dir(&self.models_dir).display()
         );
         Ok(())
     }

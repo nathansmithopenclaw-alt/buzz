@@ -319,3 +319,40 @@
   overflow: visible;
   opacity: 1;
 }
+
+/* Dictation. Pending raw words are greyed until cleanup swaps them; suggested
+   mentions get a dotted underline and open the @ picker on click; freshly
+   dictated mentions flash once so a wrong one is noticed before sending. */
+.rich-text-composer .tiptap .dictation-pending {
+  color: hsl(var(--muted-foreground));
+}
+
+.rich-text-composer .tiptap .dictation-suggestion {
+  cursor: pointer;
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+  text-decoration-color: hsl(var(--primary));
+}
+
+.rich-text-composer .tiptap .dictation-flash {
+  border-radius: 0.25rem;
+  animation: dictation-flash 1.6s ease-out 1;
+}
+
+@keyframes dictation-flash {
+  0% {
+    background-color: hsl(var(--primary) / 0.28);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rich-text-composer .tiptap .dictation-flash {
+    animation: none;
+    outline: 1px solid hsl(var(--primary) / 0.5);
+  }
+}

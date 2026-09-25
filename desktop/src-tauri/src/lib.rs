@@ -9,6 +9,7 @@ mod commands;
 mod computer_use;
 mod computer_use_native;
 mod deep_link;
+mod dictation;
 mod egress_guard;
 mod event_sync;
 mod events;
@@ -779,6 +780,16 @@ pub fn run() {
             model_connections::remove_model_connection,
             model_connections::test_model_connection,
             model_connections::check_model_connection,
+            dictation::dictation_model_status,
+            dictation::dictation_download_model,
+            dictation::get_dictation_settings,
+            dictation::save_dictation_settings,
+            dictation::dictation_start,
+            dictation::dictation_push_audio,
+            dictation::dictation_stop,
+            dictation::dictation_cancel,
+            dictation::dictation_cleanup,
+            dictation::dictation_cleanup_sources,
             model_connections::network::discover_model_servers,
             get_agent_models,
             discover_agent_models,

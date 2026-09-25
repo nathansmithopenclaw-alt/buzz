@@ -50,6 +50,7 @@ import type { FormattingSelectionRange } from "./FormattingToolbar";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useComposerVoiceNote } from "./useComposerVoiceNote";
+import { useMessageComposerDictation } from "@/features/dictation/useMessageComposerDictation";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useAgentAddressLockPicker } from "./useAgentAddressLockPicker";
 import { useAddressMentionPulse } from "./useAddressMentionPulse";
@@ -314,6 +315,18 @@ function MessageComposerImpl({
       }
     },
   });
+  const dictation = useMessageComposerDictation({
+    editor: richText.editor,
+    draftKey: effectiveDraftKey ?? null,
+    channelId: channelId ?? null,
+    editTargetId: editTarget?.id ?? null,
+    isMain: !draftKey,
+    disabled: composerDisabled,
+    voiceNoteActive: voiceNote.status !== "idle",
+    getCandidates: mentions.getDictationCandidates,
+    registerMention: mentions.registerMentionPubkey,
+    recentMentionPubkeys,
+  });
   const linkEditor = useLinkEditor(richText);
   syncContentRefFromEditorRef.current = () => {
     const markdown = richText.getMarkdown();
@@ -562,6 +575,11 @@ function MessageComposerImpl({
       if (isEditSubmissionLocked || voiceNote.statusRef.current !== "idle") {
         return;
       }
+      // Dictated words may still be swapping in; never save them half-done.
+      if (dictation.isBusy()) {
+        dictation.notifyBusy();
+        return;
+      }
       // An edit extracts from the same mention map a pasted identity binds
       // into, so wait on any check still deciding. Bounded internally.
       await mentions.settlePendingMentionBindings();
@@ -611,6 +629,11 @@ function MessageComposerImpl({
     const currentQueuedAttachments = media.queuedAttachmentsRef.current;
     const hasMedia =
       currentPendingImeta.length > 0 || currentQueuedAttachments.length > 0;
+    // Enter while dictation is finishing is held, never a half-done send.
+    if (dictation.isBusy()) {
+      dictation.notifyBusy();
+      return;
+    }
     if (
       (!trimmed && !hasMedia) ||
       disabledRef.current ||
@@ -692,6 +715,8 @@ function MessageComposerImpl({
     mentions.revalidateMentionPubkeys,
     mentions.settlePendingMentionBindings,
     voiceNote.statusRef,
+    dictation.isBusy,
+    dictation.notifyBusy,
   ]);
   submitMessageRef.current = submitMessage;
   // Draft auto-submit runs once after persisted editor state loads.
@@ -810,6 +835,7 @@ function MessageComposerImpl({
     composerDisabled ||
     media.isUploading ||
     voiceNote.status !== "idle" ||
+    dictation.blocksSend ||
     mentionSendFlow.isPreparingMentionSend ||
     (isContentEmpty &&
       media.pendingImeta.length === 0 &&
@@ -981,6 +1007,7 @@ function MessageComposerImpl({
               isVoiceNoteRecording={voiceNote.status !== "idle"}
               hasVoiceNoteAttachment={voiceNote.hasAttachment}
               voiceNoteRecorder={voiceNote.recorderElement}
+              dictation={dictation.buttonProps ?? undefined}
               onCaptureSelection={handleCaptureSelection}
               onAutoPinConfirmationDismiss={dismissAutoPinConfirmation}
               onAutoPinConfirmationHoverChange={setAutoPinConfirmationHovered}
