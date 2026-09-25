@@ -6,6 +6,7 @@ pub(crate) mod network;
 mod private_network;
 mod probe;
 pub(crate) mod runtime;
+pub(crate) mod source;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Mutex};
 use tauri::{AppHandle, Manager};
@@ -285,10 +286,9 @@ pub async fn discover_for_env(
     let Some(id) = env.get(CONNECTION_ENV).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    let (row, key) = resolve(app, id)?;
-    Ok(Some(
-        probe::catalog(&row.base_url, key.as_deref(), 5).await?,
-    ))
+    // Pickers use the last saved catalog. Refresh/Test are explicit operations;
+    // opening an editor neither contacts the endpoint nor reads credentials.
+    Ok(Some(find_connection(app, id)?.models))
 }
 
 #[cfg(test)]

@@ -110,12 +110,21 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_RELAY_URL` | no | `ws://localhost:3000` | Relay WebSocket URL. |
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
+| `BUZZ_ACP_PROVIDER_CONFIG` | no | unset | Private JSON provider override: `providerId`, `apiType`, `baseUrl`, optional `headers`. Requires the adapter's ACP providers capability. |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
 
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
+
+An explicit provider override negotiates `providers/list` and `providers/set`
+after `initialize`, before creating a session. Unsupported adapters or protocols
+fail before a session starts. The broker removes the configuration variable from
+the adapter's environment and sends it over ACP stdin; provider frames and error
+bodies are excluded from wire logs and observer events. Supply credentials through
+the environment, never through command arguments. Model selection remains the
+adapter's ordinary model configuration; this override only selects its provider.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 

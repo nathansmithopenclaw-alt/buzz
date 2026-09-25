@@ -595,6 +595,12 @@ harnesses; frontend components do not infer support from harness IDs. Runtime
 switches preserve a connection/model only when the destination advertises that
 provider. Local spawn resolves the connection and applies the harness projection;
 remote deployment rejects device-local connections rather than falling back.
+A saved connection ID is authoritative even when the harness has no provider
+control. Local launch rejects a simultaneous subscription selection, and remote
+deploy rejects the connection ID independently of the provider field. Discovery
+reads the cached model list without network or credential access; Refresh/Test
+remain explicit. A selected model must belong to that connection's saved catalog.
+Unsupported native projections fail before spawning rather than using hosted auth.
 DeepSeek uses native endpoint environment variables. Prime receives a managed,
 agent-specific models.json/settings.json with an environment reference for its key.
 Legacy manual DeepSeek endpoints remain supported.

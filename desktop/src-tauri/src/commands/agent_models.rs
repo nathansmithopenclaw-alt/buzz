@@ -101,7 +101,9 @@ pub async fn get_agent_models(
     // so a build-provided provider still gets live discovery.
     let effective_provider =
         effective_discovery_provider(saved_provider.as_deref(), provider_env_var, &merged_env);
-    if effective_provider.as_deref() == Some("buzz-local") {
+    if crate::model_connections::source::selected(&merged_env, effective_provider.as_deref())?
+        .is_some()
+    {
         let models = crate::model_connections::discover_for_env(&app, &merged_env)
             .await?
             .ok_or("Choose a saved model connection or connect a server")?;
@@ -316,7 +318,9 @@ pub async fn discover_agent_models(
     {
         return Err("Buzz shared compute is not available in this build".to_string());
     }
-    if effective_provider.as_deref() == Some("buzz-local") {
+    if crate::model_connections::source::selected(&merged_env, effective_provider.as_deref())?
+        .is_some()
+    {
         let models = crate::model_connections::discover_for_env(&app, &merged_env)
             .await?
             .ok_or("Choose a saved model connection or connect a server")?;

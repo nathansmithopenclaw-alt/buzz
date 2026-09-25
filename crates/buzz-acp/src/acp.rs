@@ -18,6 +18,7 @@ use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 #[path = "codex_model_config.rs"]
 mod codex_model_config;
 pub use codex_model_config::resolve_model_switch_method;
+mod provider;
 #[path = "acp_session_close.rs"]
 mod session_close;
 mod subscription_token;
@@ -438,6 +439,8 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// Private MCP launch files, retained for reconnects until session teardown.
     mcp_launch_files: HashMap<String, crate::mcp_launch::LaunchFiles>,
+    provider_config: Option<provider::ProviderConfig>,
+    private_provider_rpc: bool,
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
     /// Write end of the agent's stdin pipe.
@@ -997,6 +1000,7 @@ impl AcpClient {
         has_generated_codex_config: bool,
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
+        let provider_config = provider::ProviderConfig::from_env(extra_env)?;
 
         if has_generated_codex_config {
             // Workspace-local exact-prefix allowlist for `buzz messages send`.
@@ -1113,6 +1117,8 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
+        // Broker-only credential carrier; the adapter receives it over ACP stdin.
+        cmd.env_remove(provider::PROVIDER_CONFIG_ENV);
         enforce_subscription_child_env(&mut cmd, command, args)?;
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
@@ -1146,6 +1152,8 @@ impl AcpClient {
 
         Ok(Self {
             mcp_launch_files: HashMap::new(),
+            provider_config,
+            private_provider_rpc: false,
             child,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
@@ -1199,6 +1207,9 @@ impl AcpClient {
 
     /// Emit a semantic event to the local observer feed, if enabled.
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
+        if self.private_provider_rpc {
+            return;
+        }
         if let Some(observer) = &self.observer {
             observer.emit(
                 kind,
@@ -1245,6 +1256,7 @@ impl AcpClient {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
+        self.configure_provider(&result).await?;
         Ok(result)
     }
 
@@ -1948,7 +1960,9 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        if !self.private_provider_rpc {
+            tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        }
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -2058,7 +2072,9 @@ impl AcpClient {
             }
 
             // Only log and reset idle after we have a valid non-empty line.
-            tracing::debug!(target: "acp::wire", "← {trimmed}");
+            if !self.private_provider_rpc {
+                tracing::debug!(target: "acp::wire", "← {trimmed}");
+            }
 
             let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
@@ -2070,10 +2086,12 @@ impl AcpClient {
                             "error": e.to_string(),
                         }),
                     );
-                    tracing::warn!(
-                        target: "acp::wire",
-                        "failed to parse line as JSON: {e} — skipping"
-                    );
+                    if !self.private_provider_rpc {
+                        tracing::warn!(
+                            target: "acp::wire",
+                            "failed to parse line as JSON: {e} — skipping"
+                        );
+                    }
                     continue;
                 }
             };
@@ -2089,6 +2107,19 @@ impl AcpClient {
                     }
                     return Ok(msg["result"].clone());
                 }
+            }
+
+            // Provider setup runs before a session exists. Do not route stray
+            // private frames into session observers, tool permissions or logs.
+            if self.private_provider_rpc {
+                if msg.get("method").is_some() && msg.get("id").is_some() {
+                    self.write_ndjson(&serde_json::json!({
+                        "jsonrpc": "2.0", "id": msg["id"],
+                        "error": {"code": -32601, "message": "Method unavailable during provider setup"}
+                    }))
+                    .await?;
+                }
+                continue;
             }
 
             // Dispatch by method name (notifications and agent-initiated requests).
