@@ -863,8 +863,10 @@ pub fn spawn_agent_child(
         }
     }
 
+    let selected_connection =
+        crate::model_connections::source::selected(&descriptor.env, effective_provider.as_deref())?;
     crate::model_connections::source::validate_account(
-        crate::model_connections::source::selected(&descriptor.env, effective_provider.as_deref())?,
+        selected_connection,
         record.subscription_account_id.as_deref(),
         record.subscription_account_inherit_default,
     )?;
@@ -1037,12 +1039,18 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    crate::computer_use::configure_runtime(
-        app,
-        &mut command,
-        &format!("{} | {}", effective_relay_url, record.pubkey),
-        &record.name,
-    )?;
+    if selected_connection.is_some() {
+        // The current Test action qualifies text input only. Do this at the
+        // final capability boundary so later setup cannot re-enable images.
+        crate::computer_use::clear_runtime_env(&mut command);
+    } else {
+        crate::computer_use::configure_runtime(
+            app,
+            &mut command,
+            &format!("{} | {}", effective_relay_url, record.pubkey),
+            &record.name,
+        )?;
+    }
     let mut child = spawn_with_effort_proof(&mut command, effort).map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",

@@ -1,3 +1,4 @@
+import { ConnectionRuntimeNotice } from "@/features/model-connections/ConnectionRuntimeNotice";
 import { useConnectionModels } from "@/features/model-connections/useConnectionModels";
 import { CONNECTION_ENV } from "@/features/model-connections/api";
 import {
@@ -222,6 +223,10 @@ export function SummaryRuntimeFields({
           }}
         />
       </div>
+      <ConnectionRuntimeNotice
+        runtimeId={runtime?.id ?? ""}
+        connection={connections.selected}
+      />
       {providerVisible ? (
         <div className="space-y-1.5">
           <label className="text-sm font-medium" htmlFor="summary-provider">

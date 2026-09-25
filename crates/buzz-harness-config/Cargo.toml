@@ -1,0 +1,17 @@
+[package]
+name = "buzz-harness-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native harness configuration boundaries"
+
+[dependencies]
+toml = "1.0"
+serde_json = "1"
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+

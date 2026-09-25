@@ -3,6 +3,7 @@ import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import {
   CONNECTION_ENV,
   listConnections,
+  codexWorkspaceReason,
   subscribeConnections,
   type ModelConnection,
 } from "./api";
@@ -25,6 +26,9 @@ export function useConnectionModels(
 ) {
   const [loading, setLoading] = React.useState(true);
   const [rows, setRows] = React.useState<ModelConnection[]>([]);
+  const [workspaceReason, setWorkspaceReason] = React.useState<string | null>(
+    null,
+  );
   const [error, setError] = React.useState<string | null>(null);
   const source = envVars[CONNECTION_ENV]?.trim();
   const legacyProvider = usesConnectionProvider(runtime);
@@ -35,10 +39,16 @@ export function useConnectionModels(
     const refresh = () => {
       const current = ++revision;
       setLoading(true);
-      listConnections()
-        .then((value) => {
+      Promise.all([
+        listConnections(),
+        runtime?.id === "codex"
+          ? codexWorkspaceReason()
+          : Promise.resolve(null),
+      ])
+        .then(([value, reason]) => {
           if (live && current === revision) {
             setRows(value);
+            setWorkspaceReason(reason);
             setError(null);
           }
         })
@@ -58,15 +68,20 @@ export function useConnectionModels(
       live = false;
       unsubscribe();
     };
-  }, [open]);
+  }, [open, runtime?.id]);
   const options = connectionModelChoices(
     rows,
     legacyProvider ? null : runtime?.modelConnection,
-  ).map((row) =>
-    selectionBlockReason
-      ? { ...row, disabled: true, badge: selectionBlockReason }
-      : row,
-  );
+  ).map((row) => {
+    const selection = resolveConnectionModelValue(row.value, rows);
+    const context = selection?.connection.qualification?.context_window;
+    const contextReason =
+      runtime?.id === "codex" && (!context || context < 1024)
+        ? "Test this connection to establish its context window"
+        : null;
+    const reason = selectionBlockReason ?? workspaceReason ?? contextReason;
+    return reason ? { ...row, disabled: true, badge: reason } : row;
+  });
   const value =
     source && !legacyProvider ? connectionModelValue(source, model) : null;
   const selected = source ? rows.find((row) => row.id === source) : undefined;

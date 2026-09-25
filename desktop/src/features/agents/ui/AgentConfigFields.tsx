@@ -1,3 +1,4 @@
+import { ConnectionRuntimeNotice } from "@/features/model-connections/ConnectionRuntimeNotice";
 import { useConnectionModels } from "@/features/model-connections/useConnectionModels";
 import { CONNECTION_ENV } from "@/features/model-connections/api";
 import {
@@ -932,6 +933,10 @@ export function AgentConfigFields({
         </div>
       ) : null}
 
+      <ConnectionRuntimeNotice
+        runtimeId={selectedRuntimeId}
+        connection={connectionModels.selected}
+      />
       {connectionModels.error ? (
         <p role="alert" className="text-xs text-destructive">
           {connectionModels.error}
