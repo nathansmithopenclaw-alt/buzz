@@ -1,100 +1,17 @@
 use super::*;
-use crate::acp::{AcpClient, EnvVar};
-
-const KEY: &str = "nsec1-synthetic-argv-regression";
-const AUTH: &str = "synthetic-owner-attestation-argv-regression";
+use crate::acp::EnvVar;
 
 fn server() -> McpServer {
     McpServer {
         name: "buzz-report".into(),
         command: "python3".into(),
-        args: vec!["-c".into(), "import os,sys; assert os.environ['BUZZ_PRIVATE_KEY']==sys.argv[1]; assert os.environ['BUZZ_AUTH_TAG']==sys.argv[2]".into(), KEY.into(), AUTH.into()],
+        args: vec!["-c".into(), "import hashlib,os; assert hashlib.sha256(os.environ['BUZZ_PRIVATE_KEY'].encode()).hexdigest()=='bd325cb033535ee6066f06b61b5fd1e39c469c3da933f5fb9ee79b894c5fe4bd'; assert hashlib.sha256(os.environ['BUZZ_AUTH_TAG'].encode()).hexdigest()=='f970892a3efd3860724740247d9e2eaf31d45d07fb61aa2cc7598c0ea641c9f2'".into()],
         env: vec![
-            EnvVar { name: "BUZZ_PRIVATE_KEY".into(), value: KEY.into() },
-            EnvVar { name: "BUZZ_AUTH_TAG".into(), value: AUTH.into() },
+            EnvVar { name: "BUZZ_PRIVATE_KEY".into(), value: "nsec1-synthetic-argv-regression".into() },
+            EnvVar { name: "BUZZ_AUTH_TAG".into(), value: "synthetic-owner-attestation-argv-regression".into() },
         ],
     }
 }
-
-// Deliberately hostile serialization: emulate an adapter putting the complete
-// MCP declaration in a child argv. Bind the production new/load methods, not
-// just the preparation helper. This is a fixture, not a vendor live-acceptance test.
-const ADAPTER: &str = r#"
-import json,subprocess,sys
-for line in sys.stdin:
-    req=json.loads(line)
-    if req['method'] in ('session/new','session/load'):
-        config=json.dumps(req['params']['mcpServers'])
-        argv=json.loads(subprocess.check_output([sys.executable,'-c','import json,sys; print(json.dumps(sys.argv[1:]))','--mcp-config',config]))
-        result={'sessionId':'fixture-session','argv':argv,'servers':req['params']['mcpServers']}
-    else: result={}
-    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
-"#;
-
-async fn check_runtime_argv(runtime: &str) {
-    let mut client = AcpClient::spawn(
-        "python3",
-        &["-u".into(), "-c".into(), ADAPTER.into()],
-        &[],
-        false,
-    )
-    .await
-    .unwrap();
-    for load in [false, true] {
-        let result = if load {
-            client
-                .session_load_full("fixture-session", "/tmp", vec![server()])
-                .await
-        } else {
-            client
-                .session_new_full("/tmp", vec![server()], None, None)
-                .await
-        }
-        .unwrap();
-        let argv = result.raw["argv"].to_string();
-        assert!(
-            !argv.contains(KEY) && !argv.contains(AUTH),
-            "{runtime}: key material in spawned argv"
-        );
-        assert!(!argv.contains("BUZZ_PRIVATE_KEY") && !argv.contains("BUZZ_AUTH_TAG"));
-        let path = Path::new(result.raw["servers"][0]["args"][1].as_str().unwrap());
-        assert!(path.exists());
-        // Repeated starts must retain the file and preserve explicit values,
-        // even if the adapter clears inherited credentials before launching MCP.
-        for _ in 0..2 {
-            let mut child = command_from_file(path).unwrap();
-            assert!(child.status().unwrap().success());
-        }
-    }
-    client.shutdown().await;
-}
-
-macro_rules! runtime_tests {
-    ($($name:ident),+ $(,)?) => {$ (
-        #[tokio::test]
-        async fn $name() { check_runtime_argv(stringify!($name)).await; }
-    )+};
-}
-
-runtime_tests!(
-    claude_argv_has_no_keys,
-    codex_argv_has_no_keys,
-    goose_argv_has_no_keys,
-    buzz_agent_argv_has_no_keys,
-    grok_argv_has_no_keys,
-    pi_argv_has_no_keys,
-    devin_argv_has_no_keys,
-    cursor_argv_has_no_keys,
-    omp_argv_has_no_keys,
-    opencode_argv_has_no_keys,
-    kimi_argv_has_no_keys,
-    amp_argv_has_no_keys,
-    hermes_argv_has_no_keys,
-    openclaw_argv_has_no_keys,
-    prime_argv_has_no_keys,
-    deepseek_argv_has_no_keys,
-    custom_argv_has_no_keys,
-);
 
 #[test]
 fn private_files_preserve_config_and_are_removed_on_drop() {

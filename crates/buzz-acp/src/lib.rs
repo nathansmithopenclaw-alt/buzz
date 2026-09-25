@@ -4,6 +4,9 @@ mod account_control;
 mod account_handoff;
 mod acp;
 mod answered_watermark;
+#[cfg(test)]
+#[path = "acp/argv_tests.rs"]
+mod argv_tests;
 mod auth_recovery;
 mod computer_use_mcp;
 mod config;

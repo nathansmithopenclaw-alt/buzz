@@ -2037,7 +2037,10 @@ impl AcpClient {
             // read level — the buffer never grows beyond the limit, preventing
             // OOM from rogue agents writing infinite non-newline bytes.
             let line = match self.reader.next().await {
-                None => return Err(AcpError::AgentExited),
+                None => {
+                    self.mcp_launch_files.clear();
+                    return Err(AcpError::AgentExited);
+                }
                 Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
                     return Err(AcpError::Protocol(
                         "agent stdout line exceeded 10MB limit".into(),
@@ -2356,6 +2359,7 @@ impl AcpClient {
 
             match read_result {
                 None => {
+                    self.mcp_launch_files.clear();
                     if let Some((_, _, ack_tx)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
@@ -2920,7 +2924,10 @@ impl AcpClient {
                 break;
             };
             let line = match read_result {
-                None => return Err(AcpError::AgentExited),
+                None => {
+                    self.mcp_launch_files.clear();
+                    return Err(AcpError::AgentExited);
+                }
                 Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
                     return Err(AcpError::Protocol(
                         "agent stdout line exceeded 10MB limit".into(),

@@ -115,20 +115,31 @@ pub(crate) fn run() -> Result<()> {
     let mut args = std::env::args_os().skip(2);
     let path = args.next().context("Missing MCP launch file")?;
     ensure!(args.next().is_none(), "Unexpected MCP launcher argument");
-    let mut command = command_from_file(Path::new(&path))?;
+    let command = command_from_file(Path::new(&path))?;
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         // Preserve PID, process group, cwd and all three stdio handles. No
         // shell, interpolation, additional process, or secret argv is involved.
-        Err(command.exec()).context("Cannot execute MCP server")
+        Err({
+            let mut command = command;
+            command.exec()
+        })
+        .context("Cannot execute MCP server")
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let status = command.status().context("Cannot execute MCP server")?;
-        std::process::exit(status.code().unwrap_or(1));
+        windows::run(command)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = command;
+        anyhow::bail!("Private MCP launcher is unsupported on this platform")
     }
 }
+
+#[cfg(windows)]
+mod windows;
 
 #[cfg(test)]
 mod tests;
