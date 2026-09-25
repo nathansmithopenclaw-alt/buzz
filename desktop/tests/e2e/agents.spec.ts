@@ -3165,6 +3165,17 @@ test("every instance stays in Fleet and every deployment is linked from Library"
   await page.getByTestId(`managed-agent-${additionalPubkey}`).click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
   await page.getByTestId("user-profile-tab-runtime").click();
+  // 83e596298 (#7131), imported on main by 149f7c6e0, establishes:
+  // "An explicit public key always names exactly that identity" (including stopped).
+  // See docs/agent-profile-identity.md; opening stopped A must not select running B.
+  await expect(page.getByTestId("user-profile-agent-status")).toContainText(
+    "stopped",
+  );
+
+  await page.getByTestId("auxiliary-panel-close").click();
+  await page.getByTestId(`managed-agent-${primaryPubkey}`).click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await page.getByTestId("user-profile-tab-runtime").click();
   await expect(page.getByTestId("user-profile-agent-status")).toContainText(
     "running",
   );
