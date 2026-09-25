@@ -81,7 +81,13 @@ fn installed_chat_projections_use_session_tools_and_native_output_caps() {
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        let spec = serde_json::json!({"runtime":runtime,"argv":argv,"cwd":workspace,"env":env});
+        let post_session = (runtime == "goose").then(|| {
+            serde_json::json!({
+                "method": buzz_harness_config::goose::CONFIGURE_DEVELOPER_METHOD,
+                "params": buzz_harness_config::goose::text_only_developer_params("")
+            })
+        });
+        let spec = serde_json::json!({"runtime":runtime,"argv":argv,"cwd":workspace,"env":env,"post_session":post_session});
         writeln!(recorder.stdin.as_mut().unwrap(), "{spec}").unwrap();
         recorder.stdin.take();
         let mut final_line = String::new();
@@ -107,6 +113,15 @@ fn installed_chat_projections_use_session_tools_and_native_output_caps() {
                 "{runtime}"
             );
             let tools = request["tools"].as_array().unwrap();
+            assert!(
+                !tools.iter().any(|tool| tool == "read_image"),
+                "{runtime}: {result}"
+            );
+            if runtime == "goose" {
+                for name in ["edit", "shell", "tree", "write"] {
+                    assert!(tools.iter().any(|tool| tool == name), "missing {name}");
+                }
+            }
             assert!(!tools
                 .iter()
                 .any(|tool| tool.as_str().unwrap().contains("account_fixture")));

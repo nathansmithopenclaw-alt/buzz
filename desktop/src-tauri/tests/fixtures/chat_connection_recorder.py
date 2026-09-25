@@ -133,6 +133,10 @@ result = {}
 try:
     rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
     session = rpc("session/new", {"cwd": str(root), "mcpServers": [{"name": "buzz_session_control", "command": "/usr/bin/python3", "args": [str(mcp)], "env": []}]})
+    if spec.get("post_session"):
+        update = spec["post_session"]
+        update["params"]["sessionId"] = session["sessionId"]
+        rpc(update["method"], update["params"])
     response = rpc("session/prompt", {"sessionId": session["sessionId"], "prompt": [{"type": "text", "text": "Run the requested localhost session control."}]})
     result["completed"] = response.get("stopReason") == "end_turn"
 finally:
