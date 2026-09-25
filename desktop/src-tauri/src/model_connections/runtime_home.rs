@@ -32,10 +32,26 @@ pub(super) fn prepare(
     row: &ModelConnection,
     model: &str,
 ) -> Result<PathBuf, String> {
+    prepare_for(root, agent, row, model, "codex")
+}
+
+pub(super) fn prepare_for(
+    root: &Path,
+    agent: &str,
+    row: &ModelConnection,
+    model: &str,
+    runtime: &str,
+) -> Result<PathBuf, String> {
+    if !matches!(runtime, "codex" | "goose") {
+        return Err("Unsupported native connection home".into());
+    }
     if agent.len() != 64 || !agent.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Invalid agent identity for model connection".into());
     }
-    let name = format!("codex-{}", hex::encode(Sha256::digest(row.id.as_bytes())));
+    let name = format!(
+        "{runtime}-{}",
+        hex::encode(Sha256::digest(row.id.as_bytes()))
+    );
     let home = root.join(agent).join(name);
     let selection = Selection {
         connection: row.id.clone(),
@@ -43,14 +59,14 @@ pub(super) fn prepare(
         model: model.into(),
     };
     if home.exists() && read(&home).ok().as_ref() != Some(&selection) {
-        std::fs::remove_dir_all(&home).map_err(|_| "Cannot regenerate Codex connection home")?;
+        std::fs::remove_dir_all(&home).map_err(|_| "Cannot regenerate native connection home")?;
     }
-    std::fs::create_dir_all(&home).map_err(|_| "Cannot create Codex connection home")?;
+    std::fs::create_dir_all(&home).map_err(|_| "Cannot create native connection home")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| "Cannot protect Codex connection home")?;
+            .map_err(|_| "Cannot protect native connection home")?;
     }
     super::runtime::write_private(
         &home.join("connection.json"),
@@ -85,6 +101,7 @@ fn homes(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
             let name = child.file_name().to_string_lossy().into_owned();
             if name
                 .strip_prefix("codex-")
+                .or_else(|| name.strip_prefix("goose-"))
                 .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
                 && child
                     .file_type()
@@ -107,12 +124,20 @@ pub(super) fn remove_connection(root: &Path, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn retain(root: &Path, selected: &BTreeMap<String, (String, String)>) -> Result<(), String> {
+fn retain(
+    root: &Path,
+    selected: &BTreeMap<String, (String, String, String)>,
+) -> Result<(), String> {
     for (agent, home) in homes(root)? {
         let keep = read(&home).ok().is_some_and(|selection| {
-            selected.get(&agent).is_some_and(|(connection, model)| {
-                *connection == selection.connection && *model == selection.model
-            })
+            selected
+                .get(&agent)
+                .is_some_and(|(runtime, connection, model)| {
+                    home.file_name().is_some_and(|name| {
+                        name.to_string_lossy().starts_with(&format!("{runtime}-"))
+                    }) && *connection == selection.connection
+                        && *model == selection.model
+                })
         });
         if !keep {
             std::fs::remove_dir_all(home).map_err(|_| "Cannot remove obsolete connection home")?;
@@ -125,32 +150,69 @@ pub(crate) fn reconcile<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     records: &[crate::managed_agents::ManagedAgentRecord],
 ) -> Result<(), String> {
+    let global = crate::managed_agents::load_global_agent_config(app)?;
+    reconcile_with_global(app, records, &global)
+}
+
+pub(crate) fn reconcile_with_global<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    records: &[crate::managed_agents::ManagedAgentRecord],
+    global: &crate::managed_agents::GlobalAgentConfig,
+) -> Result<(), String> {
     let root = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("model-connection-runtimes");
-    if !root.exists() {
-        return Ok(());
-    }
+    reconcile_at(&root, records, global, super::native_goose::runtime_reason)
+}
+
+fn reconcile_at(
+    root: &Path,
+    records: &[crate::managed_agents::ManagedAgentRecord],
+    global: &crate::managed_agents::GlobalAgentConfig,
+    mut runtime_reason: impl FnMut() -> Option<String>,
+) -> Result<(), String> {
     let definitions = records
         .iter()
         .filter(|record| record.pubkey.is_empty())
         .filter_map(|record| record.to_definition_view())
         .collect::<Vec<_>>();
-    let global = crate::managed_agents::load_global_agent_config(app)?;
+    let connection_path = root
+        .parent()
+        .ok_or("Invalid runtime directory")?
+        .join("model-connections.json");
+    let mut checked = std::collections::BTreeSet::new();
+    let mut validate_goose = |id: &str| {
+        if checked.insert(id.to_owned()) {
+            validate_goose_source(&connection_path, id, &mut runtime_reason)?;
+        }
+        Ok::<_, String>(())
+    };
+    if global.preferred_runtime.as_deref() == Some("goose") {
+        if let Some(id) = global
+            .env_vars
+            .get(CONNECTION_ENV)
+            .filter(|id| !id.is_empty())
+        {
+            validate_goose(id)?;
+        }
+    }
     let mut selected = BTreeMap::new();
-    for record in records.iter().filter(|record| !record.pubkey.is_empty()) {
+    for record in records {
         let Ok(descriptor) = crate::managed_agents::resolve_effective_harness_descriptor(
             record,
             &definitions,
-            &global,
+            global,
         ) else {
             continue;
         };
-        if crate::managed_agents::known_acp_runtime(&descriptor.command).map(|meta| meta.id)
-            != Some("codex")
-        {
+        let Some(runtime) =
+            crate::managed_agents::known_acp_runtime(&descriptor.command).map(|meta| meta.id)
+        else {
+            continue;
+        };
+        if !matches!(runtime, "codex" | "goose") {
             continue;
         }
         let Some(connection) = descriptor
@@ -160,13 +222,38 @@ pub(crate) fn reconcile<R: tauri::Runtime>(
         else {
             continue;
         };
+        if runtime == "goose" {
+            validate_goose(connection)?;
+        }
+        if record.pubkey.is_empty() {
+            continue;
+        }
         let (model, _) =
-            crate::managed_agents::resolve_effective_model_provider(record, &definitions, &global);
+            crate::managed_agents::resolve_effective_model_provider(record, &definitions, global);
         if let Some(model) = model {
-            selected.insert(record.pubkey.clone(), (connection.clone(), model));
+            selected.insert(
+                record.pubkey.clone(),
+                (runtime.into(), connection.clone(), model),
+            );
         }
     }
-    retain(&root, &selected)
+    retain(root, &selected)
+}
+
+fn validate_goose_source(
+    path: &Path,
+    id: &str,
+    runtime_reason: impl FnOnce() -> Option<String>,
+) -> Result<(), String> {
+    let row = super::load_file(path)?
+        .into_iter()
+        .find(|row| row.id == id)
+        .ok_or_else(|| format!("Saved connection {id} is unavailable. Choose another model."))?;
+    super::native_goose::validate_key(row.has_key || row.secret_ref.is_some())?;
+    match runtime_reason() {
+        Some(reason) => Err(reason),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -183,7 +270,10 @@ mod tests {
         let other = "b".repeat(64);
         let first = prepare(root.path(), &agent, &row, "model").unwrap();
         let second = prepare(root.path(), &other, &row, "model").unwrap();
-        let retained = BTreeMap::from([(other.clone(), (row.id.clone(), "model".into()))]);
+        let retained = BTreeMap::from([(
+            other.clone(),
+            ("codex".into(), row.id.clone(), "model".into()),
+        )]);
         retain(root.path(), &retained).unwrap();
         assert!(!first.exists());
         assert!(second.exists());
@@ -205,5 +295,108 @@ mod tests {
         assert!(!home.join("history.jsonl").exists());
         remove_connection(root.path(), &row.id).unwrap();
         assert!(!home.exists());
+    }
+    #[test]
+    fn goose_save_admission_refuses_keyed_missing_and_unqualified_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("model-connections.json");
+        let mut source = row();
+        for keyed in [false, true] {
+            source.has_key = keyed;
+            super::super::persist_file(&file, &[source.clone()]).unwrap();
+            let result = validate_goose_source(&file, "connection", || None);
+            if keyed {
+                assert_eq!(
+                    result.unwrap_err(),
+                    super::super::native_goose::KEYED_REASON
+                );
+            } else {
+                result.unwrap();
+            }
+        }
+        source.has_key = false;
+        super::super::persist_file(&file, &[source.clone()]).unwrap();
+        assert!(validate_goose_source(&file, "missing", || None)
+            .unwrap_err()
+            .contains("missing"));
+        assert_eq!(
+            validate_goose_source(&file, "connection", || Some(
+                "qualified version mismatch".into()
+            ))
+            .unwrap_err(),
+            "qualified version mismatch"
+        );
+    }
+
+    #[test]
+    fn switching_native_harness_removes_old_home_and_connection_removal_covers_both() {
+        let root = tempfile::tempdir().unwrap();
+        let source = row();
+        let agent = "a".repeat(64);
+        let codex = prepare(root.path(), &agent, &source, "model").unwrap();
+        let goose = prepare_for(root.path(), &agent, &source, "model", "goose").unwrap();
+        retain(
+            root.path(),
+            &BTreeMap::from([(
+                agent.clone(),
+                ("goose".into(), source.id.clone(), "model".into()),
+            )]),
+        )
+        .unwrap();
+        assert!(!codex.exists());
+        assert!(goose.exists());
+        prepare(root.path(), &agent, &source, "model").unwrap();
+        remove_connection(root.path(), &source.id).unwrap();
+        assert!(!codex.exists() && !goose.exists());
+    }
+    #[test]
+    fn central_save_validates_definition_instance_and_global_before_any_home_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = root.path().join("model-connection-runtimes");
+        let mut source = row();
+        let definition: crate::managed_agents::AgentDefinition = serde_json::from_value(serde_json::json!({
+            "id":"test", "display_name":"Test", "system_prompt":"Test", "runtime":"goose", "model":"model", "env_vars":{CONNECTION_ENV:"connection"}, "created_at":"", "updated_at":""
+        })).unwrap();
+        let record = definition.into_agent_record();
+        let global = crate::managed_agents::GlobalAgentConfig::default();
+        for keyed in [false, true] {
+            source.has_key = keyed;
+            super::super::persist_file(
+                &root.path().join("model-connections.json"),
+                &[source.clone()],
+            )
+            .unwrap();
+            for instance in [false, true] {
+                let mut candidate = record.clone();
+                if instance {
+                    candidate.pubkey = "a".repeat(64);
+                }
+                let result = reconcile_at(&homes, &[candidate], &global, || None);
+                if keyed {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        super::super::native_goose::KEYED_REASON
+                    );
+                } else {
+                    result.unwrap();
+                }
+            }
+            let candidate = crate::managed_agents::GlobalAgentConfig {
+                preferred_runtime: Some("goose".into()),
+                model: Some("model".into()),
+                env_vars: BTreeMap::from([(CONNECTION_ENV.into(), "connection".into())]),
+                ..Default::default()
+            };
+            let result = reconcile_at(&homes, &[], &candidate, || None);
+            if keyed {
+                assert_eq!(
+                    result.unwrap_err(),
+                    super::super::native_goose::KEYED_REASON
+                );
+            } else {
+                result.unwrap();
+            }
+        }
+        assert!(!homes.exists());
     }
 }

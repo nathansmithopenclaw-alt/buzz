@@ -48,6 +48,7 @@ async function fixture(
   runtime: (typeof runtimes)[number],
   missing = false,
   reason: string | null = null,
+  keyed = false,
 ) {
   await installMockBridge(page, {
     acpRuntimesCatalog: [
@@ -79,10 +80,10 @@ async function fixture(
         status: "stopped",
         channelNames: ["agents"],
         provider: "openai",
-        model: missing || reason ? MODEL : "hosted-model",
+        model: missing || reason || keyed ? MODEL : "hosted-model",
         envVars: {
           OPENAI_API_KEY: "fixture-key",
-          ...(missing || reason ? { [CONNECTION_KEY]: SOURCE } : {}),
+          ...(missing || reason || keyed ? { [CONNECTION_KEY]: SOURCE } : {}),
         },
       },
     ],
@@ -98,12 +99,16 @@ async function fixture(
     ),
   );
   await page.evaluate(
-    ({ missing, protocol, reason }) => {
+    ({ missing, protocol, reason, keyed }) => {
       const win = window as unknown as BridgeWindow;
       const original = win.__TAURI_INTERNALS__.invoke;
       win.__connectionPicker = { writes: [], inference: 0 };
       win.__TAURI_INTERNALS__.invoke = async (command, args) => {
-        if (command === "codex_connection_workspace_reason") return reason;
+        if (
+          command === "codex_connection_workspace_reason" ||
+          command === "goose_connection_runtime_reason"
+        )
+          return reason;
         if (command === "list_model_connections")
           return missing
             ? []
@@ -113,7 +118,7 @@ async function fixture(
                   name: "opus",
                   base_url: "http://127.0.0.1:8010/v1",
                   models: ["Qwen/model"],
-                  has_key: false,
+                  has_key: keyed,
                   tested_model: "Qwen/model",
                   tested_at: 1,
                   qualification: {
@@ -146,7 +151,7 @@ async function fixture(
         return original(command, args);
       };
     },
-    { missing, protocol: runtime.protocol, reason },
+    { missing, protocol: runtime.protocol, reason, keyed },
   );
   await page.getByTestId("open-agents-view").click();
   await page
@@ -235,4 +240,38 @@ test("Codex project MCP refusal names the file and servers and blocks Save", asy
   );
   expect(result.inference).toBe(0);
   expect(result.writes).toHaveLength(0);
+});
+
+test("Goose keyed connection blocks Save with its native credential limitation", async ({
+  page,
+}) => {
+  await fixture(page, runtimes[0], false, null, true);
+  await expect(page.getByTestId("edit-agent-dialog")).toContainText(
+    "Goose 1.45 exposes the provider key to its shell",
+  );
+  await expect(
+    page.getByRole("button", { name: "Save changes", exact: true }),
+  ).toBeDisabled();
+  expect(
+    await page.evaluate(
+      () => (window as unknown as BridgeWindow).__connectionPicker.writes,
+    ),
+  ).toEqual([]);
+});
+
+test("Goose unqualified version blocks its saved connection", async ({
+  page,
+}) => {
+  await fixture(
+    page,
+    runtimes[0],
+    false,
+    "Saved-connection Goose requires qualified CLI 1.45.0; installed version is 1.52.0.",
+  );
+  await expect(page.getByTestId("edit-agent-dialog")).toContainText(
+    "installed version is 1.52.0",
+  );
+  await expect(
+    page.getByRole("button", { name: "Save changes", exact: true }),
+  ).toBeDisabled();
 });

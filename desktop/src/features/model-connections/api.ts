@@ -75,3 +75,6 @@ export const testConnection = (id: string, model: string) =>
   notifyConnectionChange(
     invokeTauri<ModelConnection>("test_model_connection", { id, model }),
   );
+
+export const gooseRuntimeReason = () =>
+  invokeTauri<string | null>("goose_connection_runtime_reason");

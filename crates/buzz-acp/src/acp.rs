@@ -441,6 +441,7 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// Recheck native project layers before every connection session.
     codex_session_only: bool,
+    goose_session_only: bool,
     /// Private MCP launch files, retained for reconnects until session teardown.
     mcp_launch_files: HashMap<String, crate::mcp_launch::LaunchFiles>,
     provider_config: Option<provider::ProviderConfig>,
@@ -1023,6 +1024,16 @@ impl AcpClient {
                     .map(|(_, value)| value.clone())
             })
             .is_some_and(|value| value == "1");
+        let goose_session_only = std::env::var(buzz_harness_config::goose::SESSION_ONLY_ENV)
+            .ok()
+            .or_else(|| {
+                extra_env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == buzz_harness_config::goose::SESSION_ONLY_ENV)
+                    .map(|(_, value)| value.clone())
+            })
+            .is_some_and(|value| value == "1");
         if codex_session_only {
             buzz_harness_config::codex_project::validate(&std::env::current_dir()?)
                 .map_err(AcpError::Protocol)?;
@@ -1196,6 +1207,19 @@ impl AcpClient {
             buzz_harness_config::codex::clear_shell_snapshots(std::path::Path::new(&home))
                 .map_err(AcpError::Protocol)?;
         }
+        if goose_session_only {
+            // Recheck on adapter restart as well as Desktop's initial launch.
+            let root = tempfile::tempdir()?;
+            let mut version = std::process::Command::new(command);
+            version
+                .arg("--version")
+                .env("GOOSE_PATH_ROOT", root.path())
+                .env("GOOSE_DISABLE_KEYRING", "1");
+            buzz_harness_config::goose::validate_version(
+                buzz_harness_config::cli_version::probe_command(&mut version),
+            )
+            .map_err(AcpError::Protocol)?;
+        }
         let mut child = cmd.spawn()?;
 
         let stdin = child
@@ -1208,6 +1232,7 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
         Ok(Self {
+            goose_session_only,
             codex_session_only,
             mcp_launch_files: HashMap::new(),
             provider_config,
@@ -1363,11 +1388,17 @@ impl AcpClient {
         if let Ok(harness) = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS") {
             validate_subscription_project_context(&harness, std::path::Path::new(cwd))?;
         }
+        let has_session_servers = !mcp_servers.is_empty();
         let (mcp_servers, launch_files) = crate::mcp_launch::prepare(mcp_servers)?;
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
         });
+        if self.goose_session_only && !has_session_servers {
+            // Goose otherwise loads account/project extensions when discovery
+            // creates a session without any MCP declarations.
+            params["_meta"]["enabledExtensions"] = serde_json::json!([]);
+        }
         match system_prompt {
             Some(SystemPromptTransport::Field(sp)) => {
                 params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
@@ -4968,6 +4999,67 @@ for line in sys.stdin:
             .expect("project policy must refuse");
         assert!(error.to_string().contains("added_after_spawn"));
         client.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connection_goose_adapter_restart_refuses_unqualified_version() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let cli = root.path().join("goose");
+        std::fs::write(&cli, "#!/bin/sh\necho 'goose 1.52.0'\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = AcpClient::spawn(
+            cli.to_str().unwrap(),
+            &[],
+            &[(
+                buzz_harness_config::goose::SESSION_ONLY_ENV.into(),
+                "1".into(),
+            )],
+            false,
+        )
+        .await;
+        let error = result
+            .err()
+            .expect("must refuse before starting the unqualified adapter")
+            .to_string();
+        assert!(error.contains("1.45.0") && error.contains("1.52.0"));
+    }
+
+    #[tokio::test]
+    async fn connection_goose_discovery_disables_implicit_extensions_only_when_empty() {
+        for (connection, has_servers) in [(true, false), (true, true), (false, false)] {
+            let script = r#"
+                read -t 2 _init
+                echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+                read -t 2 REQ
+                echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"test","_receivedRequest":'"$REQ"'}}'
+                sleep 1
+            "#;
+            let mut client = spawn_script(script).await;
+            client.goose_session_only = connection;
+            client.initialize().await.unwrap();
+            let servers = if has_servers {
+                vec![
+                    serde_json::from_value::<McpServer>(serde_json::json!({"name":"buzz-session", "command":"session-only", "args":[], "env":[]})).unwrap(),
+                ]
+            } else {
+                vec![]
+            };
+            let response = client
+                .session_new_full("/tmp", servers.clone(), None, Some("title"))
+                .await
+                .unwrap();
+            let params = &response.raw["_receivedRequest"]["params"];
+            assert_eq!(params["mcpServers"], serde_json::json!(servers));
+            assert_eq!(params["_meta"]["sessionTitle"], "title");
+            if connection && !has_servers {
+                assert_eq!(params["_meta"]["enabledExtensions"], serde_json::json!([]));
+            } else {
+                assert!(params["_meta"].get("enabledExtensions").is_none());
+            }
+            client.shutdown().await;
+        }
     }
 
     #[tokio::test]

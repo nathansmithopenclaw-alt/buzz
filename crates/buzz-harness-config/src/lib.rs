@@ -3,6 +3,7 @@
 pub mod cli_version;
 pub mod codex;
 pub mod codex_project;
+pub mod goose;
 
 /// Explicit native isolation contract; absent for hosted agents.
 pub const CODEX_SESSION_ONLY_ENV: &str = "BUZZ_ACP_CODEX_SESSION_ONLY";

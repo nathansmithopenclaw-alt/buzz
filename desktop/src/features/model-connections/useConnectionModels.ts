@@ -4,6 +4,7 @@ import {
   CONNECTION_ENV,
   listConnections,
   codexWorkspaceReason,
+  gooseRuntimeReason,
   subscribeConnections,
   type ModelConnection,
 } from "./api";
@@ -43,7 +44,9 @@ export function useConnectionModels(
         listConnections(),
         runtime?.id === "codex"
           ? codexWorkspaceReason()
-          : Promise.resolve(null),
+          : runtime?.id === "goose"
+            ? gooseRuntimeReason()
+            : Promise.resolve(null),
       ])
         .then(([value, reason]) => {
           if (live && current === revision) {
@@ -76,10 +79,18 @@ export function useConnectionModels(
     const selection = resolveConnectionModelValue(row.value, rows);
     const context = selection?.connection.qualification?.context_window;
     const contextReason =
-      runtime?.id === "codex" && (!context || context < 1024)
+      (runtime?.id === "codex" ||
+        runtime?.id === "buzz-agent" ||
+        runtime?.id === "goose") &&
+      (!context || context < 1024)
         ? "Test this connection to establish its context window"
         : null;
-    const reason = selectionBlockReason ?? workspaceReason ?? contextReason;
+    const keyReason =
+      runtime?.id === "goose" && selection?.connection.has_key
+        ? "Goose 1.45 exposes the provider key to its shell, so pick Codex or buzz-agent for this connection."
+        : null;
+    const reason =
+      selectionBlockReason ?? keyReason ?? workspaceReason ?? contextReason;
     return reason ? { ...row, disabled: true, badge: reason } : row;
   });
   const value =

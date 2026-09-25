@@ -52,7 +52,10 @@ fn launch_plan(
         return Ok(None);
     };
     let meta = meta.ok_or("This harness does not support saved model connections")?;
-    if !matches!(meta.id, "deepseek" | "prime" | "codex") {
+    if !matches!(
+        meta.id,
+        "deepseek" | "prime" | "codex" | "buzz-agent" | "goose"
+    ) {
         return Err("This harness does not support saved model connections".into());
     }
     let (connection, key) = resolve(id)?;
@@ -74,6 +77,7 @@ pub(crate) fn apply(
     agent_key: &str,
 ) -> Result<(), String> {
     command.env_remove(buzz_harness_config::CODEX_SESSION_ONLY_ENV);
+    command.env_remove(super::native_goose::SESSION_ONLY_ENV);
     let Some(plan) = launch_plan(harness, env, model, |id| resolve(app, id))? else {
         return Ok(());
     };
@@ -81,6 +85,19 @@ pub(crate) fn apply(
     let key = plan.key;
     let model = plan.model.as_str();
     match plan.runtime {
+        "goose" => super::native_goose::apply(
+            &app.path()
+                .app_data_dir()
+                .map_err(|e| e.to_string())?
+                .join("model-connection-runtimes"),
+            command,
+            &row,
+            model,
+            key.as_deref(),
+            agent_key,
+            || crate::managed_agents::resolve_command("goose"),
+        )?,
+        "buzz-agent" => super::native_buzz_agent::apply(command, &row, model, key.as_deref())?,
         "codex" => {
             super::native_codex::apply(
                 &app.path()

@@ -249,10 +249,10 @@ pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> 
     let path = global_config_path(app)?;
     let payload = serde_json::to_vec_pretty(&config)
         .map_err(|e| format!("failed to serialize global agent config: {e}"))?;
-    atomic_write_json_restricted(&path, &payload)?;
     let mut records = super::load_managed_agents(app)?;
     records.extend(super::storage::load_agent_definitions(app)?);
-    crate::model_connections::runtime_home::reconcile(app, &records)
+    crate::model_connections::runtime_home::reconcile_with_global(app, &records, &config)?;
+    atomic_write_json_restricted(&path, &payload)
 }
 
 /// Resolve the effective model and provider for an agent.
