@@ -95,6 +95,7 @@ export function useAgentDialogModelPicker(input: PickerInput) {
             ...connectionOptions.map(({ value, ...option }) => ({
               ...option,
               id: value,
+              savedConnection: true,
             })),
             ...(connectionValue &&
             !connectionOptions.some(
@@ -103,6 +104,7 @@ export function useAgentDialogModelPicker(input: PickerInput) {
               ? [
                   {
                     id: connectionValue,
+                    savedConnection: true,
                     label: model,
                     disabled: true,
                     badge: "Connection unavailable — choose another",

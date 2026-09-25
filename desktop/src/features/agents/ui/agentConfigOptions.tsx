@@ -56,6 +56,7 @@ const KNOWN_LLM_PROVIDER_IDS = [
 type PersonaLlmProviderId = (typeof KNOWN_LLM_PROVIDER_IDS)[number];
 
 export type PersonaModelOption = {
+  savedConnection?: boolean;
   badge?: string;
   disabled?: boolean;
   group?: string;

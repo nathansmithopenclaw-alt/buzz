@@ -76,17 +76,20 @@ export function modelDropdownOptions({
   globalModel?: string;
   globalModelLabel?: string;
 }): PersonaDropdownOption[] {
+  const hostedOptions = options.filter((option) => !option.savedConnection);
+  const connectionOptions = options.filter((option) => option.savedConnection);
+  const toDropdownOption = (option: PersonaModelOption) => ({
+    badge: option.badge,
+    disabled: option.disabled,
+    group: option.group,
+    label: option.label,
+    value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
+  });
   const modelOptions =
     globalModel === undefined
-      ? options.map((option) => ({
-          badge: option.badge,
-          disabled: option.disabled,
-          group: option.group,
-          label: option.label,
-          value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
-        }))
+      ? hostedOptions.map(toDropdownOption)
       : buildTemplateModelDropdownOptions(
-          options,
+          hostedOptions,
           globalModel,
           globalModelLabel,
         );
@@ -98,5 +101,6 @@ export function modelDropdownOptions({
     ...(allowCustom
       ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]
       : []),
+    ...connectionOptions.map(toDropdownOption),
   ];
 }
