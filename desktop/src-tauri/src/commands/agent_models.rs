@@ -132,6 +132,7 @@ pub async fn get_agent_models(
         &effective_provider,
         &merged_env,
         persisted_model.clone(),
+        OpenRouterModelFilter::Tools,
     )
     .await?
     {
@@ -347,6 +348,7 @@ pub async fn discover_agent_models(
         &effective_provider,
         &merged_env,
         input.model.clone(),
+        OpenRouterModelFilter::Tools,
     )
     .await?
     {
@@ -411,7 +413,7 @@ struct OpenAiModelListItem {
 
 #[path = "agent_models_openrouter.rs"]
 mod openrouter;
-use openrouter::discover_openrouter_models;
+pub(crate) use openrouter::{discover_openrouter_models, OpenRouterModelFilter};
 #[cfg(test)]
 use openrouter::{
     filter_openrouter_models, is_openrouter_provider, openrouter_models_url,

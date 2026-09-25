@@ -64,7 +64,7 @@ pub(super) fn redaction_env_with_value(
 /// with the key in goose's own keyring rather than Buzz's env) would otherwise
 /// turn the subprocess catalog into `config: ANTHROPIC_API_KEY required`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct DiscoveryProvider {
+pub(crate) struct DiscoveryProvider {
     value: Option<String>,
     inferred: bool,
 }
@@ -107,7 +107,7 @@ impl DiscoveryProvider {
 /// subprocess, which on a Databricks failure path surfaces the small
 /// known-models fallback catalog instead of the live gateway list —
 /// indistinguishable, from the picker's side, from the real thing.
-pub(super) fn effective_discovery_provider(
+pub(crate) fn effective_discovery_provider(
     provider: Option<&str>,
     provider_env_var: Option<&str>,
     env: &BTreeMap<String, String>,

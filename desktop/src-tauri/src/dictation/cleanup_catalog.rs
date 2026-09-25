@@ -1,8 +1,11 @@
 //! Cleanup catalog metadata; stored credentials never cross IPC.
 
 use crate::app_state::AppState;
-use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use crate::commands::{
+    discover_openrouter_models, effective_discovery_provider, OpenRouterModelFilter,
+};
+use serde::Serialize;
+use std::collections::BTreeMap;
 use tauri::{AppHandle, State};
 
 #[derive(Serialize)]
@@ -14,70 +17,30 @@ pub(crate) struct CleanupCatalog {
     error: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct ModelChoice {
     id: String,
     #[serde(default)]
     name: String,
 }
 
-#[derive(Deserialize)]
-struct CatalogResponse {
-    data: Vec<RouterModel>,
-}
-#[derive(Deserialize)]
-struct RouterModel {
-    #[serde(flatten)]
-    choice: ModelChoice,
-    architecture: Option<Architecture>,
-}
-#[derive(Deserialize)]
-struct Architecture {
-    output_modalities: Vec<String>,
-}
-
-async fn openrouter(client: &reqwest::Client, key: &str) -> Result<Vec<ModelChoice>, String> {
-    let mut response = client
-        .get(format!("{}/models", super::OPENROUTER_BASE_URL))
-        .bearer_auth(key)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|_| "Could not load OpenRouter models. Try again.")?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Could not load OpenRouter models (HTTP {})",
-            response.status()
-        ));
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "Could not read OpenRouter models")?
-    {
-        if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
-            return Err("OpenRouter model list is too large".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let catalog: CatalogResponse =
-        serde_json::from_slice(&bytes).map_err(|_| "OpenRouter returned an invalid model list")?;
-    Ok(text_models(catalog))
-}
-
-fn text_models(catalog: CatalogResponse) -> Vec<ModelChoice> {
-    catalog
-        .data
+async fn openrouter(
+    client: &reqwest::Client,
+    env: &BTreeMap<String, String>,
+) -> Result<Vec<ModelChoice>, String> {
+    let provider = effective_discovery_provider(Some("openrouter"), None, env);
+    let models =
+        discover_openrouter_models(client, &provider, env, None, OpenRouterModelFilter::Text)
+            .await?
+            .ok_or("OpenRouter is not configured")?;
+    Ok(models
+        .models
         .into_iter()
-        .filter(|entry| {
-            entry
-                .architecture
-                .as_ref()
-                .is_some_and(|a| a.output_modalities.iter().any(|m| m == "text"))
+        .map(|model| ModelChoice {
+            name: model.name.unwrap_or_else(|| model.id.clone()),
+            id: model.id,
         })
-        .map(|entry| entry.choice)
-        .collect()
+        .collect())
 }
 
 /// Lists text-capable OpenRouter models and local connection IDs.
@@ -93,8 +56,14 @@ pub async fn dictation_cleanup_catalog(
         .filter(|connection| crate::model_connections::is_local_model_host(&connection.base_url))
         .map(|connection| connection.id)
         .collect();
+    // Match the endpoint used by dictation cleanup, independent of agent overrides.
+    let mut env = config.env_vars.clone();
+    env.insert(
+        "OPENROUTER_BASE_URL".into(),
+        super::OPENROUTER_BASE_URL.into(),
+    );
     let (open_router, error) = match key {
-        Some(key) => match openrouter(&state.http_client, key).await {
+        Some(_) => match openrouter(&state.http_client, &env).await {
             Ok(models) => (models, None),
             Err(error) => (Vec::new(), Some(error)),
         },
@@ -109,12 +78,5 @@ pub async fn dictation_cleanup_catalog(
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn cleanup_accepts_text_models_without_tool_support() {
-        let response = serde_json::from_str(r#"{"data":[{"id":"text-only","architecture":{"output_modalities":["text"]}},{"id":"image","architecture":{"output_modalities":["image"]}}]}"#).unwrap();
-        let models = super::text_models(response);
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "text-only");
-    }
-}
+#[path = "cleanup_catalog_tests.rs"]
+mod tests;

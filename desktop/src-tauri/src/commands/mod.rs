@@ -162,3 +162,7 @@ mod summary;
 pub use summary::*;
 
 mod tracker_automation;
+
+// Shared catalog discovery for agent and dictation settings.
+pub(crate) use agent_models::{discover_openrouter_models, OpenRouterModelFilter};
+pub(crate) use agent_models_env::effective_discovery_provider;
