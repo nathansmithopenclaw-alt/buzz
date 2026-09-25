@@ -188,7 +188,10 @@ export function VoiceSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-voice">
-      <SettingsSectionHeader title="Voice" description={null} />
+      <SettingsSectionHeader
+        title="Voice"
+        description="Configure dictation and voice playback."
+      />
 
       <SettingsOptionGroupList>
         <DictationSettingsSection />
