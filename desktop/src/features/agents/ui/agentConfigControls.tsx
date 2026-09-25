@@ -25,6 +25,7 @@ import {
   providerDisplayLabel,
   type PersonaModelOption,
 } from "./agentConfigOptions";
+import { modelDropdownOptions } from "./relayMeshModelPicker";
 import { MODEL_DISCOVERY_LOADING_VALUE } from "./usePersonaModelDiscovery";
 import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
 
@@ -518,31 +519,25 @@ export function AgentModelField({
     onModelChange(nextValue);
   };
 
-  const modelOptions: AgentDropdownOption[] = [
-    ...effectiveModelOptions.map((option) => ({
-      label: option.label,
-      value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
-    })),
-    ...(modelDiscoveryLoading && discoveredModelOptions === null
-      ? [
-          {
-            disabled: true,
-            label: "Loading models...",
-            value: MODEL_DISCOVERY_LOADING_VALUE,
-          },
-        ]
-      : []),
-    ...(!isSharedCompute &&
-    (showCustomModelOption || modelSelectValue === CUSTOM_MODEL_DROPDOWN_VALUE)
-      ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]
-      : []),
-    ...connectionOptions.map((option) => ({
-      ...option,
-      label: [option.group, option.label, option.badge]
-        .filter(Boolean)
-        .join(" · "),
-    })),
-  ];
+  const modelOptions: AgentDropdownOption[] = modelDropdownOptions({
+    options: [
+      ...effectiveModelOptions.map(({ id, label }) => ({ id, label })),
+      ...connectionOptions.map((option) => ({
+        ...option,
+        id: option.value,
+        savedConnection: true,
+        label: [option.group, option.label, option.badge]
+          .filter(Boolean)
+          .join(" · "),
+      })),
+    ],
+    loading: modelDiscoveryLoading && discoveredModelOptions === null,
+    loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
+    allowCustom:
+      !isSharedCompute &&
+      (showCustomModelOption ||
+        modelSelectValue === CUSTOM_MODEL_DROPDOWN_VALUE),
+  });
   // An opened dropdown must never show a blank popover. When all the above
   // yields an empty list and discovery has finished, add a disabled sentinel
   // row so the user sees "No models found" instead of a bare white bar.

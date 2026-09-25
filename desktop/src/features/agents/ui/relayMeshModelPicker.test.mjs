@@ -83,8 +83,8 @@ test("hosted custom models precede saved-connection groups on every dropdown", (
   for (const globalModel of [undefined, "hosted"]) {
     const options = modelDropdownOptions({
       options: [
-        { id: "saved", label: "Qwen", group: "Source" },
-        { id: "hosted", label: "Hosted" },
+        { id: "saved", label: "Qwen", group: "Source", savedConnection: true },
+        { id: "hosted", label: "Hosted", group: "Opus" },
       ],
       loading: false,
       loadingValue: "loading",
@@ -95,5 +95,31 @@ test("hosted custom models precede saved-connection groups on every dropdown", (
     const connection = options.findIndex((row) => row.group === "Source");
     assert.ok(custom >= 0 && custom < connection);
     assert.ok(options.findIndex((row) => row.label === "Hosted") < custom);
+  }
+});
+
+test("grouped hosted catalogs retain their order with Custom last without connections", () => {
+  for (const globalModel of [undefined, "fable"]) {
+    const options = modelDropdownOptions({
+      options: [
+        { id: "fable", label: "Fable model", group: "Fable" },
+        { id: "opus", label: "Opus model", group: "Opus" },
+      ],
+      loading: true,
+      loadingValue: "loading",
+      allowCustom: true,
+      globalModel,
+      globalModelLabel: "Inherited model",
+    });
+    assert.deepEqual(
+      options.map((option) => option.label),
+      [
+        ...(globalModel === undefined ? [] : ["Inherited model"]),
+        "Fable model",
+        "Opus model",
+        "Loading models...",
+        "Custom model...",
+      ],
+    );
   }
 });
