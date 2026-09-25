@@ -56,6 +56,7 @@ const KNOWN_LLM_PROVIDER_IDS = [
 type PersonaLlmProviderId = (typeof KNOWN_LLM_PROVIDER_IDS)[number];
 
 export type PersonaModelOption = {
+  savedConnection?: boolean;
   badge?: string;
   disabled?: boolean;
   group?: string;
@@ -755,6 +756,22 @@ export function computeLocalModeGate({
       requiredEnvKeys: [],
       fileSatisfiedEnvKeys: [],
       satisfied: true,
+    };
+  }
+
+  const source = {
+    ...globalEnvVars,
+    ...envVars,
+  }.BUZZ_MODEL_CONNECTION_ID?.trim();
+  if (source && runtime?.modelConnection?.protocol) {
+    const missingNormalizedFields =
+      model.trim() || globalModel.trim() ? [] : ["model"];
+    return {
+      missingNormalizedFields,
+      missingEnvKeys: [],
+      requiredEnvKeys: [],
+      fileSatisfiedEnvKeys: [],
+      satisfied: missingNormalizedFields.length === 0,
     };
   }
 

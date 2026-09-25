@@ -20,6 +20,46 @@ use super::{
 use crate::managed_agents::AcpAvailabilityStatus;
 
 #[test]
+fn connection_catalog_protocols_and_actionable_preset_reasons_match_native_routes() {
+    use crate::model_connections::qualification::Protocol;
+    for (id, protocol) in [
+        ("codex", Some(Protocol::Responses)),
+        ("goose", Some(Protocol::ChatCompletions)),
+        ("buzz-agent", Some(Protocol::ChatCompletions)),
+        ("claude", None),
+        ("grok", None),
+    ] {
+        let runtime = super::KNOWN_ACP_RUNTIMES
+            .iter()
+            .find(|runtime| runtime.id == id)
+            .unwrap();
+        assert_eq!(runtime.model_connection_protocol, protocol, "{id}");
+    }
+    for (id, reason) in [
+        ("pi", "Install the Pi ACP adapter to use this connection"),
+        (
+            "amp",
+            "Configure this connection in your Amp account router",
+        ),
+        (
+            "openclaw",
+            "Configure this connection in the OpenClaw gateway",
+        ),
+    ] {
+        let preset = super::PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == id)
+            .unwrap();
+        let entry = super::preset_catalog_entry(preset, |_| None);
+        assert_eq!(
+            entry.model_connection.unwrap().setup_reason.as_deref(),
+            Some(reason),
+            "{id}"
+        );
+    }
+}
+
+#[test]
 fn goose_keeps_developer_tools_with_injected_mcp_servers() {
     for command in ["goose", "/usr/local/bin/goose", "C:\\tools\\goose.exe"] {
         for args in [vec![], vec!["acp".into()]] {

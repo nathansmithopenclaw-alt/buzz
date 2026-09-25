@@ -1,3 +1,10 @@
+import { useConnectionModels } from "@/features/model-connections/useConnectionModels";
+import { CONNECTION_ENV } from "@/features/model-connections/api";
+import {
+  connectionEffortError,
+  connectionEffortLevels,
+} from "@/features/model-connections/modelChoices";
+import { selectionOnRuntimeChange } from "@/features/agents/ui/runtimeModelProviderSelection";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { ProviderEndpointField } from "@/features/agents/ui/ProviderEndpointField";
 import { useRequiredCredentialState } from "@/features/agents/ui/useRequiredCredentialState";
@@ -73,7 +80,7 @@ export function SummaryRuntimeFields({
     ? (providerOverride ?? inheritedDefaults.provider.value)
     : "";
   const model = modelOverride ?? inheritedDefaults.model.value;
-  const mergedEnv = React.useMemo(
+  const mergedEnv = React.useMemo<Record<string, string>>(
     () => ({ ...inheritedEnvVars, ...envVars }),
     [inheritedEnvVars, envVars],
   );
@@ -86,7 +93,10 @@ export function SummaryRuntimeFields({
     provider,
     selectedRuntime: runtime,
   });
+  const connections = useConnectionModels(true, runtime, mergedEnv, model);
   const picker = useAgentDialogModelPicker({
+    connectionOptions: connections.options,
+    connectionValue: connections.value,
     discoveredOptions: discovery.discoveredModelOptions,
     effort: runtime?.effortModelQualifier
       ? (parseModelEffortQualifier(model).effort ?? "")
@@ -119,6 +129,15 @@ export function SummaryRuntimeFields({
     globalEnvVars: inheritedEnvVars,
   });
   const validationError =
+    connections.error ??
+    (connections.value
+      ? connectionEffortError(
+          connections.effortLevels,
+          runtime?.thinkingEnvVar
+            ? (mergedEnv[runtime.thinkingEnvVar] ?? "")
+            : "",
+        )
+      : null) ??
     picker.modelValidationError ??
     picker.effortValidationError ??
     (credentials.requiredEnvKeyMissing
@@ -140,14 +159,17 @@ export function SummaryRuntimeFields({
     onChange,
   ]);
   function changeContext() {
-    setEnvVars((current) =>
-      Object.fromEntries(
+    setEnvVars((current) => ({
+      [CONNECTION_ENV]: "",
+      ...Object.fromEntries(
         Object.entries(current).filter(
           ([key]) =>
-            key !== runtime?.thinkingEnvVar && key !== "BUZZ_ACP_FAST_MODE",
+            key !== runtime?.thinkingEnvVar &&
+            key !== "BUZZ_ACP_FAST_MODE" &&
+            key !== CONNECTION_ENV,
         ),
       ),
-    );
+    }));
     setCustomModel(false);
   }
   return (
@@ -170,10 +192,33 @@ export function SummaryRuntimeFields({
             label: formatRuntimeOptionLabel(r),
           }))}
           onValueChange={(id) => {
+            const nextRuntime = available.find((row) => row.id === id);
+            const next = selectionOnRuntimeChange(
+              {
+                provider,
+                model,
+                envVars: {
+                  ...envVars,
+                  [CONNECTION_ENV]: mergedEnv[CONNECTION_ENV] ?? "",
+                },
+                isCustomModelEditing: customModel,
+                isCustomProviderEditing: false,
+              },
+              {
+                previousRuntime: runtime?.id ?? "",
+                nextRuntime: id,
+                nextRuntimeCanChooseProvider:
+                  runtimeSupportsLlmProviderSelection(id, nextRuntime),
+                nextRuntimeSupportsConnections:
+                  nextRuntime?.modelConnection?.protocol != null,
+                lockedRuntimeReset: "full",
+              },
+            );
             setRuntimeOverride(id);
-            setModelOverride("");
-            setProviderOverride(null);
-            changeContext();
+            setModelOverride(next.model);
+            setProviderOverride(next.provider);
+            setEnvVars(next.envVars);
+            setCustomModel(false);
           }}
         />
       </div>
@@ -227,6 +272,31 @@ export function SummaryRuntimeFields({
           options={options}
           placeholder="Default model"
           onValueChange={(value) => {
+            const choice = connections.resolve(value);
+            if (choice) {
+              const env: Record<string, string> = {
+                ...envVars,
+                [CONNECTION_ENV]: choice.connection.id,
+              };
+              const support = runtime?.modelConnection;
+              const key = runtime?.thinkingEnvVar;
+              if (
+                key &&
+                support?.defaultEffort &&
+                connectionEffortLevels(
+                  choice.connection,
+                  choice.model,
+                  support,
+                ).includes(support.defaultEffort)
+              )
+                env[key] = support.defaultEffort;
+              delete env.BUZZ_ACP_FAST_MODE;
+              setEnvVars(env);
+              setModelOverride(choice.model);
+              setCustomModel(false);
+              return;
+            }
+            if (value.startsWith("saved-connection:")) return;
             changeContext();
             setCustomModel(value === CUSTOM_MODEL_DROPDOWN_VALUE);
             setModelOverride(
@@ -252,7 +322,27 @@ export function SummaryRuntimeFields({
           </p>
         ) : null}
       </div>
+      {validationError ? (
+        <p role="alert" className="text-xs text-destructive">
+          {validationError}
+        </p>
+      ) : null}
       <AgentDialogEffortSection
+        connectionEffort={
+          connections.value
+            ? {
+                levels: connections.effortLevels,
+                value: runtime?.thinkingEnvVar
+                  ? (mergedEnv[runtime.thinkingEnvVar] ?? "")
+                  : "",
+                onChange: (value) => {
+                  const key = runtime?.thinkingEnvVar;
+                  if (key)
+                    setEnvVars((current) => ({ ...current, [key]: value }));
+                },
+              }
+            : undefined
+        }
         disabled={disabled || discovery.modelDiscoveryLoading}
         envVars={envVars}
         inheritedEnvVars={inheritedEnvVars}

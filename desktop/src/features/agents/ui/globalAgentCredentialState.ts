@@ -18,8 +18,11 @@ export function getGlobalAgentCredentialState({
   runtimeFileConfig: RuntimeFileConfigSubset | null | undefined;
   runtimeId: string;
 }) {
-  const requiredEnvKeys = requiredCredentialEnvKeys(runtimeId, provider);
-  const apiKeyEnvVar = getProviderApiKeyEnvVar(provider);
+  const connected = Boolean(envVars.BUZZ_MODEL_CONNECTION_ID?.trim());
+  const requiredEnvKeys = connected
+    ? []
+    : requiredCredentialEnvKeys(runtimeId, provider);
+  const apiKeyEnvVar = connected ? null : getProviderApiKeyEnvVar(provider);
   const bakedSatisfiedEnvKeys = getBakedSatisfiedEnvKeys(
     requiredEnvKeys,
     envVars,

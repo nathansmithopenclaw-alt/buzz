@@ -25,6 +25,7 @@ import {
   providerDisplayLabel,
   type PersonaModelOption,
 } from "./agentConfigOptions";
+import { modelDropdownOptions } from "./relayMeshModelPicker";
 import { MODEL_DISCOVERY_LOADING_VALUE } from "./usePersonaModelDiscovery";
 import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
 
@@ -351,6 +352,8 @@ export function resolveDefaultModelLabel({
 }
 
 export function AgentModelField({
+  connectionOptions = [],
+  connectionValue,
   disabled,
   discoveredModelOptions,
   globalModel,
@@ -378,6 +381,14 @@ export function AgentModelField({
   useChevronIcon = false,
   usePersonaInputStyle = false,
 }: {
+  connectionOptions?: readonly {
+    value: string;
+    label: string;
+    group?: string;
+    badge?: string;
+    disabled?: boolean;
+  }[];
+  connectionValue?: string | null;
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
   /** Known lower-precedence model used when this field is left empty. */
@@ -442,9 +453,9 @@ export function AgentModelField({
       isSharedCompute,
     }),
   };
-  const discoveredWithoutDefault = (discoveredModelOptions ?? []).filter(
-    (option) => option.id.trim() !== "",
-  );
+  const discoveredWithoutDefault = (
+    connectionValue ? [] : (discoveredModelOptions ?? [])
+  ).filter((option) => option.id.trim() !== "");
   const baseModelOptions = isSharedCompute
     ? [defaultOption, ...discoveredWithoutDefault]
     : [
@@ -473,13 +484,14 @@ export function AgentModelField({
     !hasPersonaModelOption(effectiveModelOptions, trimmedModel);
 
   const modelSelectValue =
-    isSharedCompute && (trimmedModel === "" || trimmedModel === "auto")
+    connectionValue ??
+    (isSharedCompute && (trimmedModel === "" || trimmedModel === "auto")
       ? AUTO_MODEL_DROPDOWN_VALUE
       : getModelSelectValue({
           isCustomModelEditing,
           isModelCustom,
           model,
-        });
+        }));
 
   // The select is only disabled for mutation pending — never for missing discovery.
   // Default/custom options remain usable regardless of discovery state.
@@ -489,7 +501,9 @@ export function AgentModelField({
   // Show the custom model input whenever custom mode is active or the current
   // model is already custom — not gated on discovery having returned.
   const showCustomModelInput =
-    !isSharedCompute && (isCustomModelEditing || isModelCustom);
+    !connectionValue &&
+    !isSharedCompute &&
+    (isCustomModelEditing || isModelCustom);
 
   const handleModelSelectChange = (nextValue: string) => {
     if (nextValue === AUTO_MODEL_DROPDOWN_VALUE) {
@@ -505,25 +519,25 @@ export function AgentModelField({
     onModelChange(nextValue);
   };
 
-  const modelOptions: AgentDropdownOption[] = [
-    ...effectiveModelOptions.map((option) => ({
-      label: option.label,
-      value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
-    })),
-    ...(modelDiscoveryLoading && discoveredModelOptions === null
-      ? [
-          {
-            disabled: true,
-            label: "Loading models...",
-            value: MODEL_DISCOVERY_LOADING_VALUE,
-          },
-        ]
-      : []),
-    ...(!isSharedCompute &&
-    (showCustomModelOption || modelSelectValue === CUSTOM_MODEL_DROPDOWN_VALUE)
-      ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]
-      : []),
-  ];
+  const modelOptions: AgentDropdownOption[] = modelDropdownOptions({
+    options: [
+      ...effectiveModelOptions.map(({ id, label }) => ({ id, label })),
+      ...connectionOptions.map((option) => ({
+        ...option,
+        id: option.value,
+        savedConnection: true,
+        label: [option.group, option.label, option.badge]
+          .filter(Boolean)
+          .join(" · "),
+      })),
+    ],
+    loading: modelDiscoveryLoading && discoveredModelOptions === null,
+    loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
+    allowCustom:
+      !isSharedCompute &&
+      (showCustomModelOption ||
+        modelSelectValue === CUSTOM_MODEL_DROPDOWN_VALUE),
+  });
   // An opened dropdown must never show a blank popover. When all the above
   // yields an empty list and discovery has finished, add a disabled sentinel
   // row so the user sees "No models found" instead of a bare white bar.

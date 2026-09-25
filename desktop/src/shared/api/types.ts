@@ -510,7 +510,14 @@ export type AuthStatus =
   | { status: "not_applicable" }
   | { status: "unknown" };
 
+export type ModelConnectionSupport = {
+  protocol: "chat_completions" | "responses" | "anthropic_messages" | null;
+  setupReason: string | null;
+  defaultEffort: string | null;
+};
+
 export type AcpRuntimeCatalogEntry = {
+  modelConnection?: ModelConnectionSupport | null;
   id: string;
   label: string;
   avatarUrl: string;

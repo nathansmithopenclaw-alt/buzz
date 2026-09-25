@@ -300,7 +300,7 @@ pub async fn test_model_connection(
         .as_ref()
         .filter(|q| {
             q.protocols.iter().any(|check| {
-                q.check(&model, check.protocol.clone())
+                q.check(&model, check.protocol)
                     .is_some_and(|check| check.tool_round_trip)
             })
         })

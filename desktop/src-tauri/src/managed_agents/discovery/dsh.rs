@@ -21,6 +21,10 @@ pub(super) const DSH_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
     model_env_var: Some("DSH_MODEL"),
     provider_env_var: Some("DSH_PROVIDER"),
     provider_locked: false,
+    model_connection_protocol: Some(
+        crate::model_connections::qualification::Protocol::ChatCompletions,
+    ),
+    model_connection_default_effort: None,
     default_env: &[],
     config_file_path: None,
     config_file_format: None,

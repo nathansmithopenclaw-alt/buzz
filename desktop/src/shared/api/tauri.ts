@@ -204,6 +204,7 @@ export type RawAcpRuntimeCatalogEntry = {
   definition_env?: Record<string, string>;
   max_parallelism?: number;
   effort_canonical_values?: string[] | null;
+  model_connection?: import("./types").ModelConnectionSupport | null;
 };
 export type {
   RawInstallRuntimeResult,
@@ -709,6 +710,7 @@ export function fromRawAcpRuntimeCatalogEntry(
     source: entry.source,
     definitionEnv: entry.definition_env ?? {},
     effortCanonicalValues: entry.effort_canonical_values ?? null,
+    modelConnection: entry.model_connection ?? null,
     ...(entry.max_parallelism !== undefined && {
       maxParallelism: entry.max_parallelism,
     }),

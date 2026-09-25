@@ -1,3 +1,11 @@
+import { CONNECTION_ENV } from "@/features/model-connections/api";
+import {
+  connectionAccountReason,
+  connectionEffortError,
+  connectionEffortLevels,
+} from "@/features/model-connections/modelChoices";
+import { useConnectionModels } from "@/features/model-connections/useConnectionModels";
+import { selectionOnConnectionModel } from "./runtimeModelProviderSelection";
 import { ProviderEndpointField } from "./ProviderEndpointField";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
@@ -430,6 +438,13 @@ export function AgentDefinitionDialog({
   function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
     setHasUserChanges(true);
     setAiConfigurationMode(nextMode);
+    if (nextMode === "defaults") {
+      setEnvVars((current) => {
+        const next = { ...current };
+        delete next[CONNECTION_ENV];
+        return next;
+      });
+    }
     setIsCustomProviderEditing(false);
     setIsCustomModelEditing(false);
     const nextPair = agentAiConfigurationPairForMode({
@@ -502,8 +517,13 @@ export function AgentDefinitionDialog({
     secretEnvVar: topLevelSecretEnvVar,
     value: apiKeyValue,
   } = apiKeyFieldState;
+  const selectedConnectionId = (
+    envVars[CONNECTION_ENV] ?? globalConfig.env_vars[CONNECTION_ENV]
+  )?.trim();
   const providerIsRequired =
-    aiConfigurationMode === "custom" && runtimeCanChooseLlmProvider;
+    !selectedConnectionId &&
+    aiConfigurationMode === "custom" &&
+    runtimeCanChooseLlmProvider;
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired = aiConfigurationMode === "custom";
@@ -512,7 +532,7 @@ export function AgentDefinitionDialog({
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
-    runtimeCanChooseLlmProvider,
+    runtimeCanChooseLlmProvider && !selectedConnectionId,
   );
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
@@ -559,6 +579,13 @@ export function AgentDefinitionDialog({
   });
   const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
+  const connectionModels = useConnectionModels(
+    open,
+    selectedRuntime,
+    envVarsForDiscovery,
+    model,
+    connectionAccountReason(instanceEffort?.agent),
+  );
   const {
     effortValidationError,
     isCustom: isModelCustom,
@@ -568,6 +595,8 @@ export function AgentDefinitionDialog({
     selectValue: modelSelectValue,
     showCustomInput: showCustomModelInput,
   } = useAgentDialogModelPicker({
+    connectionOptions: connectionModels.options,
+    connectionValue: connectionModels.value,
     discoveredOptions: discoveredModelOptions,
     effort: selectedRuntime?.effortModelQualifier
       ? (parseModelEffortQualifier(model).effort ?? "")
@@ -585,14 +614,20 @@ export function AgentDefinitionDialog({
     provider: effectiveProvider,
     runtimeId: runtime,
   });
-  const savedEffortError = instanceEffortError(
-    instanceEffort,
-    model,
-    selectedRuntime,
-    nativeTuning,
-  );
+  const savedEffortError = connectionModels.value
+    ? connectionEffortError(
+        connectionModels.effortLevels,
+        instanceEffort?.value ??
+          instanceEffort?.agent?.effortLevel ??
+          (selectedRuntime?.thinkingEnvVar
+            ? envVars[selectedRuntime.thinkingEnvVar]
+            : "") ??
+          "",
+      )
+    : instanceEffortError(instanceEffort, model, selectedRuntime, nativeTuning);
   const canSubmit =
     baseCanSubmit &&
+    !connectionModels.error &&
     !modelValidationError &&
     !effortValidationError &&
     !savedEffortError;
@@ -700,9 +735,14 @@ export function AgentDefinitionDialog({
     setRuntime(nextRuntime);
     applySelection(
       selectionOnRuntimeChange(selection, {
-        nextRuntimeSupportsConnections: runtimes
-          .find((r) => r.id === nextRuntime)
-          ?.providerOptions?.some(([id]) => id === "buzz-local"),
+        nextRuntimeSupportsConnections:
+          Boolean(
+            runtimes.find((r) => r.id === nextRuntime)?.modelConnection
+              ?.protocol,
+          ) ||
+          runtimes
+            .find((r) => r.id === nextRuntime)
+            ?.providerOptions?.some(([id]) => id === "buzz-local"),
         previousRuntime: runtime,
         nextRuntime,
         nextRuntimeCanChooseProvider:
@@ -744,6 +784,28 @@ export function AgentDefinitionDialog({
   }
 
   function handleModelDropdownChange(nextValue: string) {
+    const source = connectionModels.resolve(nextValue);
+    if (source) {
+      const next = selectionOnConnectionModel(
+        selection,
+        source.connection.id,
+        source.model,
+      );
+      const support = selectedRuntime?.modelConnection;
+      const levels = support
+        ? connectionEffortLevels(source.connection, source.model, support)
+        : [];
+      const defaultEffort = support?.defaultEffort;
+      if (defaultEffort && levels.includes(defaultEffort)) {
+        if (instanceEffort) instanceEffort.onChange(defaultEffort);
+        else if (selectedRuntime?.thinkingEnvVar)
+          next.envVars[selectedRuntime.thinkingEnvVar] = defaultEffort;
+      }
+      applySelection(next);
+      setHasUserChanges(true);
+      return;
+    }
+    if (nextValue.startsWith("saved-connection:")) return;
     setHasUserChanges(true);
     applySelection(
       selectionOnModelDropdownChange(selection, {
@@ -947,8 +1009,38 @@ export function AgentDefinitionDialog({
             ) : null}
           </AnimatePresence>
 
+          {connectionModels.error ? (
+            <p role="alert" className="text-xs text-destructive">
+              {connectionModels.error}
+            </p>
+          ) : null}
           {modelFieldVisible && aiConfigurationMode === "custom" ? (
             <AgentDialogEffortSection
+              connectionEffort={
+                connectionModels.value
+                  ? {
+                      levels: connectionModels.effortLevels,
+                      value:
+                        instanceEffort?.value ??
+                        instanceEffort?.agent?.effortLevel ??
+                        (selectedRuntime?.thinkingEnvVar
+                          ? envVars[selectedRuntime.thinkingEnvVar]
+                          : "") ??
+                        "",
+                      onChange: (value) => {
+                        if (instanceEffort) instanceEffort.onChange(value);
+                        else {
+                          const key = selectedRuntime?.thinkingEnvVar;
+                          if (key)
+                            setEnvVars((current) => ({
+                              ...current,
+                              [key]: value,
+                            }));
+                        }
+                      },
+                    }
+                  : undefined
+              }
               disabled={isPending || modelDiscoveryLoading}
               envVars={envVars}
               inheritedEnvVars={globalConfig.env_vars}

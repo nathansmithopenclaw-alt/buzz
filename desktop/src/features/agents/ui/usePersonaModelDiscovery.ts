@@ -1,3 +1,5 @@
+import { usesConnectionProvider } from "@/features/model-connections/modelChoices";
+import { CONNECTION_ENV } from "@/features/model-connections/api";
 import * as React from "react";
 
 import { discoverAgentModels } from "@/shared/api/agentModels";
@@ -211,6 +213,8 @@ export function usePersonaModelDiscovery({
   const selectedRuntimeDefaultArgs = selectedRuntime?.defaultArgs;
   const selectedRuntimeDefinitionEnv = selectedRuntime?.definitionEnv;
   const canDiscoverModelOptions =
+    (!envVars[CONNECTION_ENV]?.trim() ||
+      usesConnectionProvider(selectedRuntime)) &&
     open &&
     modelFieldVisible &&
     selectedRuntime?.availability === "available" &&

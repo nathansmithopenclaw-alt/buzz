@@ -36,11 +36,15 @@ type PickerInput = Omit<
   persistedModel?: string | null;
   provider: string;
   runtimeId: string;
+  connectionOptions?: readonly PersonaDropdownOption[];
+  connectionValue?: string | null;
 };
 
 export function useAgentDialogModelPicker(input: PickerInput) {
   const {
     discoveredOptions,
+    connectionOptions = [],
+    connectionValue,
     effort,
     effortModelQualifier = false,
     effortProvider = input.provider,
@@ -57,15 +61,22 @@ export function useAgentDialogModelPicker(input: PickerInput) {
     () =>
       modelEffortPresentation(
         mergeRuntimeModelCatalog({
-          currentModel: model,
-          discovered: discoveredOptions,
+          currentModel: connectionValue ? "" : model,
+          discovered: connectionValue ? null : discoveredOptions,
           provider,
           runtimeId,
         }),
         model,
         effortModelQualifier,
       ),
-    [discoveredOptions, model, provider, runtimeId, effortModelQualifier],
+    [
+      discoveredOptions,
+      model,
+      provider,
+      runtimeId,
+      effortModelQualifier,
+      connectionValue,
+    ],
   );
   return {
     ...relayMeshModelPickerState({
@@ -77,21 +88,58 @@ export function useAgentDialogModelPicker(input: PickerInput) {
       model,
       provider,
     }),
+    ...(connectionOptions.length || connectionValue
+      ? {
+          options: [
+            ...completeModelOptions,
+            ...connectionOptions.map(({ value, ...option }) => ({
+              ...option,
+              id: value,
+              savedConnection: true,
+            })),
+            ...(connectionValue &&
+            !connectionOptions.some(
+              (option) => option.value === connectionValue,
+            )
+              ? [
+                  {
+                    id: connectionValue,
+                    savedConnection: true,
+                    label: model,
+                    disabled: true,
+                    badge: "Connection unavailable — choose another",
+                  },
+                ]
+              : []),
+          ],
+          ...(connectionValue
+            ? {
+                selectValue: connectionValue,
+                isCustom: false,
+                showCustomInput: false,
+              }
+            : {}),
+        }
+      : {}),
     completeModelOptions,
-    effortValidationError: effortModelQualifier
+    effortValidationError: connectionValue
       ? null
-      : validateEffortSelection({
-          effort,
-          model,
-          nativeEffortOptions,
-          provider: effortProvider,
-          runtimeId: effortRuntimeId,
+      : effortModelQualifier
+        ? null
+        : validateEffortSelection({
+            effort,
+            model,
+            nativeEffortOptions,
+            provider: effortProvider,
+            runtimeId: effortRuntimeId,
+          }),
+    modelValidationError: connectionValue
+      ? null
+      : validateModelSelection(model, runtimeId, {
+          enabled: effortModelQualifier,
+          effortOptions: nativeEffortOptions,
+          persistedModel,
         }),
-    modelValidationError: validateModelSelection(model, runtimeId, {
-      enabled: effortModelQualifier,
-      effortOptions: nativeEffortOptions,
-      persistedModel,
-    }),
   };
 }
 

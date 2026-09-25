@@ -80,6 +80,7 @@ export default defineConfig({
         "**/edit-agent.spec.ts",
         "**/deepseek-model-selection.spec.ts",
         "**/model-connections.spec.ts",
+        "**/model-connection-picker.spec.ts",
         "**/doctor-cta-screenshots.spec.ts",
         "**/pubkey-display-screenshots.spec.ts",
         "**/file-attachment.spec.ts",

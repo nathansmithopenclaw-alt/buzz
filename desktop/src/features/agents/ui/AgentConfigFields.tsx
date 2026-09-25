@@ -1,3 +1,10 @@
+import { useConnectionModels } from "@/features/model-connections/useConnectionModels";
+import { CONNECTION_ENV } from "@/features/model-connections/api";
+import {
+  connectionEffortError,
+  connectionEffortLevels,
+} from "@/features/model-connections/modelChoices";
+import { ConnectionEffortField } from "@/features/model-connections/ConnectionEffortField";
 import { ProviderEndpointField } from "./ProviderEndpointField";
 /**
  * Controlled field group for global agent config (provider, model, effort, env vars).
@@ -279,6 +286,12 @@ export function AgentConfigFields({
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
     [bakedEnv],
   );
+  const connectionModels = useConnectionModels(
+    true,
+    selectedRuntime,
+    config.env_vars,
+    config.model ?? "",
+  );
   const selectedRuntimeId = selectedRuntime?.id ?? "";
   const providerFieldVisible = hasRenderableAgentConfigField(
     fieldModel,
@@ -323,14 +336,17 @@ export function AgentConfigFields({
     ? providerValue
     : providerForDiscovery;
   const dependentFieldsDisabled =
+    !connectionModels.options.length &&
     providerFieldVisible &&
     requireProviderForModelAndEffort &&
     configuredProviderValue.trim().length === 0;
-  const revealDependentFields = shouldRevealDependentConfigFields({
-    disclosure,
-    providerFieldVisible,
-    providerValue: configuredProviderValue,
-  });
+  const revealDependentFields =
+    connectionModels.options.length > 0 ||
+    shouldRevealDependentConfigFields({
+      disclosure,
+      providerFieldVisible,
+      providerValue: configuredProviderValue,
+    });
   const credentialProvider =
     providerFieldVisible && !isCustomProvider ? effectiveProvider : "";
   const credentialRuntimeId = runtimeSupportsLlmProviderSelection(
@@ -359,8 +375,20 @@ export function AgentConfigFields({
     runtimeFileConfig,
     runtimeId: credentialRuntimeId,
   });
+  const savedConnectionEffortError = connectionModels.value
+    ? connectionEffortError(
+        connectionModels.effortLevels,
+        effortPersistenceKey
+          ? (config.env_vars[effortPersistenceKey] ?? "")
+          : "",
+      )
+    : null;
   const configIsValid =
-    selectedRuntimeId.length > 0 && modelIsValid && credentialsValid;
+    selectedRuntimeId.length > 0 &&
+    modelIsValid &&
+    credentialsValid &&
+    !connectionModels.error &&
+    !savedConnectionEffortError;
   React.useEffect(() => {
     onValidityChange?.(configIsValid);
   }, [configIsValid, onValidityChange]);
@@ -378,18 +406,20 @@ export function AgentConfigFields({
     provider: providerForDiscovery,
     selectedRuntime,
   });
-  const modelControlVisible = shouldRenderModelControl({
-    discoveredModelOptions: dependentFieldsDisabled
-      ? null
-      : discoveredModelOptions,
-    modelDiscoveryLoading: dependentFieldsDisabled
-      ? false
-      : modelDiscoveryLoading,
-    modelDiscoverySuccessfulEmpty:
-      !dependentFieldsDisabled && modelDiscoverySuccessfulEmpty,
-    modelIsOptional,
-    showCustomModelOption,
-  });
+  const modelControlVisible =
+    connectionModels.options.length > 0 ||
+    shouldRenderModelControl({
+      discoveredModelOptions: dependentFieldsDisabled
+        ? null
+        : discoveredModelOptions,
+      modelDiscoveryLoading: dependentFieldsDisabled
+        ? false
+        : modelDiscoveryLoading,
+      modelDiscoverySuccessfulEmpty:
+        !dependentFieldsDisabled && modelDiscoverySuccessfulEmpty,
+      modelIsOptional,
+      showCustomModelOption,
+    });
 
   // Mount-time healing policy: onboarding (first-run, no higher layers) heals
   // on open. Evergreen surfaces (Settings, dialogs) only heal after an explicit
@@ -406,7 +436,7 @@ export function AgentConfigFields({
 
   const autoSelectedModelScopeRef = React.useRef<string | null>(null);
   React.useEffect(() => {
-    if (!autoSelectModelOnProviderChange) return;
+    if (!autoSelectModelOnProviderChange || connectionModels.value) return;
     if (!mayMutateDependentFieldsRef.current) return;
     const trimmedProvider = providerForDiscovery.trim();
     if (trimmedProvider.length === 0 || isCustomProvider) {
@@ -427,6 +457,7 @@ export function AgentConfigFields({
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, model: firstModel.id });
   }, [
+    connectionModels.value,
     config,
     discoveredModelOptions,
     isCustomProvider,
@@ -437,16 +468,17 @@ export function AgentConfigFields({
     selectedRuntimeId,
   ]);
 
-  const currentEffortForAutoClear = effortPersistenceKey
-    ? (config.env_vars[effortPersistenceKey] ?? "")
-    : "";
+  const currentEffortForAutoClear =
+    !connectionModels.value && effortPersistenceKey
+      ? (config.env_vars[effortPersistenceKey] ?? "")
+      : "";
 
   // Heal a stale model when the harness changes (e.g. Back → pick different
   // harness → Next in onboarding). Clear once the new catalog proves the saved
   // model unsupported; also clear when Model is omitted after a confirmed empty
   // catalog. Never clear on failure/unavailable — transient errors must not erase.
   React.useEffect(() => {
-    if (!healOnMount) return;
+    if (!healOnMount || connectionModels.value) return;
     const currentModel = (config.model ?? "").trim();
     if (currentModel.length === 0) return;
     if (modelDiscoveryLoading) return;
@@ -467,6 +499,7 @@ export function AgentConfigFields({
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
+    connectionModels.value,
     config,
     discoveredModelOptions,
     modelControlVisible,
@@ -531,12 +564,20 @@ export function AgentConfigFields({
     userEditedProviderRef.current = true;
     const previousApiKey = getProviderApiKeyEnvVar(effectiveProvider);
     if (value === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
-      const nextEnvVars = { ...config.env_vars };
+      const nextEnvVars: Record<string, string> = {
+        ...config.env_vars,
+        [CONNECTION_ENV]: "",
+      };
       if (!preserveCredentialEnvVarsOnProviderChange && previousApiKey) {
         delete nextEnvVars[previousApiKey];
       }
       onIsCustomProviderChange(true);
-      onConfigChange({ ...config, env_vars: nextEnvVars, provider: null });
+      onConfigChange({
+        ...config,
+        env_vars: nextEnvVars,
+        provider: null,
+        model: connectionModels.value ? null : config.model,
+      });
       return;
     }
     const nextProvider =
@@ -544,7 +585,10 @@ export function AgentConfigFields({
     const nextApiKey = getProviderApiKeyEnvVar(
       nextProvider ?? bakedProvider ?? "",
     );
-    const nextEnvVars = { ...config.env_vars };
+    const nextEnvVars: Record<string, string> = {
+      ...config.env_vars,
+      [CONNECTION_ENV]: "",
+    };
     if (
       !preserveCredentialEnvVarsOnProviderChange &&
       previousApiKey &&
@@ -552,7 +596,9 @@ export function AgentConfigFields({
     ) {
       delete nextEnvVars[previousApiKey];
     }
-    const providerChanged = nextProvider !== (config.provider ?? null);
+    const providerChanged =
+      Boolean(connectionModels.value) ||
+      nextProvider !== (config.provider ?? null);
 
     onIsCustomProviderChange(false);
     onConfigChange({
@@ -569,13 +615,42 @@ export function AgentConfigFields({
   }
 
   function handleCustomProviderInput(value: string) {
-    onConfigChange({ ...config, provider: value || null });
+    onConfigChange({
+      ...config,
+      provider: value || null,
+      env_vars: { ...config.env_vars, [CONNECTION_ENV]: "" },
+    });
   }
 
   function handleModelChange(value: string) {
+    const choice = connectionModels.resolve(value);
+    if (choice) {
+      const env: Record<string, string> = {
+        ...config.env_vars,
+        [CONNECTION_ENV]: choice.connection.id,
+      };
+      const support = selectedRuntime?.modelConnection;
+      const key = selectedRuntime?.thinkingEnvVar;
+      if (
+        key &&
+        support?.defaultEffort &&
+        connectionEffortLevels(
+          choice.connection,
+          choice.model,
+          support,
+        ).includes(support.defaultEffort)
+      )
+        env[key] = support.defaultEffort;
+      onConfigChange({ ...config, model: choice.model, env_vars: env });
+      return;
+    }
+    if (value.startsWith("saved-connection:")) return;
     onConfigChange({
       ...config,
       model: config.provider === "relay-mesh" ? value || "auto" : value || null,
+      env_vars: connectionModels.value
+        ? { ...config.env_vars, [CONNECTION_ENV]: "" }
+        : config.env_vars,
     });
   }
 
@@ -807,6 +882,8 @@ export function AgentConfigFields({
       {modelControlVisible ? (
         <div className={showDescriptions ? fieldClassName : undefined}>
           <AgentModelField
+            connectionOptions={connectionModels.options}
+            connectionValue={connectionModels.value}
             allowDefaultModel={fallbackModel !== null}
             defaultModelLabel={
               fallbackModel
@@ -855,8 +932,35 @@ export function AgentConfigFields({
         </div>
       ) : null}
 
+      {connectionModels.error ? (
+        <p role="alert" className="text-xs text-destructive">
+          {connectionModels.error}
+        </p>
+      ) : null}
+      {savedConnectionEffortError ? (
+        <p role="alert" className="text-xs text-destructive">
+          {savedConnectionEffortError}
+        </p>
+      ) : null}
       {/* Thinking / Effort */}
-      {effortFieldVisible ? (
+      {connectionModels.value ? (
+        <ConnectionEffortField
+          disabled={dependentFieldsDisabled}
+          effort={{
+            levels: connectionModels.effortLevels,
+            value: currentEffort,
+            onChange: (value) => {
+              const key = selectedRuntime?.thinkingEnvVar;
+              if (key)
+                onConfigChange({
+                  ...config,
+                  env_vars: { ...config.env_vars, [key]: value },
+                });
+            },
+          }}
+        />
+      ) : null}
+      {!connectionModels.value && effortFieldVisible ? (
         <div className={blockClassName}>
           <EffortSelectField
             currentEffort={dependentFieldsDisabled ? "" : currentEffort}
