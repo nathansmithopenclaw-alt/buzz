@@ -320,7 +320,7 @@ pub(crate) const BUZZ_PI_ACP_NAME: &str = "buzz-pi-acp";
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
 /// All four fields are **required** by the schema (`args` and `env` may be empty arrays).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct McpServer {
     pub name: String,
     pub command: String,
@@ -329,7 +329,7 @@ pub struct McpServer {
 }
 
 /// A single environment variable for an MCP server.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EnvVar {
     pub name: String,
     pub value: String,
@@ -436,6 +436,8 @@ fn build_initialize_params() -> serde_json::Value {
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
 pub struct AcpClient {
+    /// Private MCP launch files, retained for reconnects until session teardown.
+    mcp_launch_files: HashMap<String, crate::mcp_launch::LaunchFiles>,
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
     /// Write end of the agent's stdin pipe.
@@ -946,6 +948,7 @@ impl AcpClient {
             Ok(Err(e)) => tracing::debug!("child wait error after kill: {e}"),
             Err(_) => tracing::warn!("child did not exit within 5s after SIGKILL — abandoning"),
         }
+        self.mcp_launch_files.clear();
     }
 
     /// A token switch cannot acknowledge teardown when child exit is unconfirmed.
@@ -953,6 +956,7 @@ impl AcpClient {
         // Capture the group before polling: an exited adapter can still have live
         // tool descendants, and try_wait clears the child's process identity.
         let Some(pid) = self.child.id() else {
+            self.mcp_launch_files.clear();
             return Ok(());
         };
         #[cfg(unix)]
@@ -974,6 +978,7 @@ impl AcpClient {
         tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait())
             .await
             .map_err(|_| AcpError::Protocol("Old account adapter exit is unconfirmed".into()))??;
+        self.mcp_launch_files.clear();
         Ok(())
     }
 
@@ -1140,6 +1145,7 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
         Ok(Self {
+            mcp_launch_files: HashMap::new(),
             child,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
@@ -1281,6 +1287,7 @@ impl AcpClient {
         if let Ok(harness) = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS") {
             validate_subscription_project_context(&harness, std::path::Path::new(cwd))?;
         }
+        let (mcp_servers, launch_files) = crate::mcp_launch::prepare(mcp_servers)?;
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -1318,6 +1325,9 @@ impl AcpClient {
             .as_str()
             .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
             .to_owned();
+        if let Some(files) = launch_files {
+            self.mcp_launch_files.insert(session_id.clone(), files);
+        }
         // Per-session readiness (design v2.1 L1.3/L2.1): refines the
         // init-selected mode but never widens it. Unarmed fires the loud
         // operator notice here; there is no raw or typed listening on that
@@ -1389,6 +1399,7 @@ impl AcpClient {
         if let Ok(harness) = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS") {
             validate_subscription_project_context(&harness, std::path::Path::new(cwd))?;
         }
+        let (mcp_servers, launch_files) = crate::mcp_launch::prepare(mcp_servers)?;
         let result = self
             .send_request(
                 "session/load",
@@ -1397,6 +1408,9 @@ impl AcpClient {
                 }),
             )
             .await?;
+        if let Some(files) = launch_files {
+            self.mcp_launch_files.insert(session_id.to_owned(), files);
+        }
         self.record_standard_session_model(session_id, &result);
         Ok(SessionNewResponse {
             session_id: session_id.to_owned(),
@@ -1674,7 +1688,9 @@ impl AcpClient {
         });
 
         tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
-        self.write_ndjson(&msg).await
+        self.write_ndjson(&msg).await?;
+        self.mcp_launch_files.remove(session_id);
+        Ok(())
     }
 
     /// Returns `true` if a `session/prompt` request is currently in flight.

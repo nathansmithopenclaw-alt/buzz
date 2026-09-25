@@ -142,7 +142,7 @@ fn scope_root(ctx: &PromptContext, scope: &SessionScope) -> Option<PathBuf> {
 }
 
 // Preserve a multicall personality symlink (Sprig dispatches from argv[0]).
-fn reporter_command() -> anyhow::Result<PathBuf> {
+pub(crate) fn reporter_command() -> anyhow::Result<PathBuf> {
     let executable = std::env::current_exe()?;
     let invocation = PathBuf::from(
         std::env::args_os()

@@ -11,6 +11,7 @@ impl AcpClient {
             serde_json::json!({ "sessionId": session_id }),
         )
         .await?;
+        self.mcp_launch_files.remove(session_id);
         Ok(())
     }
 }

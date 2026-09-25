@@ -11,6 +11,7 @@ mod engram_fetch;
 mod execution_evidence;
 mod filter;
 mod live_effort;
+mod mcp_launch;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -3131,6 +3132,9 @@ mod replay_floor_tests {
 }
 
 pub fn run() -> Result<()> {
+    if is_subcommand("mcp-launch") {
+        return mcp_launch::run();
+    }
     config::propagate_legacy_env_vars();
     tokio_main()
 }
