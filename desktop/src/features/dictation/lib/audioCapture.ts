@@ -70,6 +70,33 @@ export class MicrophoneUnavailableError extends Error {
   }
 }
 
+/**
+ * Voice processing for a capture. The system default (usually the built-in
+ * mic beside the speakers) keeps echo cancellation, noise suppression and
+ * gain control. A microphone the user picked is captured as-is: WebKit's
+ * voice processing silences some inputs outright (measured on macOS: a
+ * BlackHole capture peaks at 0.0001 with it and 0.79 without), and headsets
+ * and interfaces have no speaker echo to cancel.
+ */
+export function captureProcessing(deviceId: string | null | undefined): {
+  echoCancellation: boolean;
+  noiseSuppression: boolean;
+  autoGainControl: boolean;
+} {
+  const processed = !deviceId;
+  return {
+    echoCancellation: processed,
+    noiseSuppression: processed,
+    autoGainControl: processed,
+  };
+}
+
+/** Briefly opens the default mic so device labels and ids become visible. */
+export async function revealAudioInputs(): Promise<void> {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  for (const track of stream.getTracks()) track.stop();
+}
+
 /** RMS of one frame. */
 export function frameRms(frame: Float32Array): number {
   if (frame.length === 0) return 0;
@@ -91,9 +118,7 @@ export async function startDictationCapture(
   const open = (deviceId: string | null | undefined) =>
     navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
+        ...captureProcessing(deviceId),
         sampleRate: 48_000,
         ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
       },

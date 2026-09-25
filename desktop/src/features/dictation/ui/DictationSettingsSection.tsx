@@ -29,6 +29,7 @@ import {
 import {
   DICTATION_DEVICE_STORAGE_KEY,
   listAudioInputs,
+  revealAudioInputs,
 } from "../lib/audioCapture";
 import { useDictationSettings } from "../useDictationSettings";
 import { hotkeyLabel } from "./DictationButton";
@@ -92,17 +93,29 @@ function useMicrophoneChoice(enabled: boolean) {
     { deviceId: string; label: string }[]
   >([]);
   const [deviceId, setDeviceId] = React.useState(readDevice);
+  const refresh = React.useCallback(
+    () =>
+      listAudioInputs()
+        .then(setInputs)
+        .catch(() => setInputs([])),
+    [],
+  );
   React.useEffect(() => {
     if (!enabled) return;
-    const refresh = () =>
-      void listAudioInputs()
-        .then(setInputs)
-        .catch(() => setInputs([]));
-    refresh();
-    navigator.mediaDevices?.addEventListener?.("devicechange", refresh);
+    const onChange = () => void refresh();
+    onChange();
+    navigator.mediaDevices?.addEventListener?.("devicechange", onChange);
     return () =>
-      navigator.mediaDevices?.removeEventListener?.("devicechange", refresh);
-  }, [enabled]);
+      navigator.mediaDevices?.removeEventListener?.("devicechange", onChange);
+  }, [enabled, refresh]);
+  // Until Buzz has used the mic this session, WebKit hides device names and
+  // ids; opening the default mic for a moment reveals them.
+  const reveal = () =>
+    void revealAudioInputs()
+      .then(refresh)
+      .catch(() =>
+        toast.error("Allow Buzz to use your microphone to list microphones."),
+      );
   const choose = (next: string) => {
     setDeviceId(next);
     try {
@@ -112,7 +125,7 @@ function useMicrophoneChoice(enabled: boolean) {
       toast.error("Buzz could not save your microphone choice.");
     }
   };
-  return { inputs, deviceId, choose };
+  return { inputs, deviceId, choose, reveal };
 }
 
 /**
@@ -230,26 +243,41 @@ export function DictationSettingsSection() {
         <div className="min-w-0">
           <div className="font-medium">Microphone</div>
           <div className="text-xs text-muted-foreground">
-            Falls back to the system default if this one is unplugged.
+            The system default gets echo cancellation. A chosen microphone is
+            used as-is, and falls back to the default if it's unplugged.
           </div>
         </div>
-        <select
-          aria-label="Dictation microphone"
-          className={SELECT_CLASS}
-          onChange={(e) => microphone.choose(e.target.value)}
-          value={
-            microphone.inputs.some((i) => i.deviceId === microphone.deviceId)
-              ? microphone.deviceId
-              : ""
-          }
-        >
-          <option value="">System default</option>
-          {microphone.inputs.map((input) => (
-            <option key={input.deviceId} value={input.deviceId}>
-              {input.label}
-            </option>
-          ))}
-        </select>
+        <div className="flex flex-wrap items-center gap-2">
+          {microphone.inputs.length === 0 ? (
+            <Button
+              onClick={microphone.reveal}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              Find microphones
+            </Button>
+          ) : null}
+          <select
+            aria-label="Dictation microphone"
+            className={SELECT_CLASS}
+            onChange={(e) => microphone.choose(e.target.value)}
+            value={microphone.deviceId}
+          >
+            <option value="">System default</option>
+            {microphone.deviceId &&
+            !microphone.inputs.some(
+              (input) => input.deviceId === microphone.deviceId,
+            ) ? (
+              <option value={microphone.deviceId}>Saved microphone</option>
+            ) : null}
+            {microphone.inputs.map((input) => (
+              <option key={input.deviceId} value={input.deviceId}>
+                {input.label}
+              </option>
+            ))}
+          </select>
+        </div>
       </SettingsOptionRow>
 
       <SettingsOptionRow>

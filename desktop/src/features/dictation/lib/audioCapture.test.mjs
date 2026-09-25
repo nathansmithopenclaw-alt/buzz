@@ -90,3 +90,34 @@ test("the picker lists real inputs only, with a label even before permission", a
     { deviceId: "bh", label: "Microphone 2" },
   ]);
 });
+
+test("the system default keeps voice processing; a chosen microphone is captured as-is", async () => {
+  const seen = [];
+  installMedia(async (constraints) => {
+    seen.push(constraints.audio);
+    return stream();
+  });
+  const { startDictationCapture } = await import("./audioCapture.ts");
+  (await startDictationCapture({})).cancel();
+  (await startDictationCapture({ deviceId: "blackhole" })).cancel();
+  assert.equal(seen[0].echoCancellation, true);
+  assert.equal(seen[0].noiseSuppression, true);
+  assert.equal(seen[0].autoGainControl, true);
+  assert.equal(seen[0].deviceId, undefined);
+  assert.equal(seen[1].echoCancellation, false);
+  assert.equal(seen[1].noiseSuppression, false);
+  assert.equal(seen[1].autoGainControl, false);
+  assert.deepEqual(seen[1].deviceId, { exact: "blackhole" });
+});
+
+test("falling back to the default restores voice processing", async () => {
+  const seen = [];
+  installMedia(async (constraints) => {
+    seen.push(constraints.audio);
+    if (constraints.audio.deviceId) throw domError("NotFoundError");
+    return stream();
+  });
+  const { startDictationCapture } = await import("./audioCapture.ts");
+  (await startDictationCapture({ deviceId: "gone" })).cancel();
+  assert.equal(seen[1].echoCancellation, true);
+});
