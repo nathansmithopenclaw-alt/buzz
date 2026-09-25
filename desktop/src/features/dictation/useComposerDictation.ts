@@ -269,10 +269,12 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     const formattedRaw = applySpokenFormatting(raw);
     const verbatim = () => resolveVerbatim(formattedRaw, session.roster);
     const settings = session.settings;
+    // Only an explicit Off skips the backend. Whether a source may run (the
+    // cloud toggle, a local connection) is the backend's decision; a
+    // not_configured result comes back as verbatim with no note.
     if (
       !settings ||
       settings.cleanup.kind === "off" ||
-      !settings.cloudCleanupEnabled ||
       session.backendId === null
     ) {
       releaseBackend(session.backendId);
