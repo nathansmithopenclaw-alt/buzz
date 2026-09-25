@@ -366,6 +366,13 @@ mod tests {
     }
     #[tokio::test]
     async fn explicit_qualification_checks_streamed_tools_followup_and_endpoint_effort() {
+        qualification_with_followup(true).await;
+    }
+    #[tokio::test]
+    async fn tool_result_without_expected_answer_does_not_qualify() {
+        qualification_with_followup(false).await;
+    }
+    async fn qualification_with_followup(answer_after_tool: bool) {
         use axum::{
             extract::{Path, State},
             routing::post,
@@ -374,7 +381,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
         async fn handle(
-            State(seen): State<Arc<Mutex<Vec<Value>>>>,
+            State((seen, answer_after_tool)): State<(Arc<Mutex<Vec<Value>>>, bool)>,
             Path(path): Path<String>,
             Json(payload): Json<Value>,
         ) -> (axum::http::StatusCode, String) {
@@ -411,10 +418,15 @@ mod tests {
                 }
             } else {
                 assert!(payload.to_string().contains("call"));
+                let answer = if answer_after_tool {
+                    NONCE
+                } else {
+                    "unrelated answer"
+                };
                 match path.as_str() {
-                    "chat/completions" => json!({"choices":[{"message":{"content":NONCE}}]}),
-                    "responses" => json!({"output":[{"type":"message","content":[{"type":"output_text","text":NONCE}]}]}),
-                    "messages" => json!({"content":[{"type":"text","text":NONCE}]}),
+                    "chat/completions" => json!({"choices":[{"message":{"content":answer}}]}),
+                    "responses" => json!({"output":[{"type":"message","content":[{"type":"output_text","text":answer}]}]}),
+                    "messages" => json!({"content":[{"type":"text","text":answer}]}),
                     _ => panic!("unexpected path"),
                 }.to_string()
             };
@@ -424,22 +436,26 @@ mod tests {
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
         let app = Router::new()
             .route("/v1/{*path}", post(handle))
-            .with_state(seen.clone());
+            .with_state((seen.clone(), answer_after_tool));
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let qualified = qualify(&base, None, "local", Some(65536)).await;
         assert!(qualified
             .protocols
             .iter()
-            .all(|check| check.tool_round_trip));
+            .all(|check| check.tool_round_trip == answer_after_tool));
         assert_eq!(
             qualified
                 .check("local", Protocol::AnthropicMessages)
                 .unwrap()
                 .effort_levels,
-            ["low", "medium", "xhigh"]
+            if answer_after_tool {
+                vec!["low", "medium", "xhigh"]
+            } else {
+                vec![]
+            }
         );
         let requests = seen.lock().unwrap();
-        assert_eq!(requests.len(), 11);
+        assert_eq!(requests.len(), if answer_after_tool { 11 } else { 6 });
         assert!(requests.iter().all(|request| request["model"] == "local"));
         assert_eq!(qualified.output_token_limit, Some(8192));
         task.abort();
