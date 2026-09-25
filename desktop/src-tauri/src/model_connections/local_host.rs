@@ -1,4 +1,5 @@
-//! Literal-host classification for display grouping, never authorization.
+//! Literal-host classification for model grouping and dictation's cloud-cleanup
+//! privacy gate. A local result permits cleanup with Cloud cleanup switched off.
 
 use std::net::IpAddr;
 
