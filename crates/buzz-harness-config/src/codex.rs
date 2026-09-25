@@ -1,4 +1,4 @@
-//! Codex 0.144 native metadata and config for an explicitly selected endpoint.
+//! Codex 0.153.4 native metadata and config for an explicitly selected endpoint.
 //! The API key is referenced by env name, never accepted by these functions.
 use serde_json::{json, Value};
 use std::path::Path;
@@ -6,7 +6,18 @@ use std::path::Path;
 pub const PROVIDER_KEY_ENV: &str = "BUZZ_LOCAL_MODEL_API_KEY";
 
 /// Changes to this list require rerunning native key-path and namespace controls.
-pub const QUALIFIED_VERSIONS: &[(u64, u64, u64)] = &[(0, 144, 0)];
+pub const QUALIFIED_VERSIONS: &[(u64, u64, u64)] = &[(0, 153, 4)];
+
+/// Probe the adapter's bundled CLI through its own Node launcher. `cli -V`
+/// forwards to codex.js; `--version` would report codex-acp's version instead.
+pub fn bundled_version(adapter: &Path, augmented_path: Option<&str>) -> Option<(u64, u64, u64)> {
+    let mut command = std::process::Command::new(adapter);
+    command.args(["cli", "-V"]).env_remove("CODEX_PATH");
+    if let Some(path) = augmented_path {
+        command.env("PATH", path);
+    }
+    crate::cli_version::probe_command(&mut command)
+}
 
 pub fn validate_version(version: Option<(u64, u64, u64)>) -> Result<(), String> {
     if version.is_some_and(|version| QUALIFIED_VERSIONS.contains(&version)) {
@@ -15,7 +26,7 @@ pub fn validate_version(version: Option<(u64, u64, u64)>) -> Result<(), String> 
     let installed = version
         .map(|(a, b, c)| format!("{a}.{b}.{c}"))
         .unwrap_or_else(|| "unknown".into());
-    Err(format!("Saved-connection Codex requires qualified CLI 0.144.0; installed version is {installed}. Hosted Codex is unaffected."))
+    Err(format!("Saved-connection Codex requires qualified CLI 0.153.4; installed version is {installed}. Hosted Codex is unaffected."))
 }
 
 pub fn clear_shell_snapshots(home: &Path) -> Result<(), String> {
@@ -65,7 +76,7 @@ pub fn overrides(model: &str, context: u64) -> Value {
         "model_context_window":context,
         "model_auto_compact_token_limit":context.saturating_mul(3)/4,
         "project_root_markers":[".git"],
-        "features.shell_snapshot":false,
+        "features.shell_snapshot":false,"features.view_image":false,
         "features.apps":false,"features.plugins":false,"features.remote_plugin":false,
         "skills.include_instructions":false,"skills.bundled.enabled":false,
         "web_search":"disabled","allow_login_shell":false,
@@ -96,12 +107,31 @@ pub fn home_config(base_url: &str, catalog_path: &Path) -> Result<String, String
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn bundled_probe_uses_the_adapters_native_cli_forwarding_route() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let adapter = root.path().join("codex-acp");
+        std::fs::write(
+            &adapter,
+            "#!/bin/sh\n[ \"$1\" = cli ] && [ \"$2\" = -V ] || exit 1\necho 'codex-cli 0.153.4'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // No Codex executable exists on this PATH. The adapter resolves its own.
+        assert_eq!(
+            bundled_version(&adapter, Some(root.path().to_str().unwrap())),
+            Some((0, 153, 4))
+        );
+    }
+
     #[test]
     fn unqualified_versions_name_installed_and_qualified_versions() {
-        validate_version(Some((0, 144, 0))).unwrap();
+        validate_version(Some((0, 153, 4))).unwrap();
         for version in [Some((0, 143, 0)), Some((0, 145, 0)), None] {
             let error = validate_version(version).unwrap_err();
-            assert!(error.contains("0.144.0"));
+            assert!(error.contains("0.153.4"));
             let actual = version
                 .map(|(a, b, c)| format!("{a}.{b}.{c}"))
                 .unwrap_or_else(|| "unknown".into());

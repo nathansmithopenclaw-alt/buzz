@@ -5,7 +5,6 @@ use std::io::{BufRead, Write};
 #[ignore = "requires installed qualified Codex CLI and adapter; localhost only"]
 fn installed_native_projection_exec_keeps_the_whole_home_key_free() {
     let adapter = std::env::var("BUZZ_TEST_CODEX_ADAPTER").expect("adapter path required");
-    let cli = std::env::var("BUZZ_TEST_CODEX_CLI").expect("CLI path required");
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex_connection_recorder.py");
     let mut recorder = Command::new("python3")
@@ -44,7 +43,7 @@ fn installed_native_projection_exec_keeps_the_whole_home_key_free() {
         .current_dir(&workspace)
         .env("HOME", &user_home)
         .env("PATH", std::env::var_os("PATH").unwrap())
-        .env("CODEX_PATH", cli)
+        .env("BUZZ_ACP_AGENT_COMMAND", &adapter)
         .env("TMPDIR", root.path())
         .env("TERM", "dumb");
     let agent = "a".repeat(64);
@@ -99,6 +98,7 @@ fn installed_native_projection_exec_keeps_the_whole_home_key_free() {
     assert_eq!(result["completed"], true);
     assert_eq!(result["home_key_occurrences"], 0);
     assert_eq!(result["mode"], "agent");
+    assert_eq!(result["metadata_warnings"], 0);
     let requests = result["requests"].as_array().unwrap();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1]["exec_succeeded"], true);
@@ -107,8 +107,19 @@ fn installed_native_projection_exec_keeps_the_whole_home_key_free() {
         assert_eq!(request["auth_matches"], true);
         assert_eq!(request["key_in_result"], 0);
         assert_eq!(request["global_skill_markers"], 0);
+        for tool in request["tools"].as_array().unwrap() {
+            assert!(
+                !["view_image", "web_search", "apply_patch", "tool_search"]
+                    .contains(&tool["name"].as_str().unwrap_or("")),
+                "unexpected tool: {tool}"
+            );
+            assert!(!["web_search", "web_search_preview"]
+                .contains(&tool["type"].as_str().unwrap_or("")));
+        }
     }
     assert!(!Path::new(&home).join("auth.json").exists());
+    assert!(env.get("CODEX_PATH").and_then(Option::as_ref).is_none());
+    println!("bundled_native_control={result}");
 }
 
 #[cfg(unix)]
@@ -116,11 +127,13 @@ fn installed_native_projection_exec_keeps_the_whole_home_key_free() {
 fn version_mismatch_refuses_before_creating_a_connection_home() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
-    let cli = root.path().join("codex");
-    std::fs::write(&cli, "#!/bin/sh\necho 'codex-cli 0.145.0'\n").unwrap();
-    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let adapter = root.path().join("codex-acp");
+    std::fs::write(&adapter, "#!/bin/sh\necho 'codex-cli 0.154.0'\n").unwrap();
+    std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut command = Command::new("unused-adapter");
-    command.current_dir(root.path()).env("CODEX_PATH", cli);
+    command
+        .current_dir(root.path())
+        .env("BUZZ_ACP_AGENT_COMMAND", adapter);
     let row: ModelConnection = serde_json::from_value(serde_json::json!({
         "id":"test", "name":"Test", "base_url":"http://localhost/v1", "models":["model"],
         "qualification":{"revision":1,"model":"model","context_window":65536,"output_token_limit":8192,
@@ -137,7 +150,7 @@ fn version_mismatch_refuses_before_creating_a_connection_home() {
         &"a".repeat(64),
     )
     .unwrap_err();
-    assert!(error.contains("0.144.0"));
-    assert!(error.contains("0.145.0"));
+    assert!(error.contains("0.153.4"));
+    assert!(error.contains("0.154.0"));
     assert!(!runtimes.exists());
 }
