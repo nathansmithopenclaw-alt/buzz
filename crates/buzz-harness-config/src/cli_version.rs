@@ -1,6 +1,16 @@
 //! Bounded native CLI version probe shared with Desktop adapter discovery.
 use std::{path::Path, process::Command};
 pub fn probe(binary_path: &Path, augmented_path: Option<&str>) -> Option<(u64, u64, u64)> {
+    let mut command = Command::new(binary_path);
+    command.arg("--version");
+    if let Some(path) = augmented_path {
+        command.env("PATH", path);
+    }
+    probe_command(&mut command)
+}
+
+/// Read a bounded version response from an already configured launch command.
+pub fn probe_command(command: &mut Command) -> Option<(u64, u64, u64)> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     use std::time::{Duration, Instant};
     const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -9,11 +19,6 @@ pub fn probe(binary_path: &Path, augmented_path: Option<&str>) -> Option<(u64, u
     // inherits its descriptor, bounding the post-exit read cross-platform.
     let mut tmp = tempfile::tempfile().ok()?;
 
-    let mut command = Command::new(binary_path);
-    command.arg("--version");
-    if let Some(path) = augmented_path {
-        command.env("PATH", path);
-    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

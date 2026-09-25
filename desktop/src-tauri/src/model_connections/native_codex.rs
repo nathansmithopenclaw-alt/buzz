@@ -11,23 +11,23 @@ pub(super) fn apply(
     key: Option<&str>,
     agent: &str,
 ) -> Result<(), String> {
-    let cli = command
+    let adapter = command
         .get_envs()
-        .find(|(key, _)| *key == "CODEX_PATH")
+        .find(|(key, _)| *key == "BUZZ_ACP_AGENT_COMMAND")
         .and_then(|(_, value)| value)
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("CODEX_PATH").map(std::path::PathBuf::from))
-        .or_else(|| crate::managed_agents::resolve_command("codex"))
+        .or_else(|| crate::managed_agents::resolve_command("codex-acp"))
         .ok_or(
-            "Saved-connection Codex requires qualified CLI 0.144.0; installed version is unknown",
+            "Saved-connection Codex requires qualified CLI 0.153.4; installed version is unknown",
         )?;
     let path = command
         .get_envs()
         .find(|(key, _)| *key == "PATH")
         .and_then(|(_, value)| value)
         .and_then(|value| value.to_str());
-    codex::validate_version(buzz_harness_config::cli_version::probe(&cli, path))?;
-    command.env("CODEX_PATH", cli);
+    codex::validate_version(codex::bundled_version(&adapter, path))?;
+    // Same bundled codex.js launch as hosted agents; never select a global CLI.
+    command.env_remove("CODEX_PATH");
     let qualified = connection
         .qualification
         .as_ref()

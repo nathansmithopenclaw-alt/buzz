@@ -16,6 +16,7 @@ import time
 
 KEY = "synthetic-codex-product-test-key"
 requests = []
+notifications = []
 
 
 class Recorder(http.server.BaseHTTPRequestHandler):
@@ -39,6 +40,7 @@ class Recorder(http.server.BaseHTTPRequestHandler):
         rendered = json.dumps(payload)
         requests.append({
             "model": payload.get("model"),
+            "tools": [{"type": tool.get("type"), "name": tool.get("name")} for tool in payload.get("tools", [])],
             "key_in_result": sum(json.dumps(x).count(KEY) for x in results),
             "exec_succeeded": any("exited with code 0" in json.dumps(x) and "PATH=" in json.dumps(x) for x in results),
             "global_skill_markers": rendered.count("SYNTHETIC_GLOBAL_SKILL_MARKER"),
@@ -69,8 +71,9 @@ if not select.select([sys.stdin], [], [], 30)[0]:
 spec = json.loads(sys.stdin.readline())
 env = {key: value for key, value in spec["env"].items() if value is not None}
 skill = pathlib.Path(env["HOME"]) / ".agents/skills/control/SKILL.md"
-skill.parent.mkdir(parents=True, exist_ok=True)
-skill.write_text("---\nname: product-control\ndescription: SYNTHETIC_GLOBAL_SKILL_MARKER\n---\nLocal test fixture.\n")
+if spec.get("plant_skill", True):
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text("---\nname: product-control\ndescription: SYNTHETIC_GLOBAL_SKILL_MARKER\n---\nLocal test fixture.\n")
 proc = subprocess.Popen([spec["adapter"]], cwd=spec["cwd"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
 sequence = 0
 buffer = b""
@@ -101,6 +104,8 @@ def rpc(method, params):
                 frame = json.loads(line)
             except ValueError:
                 continue
+            if frame.get("method") == "session/update":
+                notifications.append(json.dumps(frame).count("Defaulting to fallback metadata"))
             if "method" in frame and "id" in frame:
                 if frame["method"] == "session/request_permission":
                     option = next(x for x in frame["params"]["options"] if x["kind"] == "allow_once")
@@ -118,8 +123,8 @@ result = {"completed": False}
 try:
     rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
     rpc("providers/set", {"providerId": "openai", "apiType": "openai", "baseUrl": base, "headers": {}})
-    session = rpc("session/new", {"cwd": spec["cwd"], "mcpServers": []})
-    answer = rpc("session/prompt", {"sessionId": session["sessionId"], "prompt": [{"type": "text", "text": "Run the environment control and finish."}]})
+    session = rpc("session/new", {"cwd": spec["cwd"], "mcpServers": spec.get("session_servers", [])})
+    answer = rpc("session/prompt", {"sessionId": session["sessionId"], "prompt": [{"type": "text", "text": spec.get("prompt", "Run the environment control and finish.")}]})
     result["completed"] = answer.get("stopReason") == "end_turn"
     result["mode"] = session.get("modes", {}).get("currentModeId")
 finally:
@@ -136,4 +141,5 @@ finally:
     home = pathlib.Path(env["CODEX_HOME"])
     result["home_key_occurrences"] = sum(path.read_bytes().count(KEY.encode()) for path in home.rglob("*") if path.is_file() and not path.is_symlink())
     result["requests"] = requests
+    result["metadata_warnings"] = sum(notifications)
     print(json.dumps(result), flush=True)

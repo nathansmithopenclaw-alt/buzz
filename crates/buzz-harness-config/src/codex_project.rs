@@ -1,4 +1,4 @@
-//! Codex 0.144 project-layer boundary for connection agents.
+//! Codex 0.153.4 project-layer boundary for connection agents.
 //!
 //! Its generated home pins `project_root_markers = [".git"]`. Native discovery
 //! finds the nearest marker, or uses cwd itself when none exists, then reads
@@ -25,7 +25,11 @@ pub fn validate(cwd: &Path) -> Result<(), String> {
     for ancestor in cwd.ancestors() {
         let marker = ancestor.join(".git");
         match std::fs::metadata(&marker) {
-            Ok(_) => {
+            Ok(meta) => {
+                // Native 0.153.4 ignores an uninitialized .git directory.
+                if meta.is_dir() && std::fs::metadata(marker.join("HEAD")).is_err() {
+                    continue;
+                }
                 root = ancestor;
                 break;
             }
@@ -194,5 +198,20 @@ mod tests {
         assert!(validate(workspace.path())
             .unwrap_err()
             .contains("Cannot read"));
+    }
+    #[test]
+    fn empty_git_directory_does_not_hide_a_parent_project_layer() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        std::fs::write(repo.path().join(".git/HEAD"), "ref: refs/heads/main").unwrap();
+        config(
+            repo.path(),
+            "[mcp_servers.parent_account]\ncommand='fixture'\n",
+        );
+        let cwd = repo.path().join("nested");
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        assert!(validate(&cwd).unwrap_err().contains("parent_account"));
+        std::fs::write(cwd.join(".git/HEAD"), "ref: refs/heads/main").unwrap();
+        validate(&cwd).unwrap();
     }
 }

@@ -1183,18 +1183,20 @@ impl AcpClient {
                     .map(std::ffi::OsString::from)
                     .or_else(|| std::env::var_os(name))
             };
-            let cli = child_env("CODEX_PATH").ok_or_else(|| AcpError::Protocol("Saved-connection Codex requires qualified CLI 0.144.0; installed version is unknown".into()))?;
             let path = child_env("PATH");
-            buzz_harness_config::codex::validate_version(buzz_harness_config::cli_version::probe(
-                std::path::Path::new(&cli),
-                path.as_deref().and_then(|path| path.to_str()),
-            ))
+            buzz_harness_config::codex::validate_version(
+                buzz_harness_config::codex::bundled_version(
+                    std::path::Path::new(command),
+                    path.as_deref().and_then(|path| path.to_str()),
+                ),
+            )
             .map_err(AcpError::Protocol)?;
             let home = child_env("CODEX_HOME").ok_or_else(|| {
                 AcpError::Protocol("Codex connection requires its generated home".into())
             })?;
             buzz_harness_config::codex::clear_shell_snapshots(std::path::Path::new(&home))
                 .map_err(AcpError::Protocol)?;
+            cmd.env_remove("CODEX_PATH");
         }
         let mut child = cmd.spawn()?;
 
@@ -4878,14 +4880,17 @@ mod tests {
         if std::env::var_os(MARKER).is_none() {
             let root = tempfile::tempdir().unwrap();
             let adapter = root.path().join("adapter.py");
-            std::fs::write(&adapter, r#"import json, os, sys
+            std::fs::write(&adapter, r#"#!/usr/bin/python3
+import json, os, sys
+if sys.argv[1:] == ['cli', '-V']:
+    assert 'CODEX_PATH' not in os.environ
+    print('codex-cli 0.153.4')
+    sys.exit(0)
 for line in sys.stdin:
     req=json.loads(line)
-    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':json.loads(os.environ['CODEX_CONFIG'])}),flush=True)
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':{**json.loads(os.environ['CODEX_CONFIG']), '_codex_path_present': 'CODEX_PATH' in os.environ}}),flush=True)
 "#).unwrap();
-            let cli = root.path().join("codex");
-            std::fs::write(&cli, "#!/bin/sh\necho 'codex-cli 0.144.0'\n").unwrap();
-            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -4896,8 +4901,8 @@ for line in sys.stdin:
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .env(MARKER, adapter)
                 .env(buzz_harness_config::CODEX_SESSION_ONLY_ENV, "1")
-                .env("CODEX_PATH", cli)
                 .env("CODEX_HOME", root.path())
+                .env("CODEX_PATH", "must-not-use-global-codex")
                 .env(
                     "CODEX_CONFIG",
                     buzz_harness_config::codex::overrides("exact-model", 65536).to_string(),
@@ -4914,7 +4919,7 @@ for line in sys.stdin:
             return;
         }
         let adapter = std::env::var(MARKER).unwrap();
-        let mut client = AcpClient::spawn("/usr/bin/python3", &[adapter], &[
+        let mut client = AcpClient::spawn(&adapter, &[], &[
             (buzz_harness_config::CODEX_SESSION_ONLY_ENV.into(), "0".into()),
             ("CODEX_CONFIG".into(), r#"{"mcp_servers":{"external":{"command":"must-not-run"}},"sandbox_mode":"danger-full-access","approval_policy":"never","model_provider":"redirect"}"#.into())
         ], true).await.unwrap();
@@ -4923,6 +4928,7 @@ for line in sys.stdin:
             .await
             .unwrap();
         assert!(result.get("mcp_servers").is_none());
+        assert_eq!(result["_codex_path_present"], false);
         assert_eq!(result["sandbox_mode"], "workspace-write");
         assert_eq!(result["approval_policy"], "on-request");
         assert_eq!(result["model_provider"], "custom-gateway");
