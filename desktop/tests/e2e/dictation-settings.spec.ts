@@ -144,8 +144,7 @@ test.describe("Dictation settings", () => {
       await expect(list.getByText(group, { exact: true })).toBeVisible();
     await expect(
       page.getByRole("option", {
-        name: "Gemini 3.8 Flash · Recommended",
-        exact: true,
+        name: /Gemini 3.8 Flash.*Recommended/,
       }),
     ).toBeVisible();
     await expect(

@@ -4,7 +4,7 @@ import type { CleanupCatalog, DictationCleanupSource } from "../api";
 export const RECOMMENDED_CONNECTION_MODEL = "google/gemini-3.8-flash";
 export const cleanupValue = (source: DictationCleanupSource) =>
   JSON.stringify(source);
-type Choice = { value: string; label: string; group?: string };
+type Choice = { value: string; label: string; group?: string; badge?: string };
 
 /** Group labels never change the persisted cleanup source. */
 export function cleanupOptions(
@@ -16,8 +16,20 @@ export function cleanupOptions(
   const options: Choice[] = [
     { value: cleanupValue({ kind: "off" }), label: "Off (as spoken)" },
   ];
-  const add = (source: DictationCleanupSource, label: string, group: string) =>
-    options.push({ value: cleanupValue(source), label, group });
+  const add = (
+    source: Exclude<DictationCleanupSource, { kind: "off" }>,
+    label: string,
+    group: string,
+  ) =>
+    options.push({
+      value: cleanupValue(source),
+      label,
+      group,
+      badge:
+        source.model === RECOMMENDED_CONNECTION_MODEL
+          ? "Recommended"
+          : undefined,
+    });
   if (catalog?.agentOpenRouter || current.kind === "agent_open_router") {
     const models = new Map(
       (catalog?.openRouter ?? []).map((model) => [
@@ -28,11 +40,7 @@ export function cleanupOptions(
     if (current.kind === "agent_open_router")
       models.set(current.model, models.get(current.model) ?? current.model);
     for (const [id, label] of models)
-      add(
-        { kind: "agent_open_router", model: id },
-        label + (id === RECOMMENDED_CONNECTION_MODEL ? " · Recommended" : ""),
-        "OpenRouter",
-      );
+      add({ kind: "agent_open_router", model: id }, label, "OpenRouter");
     options.push({
       value: `custom:${cleanupValue({ kind: "agent_open_router", model: "" })}`,
       label: "Other model…",
@@ -53,7 +61,7 @@ export function cleanupOptions(
       for (const model of models)
         add(
           { kind: "connection", connectionId: connection.id, model },
-          `${connection.name} · ${model}${model === RECOMMENDED_CONNECTION_MODEL ? " · Recommended" : ""}`,
+          `${connection.name} · ${model}`,
           group,
         );
       options.push({

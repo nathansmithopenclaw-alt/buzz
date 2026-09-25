@@ -33,6 +33,7 @@ export const MODEL_NO_MODELS_VALUE = "__no_models__";
 export type AgentDropdownOption = {
   disabled?: boolean;
   group?: string;
+  badge?: string;
   label: React.ReactNode;
   value: string;
 };
@@ -282,6 +283,11 @@ export function AgentDropdownSelect({
                   type="button"
                 >
                   <span className="min-w-0 truncate">{option.label}</span>
+                  {option.badge ? (
+                    <span className="ml-auto shrink-0 rounded bg-primary/10 px-1.5 text-xs text-primary">
+                      {option.badge}
+                    </span>
+                  ) : null}
                   <Check
                     aria-hidden="true"
                     className={cn(

@@ -24,7 +24,10 @@ test("Spark models use the Local models group without changing the connection wi
     model: "Qwen",
   });
   assert.ok(
-    options.some((option) => option.label === "Gemini 3.8 Flash · Recommended"),
+    options.some(
+      (option) =>
+        option.label === "Gemini 3.8 Flash" && option.badge === "Recommended",
+    ),
   );
 });
 
