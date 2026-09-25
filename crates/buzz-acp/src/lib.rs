@@ -4,6 +4,9 @@ mod account_control;
 mod account_handoff;
 mod acp;
 mod answered_watermark;
+#[cfg(test)]
+#[path = "acp/argv_tests.rs"]
+mod argv_tests;
 mod auth_recovery;
 mod computer_use_mcp;
 mod config;
@@ -11,6 +14,7 @@ mod engram_fetch;
 mod execution_evidence;
 mod filter;
 mod live_effort;
+mod mcp_launch;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -3131,6 +3135,9 @@ mod replay_floor_tests {
 }
 
 pub fn run() -> Result<()> {
+    if is_subcommand("mcp-launch") {
+        return mcp_launch::run();
+    }
     config::propagate_legacy_env_vars();
     tokio_main()
 }
