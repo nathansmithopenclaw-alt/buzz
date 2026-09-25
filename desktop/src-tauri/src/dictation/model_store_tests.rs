@@ -6,6 +6,7 @@ static MODEL: SpeechModel = SpeechModel {
     family: "nemo_transducer",
     language: "English",
     repository: "test/model",
+    source_repository: "test/original",
     revision: "test-revision",
     license: "CC-BY-4.0",
     recommended: false,
@@ -48,6 +49,9 @@ async fn download_installs_verified_files_and_remove_clears_readiness() {
     let ready = ready_path(root.path(), &MODEL).expect("verified install is ready");
     assert_eq!(std::fs::read(ready.join("model.onnx")).unwrap(), b"abc");
     assert!(ready.join(LICENSE).is_file());
+    assert!(std::fs::read_to_string(ready.join(LICENSE))
+        .unwrap()
+        .contains("Source: https://huggingface.co/test/original\n"));
     remove_from(root.path(), &MODEL).unwrap();
     assert!(
         ready_path(root.path(), &MODEL).is_none(),
