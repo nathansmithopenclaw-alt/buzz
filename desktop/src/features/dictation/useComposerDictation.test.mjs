@@ -370,6 +370,59 @@ test("a voice note owns the mic: dictation refuses to start", async () => {
   assert.equal(invoked.length, 0);
 });
 
+test("cloud cleanup off still asks the backend, which can clean up locally", async () => {
+  backend();
+  handlers.get_dictation_settings = () => ({
+    version: 1,
+    cleanup: { kind: "connection", connectionId: "c1", model: "m" },
+    timeoutMs: 4000,
+    hotkey: "AltRight",
+    language: "en",
+    cloudCleanupEnabled: false,
+  });
+  const editor = await makeEditor("");
+  const { hook, act } = await mountController(editor);
+  await recordAndHold(hook, act);
+  await act(async () => {
+    await hook.result.current.stop();
+    await flush();
+  });
+  assert.equal(invoked.includes("dictation_cleanup"), true);
+  assert.equal(editor.text(), "Hello there.");
+});
+
+test("a not_configured cleanup result stays silent: words as spoken, no note", async () => {
+  backend({
+    cleanup: { text: null, failure: { kind: "not_configured" }, elapsedMs: 1 },
+  });
+  handlers.get_dictation_settings = () => ({
+    version: 1,
+    cleanup: { kind: "agent_open_router", model: "m" },
+    timeoutMs: 4000,
+    hotkey: "AltRight",
+    language: "en",
+    cloudCleanupEnabled: false,
+  });
+  const editor = await makeEditor("");
+  const { hook, act } = await mountController(editor);
+  const { toast } = await import("sonner");
+  const notes = [];
+  const originalInfo = toast.info;
+  toast.info = (message) => notes.push(message);
+  try {
+    await recordAndHold(hook, act);
+    await act(async () => {
+      await hook.result.current.stop();
+      await flush();
+    });
+  } finally {
+    toast.info = originalInfo;
+  }
+  assert.equal(invoked.includes("dictation_cleanup"), true);
+  assert.equal(editor.text(), "hello there");
+  assert.deepEqual(notes, [], "not_configured must not surface a note");
+});
+
 test("a failure while delivering never strands the composer in a busy state", async () => {
   backend();
   const editor = await makeEditor("");
