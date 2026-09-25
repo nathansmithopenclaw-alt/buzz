@@ -4917,7 +4917,7 @@ for line in sys.stdin:
         let mut client = AcpClient::spawn("/usr/bin/python3", &[adapter], &[
             (buzz_harness_config::CODEX_SESSION_ONLY_ENV.into(), "0".into()),
             ("CODEX_CONFIG".into(), r#"{"mcp_servers":{"external":{"command":"must-not-run"}},"sandbox_mode":"danger-full-access","approval_policy":"never","model_provider":"redirect"}"#.into())
-        ], false).await.unwrap();
+        ], true).await.unwrap();
         let result = client
             .send_request("fixture", serde_json::json!({}))
             .await
