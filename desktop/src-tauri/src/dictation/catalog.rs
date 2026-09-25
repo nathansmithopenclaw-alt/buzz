@@ -13,6 +13,8 @@ pub(crate) struct SpeechModel {
     pub family: &'static str,
     pub language: &'static str,
     pub repository: &'static str,
+    #[serde(skip)]
+    pub source_repository: &'static str,
     pub revision: &'static str,
     pub license: &'static str,
     pub recommended: bool,
@@ -42,7 +44,7 @@ impl SpeechModel {
     }
 
     pub(crate) fn attribution(&self) -> String {
-        format!("{}\nCopyright NVIDIA Corporation.\nLicensed under CC-BY-4.0: https://creativecommons.org/licenses/by/4.0/\nSource: https://huggingface.co/nvidia/parakeet-tdt-0.6b-{}\nONNX conversion and int8 quantization: https://huggingface.co/{}\nProvided without warranties; see the license.\n", self.name, if self.id == DEFAULT_MODEL_ID { "v2" } else { "v3" }, self.repository)
+        format!("{}\nCopyright NVIDIA Corporation.\nLicensed under CC-BY-4.0: https://creativecommons.org/licenses/by/4.0/\nSource: https://huggingface.co/{}\nONNX conversion and int8 quantization: https://huggingface.co/{}\nProvided without warranties; see the license.\n", self.name, self.source_repository, self.repository)
     }
 }
 
@@ -60,6 +62,7 @@ pub(crate) static MODELS: &[SpeechModel] = &[
         family: "nemo_transducer",
         language: "English",
         repository: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+        source_repository: "nvidia/parakeet-tdt-0.6b-v2",
         revision: "1ab9323565ddb038682214b292f588070a538ce2",
         license: "CC-BY-4.0",
         recommended: cfg!(all(target_os = "macos", target_arch = "aarch64")),
@@ -93,6 +96,7 @@ pub(crate) static MODELS: &[SpeechModel] = &[
         family: "nemo_transducer",
         language: "25 languages",
         repository: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+        source_repository: "nvidia/parakeet-tdt-0.6b-v3",
         revision: "2bda32ec70b097a55adaa07d9a7173915b43cc78",
         license: "CC-BY-4.0",
         recommended: false,
