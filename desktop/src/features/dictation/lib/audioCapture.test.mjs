@@ -75,12 +75,15 @@ test("a denied microphone is reported, never retried on another device", async (
 });
 
 test("the picker lists real inputs only, with a label even before permission", async () => {
-  installMedia(async () => stream(), [
-    { kind: "audioinput", deviceId: "default", label: "Default" },
-    { kind: "audioinput", deviceId: "mbp", label: "MacBook Pro Microphone" },
-    { kind: "audiooutput", deviceId: "spk", label: "Speakers" },
-    { kind: "audioinput", deviceId: "bh", label: "" },
-  ]);
+  installMedia(
+    async () => stream(),
+    [
+      { kind: "audioinput", deviceId: "default", label: "Default" },
+      { kind: "audioinput", deviceId: "mbp", label: "MacBook Pro Microphone" },
+      { kind: "audiooutput", deviceId: "spk", label: "Speakers" },
+      { kind: "audioinput", deviceId: "bh", label: "" },
+    ],
+  );
   const { listAudioInputs } = await import("./audioCapture.ts");
   assert.deepEqual(await listAudioInputs(), [
     { deviceId: "mbp", label: "MacBook Pro Microphone" },
