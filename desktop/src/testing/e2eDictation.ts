@@ -77,6 +77,7 @@ export function dictationMockCommand(
           error: null,
         },
       };
+    case "goose_connection_runtime_reason":
     case "codex_connection_workspace_reason":
       return { result: null };
     case "list_model_connections":

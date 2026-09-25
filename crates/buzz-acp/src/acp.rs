@@ -441,6 +441,7 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// Recheck native project layers before every connection session.
     codex_session_only: bool,
+    goose_session_only: bool,
     /// Private MCP launch files, retained for reconnects until session teardown.
     mcp_launch_files: HashMap<String, crate::mcp_launch::LaunchFiles>,
     provider_config: Option<provider::ProviderConfig>,
@@ -1023,6 +1024,16 @@ impl AcpClient {
                     .map(|(_, value)| value.clone())
             })
             .is_some_and(|value| value == "1");
+        let goose_session_only = std::env::var(buzz_harness_config::goose::SESSION_ONLY_ENV)
+            .ok()
+            .or_else(|| {
+                extra_env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == buzz_harness_config::goose::SESSION_ONLY_ENV)
+                    .map(|(_, value)| value.clone())
+            })
+            .is_some_and(|value| value == "1");
         if codex_session_only {
             buzz_harness_config::codex_project::validate(&std::env::current_dir()?)
                 .map_err(AcpError::Protocol)?;
@@ -1198,6 +1209,19 @@ impl AcpClient {
                 .map_err(AcpError::Protocol)?;
             cmd.env_remove("CODEX_PATH");
         }
+        if goose_session_only {
+            // Recheck on adapter restart as well as Desktop's initial launch.
+            let root = tempfile::tempdir()?;
+            let mut version = std::process::Command::new(command);
+            version
+                .arg("--version")
+                .env("GOOSE_PATH_ROOT", root.path())
+                .env("GOOSE_DISABLE_KEYRING", "1");
+            buzz_harness_config::goose::validate_version(
+                buzz_harness_config::cli_version::probe_command(&mut version),
+            )
+            .map_err(AcpError::Protocol)?;
+        }
         let mut child = cmd.spawn()?;
 
         let stdin = child
@@ -1210,6 +1234,7 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
         Ok(Self {
+            goose_session_only,
             codex_session_only,
             mcp_launch_files: HashMap::new(),
             provider_config,
@@ -1365,11 +1390,17 @@ impl AcpClient {
         if let Ok(harness) = std::env::var("BUZZ_ACP_SUBSCRIPTION_HARNESS") {
             validate_subscription_project_context(&harness, std::path::Path::new(cwd))?;
         }
+        let has_session_servers = !mcp_servers.is_empty();
         let (mcp_servers, launch_files) = crate::mcp_launch::prepare(mcp_servers)?;
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
         });
+        if self.goose_session_only && !has_session_servers {
+            // Goose otherwise loads account/project extensions when discovery
+            // creates a session without any MCP declarations.
+            params["_meta"]["enabledExtensions"] = serde_json::json!([]);
+        }
         match system_prompt {
             Some(SystemPromptTransport::Field(sp)) => {
                 params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
@@ -1458,6 +1489,7 @@ impl AcpClient {
         }
         // Standard adapters omit the model on usage notifications. Retain the
         // adapter's reported selection and refresh it after native changes.
+        self.configure_connection_goose_tools(&session_id).await?;
         self.record_standard_session_model(&session_id, &result);
         tracing::info!(target: "acp::session", "session created: {session_id}");
         Ok(SessionNewResponse {
@@ -1493,11 +1525,25 @@ impl AcpClient {
         if let Some(files) = launch_files {
             self.mcp_launch_files.insert(session_id.to_owned(), files);
         }
+        self.configure_connection_goose_tools(session_id).await?;
         self.record_standard_session_model(session_id, &result);
         Ok(SessionNewResponse {
             session_id: session_id.to_owned(),
             raw: result,
         })
+    }
+
+    async fn configure_connection_goose_tools(&mut self, session_id: &str) -> Result<(), AcpError> {
+        if self.goose_session_only {
+            // Native allowlisting preserves text tools and all explicit session
+            // MCPs. Refuse the session if the version-pinned API rejects it.
+            self.send_request(
+                buzz_harness_config::goose::CONFIGURE_DEVELOPER_METHOD,
+                buzz_harness_config::goose::text_only_developer_params(session_id),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Send `session/new` and return only the `sessionId` string.
@@ -4974,6 +5020,132 @@ for line in sys.stdin:
             .expect("project policy must refuse");
         assert!(error.to_string().contains("added_after_spawn"));
         client.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connection_goose_adapter_restart_refuses_unqualified_version() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let cli = root.path().join("goose");
+        std::fs::write(&cli, "#!/bin/sh\necho 'goose 1.52.0'\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = AcpClient::spawn(
+            cli.to_str().unwrap(),
+            &[],
+            &[(
+                buzz_harness_config::goose::SESSION_ONLY_ENV.into(),
+                "1".into(),
+            )],
+            false,
+        )
+        .await;
+        let error = result
+            .err()
+            .expect("must refuse before starting the unqualified adapter")
+            .to_string();
+        assert!(error.contains("1.45.0") && error.contains("1.52.0"));
+    }
+
+    #[tokio::test]
+    async fn connection_goose_text_tools_are_required_on_new_and_load() {
+        for load in [false, true] {
+            for (connection, reject) in [(true, false), (true, true), (false, false)] {
+                let root = tempfile::tempdir().unwrap();
+                let receipt = root.path().join("configure.json");
+                let reply = if reject {
+                    r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"unsupported"}}"#
+                } else {
+                    r#"{"jsonrpc":"2.0","id":2,"result":{}}"#
+                };
+                let script = format!(
+                    r#"
+                    read -t 2 _init
+                    echo '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{}}}}}}'
+                    read -t 2 _session
+                    echo '{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"test"}}}}'
+                    if read -t 2 CONFIGURE; then
+                        printf '%s' "$CONFIGURE" > '{}'
+                        echo '{}'
+                    fi
+                    sleep 1
+                    "#,
+                    receipt.display(),
+                    reply
+                );
+                let mut client = spawn_script(&script).await;
+                client.goose_session_only = connection;
+                client.initialize().await.unwrap();
+                let result = if load {
+                    client.session_load_full("test", "/tmp", vec![]).await
+                } else {
+                    client.session_new_full("/tmp", vec![], None, None).await
+                };
+                assert_eq!(
+                    result.is_err(),
+                    reject,
+                    "load={load}, connection={connection}"
+                );
+                if connection {
+                    let wire: serde_json::Value = serde_json::from_slice(
+                        &std::fs::read(&receipt).expect("configuration must precede readiness"),
+                    )
+                    .unwrap();
+                    assert_eq!(wire["method"], "_goose/unstable/session/extensions/add");
+                    assert_eq!(wire["params"]["sessionId"], "test");
+                    assert_eq!(wire["params"]["extension"]["type"], "platform");
+                    assert_eq!(wire["params"]["extension"]["name"], "developer");
+                    assert_eq!(
+                        wire["params"]["extension"]["available_tools"],
+                        serde_json::json!(["edit", "shell", "tree", "write"])
+                    );
+                } else {
+                    assert!(
+                        !receipt.exists(),
+                        "hosted Goose must retain its tool contract"
+                    );
+                }
+                client.shutdown().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_goose_discovery_disables_implicit_extensions_only_when_empty() {
+        for (connection, has_servers) in [(true, false), (true, true), (false, false)] {
+            let script = r#"
+                read -t 2 _init
+                echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+                read -t 2 REQ
+                echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"test","_receivedRequest":'"$REQ"'}}'
+                read -t 2 _configure
+                echo '{"jsonrpc":"2.0","id":2,"result":{}}'
+                sleep 1
+            "#;
+            let mut client = spawn_script(script).await;
+            client.goose_session_only = connection;
+            client.initialize().await.unwrap();
+            let servers = if has_servers {
+                vec![
+                    serde_json::from_value::<McpServer>(serde_json::json!({"name":"buzz-session", "command":"session-only", "args":[], "env":[]})).unwrap(),
+                ]
+            } else {
+                vec![]
+            };
+            let response = client
+                .session_new_full("/tmp", servers.clone(), None, Some("title"))
+                .await
+                .unwrap();
+            let params = &response.raw["_receivedRequest"]["params"];
+            assert_eq!(params["mcpServers"], serde_json::json!(servers));
+            assert_eq!(params["_meta"]["sessionTitle"], "title");
+            if connection && !has_servers {
+                assert_eq!(params["_meta"]["enabledExtensions"], serde_json::json!([]));
+            } else {
+                assert!(params["_meta"].get("enabledExtensions").is_none());
+            }
+            client.shutdown().await;
+        }
     }
 
     #[tokio::test]

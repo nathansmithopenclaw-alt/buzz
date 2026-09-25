@@ -1,6 +1,10 @@
 //! Device-local model connections. Secrets never appear in catalog IPC responses.
 mod local_host;
+mod native_buzz_agent;
+#[cfg(test)]
+mod native_chat_tests;
 mod native_codex;
+mod native_goose;
 pub(crate) mod runtime_home;
 pub(crate) use local_host::is_local_model_host;
 mod local_permission;
@@ -137,6 +141,10 @@ pub fn codex_connection_workspace_reason() -> Option<String> {
         return Some("Codex connection requires an explicit workspace".into());
     };
     buzz_harness_config::codex_project::validate(&cwd).err()
+}
+#[tauri::command]
+pub fn goose_connection_runtime_reason() -> Option<String> {
+    native_goose::runtime_reason()
 }
 #[derive(Deserialize)]
 pub struct SaveConnectionInput {

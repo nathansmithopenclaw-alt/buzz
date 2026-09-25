@@ -519,7 +519,8 @@ fn write_agent_store<R: tauri::Runtime>(
     all.extend(instances);
 
     let path = managed_agents_store_path(app)?;
-    crate::model_connections::runtime_home::reconcile(app, &all)?;
+    let previous = load_agent_store(app)?;
+    crate::model_connections::runtime_home::reconcile(app, &all, &previous)?;
     write_agent_store_at(&path, &mut all)?;
 
     // Central lifecycle seam; disabled/Observer devices are true no-ops.
