@@ -7437,6 +7437,10 @@ mod tests {
         include!("execution_evidence_tests.rs");
     }
 
+    mod session_failure_tests {
+        include!("pool/session_failure_tests.rs");
+    }
+
     /// Conversation scope for a channel — the scope these pool tests exercise
     /// (equivalent to the pre-thread-scoping channel key).
     fn conv(channel_id: Uuid) -> SessionScope {
