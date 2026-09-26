@@ -30,6 +30,17 @@ const CUE_WORDS = new Set([
   "cc",
   "remind",
   "thanks",
+  "morning",
+]);
+/** Words that open a greeting slot: the next name is spoken to. */
+const GREETINGS = new Set([
+  "hey",
+  "hi",
+  "hello",
+  "ok",
+  "okay",
+  "morning",
+  "thanks",
 ]);
 const STOPWORDS = new Set([
   "the",
@@ -62,8 +73,13 @@ const STOPWORDS = new Set([
 
 type Lookup =
   | { type: "none" }
-  | { type: "one"; entry: DictationRosterEntry }
+  | { type: "one"; entry: DictationRosterEntry; score?: number }
   | { type: "ambiguous" };
+
+/** Fuzzy matches this close count in the strongest addressing slots. */
+const SLOT_MATCH_THRESHOLD = 0.84;
+/** Shortest heard word a strong slot may fuzzy-match ("Ren" → Wren). */
+const SLOT_MIN_FUZZY_LENGTH = 3;
 
 /** Exact (case-insensitive) display name first, then a unique alias. */
 function lookupExact(
@@ -84,11 +100,10 @@ function lookupExact(
 function lookupFuzzy(
   word: string,
   roster: readonly DictationRosterEntry[],
+  threshold = NAME_MATCH_THRESHOLD,
+  minLength = MIN_FUZZY_WORD_LENGTH,
 ): Lookup {
-  if (
-    word.length < MIN_FUZZY_WORD_LENGTH ||
-    STOPWORDS.has(word.toLowerCase())
-  ) {
+  if (word.length < minLength || STOPWORDS.has(word.toLowerCase())) {
     return { type: "none" };
   }
   let best: DictationRosterEntry | null = null;
@@ -107,8 +122,10 @@ function lookupFuzzy(
       }
     }
   }
-  if (!best || bestScore < NAME_MATCH_THRESHOLD) return { type: "none" };
-  return tie ? { type: "ambiguous" } : { type: "one", entry: best };
+  if (!best || bestScore < threshold) return { type: "none" };
+  return tie
+    ? { type: "ambiguous" }
+    : { type: "one", entry: best, score: bestScore };
 }
 
 type Token = { raw: string; core: string; start: number; end: number };
@@ -164,6 +181,7 @@ export function findAddressedNames(
   const tokens = tokenize(text);
   const hits: AddressHit[] = [];
   let lastHitTokenEnd = -1;
+  let lastHitWasGreeting = false;
   for (let i = 0; i < tokens.length; i++) {
     let span = 0;
     let lookup: Lookup = { type: "none" };
@@ -172,13 +190,21 @@ export function findAddressedNames(
       if (words.slice(0, -1).some((t) => TRAILING.test(t.raw))) continue;
       const phrase = words.map((t) => t.core).join(" ");
       lookup = lookupExact(isPossessive(phrase) ? "" : phrase, roster);
-      if (lookup.type === "none" && n === 1) {
-        lookup = lookupFuzzy(tokens[i].core, roster);
-      }
       if (lookup.type !== "none") {
         span = n;
         break;
       }
+    }
+    let fuzzy = false;
+    if (lookup.type === "none") {
+      lookup = lookupFuzzy(
+        tokens[i].core,
+        roster,
+        SLOT_MATCH_THRESHOLD,
+        SLOT_MIN_FUZZY_LENGTH,
+      );
+      span = 1;
+      fuzzy = true;
     }
     if (lookup.type !== "one") continue;
     const first = tokens[i];
@@ -188,35 +214,58 @@ export function findAddressedNames(
     const next = tokens[i + span];
     const punct = trailingPunct(last);
     const capitalized = /^\p{Lu}/u.test(first.core);
+    const strictFuzzy = !fuzzy || (lookup.score ?? 0) >= NAME_MATCH_THRESHOLD;
+    const longEnough = first.core.length >= MIN_FUZZY_WORD_LENGTH;
 
     const atRule =
       lower(prev) === "at" &&
       !TRAILING.test(prev?.raw ?? "") &&
       (endsClause(tokens[i - 2]) || lower(tokens[i - 2]) === "and") &&
       (punct.length > 0 || capitalized);
-    let how: AddressHit["how"] | null = atRule ? "at" : null;
 
-    if (!how && capitalized) {
-      const clauseStart = endsClause(prev);
-      const listContinues = lower(next) === "and" || lower(next) === "&";
-      const vocativeStart =
-        clauseStart && (punct.startsWith(",") || listContinues);
-      const listMember =
-        lower(prev) === "and" && i - 2 >= 0 && i - 2 <= lastHitTokenEnd;
-      const trailingVocative =
-        /[.!?]/.test(punct) && /,$/.test(prev?.raw ?? "");
-      const cue =
-        CUE_WORDS.has(lower(prev)) ||
-        (lower(tokens[i - 2]) === "loop" && lower(prev) === "in") ||
-        (lower(tokens[i - 2]) === "thank" && lower(prev) === "you");
-      if (
-        vocativeStart ||
-        listMember ||
-        trailingVocative ||
-        (cue && !endsSentence(prev))
-      ) {
-        how = "address";
-      }
+    // Addressing slots, strongest first.
+    const sentenceStart = endsSentence(prev) || prev === undefined;
+    const listContinues = lower(next) === "and" || lower(next) === "&";
+    const opening =
+      endsClause(prev) &&
+      (punct.startsWith(",") ||
+        punct.startsWith(":") ||
+        listContinues ||
+        (sentenceStart && /^[.!]/.test(punct)));
+    const greeting =
+      GREETINGS.has(lower(prev)) ||
+      (lower(tokens[i - 2]) === "thank" && lower(prev) === "you") ||
+      (GREETINGS.has(lower(tokens[i - 2])) && lower(prev) === "there");
+    const afterLastHit = (k: number) => k >= 0 && k === lastHitTokenEnd;
+    const joined =
+      (afterLastHit(i - 1) && /,$/.test(prev?.raw ?? "")) ||
+      ((lower(prev) === "and" || lower(prev) === "&") && afterLastHit(i - 2));
+    // A list of addressees ends in a pause ("…and Nectar, standup…") or
+    // continues; "Nemo, Morty wants…" is Nemo being told about Morty. After a
+    // greeting the list may run on ("Thanks Theron, Vela and Sable for…").
+    const list =
+      joined && (/^[,:.!?]/.test(punct) || listContinues || lastHitWasGreeting);
+    const trailing = /[.!?]/.test(punct) && /,$/.test(prev?.raw ?? "");
+    const relay =
+      (CUE_WORDS.has(lower(prev)) && !endsSentence(prev)) ||
+      (lower(tokens[i - 2]) === "loop" && lower(prev) === "in");
+
+    // Capitalized exact names may use any slot. A lowercase exact name
+    // ("patch, rebase…") needs a strong slot. A near-miss spelling ("Quen")
+    // needs a strong slot, and the loosest spellings only the safest ones.
+    const strongSlot = opening || greeting || list || trailing;
+    const safestSlot = greeting || list || trailing;
+    let how: AddressHit["how"] | null = atRule ? "at" : null;
+    if (!how) {
+      const accepted = fuzzy
+        ? capitalized &&
+          ((strictFuzzy && longEnough && (strongSlot || relay)) || safestSlot)
+        : capitalized
+          ? strongSlot || relay
+          : strongSlot && sentenceStart
+            ? true
+            : safestSlot || relay;
+      if (accepted) how = "address";
     }
     if (!how) continue;
     hits.push({
@@ -227,6 +276,7 @@ export function findAddressedNames(
       how,
     });
     lastHitTokenEnd = i + span - 1;
+    lastHitWasGreeting = greeting || (list && lastHitWasGreeting);
     i += span - 1;
   }
   return hits;
@@ -250,7 +300,7 @@ function splitAddressed(
   const segments: DictationSegment[] = [];
   let cursor = 0;
   for (const hit of findAddressedNames(text, roster)) {
-    const atMention = hit.how === "at" && hit.entry.autoMention;
+    const atMention = hit.entry.autoMention;
     // The spoken "at" is consumed by the mention itself.
     const start = atMention ? hit.consumeFrom : hit.start;
     pushText(segments, text.slice(cursor, Math.max(cursor, start)));
