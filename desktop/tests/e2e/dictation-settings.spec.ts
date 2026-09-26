@@ -1,9 +1,14 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 import { waitForAnimations } from "../helpers/animations";
 
-async function setup(page: Page, lowSpace = false, platform = "MacIntel") {
+async function setup(
+  page: Page,
+  lowSpace = false,
+  platform = "MacIntel",
+  claudeCommand?: string,
+) {
   await page.addInitScript(
     ({ lowSpace, platform }) => {
       window.__BUZZ_E2E_DICTATION__ = { lowSpace };
@@ -32,7 +37,29 @@ async function setup(page: Page, lowSpace = false, platform = "MacIntel") {
     },
     { lowSpace, platform },
   );
-  await installMockBridge(page);
+  await installMockBridge(
+    page,
+    claudeCommand
+      ? {
+          acpRuntimesCatalog: [
+            {
+              id: "claude",
+              label: "Claude Code",
+              avatar_url: "",
+              availability: "available",
+              command: claudeCommand,
+              binary_path: claudeCommand,
+              default_args: ["--test-adapter-argument"],
+              mcp_command: null,
+              install_hint: "",
+              install_instructions_url: "",
+              can_auto_install: false,
+              auth_status: { status: "authenticated" },
+            },
+          ],
+        }
+      : {},
+  );
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await openSettings(page, "voice");
   await expect(page.getByTestId("dictation-settings")).toBeVisible();
@@ -45,8 +72,131 @@ async function shot(page: Page, name: string) {
   });
 }
 
+/** Composite computed CSS colors (including alpha/OKLCH) before WCAG luminance. */
+async function contrast(locator: Locator, pseudo?: string) {
+  return locator.evaluate((element, pseudo) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas unavailable for contrast measurement");
+    const ancestors: Element[] = [];
+    for (let node: Element | null = element; node; node = node.parentElement)
+      ancestors.unshift(node);
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, 1, 1);
+    for (const node of ancestors) {
+      ctx.fillStyle = getComputedStyle(node).backgroundColor;
+      ctx.fillRect(0, 0, 1, 1);
+    }
+    const luminance = () => {
+      const rgb = [...ctx.getImageData(0, 0, 1, 1).data]
+        .slice(0, 3)
+        .map((c) => {
+          const s = c / 255;
+          return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+        });
+      return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+    };
+    const background = luminance();
+    const style = getComputedStyle(element, pseudo);
+    ctx.globalAlpha = Number(style.opacity);
+    ctx.fillStyle = style.color;
+    ctx.fillRect(0, 0, 1, 1);
+    const foreground = luminance();
+    return (
+      (Math.max(background, foreground) + 0.05) /
+      (Math.min(background, foreground) + 0.05)
+    );
+  }, pseudo);
+}
+
 test.describe("Dictation settings", () => {
   test.use({ viewport: { width: 1280, height: 1000 } });
+
+  test("discovers Claude cleanup models through the runtime catalog adapter", async ({
+    page,
+  }) => {
+    await setup(page, false, "MacIntel", "/test/claude-code-acp");
+    await page.getByLabel("Cleanup model", { exact: true }).click();
+    await expect(
+      page.getByRole("option", { name: "Claude Haiku 4.5", exact: true }),
+    ).toBeVisible();
+    const calls = await page.evaluate(() =>
+      window.__BUZZ_E2E_COMMAND_LOG__?.filter(
+        (call) => call.command === "discover_agent_models",
+      ),
+    );
+    expect(calls).toContainEqual(
+      expect.objectContaining({
+        payload: {
+          input: {
+            agentCommand: "/test/claude-code-acp",
+            agentArgs: ["--test-adapter-argument"],
+            definitionEnv: {},
+          },
+        },
+      }),
+    );
+  });
+
+  test("does not launch the underlying CLI when the Claude adapter is missing", async ({
+    page,
+  }) => {
+    await setup(page);
+    await page.getByLabel("Cleanup model", { exact: true }).click();
+    await expect(
+      page.getByRole("listbox").getByText("Claude plan", { exact: true }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(() =>
+        window.__BUZZ_E2E_COMMAND_LOG__?.filter(
+          (call) => call.command === "discover_agent_models",
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test("keeps popup headings, badges, metadata and search legible in dark mode", async ({
+    page,
+  }, testInfo) => {
+    await page.addInitScript(() => {
+      localStorage.setItem("buzz-theme", "buzz-dark");
+      localStorage.setItem("buzz-follow-system", "false");
+    });
+    await setup(page);
+    await expect(page.locator("html")).toHaveClass(/dark/);
+    await page.getByLabel("Speech model", { exact: true }).click();
+    const speech = page.getByRole("listbox");
+    const ratios: Record<string, number> = {
+      metadata: await contrast(speech.getByText(/English · .* on disk/)),
+      speechBadge: await contrast(
+        speech.getByText("Recommended", { exact: true }),
+      ),
+    };
+    await shot(page, "speech-dark-contrast");
+    await page.keyboard.press("Escape");
+    await page.getByLabel("Cleanup model", { exact: true }).click();
+    const cleanup = page.getByRole("listbox");
+    ratios.heading = await contrast(
+      cleanup.getByText("OpenRouter", { exact: true }),
+    );
+    ratios.cleanupBadge = await contrast(
+      cleanup.getByText("Recommended", { exact: true }),
+    );
+    const search = cleanup.getByRole("textbox", { name: "Search models" });
+    ratios.placeholder = await contrast(search, "::placeholder");
+    await search.fill("Gemini");
+    ratios.search = await contrast(search);
+    await shot(page, "cleanup-dark-contrast");
+    await testInfo.attach("computed-contrast", {
+      body: JSON.stringify(ratios, null, 2),
+      contentType: "application/json",
+    });
+    for (const [name, ratio] of Object.entries(ratios))
+      expect
+        .soft(ratio, `${name} contrast against popup surface`)
+        .toBeGreaterThanOrEqual(4.5);
+  });
 
   test("keeps only the experiment toggle and puts shared native controls in Voice", async ({
     page,
