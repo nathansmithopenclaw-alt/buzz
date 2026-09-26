@@ -340,6 +340,50 @@ test("polish never overwrites words the user edited meanwhile", async () => {
   assert.equal(editor.text(), "Hello, there");
 });
 
+test("polish still lands when the composer rewrites the same words", async () => {
+  backend();
+  const gate = deferred();
+  const editor = await makeEditor("");
+  const { hook, act } = await mountController(editor);
+  await recordAndHold(hook, act, gate);
+  await stopAndSettle(hook, act);
+  // A same-content rewrite of the paragraph (as a DOM re-read does) drops
+  // every mark over it without changing the words.
+  const { state } = editor.view;
+  const paragraph = state.doc.firstChild;
+  editor.view.dispatch(
+    state.tr.replaceWith(1, state.doc.content.size - 1, paragraph.content),
+  );
+  assert.equal(editor.text(), "Hello there");
+  await act(async () => {
+    gate.resolve({ text: "Hello there.", failure: null, elapsedMs: 5 });
+    await flush();
+  });
+  assert.equal(editor.text(), "Hello there.");
+});
+
+test("without its mark, polish leaves words that appear twice alone", async () => {
+  backend();
+  const gate = deferred();
+  const editor = await makeEditor("");
+  const { hook, act } = await mountController(editor);
+  await recordAndHold(hook, act, gate);
+  await stopAndSettle(hook, act);
+  const { state } = editor.view;
+  const paragraph = state.doc.firstChild;
+  editor.view.dispatch(
+    state.tr.replaceWith(1, state.doc.content.size - 1, [
+      ...paragraph.content.content,
+      state.schema.text(" and Hello there"),
+    ]),
+  );
+  await act(async () => {
+    gate.resolve({ text: "Hello there.", failure: null, elapsedMs: 5 });
+    await flush();
+  });
+  assert.equal(editor.text(), "Hello there and Hello there");
+});
+
 test("polish does nothing once the message was sent", async () => {
   backend();
   const gate = deferred();

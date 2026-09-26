@@ -45,6 +45,7 @@ import {
   trackBackendRelease,
 } from "./lib/dictationSession";
 import {
+  findTextRanges,
   insertAtSelection,
   replaceRange,
   suggestionToPickerQuery,
@@ -322,23 +323,33 @@ export function useComposerDictation(params: UseComposerDictationParams) {
         return;
       }
       const verdict = acceptPolish(request, result.text);
-      const range = readDictationMark(view, markId);
-      const intact =
-        range !== null &&
-        view.state.doc.textBetween(range.from, range.to, "\n", "\n") ===
+      // The mark follows the words through edits around them. If the
+      // composer rewrote the document without changing them, the exact
+      // words, found exactly once, still identify the dictation.
+      const marked = readDictationMark(view, markId);
+      const markIntact =
+        marked !== null &&
+        view.state.doc.textBetween(marked.from, marked.to, "\n", "\n") ===
           inserted.text;
+      const found = markIntact
+        ? []
+        : findTextRanges(view.state.doc, inserted.text);
+      const range = markIntact ? marked : found.length === 1 ? found[0] : null;
       noteCapture(session.captureId, {
         kind: "polish",
         input: request.text,
         reply: result.text,
         elapsedMs: result.elapsedMs,
+        markAlive: marked !== null,
         outcome: !verdict.accepted
           ? `rejected: ${verdict.reason}`
-          : intact
-            ? "applied"
-            : "skipped: edited or sent",
+          : range === null
+            ? "skipped: edited or sent"
+            : markIntact
+              ? "applied"
+              : "applied: found by text",
       });
-      if (!verdict.accepted || !intact || editor.isDestroyed) return;
+      if (!verdict.accepted || !range || editor.isDestroyed) return;
       const rendered = renderSegments(
         verdict.segments,
         paramsRef.current.registerMention,

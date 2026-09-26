@@ -1,5 +1,5 @@
 import { closeHistory } from "@tiptap/pm/history";
-import { Fragment, type Schema } from "@tiptap/pm/model";
+import { Fragment, type Node, type Schema } from "@tiptap/pm/model";
 import { TextSelection } from "@tiptap/pm/state";
 
 import type { DictationMarksView } from "./dictationMarks";
@@ -48,6 +48,42 @@ export function insertAtSelection(
   closeHistory(tr);
   view.dispatch(tr);
   return { from: from + lead.length, to: end };
+}
+
+/**
+ * Every place `text` (with "\n" as hard breaks, as `textToFragment` writes
+ * it) appears as contiguous inline content, as document ranges.
+ */
+export function findTextRanges(
+  doc: Node,
+  text: string,
+): { from: number; to: number }[] {
+  const ranges: { from: number; to: number }[] = [];
+  if (!text) return ranges;
+  doc.descendants((node, pos) => {
+    if (!node.isTextblock) return true;
+    let flat = "";
+    const positions: number[] = [];
+    node.forEach((child, offset) => {
+      const start = pos + 1 + offset;
+      if (child.isText) {
+        const value = child.text ?? "";
+        for (let i = 0; i < value.length; i++) positions.push(start + i);
+        flat += value;
+      } else {
+        positions.push(start);
+        flat += child.type.name === "hardBreak" ? "\n" : "\uFFFC";
+      }
+    });
+    for (let i = flat.indexOf(text); i >= 0; i = flat.indexOf(text, i + 1)) {
+      ranges.push({
+        from: positions[i],
+        to: positions[i + text.length - 1] + 1,
+      });
+    }
+    return false;
+  });
+  return ranges;
 }
 
 /**

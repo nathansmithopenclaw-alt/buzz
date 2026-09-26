@@ -116,7 +116,7 @@ export function DictationSettingsSection() {
               Cloud cleanup
             </label>
             <p className="text-xs text-muted-foreground">
-              Send words and member names for cleanup.
+              Send dictated words for cleanup.
             </p>
           </div>
           <Switch

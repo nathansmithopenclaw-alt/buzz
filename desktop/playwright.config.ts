@@ -74,6 +74,7 @@ export default defineConfig({
         "**/agent-usage-screenshots.spec.ts",
         "**/voice-settings.spec.ts",
         "**/dictation-settings.spec.ts",
+        "**/dictation-composer.spec.ts",
         "**/voice-note.spec.ts",
         "**/agent-readiness-screenshots.spec.ts",
         "**/agent-error-state-screenshots.spec.ts",

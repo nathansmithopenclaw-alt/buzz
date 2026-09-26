@@ -2,7 +2,16 @@ import type { DictationSettings, SpeechModel } from "@/features/dictation/api";
 
 declare global {
   interface Window {
-    __BUZZ_E2E_DICTATION__?: { lowSpace?: boolean; saved?: DictationSettings };
+    __BUZZ_E2E_DICTATION__?: {
+      lowSpace?: boolean;
+      saved?: DictationSettings;
+      /** What `dictation_stop` returns (the engine's transcript). */
+      transcript?: string;
+      /** What `dictation_cleanup` replies, after `delayMs`. */
+      polish?: { text: string; delayMs: number };
+      /** Transcripts the polish was asked about, for assertions. */
+      polishRequests?: string[];
+    };
   }
 }
 
@@ -62,6 +71,40 @@ export function dictationMockCommand(
       const model = models.find((model) => model.id === input.modelId);
       if (model) model.status = "not_downloaded";
       return { result: null };
+    }
+    case "dictation_start":
+      return { result: { sessionId: 1 } };
+    case "dictation_push_audio":
+    case "dictation_cancel":
+    case "dictation_capture_note":
+      return { result: null };
+    case "dictation_stop":
+      return {
+        result: {
+          text: fixture.transcript ?? "",
+          audioMs: 2000,
+          decodeMs: 90,
+          tailDecodeMs: 0,
+          chunks: 1,
+        },
+      };
+    case "dictation_cleanup": {
+      const { request } = payload as { request: { transcript: string } };
+      fixture.polishRequests?.push(request.transcript);
+      const polish = fixture.polish;
+      return {
+        result: new Promise((resolve) =>
+          window.setTimeout(
+            () =>
+              resolve({
+                text: polish?.text ?? null,
+                failure: polish ? null : { kind: "not_configured" },
+                elapsedMs: polish?.delayMs ?? 0,
+              }),
+            polish?.delayMs ?? 0,
+          ),
+        ),
+      };
     }
     case "dictation_cleanup_sources":
       return { result: { agentOpenRouter: true } };
