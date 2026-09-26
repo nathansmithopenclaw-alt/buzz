@@ -81,6 +81,16 @@ pub struct EventQuery {
     /// Restrict results to events with an exact custom tag pair.
     /// Uses JSONB containment against `tags` before SQL `LIMIT`.
     pub custom_tag: Option<(String, String)>,
+    /// Restrict results to events carrying NIP-01 generic tags: every listed
+    /// tag name must match, with any of its values (`AND` across names, `OR`
+    /// within one name's values). Pushed into SQL as JSONB containment
+    /// (`tags @> [[name, value]]`, served by `idx_events_tags_gin`) so the tag
+    /// constraint applies before `LIMIT`; filtering only after the page is
+    /// fetched lets a scope's newest non-matching rows fill it and silently
+    /// hides older matches. Containment admits a superset of exact tag
+    /// matches, so callers must keep their exact post-filter. Entries with no
+    /// values add no constraint.
+    pub tag_filters: Option<Vec<(String, Vec<String>)>>,
     /// Restrict results to events in any of these channels. By default,
     /// channel-less global events are retained so this can enforce a viewer's
     /// accessible-channel scope without hiding global events. Set
@@ -140,6 +150,7 @@ impl EventQuery {
             ids: None,
             e_tags: None,
             custom_tag: None,
+            tag_filters: None,
             channel_ids: None,
             channel_ids_include_global: true,
             max_limit: None,
@@ -435,6 +446,29 @@ async fn insert_event_on(
     ))
 }
 
+/// Append [`EventQuery::tag_filters`] as JSONB containment clauses: one
+/// `AND (...)` group per tag name, its values joined with `OR`.
+fn push_tag_filters(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    tag_filters: &[(String, Vec<String>)],
+) {
+    for (name, values) in tag_filters {
+        if values.is_empty() {
+            continue;
+        }
+        qb.push(" AND (");
+        for (i, value) in values.iter().enumerate() {
+            if i > 0 {
+                qb.push(" OR ");
+            }
+            qb.push(format!("{col_prefix}tags @> "));
+            qb.push_bind(serde_json::json!([[name, value]]));
+        }
+        qb.push(")");
+    }
+}
+
 /// Query events with optional filters. Results ordered by `created_at DESC`.
 ///
 /// Uses `QueryBuilder` for dynamic filter composition — avoids string concatenation
@@ -621,6 +655,10 @@ pub(crate) async fn query_events_on(
         let containment = serde_json::json!([[name, value]]);
         qb.push(format!(" AND {col_prefix}tags @> "))
             .push_bind(containment);
+    }
+
+    if let Some(ref tag_filters) = q.tag_filters {
+        push_tag_filters(&mut qb, col_prefix, tag_filters);
     }
 
     if let Some(s) = q.since {
@@ -884,6 +922,10 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
             }
             qb.push(")");
         }
+    }
+
+    if let Some(ref tag_filters) = q.tag_filters {
+        push_tag_filters(&mut qb, col_prefix, tag_filters);
     }
 
     if let Some(s) = q.since {
@@ -2508,6 +2550,101 @@ mod postgres_tests {
             .custom_created_at(nostr::Timestamp::from(created_at))
             .sign_with_keys(&Keys::generate())
             .expect("sign timestamped event")
+    }
+
+    fn make_tagged_event_at(content: &str, created_at: u64, tags: &[[&str; 2]]) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags(tags.iter().map(|tag| Tag::parse(*tag).expect("parse tag")))
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign tagged event")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn generic_tag_filters_apply_before_the_page_limit() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+        let base = 1_800_000_000;
+
+        // Two older task events, then newer untagged chat that fills any page
+        // the tag constraint does not narrow first.
+        let task_a = make_tagged_event_at("task a", base + 1, &[["t", "buzz-task"]]);
+        let task_b =
+            make_tagged_event_at("task b", base + 2, &[["t", "buzz-task"], ["k", "urgent"]]);
+        let mut chat = Vec::new();
+        for offset in 10..13 {
+            chat.push(make_tagged_event_at("chat", base + offset, &[]));
+        }
+        for event in [&task_a, &task_b].into_iter().chain(chat.iter()) {
+            insert_event(&pool, community, event, Some(channel))
+                .await
+                .expect("insert channel event");
+        }
+        let page = |tag_filters: Option<Vec<(String, Vec<String>)>>| EventQuery {
+            channel_id: Some(channel),
+            kinds: Some(vec![9]),
+            limit: Some(2),
+            tag_filters,
+            ..EventQuery::for_community(community)
+        };
+        let tag = |name: &str, values: &[&str]| {
+            (
+                name.to_owned(),
+                values.iter().map(|value| (*value).to_owned()).collect(),
+            )
+        };
+
+        let unnarrowed = query_events(&pool, &page(None))
+            .await
+            .expect("query unnarrowed page");
+        assert!(
+            unnarrowed
+                .iter()
+                .all(|stored| stored.event.content == "chat"),
+            "fixture: without a tag constraint the newest page is all chat"
+        );
+
+        let tasks = query_events(&pool, &page(Some(vec![tag("t", &["buzz-task"])])))
+            .await
+            .expect("query tag-filtered page");
+        let task_ids: Vec<_> = tasks.iter().map(|stored| stored.event.id).collect();
+        assert_eq!(
+            task_ids,
+            vec![task_b.id, task_a.id],
+            "#t must narrow rows before LIMIT, so newer chat cannot hide older tasks"
+        );
+
+        let urgent = query_events(
+            &pool,
+            &page(Some(vec![
+                tag("t", &["buzz-task", "other"]),
+                tag("k", &["urgent"]),
+            ])),
+        )
+        .await
+        .expect("query multi-tag page");
+        let urgent_ids: Vec<_> = urgent.iter().map(|stored| stored.event.id).collect();
+        assert_eq!(
+            urgent_ids,
+            vec![task_b.id],
+            "tag names AND together; one name's values OR together"
+        );
+
+        let counted = count_events(
+            &pool,
+            &EventQuery {
+                channel_id: Some(channel),
+                kinds: Some(vec![9]),
+                tag_filters: Some(vec![tag("t", &["buzz-task"])]),
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("count tag-filtered events");
+        assert_eq!(counted, 2);
     }
 
     #[tokio::test]

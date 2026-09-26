@@ -41,6 +41,11 @@ pub(crate) const FILTER_QUERY_CONCURRENCY: usize = 4;
 /// values before any of that request-amplified work begins.
 pub(crate) const MAX_EXPLICIT_CHANNEL_VALUES: usize = 128;
 
+/// Largest value list for one generic tag that `filter_to_query_params` pushes
+/// into SQL. A longer list is left to the exact Rust post-filter alone rather
+/// than growing the statement without bound.
+pub(crate) const MAX_PUSHDOWN_TAG_VALUES: usize = 128;
+
 // Guard: keep the bound a small fraction of any sane Postgres pool size.
 // Raising it past this range requires re-running the relay bench and
 // reconsidering pool contention (see docs above). Compile-time — violating
@@ -875,7 +880,9 @@ pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
 /// #d (single, NIP-33-only kinds), #e (any).
 ///
 /// Anything else (multi-#p, #t, #a, search, #d on non-NIP-33) requires
-/// post-filtering and cannot use the fast COUNT path.
+/// post-filtering and cannot use the fast COUNT path. Those generic tags are
+/// still narrowed in SQL via `EventQuery::tag_filters`, but JSONB containment
+/// admits a superset of exact tag matches, so only the Rust check is exact.
 pub fn filter_fully_pushable(filter: &Filter) -> bool {
     // Check if filter exclusively targets NIP-33 kinds (needed for #d pushability).
     let is_nip33_only = filter.kinds.as_ref().is_some_and(|ks| {
@@ -1070,6 +1077,28 @@ fn filter_to_query_params(
         (None, None)
     };
 
+    // Push every remaining generic tag filter (#t, #a, #k, multi-value #p,
+    // #d on non-NIP-33 kinds, ...) into SQL so it narrows rows before LIMIT.
+    // Left to the Rust post-filter, a tag constraint only sees the scope's
+    // newest `limit` rows: in a busy channel, `#t` matches older than that
+    // window were never returned at all. #h is enforced by channel scope, and
+    // #e, single #p and NIP-33 #d keep their dedicated pushdowns above.
+    let tag_filters: Vec<(String, Vec<String>)> = filter
+        .generic_tags
+        .iter()
+        .filter(|(key, values)| {
+            let dedicated = !key.uppercase
+                && match key.character {
+                    nostr::Alphabet::H | nostr::Alphabet::E => true,
+                    nostr::Alphabet::P => values.len() == 1,
+                    nostr::Alphabet::D => filter_is_nip33_only,
+                    _ => false,
+                };
+            !dedicated && !values.is_empty() && values.len() <= MAX_PUSHDOWN_TAG_VALUES
+        })
+        .map(|(key, values)| (key.to_string(), values.iter().cloned().collect()))
+        .collect();
+
     EventQuery {
         channel_id,
         kinds,
@@ -1083,6 +1112,7 @@ fn filter_to_query_params(
         authors,
         ids,
         e_tags,
+        tag_filters: (!tag_filters.is_empty()).then_some(tag_filters),
         ..EventQuery::for_community(community)
     }
 }
@@ -1768,6 +1798,103 @@ mod tests {
         .expect("limitation")
         .max_limit
         .expect("max_limit") as i64
+    }
+
+    fn sorted_tag_filters(query: &EventQuery) -> Vec<(String, Vec<String>)> {
+        let mut tag_filters = query.tag_filters.clone().unwrap_or_default();
+        tag_filters.sort();
+        tag_filters
+    }
+
+    #[test]
+    fn generic_tag_filters_are_pushed_into_sql_before_limit() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let filter = Filter::new()
+            .kind(nostr::Kind::Custom(9))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::T), "buzz-task")
+            .custom_tags(SingleLetterTag::uppercase(Alphabet::T), ["b", "a"]);
+
+        let query = filter_to_query_params(&filter, None, community);
+
+        assert_eq!(
+            sorted_tag_filters(&query),
+            vec![
+                ("T".to_owned(), vec!["a".to_owned(), "b".to_owned()]),
+                ("t".to_owned(), vec!["buzz-task".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn tags_with_dedicated_pushdowns_are_not_duplicated_into_tag_filters() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let hex = "ab".repeat(32);
+        let filter = Filter::new()
+            .kind(nostr::Kind::Custom(30_000))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::H),
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::E), hex.clone())
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::P), hex.clone())
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "slug");
+
+        let query = filter_to_query_params(&filter, None, community);
+
+        assert_eq!(query.tag_filters, None);
+        assert_eq!(query.e_tags, Some(vec![hex.clone()]));
+        assert_eq!(query.p_tag_hex, Some(hex));
+        assert_eq!(query.d_tag.as_deref(), Some("slug"));
+    }
+
+    #[test]
+    fn tags_without_a_dedicated_pushdown_fall_through_to_tag_filters() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let (first, second) = ("aa".repeat(32), "bb".repeat(32));
+        // Multi-value #p has no event_mentions pushdown, and #d outside the
+        // NIP-33 kinds has no d_tag column to use.
+        let filter = Filter::new()
+            .kind(nostr::Kind::Custom(9))
+            .custom_tags(
+                SingleLetterTag::lowercase(Alphabet::P),
+                [first.clone(), second.clone()],
+            )
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "slug");
+
+        let query = filter_to_query_params(&filter, None, community);
+
+        assert_eq!(query.p_tag_hex, None);
+        assert_eq!(query.d_tag, None);
+        assert_eq!(
+            sorted_tag_filters(&query),
+            vec![
+                ("d".to_owned(), vec!["slug".to_owned()]),
+                ("p".to_owned(), vec![first, second]),
+            ]
+        );
+    }
+
+    #[test]
+    fn oversized_tag_value_lists_stay_post_filter_only() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let t_tag = SingleLetterTag::lowercase(Alphabet::T);
+        let values: Vec<String> = (0..=MAX_PUSHDOWN_TAG_VALUES)
+            .map(|i| format!("v{i:04}"))
+            .collect();
+
+        let over_cap = Filter::new()
+            .custom_tags(t_tag, values.clone())
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::K), "9");
+        assert_eq!(
+            sorted_tag_filters(&filter_to_query_params(&over_cap, None, community)),
+            vec![("k".to_owned(), vec!["9".to_owned()])],
+            "an over-cap #t must be left to the post-filter, not truncated"
+        );
+
+        let at_cap = Filter::new().custom_tags(t_tag, values[..MAX_PUSHDOWN_TAG_VALUES].to_vec());
+        let pushed = sorted_tag_filters(&filter_to_query_params(&at_cap, None, community));
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0].1.len(), MAX_PUSHDOWN_TAG_VALUES);
     }
 
     #[test]
