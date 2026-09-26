@@ -2,11 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildDictationRoster, modelRosterNames } from "./dictationRoster.ts";
-import {
-  findAddressedNames,
-  resolveModelOutput,
-  resolveVerbatim,
-} from "./mentionResolution.ts";
+import { findAddressedNames, resolveVerbatim } from "./mentionResolution.ts";
 import { applySpokenFormatting } from "./spokenFormatting.ts";
 
 const pk = (n) => n.toString(16).padStart(64, "0");
@@ -84,24 +80,25 @@ const suggestionsIn = (segments) =>
     .filter((s) => s.type === "suggestion")
     .map((s) => s.entry.displayName);
 
-// ── Verbatim "at" rule (grill Q11 cases) ──────────────────────────────────────
+// ── Mentions at insert: addressed members, and "at <name>" ───────────────────
 
-test("verbatim: explicit 'at <name>' becomes a mention; everything else never does", () => {
+test("an addressed member or 'at <name>' becomes a mention; a referenced name never does", () => {
   const r = roster();
   const cases = [
     ["At patch, please rebase your branch onto main.", ["Patch"]],
     [
       "Quill, draft the change log, and at ledger, reconcile the invoices.",
-      ["Ledger"],
+      ["Quill", "Ledger"],
     ],
     ["At Helm, can you check the deploy?", ["Helm"]],
     ["at helm, can you check the deploy", ["Helm"]],
     ["At Theron please review this", ["Theron"]],
     ["Ship it, and at Anvil, please verify.", ["Anvil"]],
+    ["Let's meet at noon, Helm.", ["Helm"]],
+    ["Can you ask Anvil whether the migration finished?", ["Anvil"]],
     ["Look at Helm's comment on the PR.", []],
     ["We're at patch three of the rollout.", []],
     ["At ledger level the numbers don't match.", []],
-    ["Let's meet at noon, Helm.", []],
     ["Stitch is at the helm today.", []],
   ];
   for (const [text, expected] of cases) {
@@ -120,13 +117,16 @@ test("verbatim: the spoken 'at' is consumed, the rest of the sentence kept", () 
   );
 });
 
-test("verbatim: other addressed names are suggestions, never mentions", () => {
+test("an addressed non-member is a suggestion, never a mention", () => {
+  const r = roster({
+    extra: [member("Outsider", 50, { isMember: false })],
+  });
   const out = resolveVerbatim(
-    "Anvil, can you review the patch Codex sent?",
-    roster(),
+    "Anvil and Outsider, can you review the patch Codex sent?",
+    r,
   );
-  assert.deepEqual(mentionsIn(out), []);
-  assert.deepEqual(suggestionsIn(out), ["Anvil"]);
+  assert.deepEqual(mentionsIn(out), ["Anvil"]);
+  assert.deepEqual(suggestionsIn(out), ["Outsider"]);
 });
 
 // ── Addressed vs referenced (benchmark cases) ─────────────────────────────────
@@ -184,138 +184,6 @@ test("near-spellings resolve through the sound-alike matcher", () => {
 });
 
 // ── Model output validation ───────────────────────────────────────────────────
-
-test("model markers become mentions only for auto-mentionable roster entries", () => {
-  const out = resolveModelOutput(
-    "@[Anvil], can you review the patch Codex sent?",
-    roster(),
-  );
-  assert.deepEqual(summarize(out), [
-    "<@Anvil>",
-    ", can you review the patch Codex sent?",
-  ]);
-});
-
-test("invented or ambiguous names from the model never become mentions", () => {
-  const r = roster({ extra: [member("Twin", 60), member("Twin", 61)] });
-  const out = resolveModelOutput("@[Zorblax], hi and @[Twin], hi", r);
-  assert.deepEqual(summarize(out), ["Zorblax, hi and Twin, hi"]);
-  // A misspelled marker can still surface as a click-to-confirm suggestion.
-  const near = resolveModelOutput("@[Groc], ship it", r);
-  assert.deepEqual(mentionsIn(near), []);
-  assert.deepEqual(suggestionsIn(near), ["Grok"]);
-});
-
-test("the exact spoken name wins over a longer overlapping name", () => {
-  const r = roster();
-  assert.deepEqual(
-    mentionsIn(resolveModelOutput("@[Codex] and @[Codex Desktop], sync up", r)),
-    ["Codex", "Codex Desktop"],
-  );
-});
-
-test("personas, non-members and out-of-channel teams are only suggestions", () => {
-  const r = roster({
-    extra: [
-      {
-        kind: "persona",
-        personaId: "p1",
-        displayName: "Scout",
-        isMember: false,
-        isAgent: true,
-      },
-      member("Outsider", 70, { isMember: false }),
-      {
-        kind: "team",
-        teamId: "t-out",
-        displayName: "Game Studio",
-        isMember: false,
-        isAgent: true,
-        teamMembers: [
-          { kind: "identity", pubkey: pk(1), displayName: "Anvil" },
-          { kind: "identity", pubkey: pk(71), displayName: "Stranger" },
-        ],
-      },
-    ],
-  });
-  const out = resolveModelOutput(
-    "@[Scout], @[Outsider] and @[Game Studio], hello",
-    r,
-  );
-  assert.deepEqual(mentionsIn(out), []);
-  assert.deepEqual(suggestionsIn(out), ["Scout", "Outsider", "Game Studio"]);
-});
-
-test("a team whose members are all in the channel is auto-mentionable", () => {
-  const r = roster({
-    extra: [
-      {
-        kind: "team",
-        teamId: "t-in",
-        displayName: "Release Crew",
-        isMember: false,
-        isAgent: true,
-        teamMembers: [
-          { kind: "identity", pubkey: pk(1), displayName: "Anvil" },
-          { kind: "identity", pubkey: pk(9), displayName: "Helm" },
-        ],
-      },
-    ],
-  });
-  assert.deepEqual(
-    mentionsIn(resolveModelOutput("@[Release Crew], ship it", r)),
-    ["Release Crew"],
-  );
-  const withPersona = roster({
-    extra: [
-      {
-        kind: "team",
-        teamId: "t-p",
-        displayName: "Half Built",
-        isMember: false,
-        isAgent: true,
-        teamMembers: [
-          { kind: "identity", pubkey: pk(1), displayName: "Anvil" },
-          { kind: "persona", personaId: "p9", displayName: "Draft" },
-        ],
-      },
-    ],
-  });
-  assert.deepEqual(
-    mentionsIn(resolveModelOutput("@[Half Built], go", withPersona)),
-    [],
-  );
-});
-
-test("the speaker is never in the roster, so never mentioned", () => {
-  const r = roster();
-  assert.ok(!r.some((e) => e.pubkey === SELF));
-  assert.deepEqual(
-    mentionsIn(resolveModelOutput("@[Me Myself], note to self", r)),
-    [],
-  );
-});
-
-test("unique first names are aliases; shared first names are not", () => {
-  const r = roster({ extra: [member("Nathan Jones", 91, { isAgent: false })] });
-  const nathan = r.find((e) => e.displayName === "Nathan Smith");
-  assert.deepEqual(nathan.aliases, [], "two members share 'Nathan'");
-  const solo = roster().find((e) => e.displayName === "Nathan Smith");
-  assert.deepEqual(solo.aliases, ["nathan"]);
-  assert.deepEqual(mentionsIn(resolveModelOutput("@[Nathan], hi", roster())), [
-    "Nathan Smith",
-  ]);
-});
-
-test("addressed names the model left unmarked become suggestions", () => {
-  const r = roster({ extra: [member("Outsider", 70, { isMember: false })] });
-  const out = resolveModelOutput(
-    "@[Anvil], and Outsider, can you both look?",
-    r,
-  );
-  assert.deepEqual(mentionsIn(out), ["Anvil"]);
-  assert.deepEqual(suggestionsIn(out), ["Outsider"]);
-});
 
 test("the model roster lists auto-mentionable names only, capped at 150", () => {
   const names = modelRosterNames(

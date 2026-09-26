@@ -652,6 +652,7 @@ function MessageComposerImpl({
     ) {
       return;
     }
+    dictation.noteSent(trimmed);
     isSubmitLockedRef.current = true;
     setIsSubmitLocked(true);
     onPreparingMentionSendChange?.(true);
@@ -717,6 +718,7 @@ function MessageComposerImpl({
     voiceNote.statusRef,
     dictation.isBusy,
     dictation.notifyBusy,
+    dictation.noteSent,
   ]);
   submitMessageRef.current = submitMessage;
   // Draft auto-submit runs once after persisted editor state loads.

@@ -11,8 +11,7 @@ export type DictationStatus =
   | "idle"
   | "starting"
   | "recording"
-  | "transcribing"
-  | "cleaning";
+  | "transcribing";
 
 export type DictationTarget = {
   /** The channel's main composer (fallback target for the hotkey). */

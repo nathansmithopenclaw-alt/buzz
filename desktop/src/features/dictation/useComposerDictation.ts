@@ -11,10 +11,10 @@ import {
 import {
   cancelDictation,
   cleanupDictation,
-  describeCleanupFailure,
   type DictationSettings,
   getDictationModelInfo,
   getDictationSettings,
+  noteDictationCapture,
   startDictation,
   stopDictation,
 } from "./api";
@@ -51,15 +51,14 @@ import {
 } from "./lib/editorOps";
 import {
   type DictationSegment,
-  resolveModelOutput,
   resolveVerbatim,
 } from "./lib/mentionResolution";
+import { acceptPolish, toPolishRequest } from "./lib/polish";
+import { type RegisterMention, renderSegments } from "./lib/renderSegments";
 import {
-  type RegisterMention,
-  renderSegments,
-  replaceLastOccurrence,
-} from "./lib/renderSegments";
-import { applySpokenFormatting } from "./lib/spokenFormatting";
+  applySpokenCorrections,
+  applySpokenFormatting,
+} from "./lib/spokenFormatting";
 
 /** Longest dictation; recording stops and processes at this point. */
 export const DICTATION_MAX_SECONDS = 300;
@@ -103,22 +102,21 @@ type Session = {
   originChannelId: string | null;
   originEditTargetId: string | null;
   stopRequested: boolean;
-  /** The raw words were put in the editor (under `rawMarkId`). */
-  rawInserted: boolean;
-  rawMarkId: number | null;
+  /** Local capture of this dictation, when captures are on. */
+  captureId: string | null;
 };
 
 /** A finished dictation waiting for (or being handed to) its destination. */
 type Outcome = {
   session: Session;
-  raw: string;
   segments: DictationSegment[];
-  note: string | null;
+  /** Where it landed in the live editor, if it did. */
+  inserted: { from: number; to: number; text: string } | null;
 };
 
-/** Extra time past the cleanup timeout before the UI stops waiting. */
-const CLEANUP_BACKSTOP_GRACE_MS = 5000;
-const DEFAULT_CLEANUP_TIMEOUT_MS = 4000;
+/** Extra time past the polish timeout before the result is ignored. */
+const POLISH_BACKSTOP_GRACE_MS = 5000;
+const DEFAULT_POLISH_TIMEOUT_MS = 4000;
 
 function readStoredDevice(): string | null {
   try {
@@ -156,11 +154,17 @@ function showStartError(error: unknown) {
   toast.error(message);
 }
 
+/** Most captures remembered per draft until it is sent. */
+const MAX_DRAFT_CAPTURES = 20;
+
+/** Records what happened to a dictation in its local capture, if any. */
+function noteCapture(captureId: string | null, note: Record<string, unknown>) {
+  if (captureId) void noteDictationCapture(captureId, note).catch(() => {});
+}
+
 /**
  * Adds dictated text to a saved draft whose composer is no longer showing
- * it. Words that were already inserted before the composer moved away are
- * swapped in place (whole-word match); otherwise the text is appended. A
- * mention whose label another identity already holds in this draft is
+ * it. A mention whose label another identity already holds in this draft is
  * written as a plain name, so restoring the draft never rebinds it.
  */
 function deliverToDraft(
@@ -180,14 +184,9 @@ function deliverToDraft(
   });
   const now = new Date().toISOString();
   const base = existing?.content ?? "";
-  const swapped = outcome.session.rawInserted
-    ? replaceLastOccurrence(base, outcome.raw, rendered.text)
-    : null;
-  const content =
-    swapped ??
-    (base.trim()
-      ? `${base.replace(/\s+$/, "")} ${rendered.text}`
-      : rendered.text);
+  const content = base.trim()
+    ? `${base.replace(/\s+$/, "")} ${rendered.text}`
+    : rendered.text;
   const refs = [...(existing?.mentionRefs ?? [])];
   for (const ref of rendered.mentionRefs) {
     if (!refs.some((r) => r.displayName === ref.displayName)) refs.push(ref);
@@ -207,8 +206,12 @@ function deliverToDraft(
 }
 
 /**
- * Composer dictation controller: record → local transcript → raw words at the
- * caret (greyed) → cleanup → Buzz-validated mentions → swap (one undo step).
+ * Composer dictation controller: record → local transcript (roster names
+ * already spelled right) → local corrections and mention resolution → words
+ * and mentions at the caret, final and sendable at once. An optional polish
+ * pass may then tidy the words in place, but only while the user has not
+ * touched them, and it can never add or remove a mention.
+ *
  * Every async step is fenced by a generation so a cancelled or superseded
  * dictation can never write into the composer. A result always reaches the
  * draft it was spoken into: the live editor, the saved draft once the
@@ -224,6 +227,8 @@ export function useComposerDictation(params: UseComposerDictationParams) {
   const generationRef = React.useRef(0);
   const sessionRef = React.useRef<Session | null>(null);
   const parkedRef = React.useRef<Outcome | null>(null);
+  /** Captures inserted into each draft since its last send. */
+  const draftCapturesRef = React.useRef(new Map<string, string[]>());
   const targetIdRef = React.useRef(0);
   const focusedAtRef = React.useRef(0);
   const mountedRef = React.useRef(true);
@@ -247,11 +252,6 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     );
   }, []);
 
-  const releaseMark = React.useCallback((id: number | null) => {
-    const editor = paramsRef.current.editor;
-    if (editor && !editor.isDestroyed) releaseDictationMark(editor.view, id);
-  }, []);
-
   const cancel = React.useCallback(() => {
     const session = sessionRef.current;
     generationRef.current += 1;
@@ -259,101 +259,123 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     if (session) {
       session.capture?.cancel();
       releaseBackend(session.backendId);
-      releaseMark(session.rawMarkId);
     }
     releaseRecorder(targetIdRef.current);
     setStatus("idle");
-  }, [releaseMark, setStatus]);
+  }, [setStatus]);
 
-  const cleanUp = React.useCallback(async (session: Session, raw: string) => {
-    const formattedRaw = applySpokenFormatting(raw);
-    const verbatim = () => resolveVerbatim(formattedRaw, session.roster);
+  /**
+   * Tidies an inserted dictation with the configured source. The swap happens
+   * only while its words are exactly as inserted; otherwise, or when the
+   * reply does anything but polish, the dictation stays as it is.
+   */
+  const polishInPlace = React.useCallback(async (outcome: Outcome) => {
+    const { session, inserted } = outcome;
     const settings = session.settings;
-    // Only an explicit Off skips the backend. Whether a source may run (the
-    // cloud toggle, a local connection) is the backend's decision; a
-    // not_configured result comes back as verbatim with no note.
+    const editor = paramsRef.current.editor;
     if (
+      !inserted ||
+      !editor ||
       !settings ||
       settings.cleanup.kind === "off" ||
       session.backendId === null
     ) {
       releaseBackend(session.backendId);
-      return { segments: verbatim(), note: null as string | null };
+      return;
     }
+    const view = editor.view;
+    const markId = trackDictationMark(view, {
+      from: inserted.from,
+      to: inserted.to,
+      kind: "polish",
+    });
+    const request = toPolishRequest(outcome.segments);
     let backstop: number | undefined;
     try {
       const deadline = new Promise<"backstop">((resolve) => {
         backstop = window.setTimeout(
           () => resolve("backstop"),
-          (settings.timeoutMs || DEFAULT_CLEANUP_TIMEOUT_MS) +
-            CLEANUP_BACKSTOP_GRACE_MS,
+          (settings.timeoutMs || DEFAULT_POLISH_TIMEOUT_MS) +
+            POLISH_BACKSTOP_GRACE_MS,
         );
       });
       const result = await Promise.race([
         cleanupDictation({
           sessionId: session.backendId,
-          transcript: raw,
-          roster: session.modelNames,
+          transcript: request.text,
           vocabulary: [],
         }),
         deadline,
       ]);
       if (result === "backstop") {
         releaseBackend(session.backendId);
-        return {
-          segments: verbatim(),
-          note: "Cleanup took too long, so here are your words as spoken.",
-        };
+        noteCapture(session.captureId, { kind: "polish", outcome: "timeout" });
+        return;
       }
-      if (result.text) {
-        return {
-          segments: resolveModelOutput(
-            applySpokenFormatting(result.text),
-            session.roster,
-          ),
-          note: null,
-        };
+      if (!result.text) {
+        noteCapture(session.captureId, {
+          kind: "polish",
+          outcome: "failed",
+          failure: result.failure,
+          elapsedMs: result.elapsedMs,
+        });
+        return;
       }
-      return {
-        segments: verbatim(),
-        note: result.failure ? describeCleanupFailure(result.failure) : null,
-      };
+      const verdict = acceptPolish(request, result.text);
+      const range = readDictationMark(view, markId);
+      const intact =
+        range !== null &&
+        view.state.doc.textBetween(range.from, range.to, "\n", "\n") ===
+          inserted.text;
+      noteCapture(session.captureId, {
+        kind: "polish",
+        input: request.text,
+        reply: result.text,
+        elapsedMs: result.elapsedMs,
+        outcome: !verdict.accepted
+          ? `rejected: ${verdict.reason}`
+          : intact
+            ? "applied"
+            : "skipped: edited or sent",
+      });
+      if (!verdict.accepted || !intact || editor.isDestroyed) return;
+      const rendered = renderSegments(
+        verdict.segments,
+        paramsRef.current.registerMention,
+      );
+      if (rendered.text === inserted.text) return;
+      const start = replaceRange(view, range.from, range.to, rendered.text);
+      if (start === null) return;
+      for (const span of rendered.spans) {
+        if (span.kind !== "suggestion") continue;
+        trackDictationMark(view, {
+          from: start + span.from,
+          to: start + span.to,
+          kind: "suggestion",
+          entryKey: span.entryKey,
+        });
+      }
     } catch {
-      return {
-        segments: verbatim(),
-        note: "Cleanup failed, so here are your words as spoken.",
-      };
+      noteCapture(session.captureId, { kind: "polish", outcome: "error" });
     } finally {
       window.clearTimeout(backstop);
+      if (!editor.isDestroyed) releaseDictationMark(view, markId);
     }
   }, []);
 
-  /** Puts a result into the live editor (swap the raw words, or insert). */
+  /** Puts a result into the live editor at the caret. */
   const applyInEditor = React.useCallback((outcome: Outcome) => {
     const editor = paramsRef.current.editor;
     if (!editor || editor.isDestroyed) return;
     const view = editor.view;
-    const { session } = outcome;
-    let range: { from: number; to: number } | null = null;
-    if (session.rawInserted) {
-      const mark = readDictationMark(view, session.rawMarkId);
-      session.rawMarkId = null;
-      if (!mark) {
-        toast.info(
-          "The dictated words changed before cleanup finished, so they were kept as spoken.",
-        );
-        return;
-      }
-      range = mark;
-    }
     const rendered = renderSegments(
       outcome.segments,
       paramsRef.current.registerMention,
     );
-    const start = range
-      ? replaceRange(view, range.from, range.to, rendered.text)
-      : (insertAtSelection(view, rendered.text)?.from ?? null);
-    if (start === null) return;
+    const range = insertAtSelection(view, rendered.text);
+    if (!range) return;
+    const start = range.from;
+    outcome.inserted = { ...range, text: rendered.text };
     for (const span of rendered.spans) {
       const id = trackDictationMark(view, {
         from: start + span.from,
@@ -373,7 +395,6 @@ export function useComposerDictation(params: UseComposerDictationParams) {
         `${suggestions === 1 ? "A name" : `${suggestions} names`} may be meant as a mention. Click the underlined ${suggestions === 1 ? "name" : "names"}, or put the caret in one and press ${suggestionKeyLabel()}.`,
       );
     }
-    if (outcome.note) toast.info(outcome.note);
   }, []);
 
   /**
@@ -435,7 +456,9 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     let droppedBatches = 0;
     try {
       droppedBatches = (await session.capture?.stop())?.droppedBatches ?? 0;
-      rawText = (await stopDictation(backendId)).text.trim();
+      const transcript = await stopDictation(backendId);
+      rawText = transcript.text.trim();
+      session.captureId = transcript.captureId ?? null;
     } catch (error) {
       // A cancel in the meantime already released everything.
       if (generation !== generationRef.current) return;
@@ -462,38 +485,42 @@ export function useComposerDictation(params: UseComposerDictationParams) {
         "Some audio didn't reach dictation, so part of what you said may be missing.",
       );
     }
-    if (sameContext(session)) {
-      const editor = paramsRef.current.editor;
-      const range = editor ? insertAtSelection(editor.view, rawText) : null;
-      if (editor && range) {
-        session.rawInserted = true;
-        session.rawMarkId = trackDictationMark(editor.view, {
-          ...range,
-          kind: "pending",
-        });
-      }
-    }
-    setStatus("cleaning");
+    const text = applySpokenFormatting(applySpokenCorrections(rawText));
+    const outcome: Outcome = {
+      session,
+      segments: resolveVerbatim(text, session.roster),
+      inserted: null,
+    };
+    sessionRef.current = null;
+    setStatus("idle");
     try {
-      const { segments, note } = await cleanUp(session, rawText);
-      if (generation !== generationRef.current) return;
-      const outcome: Outcome = { session, raw: rawText, segments, note };
       if (deliver(outcome) === "parked") parkedRef.current = outcome;
     } catch {
-      if (generation === generationRef.current) {
-        toast.error(
-          "Dictation could not finish, so your words were kept as spoken.",
+      toast.error("Dictation could not be inserted.");
+      releaseBackend(backendId);
+      return;
+    }
+    if (session.captureId) {
+      noteCapture(session.captureId, {
+        kind: "inserted",
+        text: outcome.inserted?.text ?? null,
+        mentions: outcome.segments.flatMap((s) =>
+          s.type === "mention" ? [s.entry.displayName] : [],
+        ),
+        suggestions: outcome.segments.flatMap((s) =>
+          s.type === "suggestion" ? [s.entry.displayName] : [],
+        ),
+      });
+      if (session.originDraftKey) {
+        const ids = draftCapturesRef.current.get(session.originDraftKey) ?? [];
+        draftCapturesRef.current.set(
+          session.originDraftKey,
+          [...ids, session.captureId].slice(-MAX_DRAFT_CAPTURES),
         );
       }
-    } finally {
-      // Never strand the composer (sends are held while not idle).
-      if (generation === generationRef.current) {
-        releaseMark(session.rawMarkId);
-        sessionRef.current = null;
-        setStatus("idle");
-      }
     }
-  }, [cleanUp, deliver, releaseMark, sameContext, setStatus]);
+    void polishInPlace(outcome);
+  }, [deliver, polishInPlace, setStatus]);
 
   const start = React.useCallback(async () => {
     const current = paramsRef.current;
@@ -529,8 +556,7 @@ export function useComposerDictation(params: UseComposerDictationParams) {
       originChannelId: current.channelId,
       originEditTargetId: current.editTargetId,
       stopRequested: false,
-      rawInserted: false,
-      rawMarkId: null,
+      captureId: null,
     };
     sessionRef.current = session;
     setStatus("starting");
@@ -544,7 +570,7 @@ export function useComposerDictation(params: UseComposerDictationParams) {
       if (generation !== generationRef.current) return;
       if (info.status !== "ready") {
         throw new DictationSetupError(
-          "Set up dictation first: download its speech model in Settings → Experiments → Dictation.",
+          "Set up dictation first: download its speech model in Settings → Voice.",
         );
       }
       const candidates = current.getCandidates();
@@ -636,6 +662,15 @@ export function useComposerDictation(params: UseComposerDictationParams) {
   const getLevel = React.useCallback(() => levelRef.current, []);
   const notifyBusy = React.useCallback(() => {
     toast.info("Finishing dictation…", { id: "dictation-busy" });
+  }, []);
+  /** Records the sent message in the captures dictated into this draft. */
+  const noteSent = React.useCallback((content: string) => {
+    const draftKey = paramsRef.current.draftKey;
+    if (!draftKey) return;
+    const ids = draftCapturesRef.current.get(draftKey);
+    if (!ids) return;
+    draftCapturesRef.current.delete(draftKey);
+    for (const id of ids) noteCapture(id, { kind: "sent", content });
   }, []);
 
   // Register as a hotkey target for this composer's lifetime.
@@ -737,6 +772,7 @@ export function useComposerDictation(params: UseComposerDictationParams) {
     startedAt,
     getLevel,
     notifyBusy,
+    noteSent,
     start,
     stop,
     toggle,

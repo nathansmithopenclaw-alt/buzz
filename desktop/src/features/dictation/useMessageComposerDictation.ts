@@ -83,6 +83,7 @@ export function useMessageComposerDictation(
     blocksSend: dictation.blocksSend,
     isBusy: dictation.isBusy,
     notifyBusy: dictation.notifyBusy,
+    noteSent: dictation.noteSent,
     buttonProps,
   };
 }

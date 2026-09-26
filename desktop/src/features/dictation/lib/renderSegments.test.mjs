@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderSegments, replaceLastOccurrence } from "./renderSegments.ts";
+import { renderSegments } from "./renderSegments.ts";
 
 const pk = (n) => n.toString(16).padStart(64, "0");
 const anvil = {
@@ -121,31 +121,4 @@ test("a failed registration falls back to the plain name", () => {
   assert.equal(out.text, "Anvil ");
   assert.deepEqual(out.mentionRefs, []);
   assert.deepEqual(out.spans, []);
-});
-
-test("draft delivery replaces the last occurrence only", () => {
-  assert.equal(
-    replaceLastOccurrence("hi raw x raw", "raw", "NEW"),
-    "hi raw x NEW",
-  );
-  assert.equal(replaceLastOccurrence("nothing here", "raw", "NEW"), null);
-  assert.equal(replaceLastOccurrence("abc", "", "NEW"), null);
-});
-
-test("draft swap matches whole words only, never inside another word", () => {
-  assert.equal(replaceLastOccurrence("I know", "no", "No."), null);
-  assert.equal(
-    replaceLastOccurrence("I know no way", "no", "No"),
-    "I know No way",
-  );
-  assert.equal(
-    replaceLastOccurrence("start ship it", "ship it", "Ship it."),
-    "start Ship it.",
-  );
-  // The last whole-word hit wins, skipping a later embedded one.
-  assert.equal(
-    replaceLastOccurrence("go now, go nowhere", "go now", "Go now"),
-    "Go now, go nowhere",
-  );
-  assert.equal(replaceLastOccurrence("abc", "", "x"), null);
 });

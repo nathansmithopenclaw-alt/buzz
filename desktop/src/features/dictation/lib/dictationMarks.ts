@@ -12,9 +12,9 @@ import { isMacPlatform } from "@/shared/lib/platform";
 /**
  * Composer ranges that belong to a dictation:
  *
- * - `pending`: raw words shown greyed while cleanup runs. The swap to cleaned
- *   text only happens while this range is intact, so a late cleanup result can
- *   never overwrite text the user has since edited.
+ * - `polish`: an inserted dictation a polish pass may still tidy. Invisible;
+ *   the swap only happens while this range is intact, so a late polish can
+ *   never overwrite text the user has since edited or sent.
  * - `suggestion`: a name Buzz thinks was addressed but will not mention on its
  *   own; clicking it opens the normal @ picker for that name.
  * - `flash`: a brief highlight on mentions dictation just inserted, so a wrong
@@ -28,7 +28,7 @@ export const dictationMarksKey = new PluginKey<DictationMarks>(
   "dictationMarks",
 );
 
-export type DictationMarkKind = "pending" | "suggestion" | "flash";
+export type DictationMarkKind = "polish" | "suggestion" | "flash";
 
 export type DictationMark = {
   from: number;
@@ -91,7 +91,7 @@ function remap(mark: DictationMark, tr: Transaction): DictationMark | null {
     let overlapped = false;
     map.forEach((oldStart, oldEnd) => {
       // A replacement touching the range, or text inserted strictly inside
-      // it (typing in the middle of pending words must not be swapped away).
+      // it (typing in the middle of a dictation must not be polished away).
       const replaces = oldEnd > oldStart && oldStart < to && oldEnd > from;
       const insertsInside =
         oldEnd === oldStart && oldStart > from && oldStart < to;
@@ -134,8 +134,7 @@ function apply(current: DictationMarks, tr: Transaction): DictationMarks {
   return next;
 }
 
-const CLASS: Record<DictationMarkKind, string> = {
-  pending: "dictation-pending",
+const CLASS: Record<Exclude<DictationMarkKind, "polish">, string> = {
   suggestion: "dictation-suggestion",
   flash: "dictation-flash",
 };
@@ -146,9 +145,8 @@ function decorations(state: EditorState): DecorationSet {
   const size = state.doc.content.size;
   const items: Decoration[] = [];
   for (const [id, mark] of marks) {
-    if (mark.to > size) continue;
+    if (mark.to > size || mark.kind === "polish") continue;
     const attrs: Record<string, string> = { class: CLASS[mark.kind] };
-    if (mark.kind === "pending") attrs["aria-busy"] = "true";
     if (mark.kind === "suggestion") {
       attrs["data-dictation-suggestion"] = String(id);
       attrs.title = `Suggested mention — click, or press ${suggestionKeyLabel()} with the caret in it, to choose who you meant`;

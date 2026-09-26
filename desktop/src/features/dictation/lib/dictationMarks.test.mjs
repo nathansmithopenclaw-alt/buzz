@@ -37,12 +37,12 @@ function makeView(text) {
 // Paragraph content starts at position 1.
 const at = (offset) => offset + 1;
 
-test("a pending range follows edits made before it", () => {
+test("a polish range follows edits made before it", () => {
   const view = makeView("hello raw words here");
   const id = trackDictationMark(view, {
     from: at(6),
     to: at(15),
-    kind: "pending",
+    kind: "polish",
   });
   view.dispatch(view.state.tr.insertText("XX", at(0)));
   const mark = readDictationMark(view, id);
@@ -55,7 +55,7 @@ test("typing at either edge stays outside the range", () => {
   const id = trackDictationMark(view, {
     from: at(3),
     to: at(6),
-    kind: "pending",
+    kind: "polish",
   });
   view.dispatch(view.state.tr.insertText("<", at(3)));
   const afterStart = readDictationMark(view, id);
@@ -69,7 +69,7 @@ test("any edit inside the range kills it (late cleanup cannot overwrite edits)",
   const id = trackDictationMark(view, {
     from: at(3),
     to: at(12),
-    kind: "pending",
+    kind: "polish",
   });
   view.dispatch(view.state.tr.insertText("Z", at(5), at(6)));
   assert.equal(readDictationMark(view, id), null);
@@ -78,7 +78,7 @@ test("any edit inside the range kills it (late cleanup cannot overwrite edits)",
   const id2 = trackDictationMark(deleted, {
     from: at(3),
     to: at(12),
-    kind: "pending",
+    kind: "polish",
   });
   deleted.dispatch(deleted.state.tr.delete(at(0), at(14)));
   assert.equal(readDictationMark(deleted, id2), null);
@@ -87,7 +87,7 @@ test("any edit inside the range kills it (late cleanup cannot overwrite edits)",
 test("release forgets a mark; empty ranges are never tracked", () => {
   const view = makeView("aa raw bb");
   assert.equal(
-    trackDictationMark(view, { from: at(3), to: at(3), kind: "pending" }),
+    trackDictationMark(view, { from: at(3), to: at(3), kind: "polish" }),
     null,
   );
   const id = trackDictationMark(view, {
@@ -112,7 +112,7 @@ test("tracking does not create undo history", () => {
   assert.equal(sawHistoryFlag, false);
 });
 
-test("marks render with their classes and suggestions are clickable targets", () => {
+test("marks render with their classes; polish ranges stay invisible", () => {
   const view = makeView("hey Anvil and raw");
   trackDictationMark(view, {
     from: at(4),
@@ -120,17 +120,15 @@ test("marks render with their classes and suggestions are clickable targets", ()
     kind: "suggestion",
     entryKey: "p:1",
   });
-  trackDictationMark(view, { from: at(14), to: at(17), kind: "pending" });
+  trackDictationMark(view, { from: at(14), to: at(17), kind: "polish" });
   const set = plugins[0].props.decorations(view.state);
   const found = set.find();
   const classes = found.map((d) => d.type.attrs.class).sort();
-  assert.deepEqual(classes, ["dictation-pending", "dictation-suggestion"]);
+  assert.deepEqual(classes, ["dictation-suggestion"]);
   const suggestion = found.find(
     (d) => d.type.attrs.class === "dictation-suggestion",
   );
   assert.ok(suggestion.type.attrs["data-dictation-suggestion"]);
-  const pending = found.find((d) => d.type.attrs.class === "dictation-pending");
-  assert.equal(pending.type.attrs["aria-busy"], "true");
 });
 
 test("the mark set is capped", () => {
@@ -144,24 +142,24 @@ test("the mark set is capped", () => {
   );
 });
 
-test("typing strictly inside a pending range kills it (the swap must not erase it)", () => {
+test("typing strictly inside a polish range kills it (the swap must not erase it)", () => {
   const view = makeView("lets meet tomorrow");
   const id = trackDictationMark(view, {
     from: at(0),
     to: at(18),
-    kind: "pending",
+    kind: "polish",
   });
   // A pure insertion (no deleted text) in the middle of the raw words.
   view.dispatch(view.state.tr.insertText("not ", at(10)));
   assert.equal(readDictationMark(view, id), null);
 });
 
-test("a line break typed inside a pending range kills it too", () => {
+test("a line break typed inside a polish range kills it too", () => {
   const view = makeView("first second");
   const id = trackDictationMark(view, {
     from: at(0),
     to: at(12),
-    kind: "pending",
+    kind: "polish",
   });
   view.dispatch(
     view.state.tr.replaceWith(at(5), at(5), schema.nodes.hardBreak.create()),

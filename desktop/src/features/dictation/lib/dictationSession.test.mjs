@@ -35,13 +35,13 @@ function fakeTarget(overrides = {}) {
   };
 }
 
-test("a typing-chord cancel never aborts a composer that is still cleaning up", () => {
-  const cleaning = fakeTarget({ status: "cleaning", focused: true });
+test("a typing-chord cancel never aborts a composer that is still transcribing", () => {
+  const transcribing = fakeTarget({ status: "transcribing", focused: true });
   try {
     routeHotkeyAction("cancel");
-    assert.deepEqual(cleaning.calls, []);
+    assert.deepEqual(transcribing.calls, []);
   } finally {
-    cleaning.unregister();
+    transcribing.unregister();
   }
 });
 
@@ -74,7 +74,7 @@ test("tap toggles the focused composer; a hold drives the capturing one", () => 
 
 test("a community reset discards every composer (held results included)", () => {
   const a = fakeTarget();
-  const b = fakeTarget({ status: "cleaning" });
+  const b = fakeTarget({ status: "transcribing" });
   try {
     assert.equal(claimRecorder(a.id), true);
     resetDictationState();

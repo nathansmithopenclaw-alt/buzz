@@ -39,6 +39,8 @@ export type DictationTranscript = {
   decodeMs: number;
   tailDecodeMs: number;
   chunks: number;
+  /** Set when captures are on and this dictation was written locally. */
+  captureId?: string;
 };
 
 /** Why cleanup produced no text; mirrors `CleanupFailure`. */
@@ -111,12 +113,18 @@ export const stopDictation = (sessionId: number) =>
 export const cancelDictation = (sessionId: number) =>
   invokeTauri<void>("dictation_cancel", { sessionId });
 
+/** Polishes a dictation whose mentions are `{{n}}` placeholders. */
 export const cleanupDictation = (request: {
   sessionId: number;
   transcript: string;
-  roster: string[];
   vocabulary: string[];
 }) => invokeTauri<DictationCleanupResult>("dictation_cleanup", { request });
+
+/** Appends a note to a local dictation capture. */
+export const noteDictationCapture = (
+  captureId: string,
+  note: Record<string, unknown>,
+) => invokeTauri<void>("dictation_capture_note", { captureId, note });
 
 /**
  * Sends one raw batch of 48 kHz f32 samples. Uses Tauri's internal raw-body
@@ -129,28 +137,4 @@ export function pushDictationAudio(bytes: Uint8Array): Promise<unknown> {
     return Promise.reject(new Error("Tauri internals not available"));
   }
   return internals.invoke("dictation_push_audio", bytes);
-}
-
-/** Plain-language reason for a fallback, shown in the dictation note. */
-export function describeCleanupFailure(
-  failure: DictationCleanupFailure,
-): string | null {
-  switch (failure.kind) {
-    case "not_configured":
-      return null;
-    case "secret_detected":
-      return `Cleanup skipped: your words looked like a ${failure.secret_kind}, so nothing was sent.`;
-    case "timeout":
-      return "Cleanup took too long, so here are your words as spoken.";
-    case "offline":
-      return "Cleanup is unreachable (offline?), so here are your words as spoken.";
-    case "rate_limited":
-      return "Cleanup is busy right now, so here are your words as spoken.";
-    case "http":
-      return `Cleanup failed (HTTP ${failure.status}), so here are your words as spoken.`;
-    case "bad_response":
-      return "Cleanup returned nothing usable, so here are your words as spoken.";
-    case "unavailable":
-      return `Cleanup unavailable: ${failure.message}`;
-  }
 }

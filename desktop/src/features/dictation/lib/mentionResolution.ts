@@ -7,16 +7,16 @@ import {
 
 /**
  * Dictated text resolved into plain text, real mentions, and click-to-confirm
- * suggestions. Buzz, not the model, decides what becomes a mention: model
- * markers are validated against the roster, and everything else is at most a
- * suggestion the user confirms through the normal @ picker.
+ * suggestions, locally and at insert time. A member the speaker addresses
+ * becomes a mention; an addressed name that cannot be auto-mentioned (a
+ * persona, a non-member) is at most a suggestion the user confirms through
+ * the normal @ picker.
  */
 export type DictationSegment =
   | { type: "text"; text: string }
   | { type: "mention"; entry: DictationRosterEntry }
   | { type: "suggestion"; entry: DictationRosterEntry; text: string };
 
-const MARKER = /@\[([^\]\n]{1,80})\]/g;
 const MAX_NAME_WORDS = 4;
 const CUE_WORDS = new Set([
   "hey",
@@ -182,6 +182,8 @@ export function findAddressedNames(
   const hits: AddressHit[] = [];
   let lastHitTokenEnd = -1;
   let lastHitWasGreeting = false;
+  /** The last hit was a relay ("loop in Morty", "ask Anvil"). */
+  let lastHitWasRelay = false;
   for (let i = 0; i < tokens.length; i++) {
     let span = 0;
     let lookup: Lookup = { type: "none" };
@@ -242,9 +244,14 @@ export function findAddressedNames(
       ((lower(prev) === "and" || lower(prev) === "&") && afterLastHit(i - 2));
     // A list of addressees ends in a pause ("…and Nectar, standup…") or
     // continues; "Nemo, Morty wants…" is Nemo being told about Morty. After a
-    // greeting the list may run on ("Thanks Theron, Vela and Sable for…").
-    const list =
-      joined && (/^[,:.!?]/.test(punct) || listContinues || lastHitWasGreeting);
+    // greeting or a relay the list may run on ("Thanks Theron, Vela and Sable
+    // for…", "loop in Morty and Nemo on this").
+    const list: boolean =
+      joined &&
+      (/^[,:.!?]/.test(punct) ||
+        listContinues ||
+        lastHitWasGreeting ||
+        lastHitWasRelay);
     const trailing = /[.!?]/.test(punct) && /,$/.test(prev?.raw ?? "");
     const relay =
       (CUE_WORDS.has(lower(prev)) && !endsSentence(prev)) ||
@@ -277,6 +284,7 @@ export function findAddressedNames(
     });
     lastHitTokenEnd = i + span - 1;
     lastHitWasGreeting = greeting || (list && lastHitWasGreeting);
+    lastHitWasRelay = relay || (list && lastHitWasRelay);
     i += span - 1;
   }
   return hits;
@@ -319,86 +327,8 @@ function splitAddressed(
 }
 
 /**
- * Resolves cleanup-model output. Each `@[Name]` marker becomes a real mention
- * only for a single auto-mentionable roster entry; personas, non-members and
- * out-of-channel teams become suggestions; unknown or ambiguous names become
- * plain text. Addressed names the model left unmarked become suggestions.
- *
- * Address detection runs over the whole sentence (markers unwrapped to their
- * names) so context such as "@[Anvil], and Outsider, …" carries across.
- */
-export function resolveModelOutput(
-  text: string,
-  roster: readonly DictationRosterEntry[],
-): DictationSegment[] {
-  type EntrySegment = Exclude<DictationSegment, { type: "text" }>;
-  type Marker = { start: number; end: number; segment: EntrySegment | null };
-  const markers: Marker[] = [];
-  let plain = "";
-  let cursor = 0;
-  for (const match of text.matchAll(MARKER)) {
-    const index = match.index ?? 0;
-    plain += text.slice(cursor, index);
-    const name = match[1].trim();
-    const lookup = lookupExact(name, roster);
-    const segment: EntrySegment | null =
-      lookup.type !== "one"
-        ? null
-        : lookup.entry.autoMention
-          ? { type: "mention", entry: lookup.entry }
-          : { type: "suggestion", entry: lookup.entry, text: name };
-    markers.push({
-      start: plain.length,
-      end: plain.length + name.length,
-      segment,
-    });
-    plain += name;
-    cursor = index + match[0].length;
-  }
-  plain += text.slice(cursor);
-
-  const taken = new Set(
-    markers.flatMap((m) => (m.segment ? [m.segment.entry.key] : [])),
-  );
-  // Only resolved markers own their text; an unresolved one is plain text
-  // that may still be recognised as an addressed name.
-  const overlapsMarker = (start: number, end: number) =>
-    markers.some((m) => m.segment && start < m.end && end > m.start);
-  const suggestions = findAddressedNames(plain, roster).filter(
-    (hit) => !taken.has(hit.entry.key) && !overlapsMarker(hit.start, hit.end),
-  );
-
-  type Span = { start: number; end: number; segment: DictationSegment };
-  const spans: Span[] = [
-    ...markers.flatMap((m) =>
-      m.segment ? [{ start: m.start, end: m.end, segment: m.segment }] : [],
-    ),
-    ...suggestions.map((hit) => ({
-      start: hit.start,
-      end: hit.end,
-      segment: {
-        type: "suggestion" as const,
-        entry: hit.entry,
-        text: plain.slice(hit.start, hit.end),
-      },
-    })),
-  ].sort((a, b) => a.start - b.start);
-
-  const segments: DictationSegment[] = [];
-  let at = 0;
-  for (const span of spans) {
-    pushText(segments, plain.slice(at, span.start));
-    segments.push(span.segment);
-    at = span.end;
-  }
-  pushText(segments, plain.slice(at));
-  return segments;
-}
-
-/**
- * Resolves text with no cleanup model (Verbatim, or any fallback): only an
- * explicit "at <name>" to an auto-mentionable entry becomes a mention; every
- * other addressed name is a suggestion.
+ * Resolves dictated text: every addressed auto-mentionable member becomes a
+ * mention; other addressed names become suggestions.
  */
 export function resolveVerbatim(
   text: string,

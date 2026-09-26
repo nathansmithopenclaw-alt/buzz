@@ -28,7 +28,6 @@ const STATUS_ANNOUNCEMENT: Record<DictationStatus, string> = {
   starting: "Starting dictation",
   recording: "Dictation recording",
   transcribing: "Transcribing dictation",
-  cleaning: "Cleaning up dictation",
 };
 
 export type DictationButtonProps = {
@@ -47,7 +46,7 @@ export type DictationButtonProps = {
 /**
  * Composer dictation control (sound-wave icon). Idle: starts dictation.
  * Recording: shows a live level waveform and timer; clicking stops. While
- * transcribing or cleaning up it shows progress and cannot be pressed.
+ * transcribing it shows progress and cannot be pressed.
  */
 /** Waveform + clock, local to the button so the composer never re-renders per tick. */
 function useRecordingMeter(
@@ -91,7 +90,7 @@ export function DictationButton({
     getLevel,
     startedAt,
   );
-  const processing = status === "transcribing" || status === "cleaning";
+  const processing = status === "transcribing";
   // One stable name; state is carried by aria-pressed/aria-busy and the live
   // region, so assistive tech never hears the state twice.
   const tooltip = recording

@@ -320,13 +320,9 @@
   opacity: 1;
 }
 
-/* Dictation. Pending raw words are greyed until cleanup swaps them; suggested
-   mentions get a dotted underline and open the @ picker on click; freshly
-   dictated mentions flash once so a wrong one is noticed before sending. */
-.rich-text-composer .tiptap .dictation-pending {
-  color: hsl(var(--muted-foreground));
-}
-
+/* Dictation. Suggested mentions get a dotted underline and open the @ picker
+   on click; freshly dictated mentions flash once so a wrong one is noticed
+   before sending. */
 .rich-text-composer .tiptap .dictation-suggestion {
   cursor: pointer;
   text-decoration-line: underline;
