@@ -8,7 +8,9 @@
 //!   → engine worker thread (owns the recognizer, one session at a time)
 //!       rubato 48 kHz → 16 kHz
 //!       earshot VAD picks cut points (speech audio is kept whole)
-//!       at each ≥500 ms pause, decode the finished chunk while the user talks
+//!       at each ≥500 ms pause, decode the finished chunk while the user talks:
+//!       a plain pass and a roster-hotword pass run in parallel, and the
+//!       hotword pass's names are spliced into the plain text (`names`)
 //!   → dictation_stop: decode the short remainder, return the joined text
 //! ```
 //!
@@ -20,6 +22,7 @@
 //! CPU-bound and not meant to cross await points.
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{mpsc, Mutex, OnceLock},
     thread,
@@ -27,6 +30,8 @@ use std::{
 };
 
 use serde::Serialize;
+
+use super::names::{self, RosterNames};
 
 /// earshot requires exactly 256 samples per frame at 16 kHz (16 ms).
 const VAD_FRAME_SAMPLES: usize = 256;
@@ -47,6 +52,13 @@ pub(crate) const MAX_SESSION_SAMPLES_16K: usize = 16_000 * (5 * 60 + 10);
 const LEAD_IN_SAMPLES: usize = 16_000 * 3 / 10;
 /// Largest raw audio batch accepted from the frontend (100 ms at 48 kHz = 19.2 KB).
 pub(crate) const MAX_AUDIO_BATCH_BYTES: usize = 64 * 1024;
+/// Hotword boost for roster names. Measured on the dictation holdout: 2.0
+/// maximizes name accuracy; 3.0 starts corrupting surrounding words.
+const HOTWORDS_SCORE: f32 = 2.0;
+/// Beam width for modified beam search (hotwords need beam search).
+const MAX_ACTIVE_PATHS: i32 = 4;
+/// sherpa-onnx's hotword encoder vocabulary, derived from `tokens.txt`.
+const BPE_VOCAB: &str = "bpe.vocab";
 
 // ── Segmentation (pure; unit-tested without a model) ──────────────────────────
 
@@ -196,7 +208,33 @@ fn decoder_threads() -> i32 {
         .max(1)
 }
 
-fn load_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OfflineRecognizer, String> {
+/// A loaded model plus the characters its vocabulary can spell.
+struct Recognizer {
+    inner: sherpa_onnx::OfflineRecognizer,
+    encodable: HashSet<char>,
+}
+
+/// Writes `bpe.vocab` ("piece\tscore" per line) next to `tokens.txt`.
+/// Without `modeling_unit = "bpe"` and this file, sherpa-onnx falls back to
+/// CJK characters and silently drops every English hotword.
+fn prepare_bpe_vocab(model_dir: &Path, tokens: &str) -> Result<PathBuf, String> {
+    let vocab: String = tokens
+        .lines()
+        .filter_map(|line| line.rsplit_once(' ').map(|(piece, _)| piece))
+        .map(|piece| format!("{piece}\t-1.0\n"))
+        .collect();
+    let path = model_dir.join(BPE_VOCAB);
+    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == vocab) {
+        return Ok(path);
+    }
+    let staged = model_dir.join(format!("{BPE_VOCAB}.tmp"));
+    std::fs::write(&staged, vocab)
+        .and_then(|()| std::fs::rename(&staged, &path))
+        .map_err(|e| format!("could not prepare the dictation vocabulary: {e}"))?;
+    Ok(path)
+}
+
+fn load_recognizer(model_dir: &Path) -> Result<Recognizer, String> {
     use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
     let file = |name: &str| -> Result<String, String> {
         let path = model_dir.join(name);
@@ -206,26 +244,61 @@ fn load_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OfflineRecognizer, S
             Err(format!("dictation model file missing: {name}"))
         }
     };
+    let tokens_path = file("tokens.txt")?;
+    let tokens = std::fs::read_to_string(&tokens_path)
+        .map_err(|e| format!("could not read the dictation vocabulary: {e}"))?;
+    let encodable = tokens
+        .lines()
+        .filter_map(|line| line.rsplit_once(' ').map(|(piece, _)| piece))
+        .flat_map(|piece| piece.chars().filter(|&c| c != '\u{2581}'))
+        .collect();
+    let bpe_vocab = prepare_bpe_vocab(model_dir, &tokens)?;
     let mut cfg = OfflineRecognizerConfig::default();
     cfg.model_config.transducer.encoder = Some(file("encoder.int8.onnx")?);
     cfg.model_config.transducer.decoder = Some(file("decoder.int8.onnx")?);
     cfg.model_config.transducer.joiner = Some(file("joiner.int8.onnx")?);
-    cfg.model_config.tokens = Some(file("tokens.txt")?);
+    cfg.model_config.tokens = Some(tokens_path);
     cfg.model_config.model_type = Some("nemo_transducer".to_string());
+    cfg.model_config.modeling_unit = Some("bpe".to_string());
+    cfg.model_config.bpe_vocab = Some(bpe_vocab.to_string_lossy().into_owned());
     cfg.model_config.num_threads = decoder_threads();
     cfg.model_config.debug = false;
-    OfflineRecognizer::create(&cfg)
-        .ok_or_else(|| "could not load the dictation speech model".to_string())
+    cfg.decoding_method = Some("modified_beam_search".to_string());
+    cfg.max_active_paths = MAX_ACTIVE_PATHS;
+    cfg.hotwords_score = HOTWORDS_SCORE;
+    let inner = OfflineRecognizer::create(&cfg)
+        .ok_or_else(|| "could not load the dictation speech model".to_string())?;
+    Ok(Recognizer { inner, encodable })
 }
 
-fn decode(recognizer: &sherpa_onnx::OfflineRecognizer, samples_16k: &[f32]) -> String {
-    let stream = recognizer.create_stream();
+fn decode(recognizer: &Recognizer, samples_16k: &[f32], hotwords: Option<&str>) -> String {
+    let stream = match hotwords {
+        Some(hotwords) => recognizer.inner.create_stream_with_hotwords(hotwords),
+        None => recognizer.inner.create_stream(),
+    };
     stream.accept_waveform(16_000, samples_16k);
-    recognizer.decode(&stream);
+    recognizer.inner.decode(&stream);
     stream
         .get_result()
         .map(|r| r.text.trim().to_string())
         .unwrap_or_default()
+}
+
+/// Decodes a chunk plainly and, when the roster has names, with hotwords in
+/// parallel; returns (plain, hotword) text.
+fn decode_both(
+    recognizer: &Recognizer,
+    samples_16k: &[f32],
+    names: &RosterNames,
+) -> (String, String) {
+    let Some(hotwords) = names.hotwords() else {
+        return (decode(recognizer, samples_16k, None), String::new());
+    };
+    thread::scope(|scope| {
+        let hot = scope.spawn(|| decode(recognizer, samples_16k, Some(hotwords)));
+        let plain = decode(recognizer, samples_16k, None);
+        (plain, hot.join().unwrap_or_default())
+    })
 }
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -241,10 +314,39 @@ pub(crate) struct Transcript {
     /// Decode time spent after stop (the user-visible wait).
     pub tail_decode_ms: u64,
     pub chunks: u32,
+    /// Set when this dictation was written to the local capture directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_id: Option<String>,
+    /// Audio and per-chunk decodes, kept only when the session was started
+    /// with capture on (see `capture`).
+    #[serde(skip)]
+    pub capture: Option<CaptureData>,
+}
+
+/// One decoded chunk: both passes and the spliced result.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChunkDecode {
+    pub plain: String,
+    pub hotword: String,
+    pub text: String,
+    pub decode_ms: u64,
+}
+
+/// What a capture needs from the engine.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CaptureData {
+    pub audio_16k: Vec<f32>,
+    pub chunks: Vec<ChunkDecode>,
+    pub hotword_names: usize,
 }
 
 struct Session {
     id: u64,
+    names: RosterNames,
+    /// Keep audio and chunk decodes for a capture.
+    capture: bool,
+    decodes: Vec<ChunkDecode>,
     resampler: Resampler48To16,
     vad: earshot::Detector<earshot::DefaultPredictor>,
     segmenter: Segmenter,
@@ -258,9 +360,12 @@ struct Session {
 }
 
 impl Session {
-    fn new(id: u64) -> Result<Self, String> {
+    fn new(id: u64, names: RosterNames, capture: bool) -> Result<Self, String> {
         Ok(Self {
             id,
+            names,
+            capture,
+            decodes: Vec::new(),
             resampler: Resampler48To16::new()?,
             vad: earshot::Detector::new(earshot::DefaultPredictor::new()),
             segmenter: Segmenter::default(),
@@ -273,7 +378,7 @@ impl Session {
         })
     }
 
-    fn push_16k(&mut self, samples: &[f32], recognizer: &sherpa_onnx::OfflineRecognizer) {
+    fn push_16k(&mut self, samples: &[f32], recognizer: &Recognizer) {
         let room = MAX_SESSION_SAMPLES_16K.saturating_sub(self.samples_16k);
         let samples = &samples[..samples.len().min(room)];
         self.samples_16k += samples.len();
@@ -289,25 +394,38 @@ impl Session {
         }
     }
 
-    fn push_48k(&mut self, samples_48k: &[f32], recognizer: &sherpa_onnx::OfflineRecognizer) {
+    fn push_48k(&mut self, samples_48k: &[f32], recognizer: &Recognizer) {
         let mut out = Vec::new();
         self.resampler.push(samples_48k, &mut out);
         self.push_16k(&out, recognizer);
     }
 
-    fn decode_chunk(&mut self, chunk: &[f32], recognizer: &sherpa_onnx::OfflineRecognizer) -> u64 {
+    fn decode_chunk(&mut self, chunk: &[f32], recognizer: &Recognizer) -> u64 {
         let started = Instant::now();
-        let text = decode(recognizer, chunk);
+        let (plain, hotword) = decode_both(recognizer, chunk, &self.names);
+        let text = if hotword.is_empty() {
+            plain.clone()
+        } else {
+            names::splice_names(&plain, &hotword, &self.names)
+        };
         let elapsed = started.elapsed().as_millis() as u64;
         self.decode_ms += elapsed;
         self.chunks += 1;
+        if self.capture {
+            self.decodes.push(ChunkDecode {
+                plain,
+                hotword,
+                text: text.clone(),
+                decode_ms: elapsed,
+            });
+        }
         if !text.is_empty() {
             self.texts.push(text);
         }
         elapsed
     }
 
-    fn finish(mut self, recognizer: &sherpa_onnx::OfflineRecognizer) -> Transcript {
+    fn finish(mut self, recognizer: &Recognizer) -> Transcript {
         let mut tail = Vec::new();
         self.resampler.flush(&mut tail);
         self.push_16k(&tail, recognizer);
@@ -322,15 +440,22 @@ impl Session {
             }
         }
         if self.texts.is_empty() && has_signal(&self.all_audio) {
-            let audio = std::mem::take(&mut self.all_audio);
+            let audio = self.all_audio.clone();
             tail_decode_ms += self.decode_chunk(&audio, recognizer);
         }
+        let capture = self.capture.then(|| CaptureData {
+            audio_16k: std::mem::take(&mut self.all_audio),
+            chunks: std::mem::take(&mut self.decodes),
+            hotword_names: self.names.hotwords().map_or(0, |h| h.split('/').count()),
+        });
         Transcript {
             text: join_chunks(&self.texts),
             audio_ms: (self.samples_16k as u64 * 1000) / 16_000,
             decode_ms: self.decode_ms,
             tail_decode_ms,
             chunks: self.chunks,
+            capture_id: None,
+            capture,
         }
     }
 }
@@ -381,6 +506,8 @@ pub(crate) fn join_chunks(texts: &[String]) -> String {
 enum Command {
     Start {
         id: u64,
+        roster: Vec<String>,
+        capture: bool,
         reply: mpsc::Sender<Result<(), String>>,
     },
     Audio {
@@ -432,12 +559,18 @@ fn spawn_worker(model_dir: PathBuf) -> Result<Worker, String> {
     Ok(Worker { tx, model_dir })
 }
 
-fn run_worker(rx: mpsc::Receiver<Command>, recognizer: &sherpa_onnx::OfflineRecognizer) {
+fn run_worker(rx: mpsc::Receiver<Command>, recognizer: &Recognizer) {
     let mut session: Option<Session> = None;
     while let Ok(command) = rx.recv() {
         match command {
-            Command::Start { id, reply } => {
-                let result = Session::new(id).map(|fresh| {
+            Command::Start {
+                id,
+                roster,
+                capture,
+                reply,
+            } => {
+                let names = RosterNames::new(&roster, &recognizer.encodable);
+                let result = Session::new(id, names, capture).map(|fresh| {
                     session = Some(fresh);
                 });
                 let _ = reply.send(result);
@@ -486,12 +619,23 @@ fn existing_sender() -> Option<mpsc::Sender<Command>> {
         .map(|worker| worker.tx.clone())
 }
 
-/// Starts a session; blocks while the model loads on first use (~1 s).
-pub(crate) fn start(model_dir: &Path, id: u64) -> Result<(), String> {
+/// Starts a session biased toward `roster` names; blocks while the model
+/// loads on first use (~1 s). `capture` keeps the audio for a local capture.
+pub(crate) fn start(
+    model_dir: &Path,
+    id: u64,
+    roster: Vec<String>,
+    capture: bool,
+) -> Result<(), String> {
     let tx = worker_sender(model_dir)?;
     let (reply, rx) = mpsc::channel();
-    tx.send(Command::Start { id, reply })
-        .map_err(|_| "the dictation worker stopped".to_string())?;
+    tx.send(Command::Start {
+        id,
+        roster,
+        capture,
+        reply,
+    })
+    .map_err(|_| "the dictation worker stopped".to_string())?;
     rx.recv_timeout(Duration::from_secs(10))
         .map_err(|_| "the dictation worker did not respond".to_string())?
 }
@@ -526,9 +670,11 @@ pub(crate) fn cancel(id: u64) {
 pub(crate) fn transcribe_16k_blocking(
     model_dir: &Path,
     samples_16k: &[f32],
+    roster: &[String],
 ) -> Result<Transcript, String> {
     let recognizer = load_recognizer(model_dir)?;
-    let mut session = Session::new(0)?;
+    let names = RosterNames::new(roster, &recognizer.encodable);
+    let mut session = Session::new(0, names, false)?;
     // Feed in 20 ms batches to mirror the live cadence.
     for batch in samples_16k.chunks(320) {
         session.push_16k(batch, &recognizer);

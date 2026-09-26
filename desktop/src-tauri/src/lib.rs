@@ -793,6 +793,7 @@ pub fn run() {
             dictation::dictation_push_audio,
             dictation::dictation_stop,
             dictation::dictation_cancel,
+            dictation::dictation_capture_note,
             dictation::dictation_cleanup,
             dictation::dictation_cleanup_sources,
             model_connections::network::discover_model_servers,

@@ -1,12 +1,14 @@
-//! Composer dictation: local speech-to-text (Parakeet TDT 0.6B v2) plus an
-//! optional cleanup pass that marks addressed roster members as `@[Name]`.
+//! Composer dictation: local speech-to-text (Parakeet TDT 0.6B v2) biased
+//! toward the channel's member names, plus an optional polish pass.
 //!
 //! Lifecycle, one session at a time across every window:
-//! `dictation_start` → `dictation_push_audio`* → `dictation_stop` (raw text)
-//! → `dictation_cleanup` (cleaned text or a typed failure the UI can explain).
-//! `dictation_cancel` discards a session. Mention validation, insertion and
-//! the send-time checks live in the frontend mention pipeline.
+//! `dictation_start` (roster names) → `dictation_push_audio`* →
+//! `dictation_stop` (transcript with roster names spliced in) →
+//! `dictation_cleanup` (polished text or a typed failure the UI can explain).
+//! `dictation_cancel` discards a session. Mentions are resolved locally in
+//! the frontend at insert time; polish never adds or removes one.
 
+mod capture;
 mod catalog;
 mod claude_plan;
 mod cleanup;
@@ -14,6 +16,7 @@ pub(crate) mod cleanup_catalog;
 mod disk_space;
 mod engine;
 mod model_store;
+mod names;
 mod secret_check;
 mod settings;
 
@@ -109,7 +112,7 @@ pub fn save_dictation_settings(
     Ok(settings)
 }
 
-/// Roster and vocabulary for the cleanup prompt, captured at start.
+/// Roster names to bias recognition toward (vocabulary is reserved).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationContext {
@@ -142,6 +145,8 @@ pub async fn dictation_start(
         return Err("Dictation is off during a huddle.".into());
     }
     let settings = settings::load(&app)?;
+    let DictationContext { roster, vocabulary } = context.unwrap_or_default();
+    let capture = capture::dir(&app).is_some();
     let (id, model_dir) = {
         let mut guard = active_session().lock().map_err(|e| e.to_string())?;
         if guard.is_some() {
@@ -152,10 +157,12 @@ pub async fn dictation_start(
         *guard = Some(id);
         (id, model_dir)
     };
-    let started = tauri::async_runtime::spawn_blocking(move || engine::start(&model_dir, id))
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|result| result);
+    let started = tauri::async_runtime::spawn_blocking(move || {
+        engine::start(&model_dir, id, roster, capture)
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|result| result);
     if let Err(error) = started {
         release_session(id);
         return Err(error);
@@ -166,11 +173,9 @@ pub async fn dictation_start(
     if let (true, CleanupSource::ClaudePlan { account_id, model }) =
         (settings.cloud_cleanup_enabled, &settings.cleanup)
     {
-        let context = context.unwrap_or_default();
         let input = CleanupInput {
             transcript: String::new(),
-            roster: context.roster,
-            vocabulary: context.vocabulary,
+            vocabulary,
             mode_instructions: None,
         };
         claude_plan::prewarm(app.clone(), id, account_id.clone(), model.clone(), input);
@@ -192,18 +197,40 @@ pub fn dictation_push_audio(request: tauri::ipc::Request<'_>) -> Result<(), Stri
     Ok(())
 }
 
-/// Stops recording and returns the raw transcript.
+/// Stops recording and returns the transcript. With captures on, the audio
+/// and both decoding passes are written locally first.
 #[tauri::command]
-pub async fn dictation_stop(session_id: u64) -> Result<engine::Transcript, String> {
+pub async fn dictation_stop(app: AppHandle, session_id: u64) -> Result<engine::Transcript, String> {
     if current_session() != Some(session_id) {
         return Err("this dictation is no longer recording".into());
     }
-    let result = tauri::async_runtime::spawn_blocking(move || engine::stop(session_id))
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|result| result);
+    let capture_dir = capture::dir(&app);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut transcript = engine::stop(session_id)?;
+        if let (Some(dir), Some(data)) = (capture_dir, transcript.capture.take()) {
+            match capture::write(&dir, session_id, &transcript, &data) {
+                Ok(id) => transcript.capture_id = Some(id),
+                Err(error) => eprintln!("dictation: {error}"),
+            }
+        }
+        Ok(transcript)
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|result| result);
     release_session(session_id);
     result
+}
+
+/// Appends a note (what was inserted, polished or sent) to a local capture.
+#[tauri::command]
+pub fn dictation_capture_note(
+    app: AppHandle,
+    capture_id: String,
+    note: serde_json::Value,
+) -> Result<(), String> {
+    let dir = capture::dir(&app).ok_or("dictation captures are off")?;
+    capture::note(&dir, &capture_id, note)
 }
 
 /// Discards a session (Esc, community switch, huddle start, unmount).
@@ -260,8 +287,6 @@ pub struct DictationCleanupRequest {
     session_id: u64,
     transcript: String,
     #[serde(default)]
-    roster: Vec<String>,
-    #[serde(default)]
     vocabulary: Vec<String>,
 }
 
@@ -281,7 +306,6 @@ pub async fn dictation_cleanup(
     let started = Instant::now();
     let input = CleanupInput {
         transcript: request.transcript,
-        roster: request.roster,
         vocabulary: request.vocabulary,
         mode_instructions: None,
     };

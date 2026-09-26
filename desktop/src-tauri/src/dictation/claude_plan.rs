@@ -119,7 +119,7 @@ async fn spawn(
     model: &str,
     input: &CleanupInput,
 ) -> Result<Prewarmed, CleanupFailure> {
-    // The system prompt (roster, vocabulary) leaves the process at launch, so
+    // The system prompt (rules, examples, vocabulary) leaves the process at launch, so
     // it passes the same outbound secret check as the cleanup call.
     cleanup::check_outbound(input)?;
     let unavailable = |message: String| CleanupFailure::Unavailable { message };
@@ -135,7 +135,10 @@ async fn spawn(
     command
         .env_clear()
         .current_dir(home.path())
-        .args(cli_args(model, &cleanup::system_prompt(input)))
+        .args(cli_args(
+            model,
+            &cleanup::system_prompt_with_examples(input),
+        ))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

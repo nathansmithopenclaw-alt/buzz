@@ -194,7 +194,7 @@ fn eval_clips_through_live_segmentation() {
     for path in paths {
         let samples = read_wav_mono_16k(&path);
         let started = Instant::now();
-        let transcript = transcribe_16k_blocking(&model_dir, &samples).expect("transcribe");
+        let transcript = transcribe_16k_blocking(&model_dir, &samples, &[]).expect("transcribe");
         println!(
             "EVAL\t{}\t{}\t{}\t{}",
             path.file_stem().unwrap().to_string_lossy(),
