@@ -210,7 +210,7 @@ export function AgentDropdownSelect({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="z-[100] max-h-72 overflow-y-auto rounded-2xl border-foreground/10 bg-white p-1.5 text-foreground opacity-100 data-[state=closed]:animate-none data-[state=open]:animate-none"
+        className="z-[100] max-h-72 overflow-y-auto rounded-2xl border-foreground/10 bg-white p-1.5 text-black opacity-100 data-[state=closed]:animate-none data-[state=open]:animate-none"
         sideOffset={8}
         style={{
           boxShadow: "0 16px 36px rgb(0 0 0 / 0.12)",
@@ -227,12 +227,12 @@ export function AgentDropdownSelect({
             <div className="relative">
               <Search
                 aria-hidden="true"
-                className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground/45"
+                className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-black/60"
               />
               <Input
                 aria-label="Search models"
                 autoFocus
-                className="h-9 rounded-xl border-foreground/10 bg-white pl-9 text-sm"
+                className="h-9 rounded-xl border-black/10 bg-white pl-9 text-sm text-black placeholder:text-black/60"
                 data-testid={testId ? `${testId}-search` : undefined}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Search models…"
@@ -242,7 +242,7 @@ export function AgentDropdownSelect({
           ) : null}
           {filteredOptions.length === 0 ? (
             <p
-              className="px-3 py-2 text-sm text-foreground/55"
+              className="px-3 py-2 text-sm text-black/60"
               data-testid={testId ? `${testId}-empty` : undefined}
             >
               {showSearch && query.trim().length > 0
@@ -257,7 +257,7 @@ export function AgentDropdownSelect({
                 {option.group &&
                 option.group !== filteredOptions[index - 1]?.group ? (
                   <div
-                    className="px-3 pb-1 pt-2 text-xs font-medium text-foreground/60"
+                    className="px-3 pb-1 pt-2 text-xs font-medium text-black/60"
                     role="presentation"
                   >
                     {option.group}
@@ -285,7 +285,7 @@ export function AgentDropdownSelect({
                 >
                   <span className="min-w-0 truncate">{option.label}</span>
                   {option.badge ? (
-                    <span className="ml-auto shrink-0 rounded bg-primary/10 px-1.5 text-xs text-primary">
+                    <span className="ml-auto shrink-0 rounded bg-black/5 px-1.5 text-xs text-black/70">
                       {option.badge}
                     </span>
                   ) : null}

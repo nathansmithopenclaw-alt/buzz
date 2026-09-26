@@ -67,11 +67,11 @@ export function DictationSpeechRow({
             label: (
               <span className="block whitespace-normal">
                 <span className="block">{model.name}</span>
-                <span className="block text-xs text-muted-foreground">
+                <span className="block text-xs text-black/60">
                   {model.language} · {size(model.sizeBytes)} on disk
                 </span>
                 {model.recommended ? (
-                  <span className="inline-block rounded bg-primary/10 px-1.5 text-xs text-primary">
+                  <span className="inline-block rounded bg-black/5 px-1.5 text-xs text-black/70">
                     Recommended
                   </span>
                 ) : null}

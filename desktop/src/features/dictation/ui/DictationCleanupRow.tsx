@@ -1,6 +1,7 @@
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
+import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import { listConnections } from "@/features/model-connections/api";
 import { discoverAgentModels } from "@/shared/api/agentModels";
 import { listSubscriptionAccounts } from "@/shared/api/tauriSubscriptionAccounts";
@@ -31,9 +32,27 @@ export function DictationCleanupRow({
     queryKey: ["subscription-accounts"],
     queryFn: listSubscriptionAccounts,
   });
+  const runtimes = useAcpRuntimesQuery();
+  const claudeRuntime = runtimes.data?.find(
+    (runtime) => runtime.id === "claude",
+  );
   const claude = useQuery({
-    queryKey: ["dictation-claude-models"],
-    queryFn: () => discoverAgentModels({ agentCommand: "claude" }),
+    queryKey: [
+      "dictation-claude-models",
+      claudeRuntime?.command,
+      claudeRuntime?.defaultArgs,
+      claudeRuntime?.definitionEnv,
+    ],
+    enabled: Boolean(claudeRuntime?.command),
+    queryFn: () => {
+      if (!claudeRuntime?.command)
+        throw new Error("Claude ACP adapter unavailable");
+      return discoverAgentModels({
+        agentCommand: claudeRuntime.command,
+        agentArgs: claudeRuntime.defaultArgs,
+        definitionEnv: claudeRuntime.definitionEnv ?? {},
+      });
+    },
     staleTime: 60_000,
   });
   const [custom, setCustom] = React.useState<Exclude<
@@ -151,7 +170,10 @@ export function DictationCleanupRow({
             </button>
           </p>
         ) : null}
-        {connections.error || accounts.error || claude.error ? (
+        {connections.error ||
+        accounts.error ||
+        runtimes.error ||
+        claude.error ? (
           <p className="text-xs text-muted-foreground">
             Some model sources could not be loaded.{" "}
             <button
@@ -160,7 +182,8 @@ export function DictationCleanupRow({
               onClick={() => {
                 void connections.refetch();
                 void accounts.refetch();
-                void claude.refetch();
+                void runtimes.refetch();
+                if (claudeRuntime?.command) void claude.refetch();
               }}
             >
               Retry
