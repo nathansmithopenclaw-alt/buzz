@@ -915,7 +915,18 @@ impl DeletionStore {
             .await?
         {
             let existing = row_to_request(row)?;
-            let converges = existing.community_host == normalized_community_host
+            let same_community = existing
+                .community_host
+                .eq_ignore_ascii_case(normalized_community_host)
+                || sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM community_hosts \
+                     WHERE community_id = $1 AND lower(host) = lower($2))",
+                )
+                .bind(existing.community_id.as_uuid())
+                .bind(normalized_community_host)
+                .fetch_one(&mut *tx)
+                .await?;
+            let converges = same_community
                 && existing.request_origin == DeletionRequestOrigin::Owner
                 && existing.owner_pubkey.as_deref() == Some(owner_pubkey.as_str())
                 && existing.acknowledgement_version == Some(acknowledgement_version);
@@ -928,8 +939,9 @@ impl DeletionStore {
         }
 
         let target = sqlx::query(
-            "SELECT id, host, archived_at, deletion_state, deleted_at \
-             FROM communities WHERE host = $1 FOR UPDATE",
+            "SELECT c.id, c.host, c.archived_at, c.deletion_state, c.deleted_at \
+             FROM communities c JOIN community_hosts ch ON ch.community_id = c.id \
+             WHERE lower(ch.host) = lower($1) FOR UPDATE OF c",
         )
         .bind(normalized_community_host)
         .fetch_optional(&mut *tx)
@@ -4696,6 +4708,45 @@ mod postgres_tests {
                 .expect("community lifecycle"),
             "active",
             "admission must not prematurely quiesce the community"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_admission_accepts_host_alias_and_retries_same_request() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let alias = format!("owner-alias-{}.example", Uuid::new_v4().simple());
+        db.add_community_host(community, &alias)
+            .await
+            .expect("alias");
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        for request_host in [&alias.to_uppercase(), &alias, &host] {
+            let OwnerDeletionAdmission::Accepted(request) = store
+                .admit_owner_request(request_host, &owner, operator, 1, request_id)
+                .await
+                .expect("admit alias or canonical retry")
+            else {
+                panic!("expected alias admission")
+            };
+            assert_eq!(request.community_id, community);
+            assert_eq!(request.community_host, host);
+            assert_eq!(request.id, request_id);
+        }
+        assert_eq!(
+            store
+                .admit_owner_request(&alias, &"c".repeat(64), operator, 1, request_id)
+                .await
+                .expect("different owner retry"),
+            OwnerDeletionAdmission::RequestConflict
+        );
+        assert_eq!(
+            store
+                .admit_owner_request("unrelated.example", &owner, operator, 1, request_id)
+                .await
+                .expect("different host retry"),
+            OwnerDeletionAdmission::RequestConflict
         );
     }
 
