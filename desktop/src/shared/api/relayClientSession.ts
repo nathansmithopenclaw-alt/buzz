@@ -478,8 +478,8 @@ export class RelayClient {
     return this.subscribe(
       filter,
       onEvent,
-      undefined,
-      undefined,
+      options?.onReady,
+      options?.readinessTimeoutMs,
       undefined,
       "interactive",
       options?.onTerminalClosed,

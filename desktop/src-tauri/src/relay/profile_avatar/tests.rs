@@ -629,3 +629,35 @@ async fn managed_profiles_setting_skips_launch_and_applies_only_avatar() {
     assert_eq!(published["display_name"], data.name);
     assert_eq!(published["about"], data.about.unwrap());
 }
+
+#[tokio::test]
+async fn profile_query_accepts_large_inline_picture_and_bounds_oversized_response() {
+    let relay = server().await;
+    let state = state(&[&relay]);
+    let keys = Keys::generate();
+    for size in [128 * 1024, MAX_PROFILE_RESPONSE_BYTES + 1] {
+        let metadata = serde_json::json!({
+            "display_name": "Large profile",
+            "picture": format!("data:image/png;base64,{}", "a".repeat(size)),
+        });
+        let event = nostr::EventBuilder::new(nostr::Kind::Metadata, metadata.to_string())
+            .sign_with_keys(&keys)
+            .unwrap();
+        relay
+            .state
+            .data
+            .lock()
+            .unwrap()
+            .profiles
+            .push(event.clone());
+        let result = query_profile_event(&state, &relay.state.base, &keys, None).await;
+        if size < MAX_PROFILE_RESPONSE_BYTES {
+            assert_eq!(result.unwrap().unwrap().id, event.id);
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                "agent profile query exceeds size limit"
+            );
+        }
+    }
+}

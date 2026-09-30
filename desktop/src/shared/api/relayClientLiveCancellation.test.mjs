@@ -406,3 +406,33 @@ test("a failed reconnect attempt still rejects setup rather than claiming a succ
   assert.equal(frames("REQ").length, 1);
   assert.equal(timers.size, 0);
 });
+
+for (const method of ["subscribeLive", "subscribeInteractive"]) {
+  for (const readyVia of ["EOSE", "timeout"]) {
+    test(`${method} forwards readiness options and real terminal CLOSED`, async () => {
+      const h = setup();
+      const readiness = [];
+      const terminal = [];
+      const pending = h.client[method](filter, () => {}, {
+        onReady: (value) => readiness.push(value),
+        readinessTimeoutMs: 73,
+        onTerminalClosed: (message) => terminal.push(message),
+      });
+      await flush();
+      const id = frames("REQ")[0].frame[1];
+      if (readyVia === "EOSE") await deliver(h.client, ["EOSE", id]);
+      else {
+        await tickTo(72);
+        assert.deepEqual(readiness, []);
+        await tickTo(73);
+      }
+      await pending;
+      assert.deepEqual(readiness, [readyVia === "EOSE" ? "eose" : "timeout"]);
+      await deliver(h.client, ["CLOSED", id, "restricted: denied"]);
+      await deliver(h.client, ["CLOSED", id, "restricted: denied"]);
+      assert.deepEqual(terminal, ["restricted: denied"]);
+      assert.equal(h.client.subscriptions.size, 0);
+      assert.equal(timers.size, 0);
+    });
+  }
+}

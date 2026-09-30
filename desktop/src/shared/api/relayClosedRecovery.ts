@@ -87,7 +87,11 @@ export function handleRelayClosed({
                 new Error("Relay closed the history subscription."),
               );
             }, subscription.timeoutMs);
-            void sendReq(newSubId, subscription.filters?.[0] ?? subscription.filter, ...(subscription.filters?.slice(1) ?? [])).catch(() => {
+            void sendReq(
+              newSubId,
+              subscription.filters?.[0] ?? subscription.filter,
+              ...(subscription.filters?.slice(1) ?? []),
+            ).catch(() => {
               if (!isOwned()) return;
               window.clearTimeout(subscription.timeout);
               subscriptions.delete(newSubId);

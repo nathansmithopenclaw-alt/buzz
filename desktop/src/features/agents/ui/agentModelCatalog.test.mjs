@@ -332,5 +332,8 @@ test("Codex catalog offers the GPT-6 family and groups live GPT-6 ids by version
       `${id} is in the Codex fallback catalog`,
     );
   }
-  assert.equal(options.find((option) => option.id === "gpt-6-luna")?.group, "GPT-6");
+  assert.equal(
+    options.find((option) => option.id === "gpt-6-luna")?.group,
+    "GPT-6",
+  );
 });

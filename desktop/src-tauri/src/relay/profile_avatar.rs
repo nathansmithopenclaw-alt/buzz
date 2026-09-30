@@ -17,6 +17,9 @@ use crate::{
 use super::{classify_request_error, relay_http_base_url};
 
 const MAX_AVATAR_BYTES: usize = 10 * 1024 * 1024;
+// A profile can contain an inline image. Allow a full relay frame (512 KiB)
+// plus its JSON query envelope while keeping the response bounded.
+const MAX_PROFILE_RESPONSE_BYTES: usize = 1024 * 1024;
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn community_base(relay: &str) -> Result<url::Url, String> {
@@ -150,7 +153,7 @@ pub(crate) async fn localize_avatar(
         .send()
         .await
         .map_err(|e| classify_request_error(&e))?;
-    let bytes = read_bounded(response, MAX_AVATAR_BYTES).await?;
+    let bytes = read_bounded(response, MAX_AVATAR_BYTES, "agent avatar transfer").await?;
     if hex::encode(Sha256::digest(&bytes)) != hash {
         return Err("agent avatar content hash does not match its URL".into());
     }
@@ -195,7 +198,7 @@ pub(crate) async fn localize_avatar(
     }
     let response = response.ok_or("agent avatar upload did not run")?;
     let descriptor: BlobDescriptor =
-        serde_json::from_slice(&read_bounded(response, 64 * 1024).await?)
+        serde_json::from_slice(&read_bounded(response, 64 * 1024, "agent avatar transfer").await?)
             .map_err(|e| format!("invalid avatar upload response: {e}"))?;
     let localized = url::Url::parse(&descriptor.url).map_err(|e| e.to_string())?;
     if localized.origin() != target.origin()
@@ -233,10 +236,14 @@ async fn existing_projection(
     .then(|| picture.into()))
 }
 
-async fn read_bounded(response: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
+async fn read_bounded(
+    response: reqwest::Response,
+    cap: usize,
+    operation: &str,
+) -> Result<Vec<u8>, String> {
     if !response.status().is_success() {
         return Err(format!(
-            "agent avatar transfer failed: HTTP {} (redirects are not followed)",
+            "{operation} failed: HTTP {} (redirects are not followed)",
             response.status()
         ));
     }
@@ -244,14 +251,14 @@ async fn read_bounded(response: reqwest::Response, cap: usize) -> Result<Vec<u8>
         .content_length()
         .is_some_and(|size| size > cap as u64)
     {
-        return Err("agent avatar transfer exceeds size limit".into());
+        return Err(format!("{operation} exceeds size limit"));
     }
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| classify_request_error(&e))?;
         if bytes.len().saturating_add(chunk.len()) > cap {
-            return Err("agent avatar transfer exceeds size limit".into());
+            return Err(format!("{operation} exceeds size limit"));
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -319,14 +326,15 @@ pub(super) async fn query_profile_event(
     .send()
     .await
     .map_err(|e| classify_request_error(&e))?;
-    let events: Vec<nostr::Event> =
-        serde_json::from_slice(&read_bounded(response, 64 * 1024).await?)
-            .map_err(|e| format!("invalid avatar profile response: {e}"))?;
+    let events: Vec<nostr::Event> = serde_json::from_slice(
+        &read_bounded(response, MAX_PROFILE_RESPONSE_BYTES, "agent profile query").await?,
+    )
+    .map_err(|e| format!("invalid agent profile response: {e}"))?;
     let Some(event) = events.into_iter().next() else {
         return Ok(None);
     };
     if event.kind.as_u16() != 0 || event.pubkey != keys.public_key() || event.verify().is_err() {
-        return Err("invalid avatar profile signer or kind".into());
+        return Err("invalid agent profile signer or kind".into());
     }
     Ok(Some(event))
 }
