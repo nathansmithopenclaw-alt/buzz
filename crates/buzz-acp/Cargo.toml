@@ -22,11 +22,17 @@ buzz-harness-config = { path = "../buzz-harness-config" }
 buzz-sdk = { workspace = true }
 buzz-persona = { path = "../buzz-persona" }
 
+# Git multicall helpers and ephemeral key ownership
+git-credential-nostr = { path = "../git-credential-nostr" }
+git-sign-nostr = { path = "../git-sign-nostr" }
+tempfile = "3"
+zeroize = { workspace = true }
+
 # Nostr
 nostr = { workspace = true }
 
 # Async runtime
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-std"] }
 
 # WebSocket
 tokio-tungstenite = { workspace = true }
@@ -65,7 +71,6 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 dirs = "6"
-zeroize = { workspace = true }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -73,7 +78,6 @@ clap = { version = "4", features = ["derive", "env"] }
 # Config file
 toml = "1.0"
 atomic-write-file = "0.3"
-tempfile = "3"
 
 # Filter expressions
 evalexpr = { workspace = true }
@@ -81,12 +85,13 @@ evalexpr = { workspace = true }
 # Process-group kill (safe wrapper around killpg) — Unix-only; kill_process_group
 # has a #[cfg(not(unix))] fallback in acp.rs.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "user"] }
 
 [target.'cfg(windows)'.dependencies]
 process-wrap = { version = "9.1.0", default-features = false, features = ["tokio1", "job-object", "kill-on-drop", "creation-flags"] }
 windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
 
 [dev-dependencies]
+axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"

@@ -447,6 +447,7 @@ fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
         session_policy: Default::default(),
         avatar_selection: None,
+        acp_command: None,
 
         id: id.to_string(),
         display_name: display_name.to_string(),

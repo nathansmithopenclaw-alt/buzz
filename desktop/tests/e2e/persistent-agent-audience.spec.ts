@@ -632,6 +632,9 @@ test("the mention button opens settings and can undo an address", async ({
   await expect(
     composer.getByRole("button", { name: "Mention someone" }),
   ).toBeVisible();
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
   // Keyboard selection updates ProseMirror before Delete; fill("") only
   // selects the DOM range and can race the editor's selectionchange handler.
   await input.press("ControlOrMeta+A");
@@ -647,6 +650,8 @@ test("the mention button opens settings and can undo an address", async ({
     .getByRole("button", { name: "Mention Morgarita", exact: true })
     .click();
   await expect(input).toHaveText("@Morgarita ");
+  // Explicitly opting out keeps subsequent mentions manual. The old avatar's
+  // exit animation must not be mistaken for a newly pinned recipient.
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toHaveCount(0);

@@ -462,6 +462,7 @@ mod tests {
         AgentDefinition {
             session_policy: Default::default(),
             avatar_selection: None,
+            acp_command: None,
 
             id: id.into(),
             display_name: id.into(),

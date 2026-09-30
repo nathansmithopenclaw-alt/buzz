@@ -12,11 +12,15 @@ type SettingsRouteSearch = {
   target?: SettingsTarget;
 };
 
-function validateSettingsSearch(
+export function validateSettingsSearch(
   search: Record<string, unknown>,
 ): SettingsRouteSearch {
   if (search.section === "doctor") {
     return { section: "agents" };
+  }
+
+  if (search.section === "moderation") {
+    return { section: "relay-admin" };
   }
 
   return {

@@ -349,3 +349,14 @@ test("agentEffortModelQualifier — reads the capability from the catalog entry 
     false,
   );
 });
+
+test("resolveModelLabel — uncurated Databricks ids humanize only under databricks_v2", () => {
+  const id = "data_workflow_tools.goose.goose-gpt-6-astra";
+  assert.equal(resolveModelLabel(id, id, "databricks_v2"), "GPT-6 Astra");
+  assert.equal(formatAgentModelLabel(id), id);
+  assert.equal(formatAgentModelLabel(id, "openai"), id);
+  assert.equal(
+    formatAgentModelLabel("builderbot-pr-reviews", "databricks_v2"),
+    "builderbot-pr-reviews",
+  );
+});

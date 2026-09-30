@@ -63,7 +63,7 @@ function harness({
   });
   mock.method(
     relayClient,
-    "subscribeLive",
+    "subscribeInteractive",
     async (filter, onEvent, options) => {
       const call = { filter, onEvent, options, disposed: false };
       calls.push(call);

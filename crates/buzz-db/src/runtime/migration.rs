@@ -358,7 +358,21 @@ async fn ensure_community_hosts_deletion_taxonomy(conn: &mut PgConnection) -> Re
         } else {
             COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL
         };
-        sqlx::query(taxonomy).execute(&mut *conn).await?;
+        let listener_exists: bool =
+            sqlx::query_scalar("SELECT to_regclass('operator_listener_outbox') IS NOT NULL")
+                .fetch_one(&mut *conn)
+                .await?;
+        let taxonomy = if listener_exists {
+            taxonomy.replace(
+                "'community_hosts'",
+                "'community_hosts', 'operator_listener_outbox'",
+            )
+        } else {
+            taxonomy.to_owned()
+        };
+        sqlx::query(sqlx::AssertSqlSafe(taxonomy))
+            .execute(&mut *conn)
+            .await?;
     }
     Ok(())
 }
@@ -791,6 +805,9 @@ mod postgres_tests {
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "storage_accounting_snapshots",
+            "operator_listener_pubkeys",
+            "operator_listener_outbox",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -1004,12 +1021,30 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 55);
+        assert_eq!(migrations.len(), 63);
         assert_eq!(migrations[54].version, 55);
         assert!(migrations[54]
             .sql
             .as_str()
             .contains("CREATE TABLE dispatch_workflow_effects"));
+        assert_eq!(migrations[58].version, 59);
+        assert_eq!(migrations[59].version, 60);
+        assert_eq!(migrations[60].version, 61);
+        assert_eq!(migrations[61].version, 62);
+        assert_eq!(migrations[62].version, 63);
+        assert!(migrations[58]
+            .sql
+            .as_str()
+            .contains("idx_thread_metadata_window"));
+        assert!(migrations[60]
+            .sql
+            .as_str()
+            .contains("community_deletion_owner_provenance"));
+        assert!(migrations[62].sql.as_str().contains("approval_origin"));
+        assert!(migrations[62]
+            .sql
+            .as_str()
+            .contains("community_deletion_requests_owner_preparable"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1061,6 +1096,11 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE INDEX idx_events_tags_gin"));
         assert!(!migrations[0].sql.as_str().contains("idx_events_tags_gin"));
+        // schema.sql (CI / isolated relay bootstrap) must carry the same index,
+        // or e-tag reads there run on plans prod never sees.
+        assert!(include_str!("../../../../schema/schema.sql").contains(
+            "CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops)"
+        ));
 
         // NIP-AM (kind 44200) FTS exclusion: additive migration, never folded
         // into 0001 — folding would change 0001's checksum and break brownfield
@@ -1603,7 +1643,7 @@ mod postgres_tests {
         // The consolidated desired-state exclusion function must byte-match
         // startup's post-migration union. Comparing it directly with immutable
         // upstream 0046 would incorrectly discard canonical `community_hosts`.
-        fn extract_excluded_table_array(sql: &str) -> &str {
+        fn extract_excluded_table_array(sql: &str) -> std::collections::BTreeSet<String> {
             let anchor = "community_write_fence_excluded_table(target NAME) RETURNS BOOLEAN";
             let start = sql.find(anchor).expect("exclusion function definition");
             let array_start = sql[start..].find("ARRAY[").expect("exclusion array") + start;
@@ -1611,13 +1651,17 @@ mod postgres_tests {
                 .find("]::TEXT[]")
                 .expect("exclusion array end")
                 + array_start;
-            &sql[array_start..array_end]
+            sql[array_start + 6..array_end]
+                .split(',')
+                .map(|entry| entry.trim().trim_matches('\'').to_string())
+                .collect()
         }
-        assert!(
-            !extract_excluded_table_array(authorization_foundation).contains("'community_hosts'")
-        );
+        assert!(!extract_excluded_table_array(authorization_foundation).contains("community_hosts"));
+        let mut expected_exclusions =
+            extract_excluded_table_array(COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL);
+        expected_exclusions.insert("operator_listener_outbox".to_string());
         assert_eq!(
-            extract_excluded_table_array(COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL),
+            expected_exclusions,
             extract_excluded_table_array(desired_schema),
             "schema.sql exclusion list drifted from post-migration union"
         );
@@ -1660,10 +1704,77 @@ mod postgres_tests {
         // The restored exclusion function must NOT list any NIP-FI relation.
         assert!(!ledger_removal.contains("'authorization_operation_receipts'"));
         assert!(!ledger_removal.contains("'identity_bindings'"));
-        assert_eq!(
-            extract_excluded_table_array(COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL),
-            extract_excluded_table_array(desired_schema),
+        let mut expected = extract_excluded_table_array(COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL);
+        expected.insert("operator_listener_outbox".to_string());
+        assert_eq!(expected, extract_excluded_table_array(desired_schema));
+        assert_eq!(migrations[55].version, 56);
+        assert!(migrations[55]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE storage_accounting_snapshots"));
+        assert_eq!(migrations[57].version, 58);
+        assert!(migrations[57]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN hash_version SMALLINT"));
+        assert_eq!(migrations[59].version, 60);
+        assert!(migrations[59]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE operator_listener_pubkeys"));
+        assert!(migrations[59]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE operator_listener_outbox"));
+        assert!(migrations[59]
+            .sql
+            .as_str()
+            .contains("CREATE OR REPLACE FUNCTION community_write_fence_excluded_table"));
+        assert!(migrations[59]
+            .sql
+            .as_str()
+            .contains("'rate_limit_violations', 'operator_listener_outbox'"));
+        for index in [
+            "operator_listener_pubkeys_target",
+            "operator_listener_pubkeys_created_at",
+            "operator_listener_outbox_due",
+            "operator_listener_outbox_recovery",
+            "operator_listener_outbox_created_at",
+        ] {
+            assert!(
+                migrations[59].sql.as_str().contains(index),
+                "migration 0050 must declare {index}"
+            );
+            assert!(
+                desired_schema.contains(index),
+                "schema.sql must declare {index}"
+            );
+        }
+        for index_shape in [
+            "ON operator_listener_outbox (next_attempt_at, created_at, id)",
+            "ON operator_listener_outbox (lease_until, created_at, id)",
+        ] {
+            assert!(
+                migrations[59].sql.as_str().contains(index_shape),
+                "migration 0050 must declare {index_shape}"
+            );
+            assert!(
+                desired_schema.contains(index_shape),
+                "schema.sql must declare {index_shape}"
+            );
+        }
+        // schema.sql keeps the restored (pre-0041) deletion exclusions and also
+        // leaves the deployment-global listener outbox outside tenant fencing.
+        assert!(
+            desired_schema
+                .contains("'rate_limit_violations', 'operator_listener_outbox', 'community_hosts'\n    ]::TEXT[])"),
+            "schema.sql must exclude the deployment-global listener outbox from tenant fencing"
         );
+        assert_eq!(migrations[61].version, 62);
+        assert!(migrations[61]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE artifact_heads"));
     }
 
     #[test]
@@ -2018,6 +2129,34 @@ mod postgres_tests {
         );
     }
 
+    #[test]
+    fn owner_deletion_auto_approval_migration_matches_desired_schema() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.description == "owner deletion auto approval")
+            .expect("embedded migration 0053")
+            .sql
+            .as_ref()
+            .to_ascii_lowercase();
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let schema = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
+            .expect("read schema/schema.sql")
+            .to_ascii_lowercase();
+
+        for sql in [&migration, &schema] {
+            assert!(sql.contains("approval_origin text not null default 'operator'"));
+            assert!(sql.contains("approval_origin in ('operator', 'owner_automatic')"));
+            assert!(sql.contains("'submitted', 'approved', 'fenced'"));
+            assert!(sql.contains("community_deletion_requests_owner_preparable"));
+            assert!(sql.contains("request_origin = 'owner'"));
+            assert!(sql.contains("stage = 'submitted'"));
+        }
+        assert!(migration.contains("set local lock_timeout = '5s'"));
+    }
+
     /// Structural parity between migration 0029's deletion surface and the
     /// desired-state bootstrap schema (`schema/schema.sql`).
     ///
@@ -2132,6 +2271,12 @@ mod postgres_tests {
             .expect("embedded migration 0029")
             .sql
             .as_ref();
+        let migration_0051: &str = MIGRATOR
+            .iter()
+            .find(|migration| migration.description == "owner community deletion admission")
+            .expect("embedded migration 0051")
+            .sql
+            .as_ref();
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)
@@ -2140,6 +2285,7 @@ mod postgres_tests {
             .expect("read schema/schema.sql");
 
         let migration = surface(migration_0029);
+        let owner_admission_migration = surface(migration_0051);
         let schema = surface(&schema_sql);
 
         assert_eq!(
@@ -2156,24 +2302,90 @@ mod postgres_tests {
                 .tables
                 .get(table)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
-            if table != "community_deletion_requests" {
+            if table != "community_deletion_requests" && table != "community_deletion_approvals" {
                 assert_eq!(
                     in_schema, definition,
                     "schema.sql definition of {table} drifted from migration 0029"
                 );
             }
         }
+        let migration_approval_table = migration
+            .tables
+            .get("community_deletion_approvals")
+            .expect("0029 approval table");
+        let schema_approval_table = schema
+            .tables
+            .get("community_deletion_approvals")
+            .expect("schema.sql approval table");
+        for invariant in [
+            "inventory_digest bytea not null check (length(inventory_digest) = 32)",
+            "foreign key (request_id, community_id, inventory_digest) references community_deletion_requests(id, community_id, inventory_digest) on delete restrict",
+        ] {
+            assert!(
+                migration_approval_table.contains(invariant),
+                "0029 deletion approvals are missing {invariant}"
+            );
+            assert!(
+                schema_approval_table.contains(invariant),
+                "schema.sql deletion approvals are missing {invariant}"
+            );
+        }
+        let migration_request_table = migration
+            .tables
+            .get("community_deletion_requests")
+            .expect("0029 deletion request table");
+        for request_table in [
+            migration_request_table,
+            schema
+                .tables
+                .get("community_deletion_requests")
+                .expect("schema.sql deletion request table"),
+        ] {
+            assert!(
+                request_table.contains("unique (id, community_id, inventory_digest)"),
+                "deletion requests must expose the exact composite approval target"
+            );
+        }
         for (function, definition) in &migration.functions {
             let in_schema = schema
                 .functions
                 .get(function)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion function {function}"));
-            if function != "community_write_fence_excluded_table" {
+            if function != "community_write_fence_excluded_table"
+                && function != "prevent_community_deletion_request_retargeting"
+            {
                 assert_eq!(
                     in_schema, definition,
                     "schema.sql definition of {function}() drifted from migration 0029"
                 );
             }
+        }
+        assert_eq!(
+            schema
+                .functions
+                .get("prevent_community_deletion_request_retargeting")
+                .expect("schema.sql deletion retargeting guard"),
+            owner_admission_migration
+                .functions
+                .get("prevent_community_deletion_request_retargeting")
+                .expect("0051 deletion retargeting guard"),
+            "schema.sql must carry the latest immutable owner-provenance guard"
+        );
+        let request_table = schema
+            .tables
+            .get("community_deletion_requests")
+            .expect("schema.sql deletion request table");
+        for owner_provenance_fragment in [
+            "request_origin text not null default 'operator'",
+            "owner_pubkey text",
+            "mediating_operator_pubkey text",
+            "acknowledgement_version integer",
+            "constraint community_deletion_owner_provenance check",
+        ] {
+            assert!(
+                request_table.contains(owner_provenance_fragment),
+                "schema.sql deletion requests are missing {owner_provenance_fragment}"
+            );
         }
         for (trigger, definition) in &migration.triggers {
             let in_schema = schema
@@ -2221,6 +2433,7 @@ mod postgres_tests {
             ]
             .map(str::to_owned),
         );
+        expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -2912,6 +3125,74 @@ mod postgres_tests {
         .await
         .expect("read post-upgrade search behavior");
         assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
+    }
+
+    /// Migration-upgrade half of the owner-provenance contract.
+    ///
+    /// The desired-state bootstrap half lives in
+    /// `store::deletion::postgres_tests` and asserts the same shared case
+    /// table, so `schema/schema.sql` cannot admit owner rows the migration
+    /// path refuses (or the reverse).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migrated_schema_enforces_owner_provenance_contract() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool).await.expect("run migrations");
+
+        crate::store::deletion::owner_provenance_contract::assert_contract(&pool).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fork_0055_upgrade_preserves_ledger_and_combines_catalogs() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 55)
+            .await
+            .expect("fork baseline");
+        let before: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .expect("baseline ledger");
+        assert_eq!(before.len(), 55);
+        run_migrations(&pool).await.expect("upstream fold upgrade");
+        run_migrations(&pool).await.expect("idempotent restart");
+        let after: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, checksum FROM _sqlx_migrations WHERE version <= 55 ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("retained ledger");
+        assert_eq!(before, after, "shipped fork checksums are immutable");
+        assert_eq!(applied_versions(&pool).await, embedded_migration_versions());
+        for table in [
+            "summary_runs",
+            "dispatch_workflow_effects",
+            "artifact_heads",
+            "artifact_revisions",
+        ] {
+            let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                .bind(table)
+                .fetch_one(&pool)
+                .await
+                .expect("feature table");
+            assert!(exists, "missing {table}");
+        }
+        for table in ["community_hosts", "operator_listener_outbox"] {
+            let excluded: bool =
+                sqlx::query_scalar("SELECT community_write_fence_excluded_table($1::name)")
+                    .bind(table)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("exclusion union");
+            assert!(excluded, "missing exclusion for {table}");
+        }
+        crate::deletion::DeletionStore::new(pool.clone())
+            .validate_catalog()
+            .await
+            .expect("combined deletion catalog");
     }
 
     #[tokio::test]
@@ -3754,6 +4035,11 @@ mod postgres_tests {
             "all NIP-FI tables must be absent after migration 0050: {present:?}"
         );
 
+        // Complete later additive migrations before comparing to the current
+        // binary's complete tenant-table inventory.
+        run_migrations(&pool)
+            .await
+            .expect("complete current migrations");
         // The deletion catalog must validate with ledger relations gone.
         crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
@@ -3834,15 +4120,15 @@ mod postgres_tests {
         );
 
         // The current catalog correctly rejects this historical schema only
-        // for the later Summary tables. Identity ledger relations remain
+        // for the later artifact, Dispatch and Summary tables. Identity ledger relations remain
         // excluded; any additional missing/unknown relation fails this check.
         let catalog_error = crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
-            .expect_err("the current deletion catalog requires later Summary migrations");
+            .expect_err("the current deletion catalog requires later artifact, Dispatch and Summary migrations");
         assert!(
             matches!(catalog_error, crate::DbError::DeletionSafety(message)
-            if message == "community deletion catalog drift (missing=summary_cursors,summary_report_archive,summary_run_reads,summary_run_sources,summary_runs,summary_schedule_jobs,summary_schedule_state, unknown=)")
+            if message == "community deletion catalog drift (missing=artifact_heads,artifact_revisions,dispatch_workflow_effects,summary_cursors,summary_report_archive,summary_run_reads,summary_run_sources,summary_runs,summary_schedule_jobs,summary_schedule_state, unknown=)")
         );
 
         // The immutability contract is enforced, not merely declared. TRUNCATE
@@ -3941,10 +4227,10 @@ mod postgres_tests {
         let catalog_error = crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
-            .expect_err("the current deletion catalog requires later Summary migrations");
+            .expect_err("the current deletion catalog requires later artifact, Dispatch and Summary migrations");
         assert!(
             matches!(catalog_error, crate::DbError::DeletionSafety(message)
-            if message == "community deletion catalog drift (missing=summary_cursors,summary_report_archive,summary_run_reads,summary_run_sources,summary_runs,summary_schedule_jobs,summary_schedule_state, unknown=)")
+            if message == "community deletion catalog drift (missing=artifact_heads,artifact_revisions,dispatch_workflow_effects,summary_cursors,summary_report_archive,summary_run_reads,summary_run_sources,summary_runs,summary_schedule_jobs,summary_schedule_state, unknown=)")
         );
 
         // A migration-B relation is immutable too. TRUNCATE fires the

@@ -1,6 +1,9 @@
 import type { RelayEvent } from "@/shared/api/types";
 import type { PendingEvent } from "@/shared/api/relayClientShared";
-import { waitForRateLimit } from "@/shared/api/relayRateLimitGate";
+import {
+  waitForRateLimit,
+  activateRateLimitIfSignalled,
+} from "@/shared/api/relayRateLimitGate";
 import { PUBLISH_TIMEOUT_MS } from "@/shared/api/relayClientTimings";
 
 type PublishSession = {
@@ -13,12 +16,25 @@ type PublishSession = {
   recoverSocketFailure: (error: unknown, fallback: string) => Error;
 };
 
-/** Publish once, with one reconnect retry, without crossing session ownership. */
+/** Typed so no relay rejection text can be mistaken for a caller's cancel. */
+export class PublishCanceledError extends Error {
+  constructor() {
+    super("Relay publish canceled by its caller.");
+    this.name = "PublishCanceledError";
+  }
+}
+
+/**
+ * Publish once, with one reconnect retry, without crossing session ownership.
+ * `isCurrent`, when given, is checked immediately before every socket send; a
+ * false result rejects with `PublishCanceledError` and sends nothing.
+ */
 export async function publishSessionEvent(
   session: PublishSession,
   event: RelayEvent,
   timeoutMessage: string,
   sendErrorMessage: string,
+  isCurrent?: () => boolean,
   onAcknowledged?: (message: string) => void,
 ): Promise<RelayEvent> {
   const publishOwnership = session.ownership();
@@ -26,6 +42,7 @@ export async function publishSessionEvent(
   if (publishOwnership !== session.ownership()) {
     throw new Error("Relay disconnected for community switch.");
   }
+  if (isCurrent?.() === false) throw new PublishCanceledError();
   const publishGeneration = session.generation();
 
   return new Promise<RelayEvent>((resolve, reject) => {
@@ -66,6 +83,12 @@ export async function publishSessionEvent(
               "Relay publish was superseded by a session change.",
             );
           }
+          if (isCurrent?.() === false) {
+            window.clearTimeout(timeout);
+            session.pendingEvents.delete(event.id);
+            reject(new PublishCanceledError());
+            return;
+          }
           await session.send(["EVENT", event], retryGeneration);
         } catch (retryError) {
           if (session.pendingEvents.get(event.id) !== pendingEvent) return;
@@ -82,4 +105,47 @@ export async function publishSessionEvent(
         }
       });
   });
+}
+
+/** Return the relay ACK payload for a read-only Dispatch command. */
+export async function readDispatchResponse(
+  event: RelayEvent,
+  publish: (onAcknowledged: (message: string) => void) => Promise<RelayEvent>,
+): Promise<string> {
+  if (event.kind !== 40028)
+    throw new Error("Expected a read-only Dispatch command.");
+  let response: string | undefined;
+  await publish((message) => {
+    response = message;
+  });
+  if (response === undefined)
+    throw new Error("The relay did not return a command response.");
+  return response;
+}
+
+/** Settle one pending publish from the authoritative relay ACK. */
+export function settlePublishedEvent(
+  pendingEvents: Map<string, PendingEvent>,
+  eventId: string,
+  success: boolean,
+  message: string,
+) {
+  const pendingEvent = pendingEvents.get(eventId);
+  if (!pendingEvent) {
+    return;
+  }
+
+  window.clearTimeout(pendingEvent.timeout);
+  pendingEvents.delete(eventId);
+
+  if (success) {
+    pendingEvent.onAcknowledged?.(message);
+    pendingEvent.resolve(pendingEvent.event);
+  } else {
+    // Back-pressure now arrives here rather than as a NOTICE: the relay
+    // rejects an over-quota EVENT on the OK channel so this pending publish
+    // can be settled at all. Unarmed, the send retries into the same quota.
+    activateRateLimitIfSignalled(message);
+    pendingEvent.reject(new Error(message || "Relay rejected the event."));
+  }
 }

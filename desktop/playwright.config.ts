@@ -30,6 +30,7 @@ export default defineConfig({
         "**/summary-setup.spec.ts",
         "**/computer-use.spec.ts",
         "**/smoke.spec.ts",
+        "**/mock-subscription-readiness.spec.ts",
         "**/owned-agent-discovery.spec.ts",
         "**/thread-head-stale-edit.spec.ts",
         "**/sidebar-offcanvas-rail.spec.ts",

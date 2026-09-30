@@ -628,6 +628,7 @@ async fn update_persona_from<R: Send + 'static>(
             let avatar_edit = input
                 .avatar_edit
                 .unwrap_or(crate::managed_agents::avatar_selection::AvatarEdit::Keep);
+            let acp_command = trim_optional(input.acp_command);
             let runtime = trim_optional(input.runtime);
             let model = trim_optional(input.model);
             let provider = trim_optional(input.provider);
@@ -678,6 +679,7 @@ async fn update_persona_from<R: Send + 'static>(
             }
             persona.description = description;
             persona.system_prompt = system_prompt;
+            persona.acp_command = acp_command;
             persona.runtime = runtime;
             persona.model = model;
             persona.provider = provider;

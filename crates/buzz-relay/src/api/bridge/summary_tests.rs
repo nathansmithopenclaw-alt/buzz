@@ -338,7 +338,12 @@ impl Fixture {
         use tokio_util::sync::CancellationToken;
         let (tx, mut rx) = mpsc::channel(8);
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
         let conn = Arc::new(ConnectionState {
+            nip_fi_assertion: None,
+            session_deadline: None,
+            nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+            terminal_ctrl_tx: mpsc::channel(1).0,
             conn_id: Uuid::new_v4(),
             tenant: self.tenant.clone(),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -353,7 +358,7 @@ impl Fixture {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx: tx.clone(),
             ctrl_tx: ctrl_tx.clone(),
-            cancel: CancellationToken::new(),
+            cancel,
             backpressure_count: Arc::new(AtomicU8::new(0)),
             grace_limit: 3,
         });

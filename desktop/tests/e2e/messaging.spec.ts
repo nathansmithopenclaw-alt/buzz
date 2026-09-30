@@ -3980,10 +3980,10 @@ test("closing a thread while editing a reply preserves the typed edit", async ({
   const timelineRoot = page
     .getByTestId("message-timeline")
     .getByTestId("message-row")
-    .last();
+    .filter({ hasText: root });
   await expect(timelineRoot).toContainText(root);
   await waitForAnimations(page);
-  await timelineRoot.scrollIntoViewIfNeeded();
+  // Hover auto-scrolls and re-resolves the row if rendering replaces it.
   await timelineRoot.hover();
   await timelineRoot.getByRole("button", { name: "Reply" }).click();
 
@@ -4070,10 +4070,10 @@ test("main ArrowUp refuses to replace a dirty thread edit", async ({
   const timelineRoot = page
     .getByTestId("message-timeline")
     .getByTestId("message-row")
-    .last();
+    .filter({ hasText: root });
   await expect(timelineRoot).toContainText(root);
   await waitForAnimations(page);
-  await timelineRoot.scrollIntoViewIfNeeded();
+  // Hover auto-scrolls and re-resolves the row if rendering replaces it.
   await timelineRoot.hover();
   await timelineRoot.getByRole("button", { name: "Reply" }).click();
 

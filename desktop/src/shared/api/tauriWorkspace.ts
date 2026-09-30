@@ -32,3 +32,6 @@ export const setAgentSessionResidency = (enabled: boolean) =>
 
 export const setAnsweredEventWatermark = (enabled: boolean) =>
   invokeTauri("set_answered_event_watermark", { enabled });
+/** Refresh source trust without applying/resetting the active workspace. */
+export const setAgentAvatarCommunities = (relayUrls: string[]) =>
+  invokeTauri<void>("set_agent_avatar_communities", { relayUrls });

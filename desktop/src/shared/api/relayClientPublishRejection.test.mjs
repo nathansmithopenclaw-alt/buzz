@@ -42,6 +42,7 @@ Date.now = () => fakeNow;
 
 const { RelayClient } = await import("./relayClientSession.ts");
 const { invokeTauri } = await import("./tauri.ts");
+const { PublishCanceledError } = await import("./relayEventPublisher.ts");
 const { activateRateLimit, isRateLimited, resetRateLimitGate } = await import(
   "./relayRateLimitGate.ts"
 );
@@ -376,4 +377,26 @@ test("read-only Dispatch commands return the matching relay response without mut
     client.readDispatchCommand({ ...event, kind: 40021 }, "timeout", "failed"),
     /read-only/,
   );
+});
+
+test("isCurrent forwarded by publishEvent cancels a rate-limited send", async () => {
+  reset();
+  activateRateLimit(4);
+  const client = connectedClient();
+  const event = { id: "7".repeat(64), kind: 30078 };
+  let current = true;
+  const published = client.publishEvent(
+    event,
+    "timed out",
+    "send failed",
+    () => current,
+  );
+  await Promise.resolve();
+  assert.equal(sendAttempts.length, 0, "waits behind the gate");
+  current = false;
+  resetRateLimitGate();
+  await assert.rejects(published, PublishCanceledError);
+  assert.equal(sendAttempts.length, 0, "nothing reached the native send");
+  assert.equal(client.pendingEvents.size, 0);
+  assert.equal(pendingTimers.size, 0, "no publication timeout armed");
 });

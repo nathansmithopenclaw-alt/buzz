@@ -106,6 +106,8 @@ pub struct CreatePersonaRequest {
     pub description: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
+    pub acp_command: Option<String>,
+    #[serde(default)]
     pub runtime: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
@@ -141,6 +143,8 @@ pub struct UpdatePersonaRequest {
     #[serde(default)]
     pub description: Option<String>,
     pub system_prompt: String,
+    #[serde(default)]
+    pub acp_command: Option<String>,
     #[serde(default)]
     pub runtime: Option<String>,
     #[serde(default)]
@@ -332,6 +336,7 @@ mod tests {
             display_name: "Test".to_string(),
             avatar_url: None,
             system_prompt: "prompt".to_string(),
+            acp_command: None,
             runtime: None,
             model: None,
             provider: None,

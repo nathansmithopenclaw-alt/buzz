@@ -44,6 +44,8 @@ pub mod relay;
 pub mod summary;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
+/// NIP-CW thread-mode normalized newest-first window contract.
+pub mod thread_window;
 /// Schnorr signature and event ID verification.
 pub mod verification;
 
@@ -84,4 +86,6 @@ pub mod test_helpers {
     }
 }
 
+/// NIP-AR channel artifact envelope and limits.
+pub mod artifact;
 pub mod grok_subscription;

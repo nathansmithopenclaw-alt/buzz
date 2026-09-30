@@ -28,7 +28,8 @@ pub(crate) struct ProfileReconcileData {
     /// left unpinned (no tenant boundary) resolves the current workspace at
     /// execution time. See `resolve_reconcile_relay`.
     pub(crate) target_relay_url: Option<String>,
-    /// Expected avatar URL for the published profile. `None` for legacy records
+    /// Saved avatar source, localized to the target community before publishing.
+    /// `None` for legacy records
     /// that predate the `avatar_url` field — these will be backfilled from the
     /// relay's existing kind:0 profile on first reconciliation.
     pub(crate) avatar_url: Option<String>,
@@ -164,7 +165,7 @@ pub(crate) async fn reconcile_agent_profile(
     agent_pubkey: &str,
     data: &ProfileReconcileData,
 ) -> Result<ProfileReconcileOutcome, String> {
-    use crate::relay::{query_agent_profile, sync_managed_agent_profile_from_snapshot};
+    use crate::relay::query_agent_profile_with_keys;
 
     // Resolved ONCE and used for both the read and the write-back. A pinned
     // `target_relay_url` wins unconditionally — see `resolve_reconcile_relay`.
@@ -179,7 +180,10 @@ pub(crate) async fn reconcile_agent_profile(
     }
 
     // Query the relay for the agent's existing kind:0 profile.
-    let existing = query_agent_profile(state, &relay_url, agent_pubkey).await?;
+    let keys = Keys::parse(&data.private_key_nsec)
+        .map_err(|e| format!("failed to parse agent keys: {e}"))?;
+    let existing =
+        query_agent_profile_with_keys(state, &relay_url, &keys, data.auth_tag.as_deref()).await?;
 
     // Resolve from the latest durable selection after the relay read. A stale
     // startup snapshot must never re-adopt a picture over an explicit removal.
@@ -190,8 +194,53 @@ pub(crate) async fn reconcile_agent_profile(
         .map(|s| s.url.clone().unwrap_or_default())
         .or_else(|| data.avatar_url.clone());
 
-    if !profile_needs_sync(
+    reconcile_profile_at(
+        state,
+        &relay_url,
+        data,
+        expected_avatar.as_deref(),
         existing.as_ref(),
+    )
+    .await
+}
+
+/// Network half of startup/restore reconciliation, after legacy source backfill.
+/// Kept separate from the disk migration so the production compare-and-publish
+/// seam can be exercised against two communities without a GUI runtime.
+pub(crate) async fn reconcile_profile_at(
+    state: &AppState,
+    relay_url: &str,
+    data: &ProfileReconcileData,
+    expected_avatar: Option<&str>,
+    existing: Option<&crate::relay::AgentProfileInfo>,
+) -> Result<ProfileReconcileOutcome, String> {
+    if !state
+        .managed_agent_profile_reconcile_enabled
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Ok(ProfileReconcileOutcome::SkippedAgentManagedProfiles);
+    }
+    let agent_keys = Keys::parse(&data.private_key_nsec)
+        .map_err(|e| format!("failed to parse agent keys: {e}"))?;
+    // Capture intent before localization awaits; only this edit may be acknowledged.
+    let agent_pubkey = agent_keys.public_key().to_hex();
+    let selection =
+        crate::managed_agents::avatar_publication::current_selection(state, &agent_pubkey)?;
+    let expected_avatar = selection
+        .as_ref()
+        .map(|selected| selected.url.as_deref().unwrap_or(""))
+        .or(expected_avatar);
+    let expected_avatar = crate::relay::profile_avatar::localize_avatar(
+        state,
+        relay_url,
+        &agent_keys,
+        expected_avatar,
+        data.auth_tag.as_deref(),
+    )
+    .await?;
+
+    if !profile_needs_sync(
+        existing,
         &data.name,
         expected_avatar.as_deref(),
         data.about.as_deref(),
@@ -199,8 +248,8 @@ pub(crate) async fn reconcile_agent_profile(
         if let Some(selection) = &selection {
             crate::managed_agents::avatar_publication::mark_synced(
                 state,
-                &relay_url,
-                agent_pubkey,
+                relay_url,
+                &agent_pubkey,
                 selection,
             )?;
         }
@@ -214,15 +263,15 @@ pub(crate) async fn reconcile_agent_profile(
         return Ok(ProfileReconcileOutcome::SkippedAgentManagedProfiles);
     }
 
-    sync_managed_agent_profile_from_snapshot(
+    crate::relay::sync_managed_agent_profile_from_snapshot(
         state,
-        &relay_url,
+        relay_url,
         &agent_keys,
         &data.name,
         expected_avatar.as_deref(),
         data.about.as_deref(),
         data.auth_tag.as_deref(),
-        existing.as_ref(),
+        existing,
     )
     .await?;
     Ok(ProfileReconcileOutcome::Published)

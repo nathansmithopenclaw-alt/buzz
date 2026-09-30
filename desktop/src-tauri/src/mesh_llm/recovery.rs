@@ -446,6 +446,7 @@ mod tests {
             avatar_selection: None,
             description: None,
             system_prompt: String::new(),
+            acp_command: None,
             runtime: None,
             model: None,
             provider: None,

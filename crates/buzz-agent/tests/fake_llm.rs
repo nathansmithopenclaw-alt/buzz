@@ -1279,7 +1279,7 @@ async fn mid_turn_usage_includes_earlier_turns() {
 /// Setup: round 1 is a tool call WITH usage (tokens are captured). After the
 /// tool_call_update notification (proving round 1 is fully processed), we gate
 /// the round-2 LLM response behind a `oneshot` barrier that only releases after
-/// cancel is sent. This guarantees the turn exits with `stopReason: "cancelled"`
+/// cancel is acknowledged. This guarantees the turn exits with `stopReason: "cancelled"`
 /// deterministically, even on a slow CI worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_turn_with_usage_emits_notification_before_response() {
@@ -1294,7 +1294,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     // in-flight TCP request can resolve. The queue is empty for round 2, so the
     // agent receives the fallback "no canned response" body which it treats as
     // an LLM error; the cancel check at the round boundary fires first because
-    // the gate is only released after cancel is enqueued.
+    // the gate is only released after cancel is acknowledged.
     let responses = vec![openai_tool_call_with_usage(
         "call_cancel_test",
         "fake__noop",
@@ -1330,7 +1330,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
                     }
                 }
                 // For request 2+ (round 2), wait for the gate to open before
-                // responding. This ensures cancel is sent before round 2 resolves,
+                // responding. This ensures cancel is processed before round 2 resolves,
                 // making stopReason: cancelled deterministic.
                 if req_num >= 2 {
                     let rx = gate.lock().await.take();
@@ -1374,52 +1374,46 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     })
     .await;
 
-    // Send cancel, then wait for its acknowledgement before releasing the
-    // round-2 gate. Merely writing both messages in order is insufficient:
-    // under workspace load the provider task can resume before the ACP loop
-    // processes the cancel request.
+    // Writing to stdin does not prove the agent processed cancel. Keep the
+    // provider blocked until the acknowledgement, retaining all earlier frames
+    // so usage/prompt ordering is checked even if the turn finishes before ACK.
     let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
-    let (frames_before_cancel_ack, _) =
+    let (frames_before_cancel_ack, cancel_ack) =
         recv_until_with_drain(&mut h, |v| v["id"] == json!(c_id)).await;
+    assert_eq!(cancel_ack.get("result"), Some(&Value::Null), "{cancel_ack}");
+    assert!(cancel_ack.get("error").is_none(), "{cancel_ack}");
     let _ = gate_tx.send(()); // unblock round 2
 
     let mut saw_usage_before_prompt_response = false;
     let mut saw_usage = false;
     let mut saw_prompt_response = false;
-    {
-        let mut inspect_frame = |v: &Value| {
-            if is_usage_update(v) {
-                saw_usage = true;
-                if !saw_prompt_response {
-                    saw_usage_before_prompt_response = true;
-                }
-            } else if v["id"] == json!(p_id) {
-                saw_prompt_response = true;
-                // The gate guarantees stopReason: cancelled — not a race-driven error.
-                assert_eq!(
-                    v["result"]["stopReason"], "cancelled",
-                    "turn must end with stopReason: cancelled"
-                );
-            }
-            saw_usage && saw_prompt_response
+    let mut pending_frames = VecDeque::from(frames_before_cancel_ack);
+    let frame_budget = 40 + pending_frames.len();
+    for _ in 0..frame_budget {
+        let v = match pending_frames.pop_front() {
+            Some(v) => v,
+            None => h.recv().await,
         };
-
-        let mut done = false;
-        for v in &frames_before_cancel_ack {
-            if inspect_frame(v) {
-                done = true;
-                break;
+        if is_usage_update(&v) {
+            saw_usage = true;
+            if !saw_prompt_response {
+                saw_usage_before_prompt_response = true;
             }
+        } else if v["id"] == json!(p_id) {
+            saw_prompt_response = true;
+            assert_eq!(
+                v["result"]["stopReason"], "cancelled",
+                "turn must end with stopReason: cancelled"
+            );
         }
-        if !done {
-            for _ in 0..40 {
-                let v = h.recv().await;
-                if inspect_frame(&v) {
-                    break;
-                }
-            }
+        if saw_usage && saw_prompt_response {
+            break;
         }
     }
+    assert!(
+        saw_prompt_response,
+        "session/prompt did not finish after cancel"
+    );
     assert!(
         saw_usage,
         "expected usage_update notification for cancelled turn with observed tokens"

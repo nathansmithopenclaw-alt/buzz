@@ -579,6 +579,7 @@ fn build_agent_managed_avatar_event(
         .unwrap_or_default();
     sign_managed_agent_profile_event(builder, agent_keys, prior_tags, auth_tag_json)
 }
+pub(crate) mod profile_avatar;
 
 // ── Managed-agent profile sync ──────────────────────────────────────────────
 
@@ -589,6 +590,8 @@ fn build_agent_managed_avatar_event(
 /// description (see `managed_agents::record_effective_description`); the
 /// relay treats kind:0
 /// fields as absolute, so passing `None` clears any previously published about.
+/// Configured-community avatar media is copied into this target before signing;
+/// transfer failure never replaces the existing profile with a foreign URL.
 pub async fn sync_managed_agent_profile(
     state: &AppState,
     relay_url: &str,
@@ -607,7 +610,7 @@ pub async fn sync_managed_agent_profile(
         "agent profile sync",
     )?;
 
-    let existing = query_agent_profile(state, relay_url, &agent_keys.public_key().to_hex()).await?;
+    let existing = query_agent_profile_with_keys(state, relay_url, agent_keys, auth_tag).await?;
     sync_managed_agent_profile_from_snapshot(
         state,
         relay_url,
@@ -665,7 +668,7 @@ pub async fn sync_agent_managed_profile_avatar(
     auth_tag: Option<&str>,
 ) -> Result<(), String> {
     crate::relay_admission::wait_for_rate_limit().await;
-    let existing = query_agent_profile(state, relay_url, &agent_keys.public_key().to_hex()).await?;
+    let existing = query_agent_profile_with_keys(state, relay_url, agent_keys, auth_tag).await?;
     let event = build_agent_managed_avatar_event(
         agent_keys,
         existing.as_ref(),
@@ -696,7 +699,7 @@ async fn submit_managed_agent_profile_event(
         crate::managed_agents::avatar_publication::publish_current(
             relay_url,
             &pubkey,
-            || query_agent_profile(state, relay_url, &pubkey),
+            || query_agent_profile_with_keys(state, relay_url, agent_keys, auth_tag),
             |latest| {
                 let selection =
                     crate::managed_agents::avatar_publication::current_selection(state, &pubkey)?;
@@ -727,11 +730,22 @@ async fn submit_managed_agent_profile_event(
                 } else {
                     event
                 };
+                let mut projected_selection = selection.clone();
+                if let Some(selected) = &mut projected_selection {
+                    selected.url = profile_avatar::localize_avatar(
+                        state,
+                        relay_url,
+                        agent_keys,
+                        selected.url.as_deref(),
+                        auth_tag,
+                    )
+                    .await?;
+                }
                 let event = build_selected_profile_event(
                     agent_keys,
                     &event,
                     latest.as_ref(),
-                    selection.as_ref(),
+                    projected_selection.as_ref(),
                 )?;
                 post_managed_profile_event(state, relay_url, agent_keys, event, auth_tag).await
             },
@@ -807,6 +821,10 @@ async fn post_managed_profile_event(
     event: nostr::Event,
     auth_tag: Option<&str>,
 ) -> Result<(), String> {
+    let event =
+        profile_avatar::localize_profile_event(state, relay_url, agent_keys, event, auth_tag)
+            .await?;
+
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
@@ -815,8 +833,9 @@ async fn post_managed_profile_event(
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
 
     let mut request = state
-        .http_client
+        .media_fetch_client
         .post(&url)
+        .timeout(std::time::Duration::from_secs(30))
         .header("Authorization", auth)
         .header("Content-Type", "application/json");
     if let Some(tag) = auth_tag {
@@ -848,63 +867,9 @@ fn validate_profile_receipt(receipt: &SubmitEventResponse, event_id: &str) -> Re
     Ok(())
 }
 
-// ── Agent profile query ─────────────────────────────────────────────────────
-
-/// Query the relay for an agent's kind:0 profile event.
-///
-/// Callers pass the active workspace relay resolved by
-/// `effective_agent_relay_url`. Returns parsed fields, full metadata, and event
-/// timestamp, or `None` when no kind:0 profile is published.
-pub async fn query_agent_profile(
-    state: &AppState,
-    relay_url: &str,
-    agent_pubkey: &str,
-) -> Result<Option<AgentProfileInfo>, String> {
-    let filter = serde_json::json!({
-        "authors": [agent_pubkey],
-        "kinds": [0],
-        "limit": 1
-    });
-
-    let events = query_relay_at(state, &relay_http_base_url(relay_url), &[filter]).await?;
-
-    let Some(event) = events.first() else {
-        return Ok(None);
-    };
-
-    let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) else {
-        return Ok(None);
-    };
-
-    Ok(Some(AgentProfileInfo {
-        display_name: content
-            .get("display_name")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        picture: content
-            .get("picture")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        about: content
-            .get("about")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        metadata: content.as_object().cloned().unwrap_or_default(),
-        tags: event.tags.iter().cloned().collect(),
-        created_at: event.created_at.as_secs() as i64,
-    }))
-}
-
-/// Parsed fields from a kind:0 profile event.
-#[derive(Debug, Clone)]
-pub struct AgentProfileInfo {
-    pub display_name: Option<String>,
-    pub picture: Option<String>,
-    pub about: Option<String>,
-    pub metadata: serde_json::Map<String, serde_json::Value>,
-    pub tags: Vec<nostr::Tag>,
-    pub created_at: i64,
-}
+mod managed_profile;
+pub(crate) use managed_profile::query_agent_profile_with_keys;
+pub use managed_profile::{query_agent_profile, AgentProfileInfo};
 
 // ── Signed-event submission ─────────────────────────────────────────────────
 

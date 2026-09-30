@@ -288,7 +288,6 @@ export function AppSidebar({
   const { sortModeFor, setSortModeFor } = useChannelSortPreference(
     currentPubkey,
     activeCommunity?.relayUrl,
-    sectionIds,
   );
 
   const [createSectionState, setCreateSectionState] = React.useState<{

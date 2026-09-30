@@ -13,6 +13,7 @@ export type RawPersona = {
   /** Optional short, PUBLIC description (max 280 chars). */
   description?: string | null;
   system_prompt: string;
+  acp_command?: string | null;
   runtime?: string | null;
   model?: string | null;
   provider?: string | null;
@@ -45,6 +46,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     avatarUrl: persona.avatar_url,
     description: persona.description ?? null,
     systemPrompt: persona.system_prompt,
+    acpCommand: persona.acp_command ?? "buzz-acp",
     runtime: persona.runtime ?? null,
     model: persona.model ?? null,
     provider: persona.provider ?? null,
@@ -100,6 +102,7 @@ export async function createPersona(
         avatarUrl: input.avatarUrl,
         description: normalizeDescription(input.description),
         systemPrompt: input.systemPrompt,
+        acpCommand: input.acpCommand,
         runtime: input.runtime,
         model: input.model,
         provider: input.provider,
@@ -120,6 +123,7 @@ export function updatePersonaPayload(input: UpdatePersonaInput) {
     avatarEdit: input.avatarEdit,
     description: normalizeDescription(input.description),
     systemPrompt: input.systemPrompt,
+    acpCommand: input.acpCommand,
     runtime: input.runtime,
     model: input.model,
     provider: input.provider,

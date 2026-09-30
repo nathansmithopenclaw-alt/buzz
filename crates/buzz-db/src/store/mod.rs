@@ -28,6 +28,8 @@ pub mod feed;
 pub mod git_repo;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
+/// Deployment-global operator-listener mention registrations and delivery queues.
+pub mod operator_listener;
 /// Monthly table partition management.
 pub mod partition;
 /// Buzz product-feedback sidecar persistence.
@@ -36,6 +38,8 @@ pub mod product_feedback;
 pub mod push;
 /// Reaction persistence.
 pub mod reaction;
+/// Complete own-author read-state snapshots.
+pub mod read_state;
 /// HTTP report-resolution enforcement state machine persistence.
 pub mod relay_admin_actions;
 /// Use-limited relay invite persistence (v2 opaque tokens).
@@ -48,6 +52,8 @@ pub mod relay_operators;
 pub mod reminder;
 /// Replaceable-event persistence and coordinate locking.
 pub mod replaceable;
+/// Durable completed snapshots from the isolated media-storage worker.
+pub mod storage_accounting;
 /// Summary audience directory and durable run coordination.
 pub mod summary;
 pub mod summary_archive;
@@ -55,6 +61,8 @@ pub mod summary_publish;
 pub mod summary_runs;
 /// Thread metadata persistence.
 pub mod thread;
+/// Strict newest-first thread windows and auxiliary scans.
+pub mod thread_window;
 /// Per-community usage rollup queries for Prometheus gauges.
 pub mod usage;
 /// User profile persistence.
@@ -70,4 +78,11 @@ mod summary_migration;
 mod summary_reads;
 mod summary_schedule;
 
+/// NIP-AR artifact lifecycle and durable delivery.
+pub mod artifact;
 pub mod dispatch_workflow;
+
+mod artifact_query;
+
+#[cfg(test)]
+mod artifact_postgres_tests;

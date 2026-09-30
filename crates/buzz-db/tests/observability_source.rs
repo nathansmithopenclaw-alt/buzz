@@ -527,6 +527,15 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .0;
     assert!(lease_stats.contains("WriterOperation::Maintenance"));
     assert!(lease_stats.contains("fetch_one(&mut *connection)"));
+    let bounded_lease = deletion
+        .split_once("async fn bounded_serving_lease_sql<T>(")
+        .expect("bounded serving-lease helper")
+        .1
+        .split_once("pub async fn acquire_serving_write_lease")
+        .expect("helper precedes lease entrypoint")
+        .0;
+    assert!(bounded_lease.contains("WriterOperation::EventWrite"));
+    assert!(bounded_lease.contains("acquire_writer_until("));
     for (start, end) in [
         (
             "pub async fn acquire_serving_write_lease",
@@ -557,7 +566,8 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
             .unwrap_or_else(|| panic!("serving-write seam {start} must precede {end}"))
             .0;
         assert!(
-            function.contains("WriterOperation::EventWrite"),
+            function.contains("WriterOperation::EventWrite")
+                || function.contains("self.bounded_serving_lease_sql("),
             "serving-write seam {start} must be event-write attributed"
         );
         assert!(!function.contains("self.pool.begin().await"));
