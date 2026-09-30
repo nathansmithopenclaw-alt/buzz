@@ -312,3 +312,25 @@ test("an unknown effort catalog does not invalidate a changed model qualifier", 
     null,
   );
 });
+
+test("Codex catalog offers the GPT-6 family and groups live GPT-6 ids by version", () => {
+  const options = mergeRuntimeModelCatalog({
+    currentModel: "",
+    discovered: [{ id: "gpt-6.1-sol[medium]", label: "GPT-6.1 Sol (medium)" }],
+    provider: "",
+    runtimeId: "codex",
+  });
+
+  assert.equal(
+    options.find((option) => option.id === "gpt-6.1-sol[medium]")?.group,
+    "GPT-6.1",
+  );
+  for (const id of ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]) {
+    assert.equal(
+      options.find((option) => option.id === id)?.badge,
+      "Catalog only",
+      `${id} is in the Codex fallback catalog`,
+    );
+  }
+  assert.equal(options.find((option) => option.id === "gpt-6-luna")?.group, "GPT-6");
+});
