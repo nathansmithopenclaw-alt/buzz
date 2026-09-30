@@ -495,7 +495,7 @@ async fn startup_reconcile_compares_local_projection_retries_saved_edit_and_hono
     assert_eq!(picture(&b), second);
     assert_eq!(a.state.data.lock().unwrap().requests.len(), source_requests);
     state
-        .managed_agent_profile_reconcile_enabled
+        .managed_agent_profile_reconcile_enabled()
         .store(false, std::sync::atomic::Ordering::Release);
     let requests = b.state.data.lock().unwrap().requests.len();
     assert_eq!(
@@ -549,4 +549,83 @@ async fn removed_source_projection_query_uses_fixed_signer_and_cannot_redirect()
     assert!(sync(&state, &b, &keys, &avatar).await.is_err());
     assert!(trap.state.data.lock().unwrap().requests.is_empty());
     assert_eq!(picture(&b), projected);
+}
+
+#[tokio::test]
+async fn managed_profiles_setting_skips_launch_and_applies_only_avatar() {
+    use crate::commands::{
+        reconcile_agent_profile, reconcile_applied_avatar, set_agent_managed_profiles,
+        AvatarProfilePublication, ProfileReconcileData, ProfileReconcileOutcome,
+    };
+    use nostr::ToBech32;
+    use tauri::Manager;
+
+    let relay = server().await;
+    let app = tauri::test::mock_builder()
+        .manage(state(&[&relay]))
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("headless app");
+    let state = app.state::<AppState>();
+    *state.relay_url_override.lock().unwrap() = Some(relay.state.base.clone());
+    let keys = Keys::generate();
+    let prior = serde_json::json!({
+        "name": "agent-chosen", "display_name": "Agent's own name",
+        "about": "Agent's own about", "nip05": "agent@example.com", "custom": "preserved",
+    });
+    relay.state.data.lock().unwrap().profiles.push(
+        nostr::EventBuilder::new(nostr::Kind::Metadata, prior.to_string())
+            .sign_with_keys(&keys)
+            .unwrap(),
+    );
+    let avatar = seed(&relay, image(42));
+    let data = ProfileReconcileData {
+        private_key_nsec: keys.secret_key().to_bech32().unwrap(),
+        name: "Desktop's stale name".into(),
+        relay_url: relay.state.base.clone(),
+        target_relay_url: Some(relay.state.base.clone()),
+        avatar_url: Some(avatar.clone()),
+        auth_tag: None,
+        about: Some("Desktop's stale about".into()),
+    };
+    set_agent_managed_profiles(true, state.clone());
+    assert_eq!(
+        reconcile_agent_profile(&state, &keys.public_key().to_hex(), &data)
+            .await
+            .unwrap(),
+        ProfileReconcileOutcome::SkippedAgentManagedProfiles,
+    );
+    assert!(
+        relay.state.data.lock().unwrap().requests.is_empty(),
+        "launch must not query or publish"
+    );
+    match reconcile_applied_avatar(&state, &keys.public_key().to_hex(), &data, &avatar)
+        .await
+        .unwrap()
+    {
+        AvatarProfilePublication::AgentManaged(result) => result.expect("avatar-only publication"),
+        AvatarProfilePublication::Reconciled => panic!("must use avatar-only path"),
+    }
+
+    {
+        let server = relay.state.data.lock().unwrap();
+        assert_eq!(server.profiles.len(), 2);
+        let published: serde_json::Value =
+            serde_json::from_str(&server.profiles.last().unwrap().content).unwrap();
+        for (key, value) in prior.as_object().unwrap() {
+            assert_eq!(&published[key], value, "avatar apply must preserve {key}");
+        }
+        assert_eq!(published["picture"], avatar);
+    }
+    set_agent_managed_profiles(false, state.clone());
+    assert_eq!(
+        reconcile_agent_profile(&state, &keys.public_key().to_hex(), &data)
+            .await
+            .unwrap(),
+        ProfileReconcileOutcome::Published,
+    );
+    let server = relay.state.data.lock().unwrap();
+    let published: serde_json::Value =
+        serde_json::from_str(&server.profiles.last().unwrap().content).unwrap();
+    assert_eq!(published["display_name"], data.name);
+    assert_eq!(published["about"], data.about.unwrap());
 }

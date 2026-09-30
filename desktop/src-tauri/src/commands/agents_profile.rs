@@ -161,7 +161,6 @@ pub(crate) fn mark_profile_reconciled(
 /// it points.
 pub(crate) async fn reconcile_agent_profile(
     state: &AppState,
-    _app: &AppHandle,
     agent_pubkey: &str,
     data: &ProfileReconcileData,
 ) -> Result<ProfileReconcileOutcome, String> {
@@ -175,7 +174,7 @@ pub(crate) async fn reconcile_agent_profile(
         &relay_ws_url_with_override(state),
     );
 
-    if !profile_reconcile_enabled(&state.managed_agent_profile_reconcile_enabled) {
+    if !profile_reconcile_enabled(state.managed_agent_profile_reconcile_enabled()) {
         return Ok(ProfileReconcileOutcome::SkippedAgentManagedProfiles);
     }
 
@@ -215,7 +214,7 @@ pub(crate) async fn reconcile_profile_at(
     existing: Option<&crate::relay::AgentProfileInfo>,
 ) -> Result<ProfileReconcileOutcome, String> {
     if !state
-        .managed_agent_profile_reconcile_enabled
+        .managed_agent_profile_reconcile_enabled()
         .load(std::sync::atomic::Ordering::Acquire)
     {
         return Ok(ProfileReconcileOutcome::SkippedAgentManagedProfiles);
@@ -259,7 +258,7 @@ pub(crate) async fn reconcile_profile_at(
     let agent_keys = Keys::parse(&data.private_key_nsec)
         .map_err(|e| format!("failed to parse agent keys: {e}"))?;
 
-    if !profile_reconcile_enabled(&state.managed_agent_profile_reconcile_enabled) {
+    if !profile_reconcile_enabled(state.managed_agent_profile_reconcile_enabled()) {
         return Ok(ProfileReconcileOutcome::SkippedAgentManagedProfiles);
     }
 

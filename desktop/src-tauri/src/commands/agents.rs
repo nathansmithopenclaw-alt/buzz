@@ -1152,8 +1152,7 @@ pub(super) async fn start_managed_agent_inner(
             use tauri::Manager;
             let state = reconcile_app.state::<AppState>();
             if let Err(e) =
-                reconcile_agent_profile(&state, &reconcile_app, &reconcile_pubkey, &reconcile_data)
-                    .await
+                reconcile_agent_profile(&state, &reconcile_pubkey, &reconcile_data).await
             {
                 eprintln!(
                     "buzz-desktop: profile reconciliation failed for agent {reconcile_pubkey}: {e}"

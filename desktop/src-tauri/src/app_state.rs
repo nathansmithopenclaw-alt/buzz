@@ -39,8 +39,6 @@ pub struct AppState {
     pub workspace_apply_generation: AtomicU64,
     /// Defers managed-agent restore until `apply_workspace` installs relay and identity.
     pub managed_agent_restore_pending: AtomicBool,
-    /// Disabled by agent-managed profiles so agent profile updates survive start/restore.
-    pub managed_agent_profile_reconcile_enabled: AtomicBool,
     /// Device-local Fleet Visibility role and Rust authority.
     pub fleet_visibility: Mutex<crate::managed_agents::fleet_visibility::FleetVisibilityRuntime>,
     /// Experiment state applied to managed-agent starts and profile reconciliation.
@@ -224,7 +222,6 @@ pub fn build_app_state() -> AppState {
         workspace_apply_lock: Arc::new(AsyncMutex::new(())),
         workspace_apply_generation: AtomicU64::new(0),
         managed_agent_restore_pending: AtomicBool::new(false),
-        managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         fleet_visibility: Mutex::new(Default::default()),
         managed_agent_experiments: crate::managed_agents::ManagedAgentExperimentState::default(),
         shutdown_started: AtomicBool::new(false),

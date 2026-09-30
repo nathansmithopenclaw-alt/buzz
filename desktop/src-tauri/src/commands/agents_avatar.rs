@@ -77,6 +77,47 @@ struct ReconcileTarget {
     data: ProfileReconcileData,
 }
 
+/// Publication outcome used to preserve avatar-only receipt and retry semantics.
+pub(crate) enum AvatarProfilePublication {
+    Reconciled,
+    AgentManaged(Result<(), String>),
+}
+
+/// Apply an owner avatar edit through the same live setting as launch reconciliation.
+pub(crate) async fn reconcile_applied_avatar(
+    state: &AppState,
+    pubkey: &str,
+    data: &ProfileReconcileData,
+    avatar_url: &str,
+) -> Result<AvatarProfilePublication, String> {
+    match reconcile_agent_profile(state, pubkey, data).await? {
+        ProfileReconcileOutcome::AlreadyCurrent | ProfileReconcileOutcome::Published => {
+            Ok(AvatarProfilePublication::Reconciled)
+        }
+        ProfileReconcileOutcome::SkippedAgentManagedProfiles => {
+            let result = async {
+                let relay_url = crate::relay::effective_agent_relay_url(
+                    &data.relay_url,
+                    &crate::relay::relay_ws_url_with_override(state),
+                );
+                let keys = nostr::Keys::parse(&data.private_key_nsec)
+                    .map_err(|error| format!("failed to parse agent keys: {error}"))?;
+                crate::relay::sync_agent_managed_profile_avatar(
+                    state,
+                    &relay_url,
+                    &keys,
+                    &data.name,
+                    avatar_url,
+                    data.auth_tag.as_deref(),
+                )
+                .await
+            }
+            .await;
+            Ok(AvatarProfilePublication::AgentManaged(result))
+        }
+    }
+}
+
 fn validate_avatar_url(value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() || value.chars().count() > MAX_AVATAR_URL_CHARS {
@@ -339,38 +380,12 @@ pub async fn apply_managed_agent_avatar_request(
     if applied {
         let state = app.state::<AppState>();
         for target in targets {
-            match reconcile_agent_profile(&state, &app, &target.pubkey, &target.data).await {
-                Ok(
-                    ProfileReconcileOutcome::AlreadyCurrent | ProfileReconcileOutcome::Published,
-                ) => {
-                    reconciled_count += 1;
-                }
-                Ok(ProfileReconcileOutcome::SkippedAgentManagedProfiles) => {
+            match reconcile_applied_avatar(&state, &target.pubkey, &target.data, &avatar_url).await
+            {
+                Ok(AvatarProfilePublication::Reconciled) => reconciled_count += 1,
+                Ok(AvatarProfilePublication::AgentManaged(result)) => {
                     reconcile_skipped = Some(AGENT_MANAGED_PROFILES_SKIP_REASON);
-                    let relay_url = crate::relay::effective_agent_relay_url(
-                        &target.data.relay_url,
-                        &crate::relay::relay_ws_url_with_override(&state),
-                    );
-                    let agent_keys = match nostr::Keys::parse(&target.data.private_key_nsec) {
-                        Ok(keys) => keys,
-                        Err(error) => {
-                            eprintln!(
-                                "buzz-desktop: avatar publish failed for agent {}: failed to parse agent keys: {error}",
-                                target.pubkey
-                            );
-                            continue;
-                        }
-                    };
-                    match crate::relay::sync_agent_managed_profile_avatar(
-                        &state,
-                        &relay_url,
-                        &agent_keys,
-                        &target.data.name,
-                        &avatar_url,
-                        target.data.auth_tag.as_deref(),
-                    )
-                    .await
-                    {
+                    match result {
                         Ok(()) => published_count += 1,
                         Err(error) => eprintln!(
                             "buzz-desktop: agent-managed avatar publish failed for agent {}: {error}",
