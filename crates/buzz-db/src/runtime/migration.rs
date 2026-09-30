@@ -344,11 +344,20 @@ async fn reconcile_fold_migration_collisions(conn: &mut PgConnection) -> Result<
 /// A crash after the ledger transaction but before this step is retry-safe:
 /// the next migration run observes the missing classification and installs it.
 async fn ensure_community_hosts_deletion_taxonomy(conn: &mut PgConnection) -> Result<()> {
-    let excluded: bool =
+    let hosts_excluded: bool =
         sqlx::query_scalar("SELECT community_write_fence_excluded_table('community_hosts')")
             .fetch_one(&mut *conn)
             .await?;
-    if !excluded {
+    let listener_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('operator_listener_outbox') IS NOT NULL")
+            .fetch_one(&mut *conn)
+            .await?;
+    let listener_excluded: bool = sqlx::query_scalar(
+        "SELECT community_write_fence_excluded_table('operator_listener_outbox')",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if !hosts_excluded || (listener_exists && !listener_excluded) {
         let ledger_exists: bool =
             sqlx::query_scalar("SELECT to_regclass('identity_bindings') IS NOT NULL")
                 .fetch_one(&mut *conn)
@@ -358,10 +367,6 @@ async fn ensure_community_hosts_deletion_taxonomy(conn: &mut PgConnection) -> Re
         } else {
             COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL
         };
-        let listener_exists: bool =
-            sqlx::query_scalar("SELECT to_regclass('operator_listener_outbox') IS NOT NULL")
-                .fetch_one(&mut *conn)
-                .await?;
         let taxonomy = if listener_exists {
             taxonomy.replace(
                 "'community_hosts'",
@@ -3141,6 +3146,45 @@ mod postgres_tests {
         run_migrations(&pool).await.expect("run migrations");
 
         crate::store::deletion::owner_provenance_contract::assert_contract(&pool).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn exclusion_repair_restores_listener_when_hosts_already_excluded() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool).await.expect("fresh migrations");
+        let definition_sql =
+            "SELECT pg_get_functiondef('community_write_fence_excluded_table(name)'::regprocedure)";
+        let expected: String = sqlx::query_scalar(definition_sql)
+            .fetch_one(&pool)
+            .await
+            .expect("complete function");
+        sqlx::raw_sql(COMMUNITY_HOSTS_DELETION_TAXONOMY_SQL)
+            .execute(&pool)
+            .await
+            .expect("simulate missing listener exclusion");
+        let exclusions: (bool, bool) = sqlx::query_as(
+            "SELECT community_write_fence_excluded_table('community_hosts'), \
+             community_write_fence_excluded_table('operator_listener_outbox')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("partial exclusions");
+        assert_eq!(exclusions, (true, false));
+        // Exercise the actual startup repair, including its idempotent retry.
+        for _ in 0..2 {
+            run_migrations(&pool).await.expect("repair startup");
+            let actual: String = sqlx::query_scalar(definition_sql)
+                .fetch_one(&pool)
+                .await
+                .expect("repaired function");
+            assert_eq!(actual, expected, "the complete function must be restored");
+            crate::deletion::DeletionStore::new(pool.clone())
+                .validate_catalog()
+                .await
+                .expect("complete deletion catalog");
+        }
     }
 
     #[tokio::test]
