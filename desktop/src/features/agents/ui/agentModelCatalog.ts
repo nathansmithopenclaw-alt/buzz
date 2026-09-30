@@ -166,6 +166,10 @@ function mergeClaudeModelCatalog(
 }
 
 const OPENAI_MODELS: readonly CatalogModel[] = [
+  { id: "gpt-6.1-sol", label: "GPT-6.1 Sol", group: "GPT-6.1" },
+  { id: "gpt-6-astra", label: "GPT-6 Astra", group: "GPT-6" },
+  { id: "gpt-6-sol", label: "GPT-6 Sol", group: "GPT-6" },
+  { id: "gpt-6-luna", label: "GPT-6 Luna", group: "GPT-6" },
   { id: "gpt-5.6", label: "GPT-5.6 (Sol alias)", group: "GPT-5.6" },
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", group: "GPT-5.6" },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", group: "GPT-5.6" },
@@ -249,7 +253,7 @@ function modelFamily(modelId: string): string {
   if (id.includes("opus")) return "Opus";
   if (id.includes("sonnet")) return "Sonnet";
   if (id.includes("haiku")) return "Haiku";
-  const gpt = id.match(/gpt-(5(?:\.\d+)?)/)?.[1];
+  const gpt = id.match(/gpt-(\d+(?:\.\d+)?)/)?.[1];
   return gpt ? `GPT-${gpt}` : "Other";
 }
 
