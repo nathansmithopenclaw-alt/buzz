@@ -25,7 +25,7 @@ impl Db {
     /// the live definition is a no-op. Missing projections are tolerated so a
     /// retry can remove definitions left behind by older relay versions.
     /// Reports committed changes independently of the optional workflow channel.
-    /// No tombstone is retained: clients may intentionally publish backdated definitions.
+    /// Retains the NIP-09 deletion floor so late older definitions cannot resurrect it.
     #[datastore_span(name = "delete_workflow_by_coordinate", system = "postgresql")]
     pub async fn delete_workflow_by_coordinate(
         &self,
@@ -103,6 +103,26 @@ async fn delete_workflow_in_transaction(
             .bind(lock_key)
             .execute(&mut **tx),
     )
+    .await?;
+
+    // Share the replacement lock and transaction with the inclusive NIP-09
+    // floor, including deletions that arrive before the definition itself.
+    sqlx::query(
+        "INSERT INTO addressable_event_tombstones \
+             (community_id, kind, pubkey, d_tag, deleted_through) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+             deleted_through = GREATEST( \
+                 addressable_event_tombstones.deleted_through, \
+                 EXCLUDED.deleted_through \
+             )",
+    )
+    .bind(community_id.as_uuid())
+    .bind(KIND_WORKFLOW_DEF as i32)
+    .bind(owner_pubkey)
+    .bind(d_tag)
+    .bind(cutoff)
+    .execute(&mut **tx)
     .await?;
 
     let head: Option<DateTime<Utc>> = sqlx::query_scalar(

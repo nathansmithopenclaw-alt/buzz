@@ -292,3 +292,44 @@ async fn legacy_stored_deletion_repair_has_one_committed_dispatch_owner() {
             .1
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_deletion_rejects_late_older_and_same_second_definitions() {
+    let (db, community) = setup().await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let d_tag = id.to_string();
+    let now = Timestamp::now().as_secs();
+    let query = seed(&db, community, &keys, id, &d_tag, now - 2).await;
+    db.delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64)
+        .await
+        .expect("delete workflow");
+    // An older retry must not lower the deletion floor.
+    db.delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64 - 2)
+        .await
+        .expect("retry older deletion");
+    assert_absent(&db, &query, id).await;
+    for created_at in [now - 1, now] {
+        let late = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), "late revision")
+            .tags([Tag::parse(["d", &d_tag]).expect("coordinate")])
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(&keys)
+            .expect("sign late definition");
+        db.replace_parameterized_event(community, &late, &d_tag, None)
+            .await
+            .expect("ingest late definition");
+        assert_absent(&db, &query, id).await;
+    }
+    // NIP-09 permits an intentional recreation strictly after the floor.
+    let newer = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), "new revision")
+        .tags([Tag::parse(["d", &d_tag]).expect("coordinate")])
+        .custom_created_at(Timestamp::from(now + 1))
+        .sign_with_keys(&keys)
+        .expect("sign newer definition");
+    db.replace_parameterized_event(community, &newer, &d_tag, None)
+        .await
+        .expect("ingest newer definition");
+    assert_eq!(db.query_events(&query).await.expect("new head").len(), 1);
+}
