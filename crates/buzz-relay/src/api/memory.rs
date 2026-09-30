@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::{
     extract::{Extension, State},
     http::{HeaderMap, StatusCode},
-    response::Json,
+    response::{IntoResponse, Json, Response},
 };
 use buzz_memory::{
     Clearance, OutputContext, ProviderError, QueryMode, QueryRequest, QueryResponse, ReadScope,
@@ -20,7 +20,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::state::AppState;
+use crate::{nip_fi_http::admit_nip_fi_http_on_state, state::AppState};
+use buzz_auth::NipFiMode;
 
 use super::{api_error, bridge};
 
@@ -64,20 +65,21 @@ pub async fn query(
     Extension(public_scheme): Extension<crate::proxy::PublicScheme>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    ensure_enabled(&state)?;
+) -> Result<Json<Value>, Response> {
+    ensure_enabled(&state).map_err(IntoResponse::into_response)?;
     if body.len() > MAX_BODY_BYTES {
-        return Err(api_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "memory request too large",
-        ));
+        return Err(
+            api_error(StatusCode::PAYLOAD_TOO_LARGE, "memory request too large").into_response(),
+        );
     }
-    let parsed: QueryBody = serde_json::from_slice(&body).map_err(|error| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            &format!("invalid memory query: {error}"),
-        )
-    })?;
+    let parsed: QueryBody = serde_json::from_slice(&body)
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid memory query: {error}"),
+            )
+        })
+        .map_err(IntoResponse::into_response)?;
     let (scope, event_id) = authenticate_scope(
         &state,
         public_scheme,
@@ -87,7 +89,9 @@ pub async fn query(
         parsed.context,
     )
     .await?;
-    bridge::check_nip98_replay(&state, &scope.0, event_id).await?;
+    bridge::check_nip98_replay(&state, &scope.0, event_id)
+        .await
+        .map_err(IntoResponse::into_response)?;
     let request = QueryRequest {
         scope: scope.1,
         mode: parsed.mode,
@@ -104,7 +108,8 @@ pub async fn query(
     .await;
     let response = match result {
         Ok(Ok(mut response)) => {
-            enforce_truth_receipts(&response, &provider_id, &policy_id)?;
+            enforce_truth_receipts(&response, &provider_id, &policy_id)
+                .map_err(IntoResponse::into_response)?;
             apply_current_rendering_gate(
                 &mut response,
                 state.config.memory.current_rendering_enabled,
@@ -112,13 +117,13 @@ pub async fn query(
             response
         }
         Ok(Err(ProviderError::InvalidRequest(message))) => {
-            return Err(api_error(StatusCode::BAD_REQUEST, &message));
+            return Err(api_error(StatusCode::BAD_REQUEST, &message).into_response());
         }
         Ok(Err(_)) | Err(_) => unavailable_query(provider_id, policy_id),
     };
-    serde_json::to_value(response)
-        .map(Json)
-        .map_err(|error| super::internal_error(&format!("memory response serialization: {error}")))
+    serde_json::to_value(response).map(Json).map_err(|error| {
+        super::internal_error(&format!("memory response serialization: {error}")).into_response()
+    })
 }
 
 /// Return provider health and generation under an explicit output context.
@@ -127,20 +132,21 @@ pub async fn status(
     Extension(public_scheme): Extension<crate::proxy::PublicScheme>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    ensure_enabled(&state)?;
+) -> Result<Json<Value>, Response> {
+    ensure_enabled(&state).map_err(IntoResponse::into_response)?;
     if body.len() > MAX_BODY_BYTES {
-        return Err(api_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "memory request too large",
-        ));
+        return Err(
+            api_error(StatusCode::PAYLOAD_TOO_LARGE, "memory request too large").into_response(),
+        );
     }
-    let parsed: StatusBody = serde_json::from_slice(&body).map_err(|error| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            &format!("invalid memory status: {error}"),
-        )
-    })?;
+    let parsed: StatusBody = serde_json::from_slice(&body)
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid memory status: {error}"),
+            )
+        })
+        .map_err(IntoResponse::into_response)?;
     let (scope, event_id) = authenticate_scope(
         &state,
         public_scheme,
@@ -150,7 +156,9 @@ pub async fn status(
         parsed.context,
     )
     .await?;
-    bridge::check_nip98_replay(&state, &scope.0, event_id).await?;
+    bridge::check_nip98_replay(&state, &scope.0, event_id)
+        .await
+        .map_err(IntoResponse::into_response)?;
     let provider_id = state.memory_provider.provider_id().to_string();
     let policy_id = scope.1.policy_id.clone();
     let result = tokio::time::timeout(
@@ -162,15 +170,17 @@ pub async fn status(
     .await;
     match result {
         Ok(Ok(response)) => {
-            let mut value = serde_json::to_value(response).map_err(|error| {
-                super::internal_error(&format!("memory status serialization: {error}"))
-            })?;
+            let mut value = serde_json::to_value(response)
+                .map_err(|error| {
+                    super::internal_error(&format!("memory status serialization: {error}"))
+                })
+                .map_err(IntoResponse::into_response)?;
             value["current_rendering_enabled"] =
                 Value::Bool(state.config.memory.current_rendering_enabled);
             Ok(Json(value))
         }
         Ok(Err(ProviderError::InvalidRequest(message))) => {
-            Err(api_error(StatusCode::BAD_REQUEST, &message))
+            Err(api_error(StatusCode::BAD_REQUEST, &message).into_response())
         }
         Ok(Err(_)) | Err(_) => Ok(Json(json!({
             "provider_id": provider_id,
@@ -206,7 +216,7 @@ async fn authenticate_scope(
     body: &[u8],
     path: &str,
     requested: RequestedContext,
-) -> Result<((buzz_core::TenantContext, ReadScope), [u8; 32]), (StatusCode, Json<Value>)> {
+) -> Result<((buzz_core::TenantContext, ReadScope), [u8; 32]), Response> {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -218,21 +228,27 @@ async fn authenticate_scope(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
             )
-        })?;
+        })
+        .map_err(IntoResponse::into_response)?;
     let url = bridge::nip98_expected_url(public_scheme, &tenant, path);
-    let bridge::VerifiedBridgeAuth {
-        pubkey,
-        event_id_bytes: event_id,
-        signed_created_at,
-    } = bridge::verify_bridge_auth_with_options(
+    let nip_fi_active = !matches!(state.config.nip_fi.mode, NipFiMode::Off);
+    let admission = admit_nip_fi_http_on_state(
+        state,
         headers,
-        "POST",
-        &url,
-        Some(body),
-        state.config.require_auth_token,
-        true,
+        bridge::make_nip98_closure_for_admission(
+            headers.clone(),
+            "POST",
+            url,
+            Some(body.to_vec()),
+            state.config.require_auth_token || nip_fi_active,
+            true,
+        ),
     )?;
-    bridge::enforce_http_admission(state, &tenant, &pubkey).await?;
+    let pubkey = *admission.proven_pubkey();
+    let (event_id, signed_created_at) = admission.into_extra();
+    bridge::enforce_http_admission(state, &tenant, &pubkey)
+        .await
+        .map_err(IntoResponse::into_response)?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let auth_tag = headers
         .get("x-auth-tag")
@@ -244,11 +260,13 @@ async fn authenticate_scope(
         auth_tag,
         signed_created_at,
     )
-    .await?;
+    .await
+    .map_err(IntoResponse::into_response)?;
     let accessible = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
-        .map_err(|error| super::internal_error(&format!("channel access lookup: {error}")))?;
+        .map_err(|error| super::internal_error(&format!("channel access lookup: {error}")))
+        .map_err(IntoResponse::into_response)?;
 
     let (context, output_clearance, caller_clearance) = match requested {
         RequestedContext::WorkspacePublic => (
@@ -258,30 +276,31 @@ async fn authenticate_scope(
         ),
         RequestedContext::Channel { id } | RequestedContext::Dm { id } => {
             if !accessible.contains(&id) {
-                return Err(api_error(
-                    StatusCode::FORBIDDEN,
-                    "memory context is not accessible",
-                ));
+                return Err(
+                    api_error(StatusCode::FORBIDDEN, "memory context is not accessible")
+                        .into_response(),
+                );
             }
             let channel = state
                 .db
                 .get_channel(tenant.community(), id)
                 .await
-                .map_err(|_| {
-                    api_error(StatusCode::FORBIDDEN, "memory context is not accessible")
-                })?;
+                .map_err(|_| api_error(StatusCode::FORBIDDEN, "memory context is not accessible"))
+                .map_err(IntoResponse::into_response)?;
             let requested_dm = matches!(requested, RequestedContext::Dm { .. });
             if (channel.channel_type == "dm") != requested_dm {
                 return Err(api_error(
                     StatusCode::BAD_REQUEST,
                     "memory context kind does not match channel",
-                ));
+                )
+                .into_response());
             }
             let role = state
                 .db
                 .get_member_role(tenant.community(), id, &pubkey_bytes)
                 .await
-                .map_err(|error| super::internal_error(&format!("channel role lookup: {error}")))?;
+                .map_err(|error| super::internal_error(&format!("channel role lookup: {error}")))
+                .map_err(IntoResponse::into_response)?;
             let caller = if role.as_deref() == Some("guest") {
                 Clearance::WorkspacePublic
             } else {
@@ -307,7 +326,8 @@ async fn authenticate_scope(
     };
     scope
         .validate()
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, &error.to_string()))?;
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, &error.to_string()))
+        .map_err(IntoResponse::into_response)?;
     Ok(((tenant, scope), event_id))
 }
 

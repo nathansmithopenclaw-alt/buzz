@@ -2655,7 +2655,7 @@ pub async fn workflow_runs(
     Path(workflow_id): Path<uuid::Uuid>,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<WorkflowRunsQuery>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+) -> Result<Json<Value>, Response> {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -2667,17 +2667,32 @@ pub async fn workflow_runs(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
             )
-        })?;
+        })
+        .map_err(IntoResponse::into_response)?;
 
     let path = workflow_runs_path(workflow_id, raw_query.as_deref());
     let url = nip98_expected_url(public_scheme, &tenant, &path);
-    let VerifiedBridgeAuth {
-        pubkey,
-        event_id_bytes,
-        signed_created_at,
-    } = verify_bridge_auth(&headers, "GET", &url, None, state.config.require_auth_token)?;
-    enforce_http_admission(&state, &tenant, &pubkey).await?;
-    check_nip98_replay(&state, &tenant, event_id_bytes).await?;
+    let nip_fi_active = !matches!(state.config.nip_fi.mode, NipFiMode::Off);
+    let admission = admit_nip_fi_http_on_state(
+        &state,
+        &headers,
+        make_nip98_closure_for_admission(
+            headers.clone(),
+            "GET",
+            url,
+            None,
+            state.config.require_auth_token || nip_fi_active,
+            false,
+        ),
+    )?;
+    let pubkey = *admission.proven_pubkey();
+    let (event_id_bytes, signed_created_at) = admission.into_extra();
+    enforce_http_admission(&state, &tenant, &pubkey)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    check_nip98_replay(&state, &tenant, event_id_bytes)
+        .await
+        .map_err(IntoResponse::into_response)?;
 
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let auth_tag = headers
@@ -2690,7 +2705,8 @@ pub async fn workflow_runs(
         auth_tag,
         signed_created_at,
     )
-    .await?;
+    .await
+    .map_err(IntoResponse::into_response)?;
 
     let workflow = state
         .db
@@ -2699,16 +2715,18 @@ pub async fn workflow_runs(
         .map_err(|error| match error {
             buzz_db::DbError::NotFound(_) => not_found("workflow not found"),
             other => internal_error(&format!("get workflow: {other}")),
-        })?;
+        })
+        .map_err(IntoResponse::into_response)?;
     let Some(channel_id) = workflow.channel_id else {
-        return Err(not_found("workflow not found"));
+        return Err(not_found("workflow not found").into_response());
     };
     let accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
-        .map_err(|error| internal_error(&format!("channel access lookup: {error}")))?;
+        .map_err(|error| internal_error(&format!("channel access lookup: {error}")))
+        .map_err(IntoResponse::into_response)?;
     if !accessible_channels.contains(&channel_id) {
-        return Err(not_found("workflow not found"));
+        return Err(not_found("workflow not found").into_response());
     }
 
     let limit = query.limit.unwrap_or(20).min(100) as i64;
@@ -2716,7 +2734,8 @@ pub async fn workflow_runs(
         .db
         .list_workflow_runs(tenant.community(), workflow_id, limit)
         .await
-        .map_err(|error| internal_error(&format!("list workflow runs: {error}")))?;
+        .map_err(|error| internal_error(&format!("list workflow runs: {error}")))
+        .map_err(IntoResponse::into_response)?;
     Ok(Json(Value::Array(
         runs.iter().map(workflow_run_json).collect(),
     )))
@@ -3080,6 +3099,10 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
         "updated_at": b.updated_at,
     })
 }
+
+#[cfg(test)]
+#[path = "fork_route_postgres_tests.rs"]
+mod fork_route_postgres_tests;
 
 #[cfg(test)]
 #[path = "artifact_postgres_tests.rs"]
@@ -5264,7 +5287,8 @@ mod postgres_tests {
     /// Used by positive-control tests (same-key admission proves the handler
     /// was reached, not just deny-all).  Same key material as used in the
     /// cardinality test and the `signed_assertion_for_pubkey` helper below.
-    async fn nip_fi_enforce_test_state_with_verifier() -> Option<Arc<crate::state::AppState>> {
+    pub(super) async fn nip_fi_enforce_test_state_with_verifier(
+    ) -> Option<Arc<crate::state::AppState>> {
         use buzz_auth::{
             AssertionKeySet, FederatedAssertionVerifier, FreshnessClass, IssuerPolicy,
             IssuerRegistry, StaticIssuerKeySource, TokenClass, VerifyAssertion,
@@ -5316,7 +5340,7 @@ mod postgres_tests {
 
     /// Mint a signed NIP-FI assertion whose `nostr_pubkey` = `pubkey_hex`,
     /// using the shared HANDLER_TEST_* key material.
-    fn signed_assertion_for_pubkey(pubkey_hex: &str) -> String {
+    pub(super) fn signed_assertion_for_pubkey(pubkey_hex: &str) -> String {
         use jsonwebtoken::{Algorithm, EncodingKey, Header};
         let now = chrono::Utc::now().timestamp();
         let claims = serde_json::json!({
@@ -5337,7 +5361,7 @@ mod postgres_tests {
 
     /// Build a HeaderMap containing a valid NIP-98 Authorization header +
     /// a valid NIP-FI assertion for the same key.
-    fn same_key_nip98_and_assertion_headers(
+    pub(super) fn same_key_nip98_and_assertion_headers(
         keys: &Keys,
         url: &str,
         method: &str,
@@ -5458,7 +5482,7 @@ mod postgres_tests {
     /// the payload-binding check in NIP-FI Enforce mode. For GET or empty
     /// bodies pass `b""` — the SHA-256 of an empty body is included regardless,
     /// keeping the event unconditionally valid through `verify_bridge_auth_with_options`.
-    fn make_nip98_headers(
+    pub(super) fn make_nip98_headers(
         keys: &Keys,
         url: &str,
         method: &str,
@@ -5520,7 +5544,7 @@ mod postgres_tests {
 
     /// Drive a single oneshot request through the full relay router and return
     /// `(status, response_headers, body_bytes)` for exact-byte assertions.
-    async fn oneshot_request_full(
+    pub(super) async fn oneshot_request_full(
         state: Arc<crate::state::AppState>,
         method: &str,
         uri: &str,
