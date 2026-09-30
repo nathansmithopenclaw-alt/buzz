@@ -412,3 +412,292 @@ async fn generic_d_lookup_matches_before_limit() {
     expected.sort();
     assert_eq!(ids, expected, "{body}");
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_artifact_content_search_finds_current_revision() {
+    // NIP-AR docs/nips/NIP-AR.md#access: readable artifacts participate in search.
+    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    buzz_db::migration::run_migrations(&pool).await.unwrap();
+    let f = Fixture::new().await;
+    let create = f.revision(Uuid::new_v4(), "create", None);
+    f.publish(&create).await;
+    let (status, current) = f
+        .request(
+            "/query",
+            json!([
+                {"artifact":"current", "#d":[create.tags.identifier().unwrap()]}
+            ]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {current}");
+    assert_eq!(current[0]["id"], create.id.to_hex());
+    let (status, body) = f
+        .request(
+            "/query",
+            json!([
+                {"kinds":[45010], "#h":[f.home], "search":"review searchable"}
+            ]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body.as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body[0]["id"], create.id.to_hex(), "{body}");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn non_moderator_revision_author_redaction_preserves_artifact_current_state() {
+    // NIP-AR docs/nips/NIP-AR.md#moving-and-deleting: writer deletion uses a restorable tombstone (moderation-policy tension).
+    let f = Fixture::new().await;
+    let d = Uuid::new_v4();
+    let create = f.revision(d, "create", None);
+    f.publish(&create).await;
+    let edit = f.revision_as(&f.peer, f.home, d, "update", Some(&create));
+    f.publish(&edit).await;
+    let redact = EventBuilder::new(Kind::Custom(9005), "")
+        .tags([
+            Tag::parse(["e", &edit.id.to_hex()]).unwrap(),
+            Tag::parse(["h", &f.home.to_string()]).unwrap(),
+        ])
+        .sign_with_keys(&f.peer)
+        .unwrap();
+    let (status, redaction) = f.try_publish(&redact).await;
+    let (query_status, current) = f
+        .request("/query", json!([{"artifact":"current","#d":[d]}]))
+        .await;
+    let (count_status, history) = f
+        .request("/count", json!([{"artifact":"history","#d":[d]}]))
+        .await;
+    assert!(query_status.is_success(), "{query_status}: {current}");
+    assert!(count_status.is_success(), "{count_status}: {history}");
+    let recreate = EventBuilder::new(create.kind, "recreated task")
+        .tags(create.tags.iter().cloned())
+        .sign_with_keys(&f.owner)
+        .unwrap();
+    let (_, recreate) = f.try_publish(&recreate).await;
+    assert_eq!(
+        current.as_array().unwrap().len(),
+        1,
+        "nonmember 9005 ({status}: {redaction}) retired the owner's artifact; \
+         history count {history}; owner re-create: {recreate}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn retired_artifact_cannot_be_revived_by_a_new_reader() {
+    // NIP-AR docs/nips/NIP-AR.md#moderation-and-retention: clients without the retired head cannot edit further.
+    let f = Fixture::new().await;
+    let d = Uuid::new_v4();
+    let create = f.revision(d, "create", None);
+    f.publish(&create).await;
+    let removal = EventBuilder::new(Kind::Custom(9005), "")
+        .tags([
+            Tag::parse(["h", &f.home.to_string()]).unwrap(),
+            Tag::parse(["e", &create.id.to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&f.owner)
+        .unwrap();
+    f.publish(&removal).await;
+    // Peer has never fetched a revision. Its only source is post-redaction replay.
+    let (status, body) = f
+        .request_as(&f.peer, "/query", json!([{"kinds":[9005],"#h":[f.home]}]))
+        .await;
+    assert!(status.is_success(), "{status}: {body}");
+    let returned: Event = serde_json::from_value(body[0].clone()).unwrap();
+    let leaked_prev = returned
+        .tags
+        .iter()
+        .find_map(|t| {
+            let p = t.as_slice();
+            (p.first().map(String::as_str) == Some("e")).then(|| p[1].clone())
+        })
+        .unwrap();
+    let edit = EventBuilder::new(Kind::Custom(45010), "resurrected by fresh reader")
+        .tags([
+            Tag::parse(["ar", "1"]).unwrap(),
+            Tag::parse(["d", &d.to_string()]).unwrap(),
+            Tag::parse(["h", &f.home.to_string()]).unwrap(),
+            Tag::parse(["type", "buzz.task"]).unwrap(),
+            Tag::parse(["title", "resurrected"]).unwrap(),
+            Tag::parse(["op", "update"]).unwrap(),
+            Tag::parse(["prev", &leaked_prev]).unwrap(),
+        ])
+        .sign_with_keys(&f.peer)
+        .unwrap();
+    let (status, body) = f.try_publish(&edit).await;
+    assert!(
+        !status.is_success() || body["accepted"] != true,
+        "fresh reader recovered retired prev from 9005 and revived artifact: {status}: {body}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn generic_artifact_tag_matching_precedes_pagination() {
+    // NIP-AR docs/nips/NIP-AR.md#current-state-and-queries: tag matching applies before pagination.
+    let f = Fixture::new().await;
+    let now = nostr::Timestamp::now().as_secs();
+    let older = resign(
+        &f.revision(Uuid::new_v4(), "create", None),
+        &f.owner,
+        &[["t", "wanted"]],
+        now - 60,
+    );
+    let newer = resign(
+        &f.revision(Uuid::new_v4(), "create", None),
+        &f.owner,
+        &[["t", "other"]],
+        now,
+    );
+    f.publish(&older).await;
+    f.publish(&newer).await;
+    let (status, exact) = f
+        .request(
+            "/query",
+            json!([
+                {"artifact":"current", "#t":["wanted"], "limit":1}
+            ]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {exact}");
+    assert_eq!(exact[0]["id"], older.id.to_hex());
+    let (status, body) = f
+        .request(
+            "/query",
+            json!([
+                {"kinds":[45010], "#h":[f.home], "#t":["wanted"], "limit":1}
+            ]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body.as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body[0]["id"], older.id.to_hex(), "{body}");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn out_of_range_kinds_cannot_silently_drop_artifact_predicates() {
+    // NIP-AR docs/nips/NIP-AR.md#current-state-and-queries: unsupported predicates fail explicitly, never silently ignored.
+    let f = Fixture::new().await;
+    for project in ["A", "B"] {
+        let create = f.revision(Uuid::new_v4(), "create", None);
+        let create = resign(
+            &create,
+            &f.owner,
+            &[["project", project]],
+            create.created_at.as_secs(),
+        );
+        f.publish(&create).await;
+    }
+    let filter = json!({"kinds":[110546],"#h":[f.home],"#project":["A"]});
+    let ws = json!(["REQ", "board", filter.clone()]).to_string();
+    let ws_parse = crate::protocol::ClientMessage::parse(&ws).is_ok();
+    let (query_status, query) = f.request("/query", json!([filter.clone()])).await;
+    let (count_status, count) = f.request("/count", json!([filter])).await;
+    assert!(
+        query_status == axum::http::StatusCode::BAD_REQUEST
+            && count_status == axum::http::StatusCode::BAD_REQUEST
+            && !ws_parse,
+        "unsupported #project must fail explicitly: /query {query_status}: {query}; \
+         /count {count_status}: {count}; WebSocket REQ accepted: {ws_parse}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn generic_artifact_identity_matches_only_the_d_tag_first_value() {
+    // NIP-AR docs/nips/NIP-AR.md#current-state-and-queries: match the tag name and its first value in the same tag.
+    let f = Fixture::new().await;
+    let a = Uuid::new_v4();
+    let now = nostr::Timestamp::now().as_secs();
+    let older = resign(&f.revision(a, "create", None), &f.owner, &[], now - 60);
+    f.publish(&older).await;
+    let other = f.revision(Uuid::new_v4(), "create", None);
+    let newer = EventBuilder::new(other.kind, other.content.clone())
+        .tags(
+            other
+                .tags
+                .iter()
+                .cloned()
+                .chain([Tag::parse(["related", "d", &a.to_string()]).unwrap()]),
+        )
+        .custom_created_at(nostr::Timestamp::from(now))
+        .sign_with_keys(&f.owner)
+        .unwrap();
+    f.publish(&newer).await;
+    // Exact artifact queries correctly reject an annotation-value match.
+    let (status, exact) = f
+        .request(
+            "/query",
+            json!([
+                {"artifact":"current", "#d":[a], "limit":1}
+            ]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {exact}");
+    assert_eq!(exact[0]["id"], older.id.to_hex());
+    // Generic lookup must apply the same positional check before LIMIT.
+    let (status, body) = f
+        .request(
+            "/query",
+            json!([
+                {"kinds":[45010], "#h":[f.home], "#d":[a], "limit":1}
+            ]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body.as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body[0]["id"], older.id.to_hex(), "{body}");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn kind5_address_deletion_is_rejected_for_artifacts() {
+    // NIP-AR docs/nips/NIP-AR.md#moderation-and-retention: kind-5 requests targeting artifact revisions are explicitly rejected.
+    let f = Fixture::new().await;
+    let d = Uuid::new_v4();
+    let create = f.revision(d, "create", None);
+    f.publish(&create).await;
+    let coordinate = format!("45010:{}:{d}", f.owner.public_key().to_hex());
+    let deletion = EventBuilder::new(Kind::Custom(5), "")
+        .tags([
+            Tag::parse(["a", &coordinate]).unwrap(),
+            Tag::parse(["k", "45010"]).unwrap(),
+        ])
+        .sign_with_keys(&f.owner)
+        .unwrap();
+    let (status, body) = f.try_publish(&deletion).await;
+    assert!(
+        !status.is_success() || body["accepted"] == false,
+        "kind 5 {coordinate} accepted: {status}: {body}"
+    );
+    assert!(
+        body.to_string()
+            .contains("artifacts cannot be deleted with kind 5"),
+        "kind 5 artifact deletion needs an explicit reason: {status}: {body}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn readable_artifact_conflict_names_current_head() {
+    // Agreed requirement 1 / crates/buzz-db/src/store/artifact.rs ArtifactOutcome contract: stale-prev conflicts name the readable head.
+    let f = Fixture::new().await;
+    let d = Uuid::new_v4();
+    let create = f.revision(d, "create", None);
+    f.publish(&create).await;
+    let update = f.revision(d, "update", Some(&create));
+    f.publish(&update).await;
+    let stale = f.revision_as(&f.peer, f.home, d, "update", Some(&create));
+    let (status, body) = f.try_publish(&stale).await;
+    assert!(body.to_string().contains("conflict"), "{status}: {body}");
+    assert!(
+        body.to_string().contains(&update.id.to_hex()),
+        "conflict omits the readable head {}: {body}",
+        update.id.to_hex()
+    );
+}
