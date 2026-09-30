@@ -1748,7 +1748,7 @@ mod postgres_tests {
         ] {
             assert!(
                 migrations[59].sql.as_str().contains(index),
-                "migration 0050 must declare {index}"
+                "migration 0060 must declare {index}"
             );
             assert!(
                 desired_schema.contains(index),
@@ -1761,7 +1761,7 @@ mod postgres_tests {
         ] {
             assert!(
                 migrations[59].sql.as_str().contains(index_shape),
-                "migration 0050 must declare {index_shape}"
+                "migration 0060 must declare {index_shape}"
             );
             assert!(
                 desired_schema.contains(index_shape),
@@ -2139,7 +2139,7 @@ mod postgres_tests {
         let migration = MIGRATOR
             .iter()
             .find(|migration| migration.description == "owner deletion auto approval")
-            .expect("embedded migration 0053")
+            .expect("embedded migration 0063")
             .sql
             .as_ref()
             .to_ascii_lowercase();
@@ -2276,10 +2276,10 @@ mod postgres_tests {
             .expect("embedded migration 0029")
             .sql
             .as_ref();
-        let migration_0051: &str = MIGRATOR
+        let migration_0061: &str = MIGRATOR
             .iter()
             .find(|migration| migration.description == "owner community deletion admission")
-            .expect("embedded migration 0051")
+            .expect("embedded migration 0061")
             .sql
             .as_ref();
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2290,7 +2290,7 @@ mod postgres_tests {
             .expect("read schema/schema.sql");
 
         let migration = surface(migration_0029);
-        let owner_admission_migration = surface(migration_0051);
+        let owner_admission_migration = surface(migration_0061);
         let schema = surface(&schema_sql);
 
         assert_eq!(
@@ -2373,7 +2373,7 @@ mod postgres_tests {
             owner_admission_migration
                 .functions
                 .get("prevent_community_deletion_request_retargeting")
-                .expect("0051 deletion retargeting guard"),
+                .expect("0061 deletion retargeting guard"),
             "schema.sql must carry the latest immutable owner-provenance guard"
         );
         let request_table = schema

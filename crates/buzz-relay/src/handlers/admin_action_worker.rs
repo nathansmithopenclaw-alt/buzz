@@ -102,7 +102,7 @@ pub(crate) async fn recover_one(state: &Arc<AppState>, claim: StrandedActionClai
     );
 
     // Use the target context persisted at claim time for kick actions only.
-    // Migration 0047 added enforcement_target_pubkey/enforcement_channel_id
+    // Migration 0057 added enforcement_target_pubkey/enforcement_channel_id
     // for kicks; other actions (ban, timeout, delete) do not set these columns
     // and must re-derive from the report row on every recovery. Applying the
     // persisted-context branch to non-kick actions breaks delete recovery:

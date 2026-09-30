@@ -7549,7 +7549,7 @@ mod postgres_tests {
         // Criterion 3 + Paul's mid-flight edge: a kick on an event report claims,
         // commits its mutation+marker, then the event row is HARD-purged before a
         // stranded re-drive. Because target_pubkey and channel_id are now persisted
-        // in relay_admin_actions at claim time (migration 0047), recovery no longer
+        // in relay_admin_actions at claim time (migration 0057), recovery no longer
         // re-derives them from the mutable event/report rows. All three live side
         // effects fire on re-drive: cache invalidation, subscription eviction, and
         // workflow disablement. The action converges to succeeded and report → resolved.
@@ -10358,7 +10358,7 @@ mod postgres_tests {
 
     // ── Pre-migration kick row upgrade-recovery (pre-marker) ─────────────────
 
-    /// A kick action created by the old writer (before migration 0047 applied)
+    /// A kick action created by the old writer (before migration 0057 applied)
     /// has NULL enforcement_target_pubkey and enforcement_channel_id. After the
     /// migration the recovery worker finds this row pre-marker (no mutation
     /// committed yet), re-derives the target from the report, and drives the full
@@ -10388,7 +10388,7 @@ mod postgres_tests {
             e2e_event_report_with_author(&pool, community_id, &target).await;
 
         // Claim via the normal path (populates enforcement columns), then clear
-        // them to simulate the old writer that did not know about migration 0047.
+        // them to simulate the old writer that did not know about migration 0057.
         let action_id = match buzz_db::relay_admin_actions::claim_report(
             &pool,
             cid,
@@ -10589,7 +10589,7 @@ mod postgres_tests {
     // ── Pre-migration kick row upgrade-recovery (post-marker) ────────────────
 
     /// Same scenario as the pre-marker test, but the old writer committed both
-    /// the kick mutation AND the step_marker before crashing. After migration 0047
+    /// the kick mutation AND the step_marker before crashing. After migration 0057
     /// the recovery worker picks up the stranded post-marker row, falls back to
     /// the re-derived target, fires live side effects, and finalizes to succeeded.
     ///

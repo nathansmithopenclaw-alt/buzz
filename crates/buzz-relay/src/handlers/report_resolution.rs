@@ -619,7 +619,7 @@ async fn drive_enforcement(
         //
         // Live side effects for kick use the target context persisted at claim
         // time (enforcement_target_pubkey / enforcement_channel_id) when present.
-        // Migration 0047 added these columns without backfilling, so rows written
+        // Migration 0057 added these columns without backfilling, so rows written
         // before the migration have NULL/NULL.  On the recovery path the worker
         // re-derives the target from the report and passes it as the function
         // parameters; we accept those as a legacy-context fallback so pre-migration
@@ -637,7 +637,7 @@ async fn drive_enforcement(
         if action == "kick" {
             // Prefer the persisted context (accurate at claim time, immune to
             // later report/member mutations). Fall back to the function parameters
-            // when the row pre-dates migration 0047 and those columns are NULL.
+            // when the row pre-dates migration 0057 and those columns are NULL.
             let kick_target = rec.enforcement_target_pubkey.as_deref().or(target_pubkey);
             let kick_channel = rec.enforcement_channel_id.or(channel_id);
 
