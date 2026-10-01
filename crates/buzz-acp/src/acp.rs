@@ -1040,19 +1040,20 @@ impl AcpClient {
         }
 
         if has_generated_codex_config {
-            // Workspace-local exact-prefix allowlist for `buzz messages send`.
-            // auto_review stays on for every other command (Nathan 08-11).
+            // Workspace-local exact-prefix allowlists for `buzz messages send`
+            // (Nathan 08-11) and `buzz briefs` (Nathan 10-01). auto_review
+            // stays on for every other command.
             match std::env::current_dir() {
                 Ok(cwd) => match crate::config::install_codex_relay_send_allowlist(&cwd) {
                     Ok(path) => tracing::info!(
                         target: "acp::codex",
                         path = %path.display(),
-                        "installed Codex execpolicy allowlist for buzz messages send"
+                        "installed Codex execpolicy allowlists for buzz messages send and buzz briefs"
                     ),
                     Err(error) => tracing::warn!(
                         target: "acp::codex",
                         error = %error,
-                        "failed to install Codex execpolicy allowlist for buzz messages send"
+                        "failed to install Codex execpolicy allowlists for buzz messages send and buzz briefs"
                     ),
                 },
                 Err(error) => tracing::warn!(
