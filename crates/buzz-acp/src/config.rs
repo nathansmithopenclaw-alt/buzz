@@ -1062,6 +1062,45 @@ pub fn command_is_relay_send(tokens: &[&str]) -> bool {
     tokens.starts_with(CODEX_RELAY_SEND_PREFIX)
 }
 
+/// Exact argv prefixes Codex execpolicy treats as `buzz briefs`, with and
+/// without the global `--format` flag that precedes the subcommand.
+///
+/// Summary runs read every configured conversation and publish through
+/// `buzz briefs`; under `auto_review` each call needed a sandbox escalation,
+/// and a model that skipped it read the sandbox's DNS failure as a relay
+/// outage (Synopsis, 2026-09-26..29). Nathan approved running this one
+/// command group with relay network access on 2026-10-01. Every other
+/// `buzz` command stays under `auto_review`. Do not widen past `briefs`.
+pub const CODEX_RELAY_BRIEFS_PREFIXES: &[&[&str]] = &[
+    &["buzz", "briefs"],
+    &["buzz", "--format", "json", "briefs"],
+    &["buzz", "--format", "compact", "briefs"],
+];
+
+/// Filename written next to [`CODEX_RELAY_SEND_RULES_FILE`].
+pub const CODEX_RELAY_BRIEFS_RULES_FILE: &str = "buzz-acp-relay-briefs.rules";
+
+/// Starlark execpolicy that allows only `buzz [--format json|compact] briefs …`.
+pub fn codex_relay_briefs_execpolicy() -> String {
+    CODEX_RELAY_BRIEFS_PREFIXES
+        .iter()
+        .map(|prefix| {
+            format!(
+                "prefix_rule(pattern=[\"{}\"], decision=\"allow\", justification=\"owner-authorized Summary relay reads and publication\")\n",
+                prefix.join("\", \"")
+            )
+        })
+        .collect()
+}
+
+/// True when `tokens` is a `buzz briefs` invocation covered by the allowlist.
+#[allow(dead_code)] // public matcher for the installed execpolicy; used by tests
+pub fn command_is_relay_briefs(tokens: &[&str]) -> bool {
+    CODEX_RELAY_BRIEFS_PREFIXES
+        .iter()
+        .any(|prefix| tokens.starts_with(prefix))
+}
+
 /// Install the exact-prefix allowlist into `workspace/.codex/rules/`.
 ///
 /// Idempotent: rewritten only when content differs. Non-Codex callers should
@@ -1070,13 +1109,20 @@ pub fn command_is_relay_send(tokens: &[&str]) -> bool {
 pub fn install_codex_relay_send_allowlist(workspace: &Path) -> std::io::Result<PathBuf> {
     let dir = workspace.join(".codex").join("rules");
     std::fs::create_dir_all(&dir)?;
+    write_if_changed(
+        &dir.join(CODEX_RELAY_BRIEFS_RULES_FILE),
+        &codex_relay_briefs_execpolicy(),
+    )?;
     let path = dir.join(CODEX_RELAY_SEND_RULES_FILE);
-    let desired = codex_relay_send_execpolicy();
-    match std::fs::read_to_string(&path) {
-        Ok(existing) if existing == desired => {}
-        _ => std::fs::write(&path, desired)?,
-    }
+    write_if_changed(&path, &codex_relay_send_execpolicy())?;
     Ok(path)
+}
+
+fn write_if_changed(path: &Path, desired: &str) -> std::io::Result<()> {
+    match std::fs::read_to_string(path) {
+        Ok(existing) if existing == desired => Ok(()),
+        _ => std::fs::write(path, desired),
+    }
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -2288,6 +2334,54 @@ mod tests {
         assert!(!policy.contains("/bin/zsh"));
         assert!(!policy.contains("approval_policy"));
         assert!(!policy.contains("approvals_reviewer"));
+    }
+
+    #[test]
+    fn relay_briefs_execpolicy_is_exact_prefix_starlark() {
+        let policy = codex_relay_briefs_execpolicy();
+        assert_eq!(policy.lines().count(), 3);
+        assert!(policy.contains("pattern=[\"buzz\", \"briefs\"]"));
+        assert!(policy.contains("pattern=[\"buzz\", \"--format\", \"compact\", \"briefs\"]"));
+        assert!(policy.contains("pattern=[\"buzz\", \"--format\", \"json\", \"briefs\"]"));
+        assert!(!policy.contains("/bin/zsh"));
+        assert!(!policy.contains("approval_policy"));
+    }
+
+    #[test]
+    fn relay_briefs_matcher_allows_only_briefs() {
+        assert!(command_is_relay_briefs(&[
+            "buzz", "briefs", "run", "status"
+        ]));
+        assert!(command_is_relay_briefs(&[
+            "buzz", "--format", "compact", "briefs", "read"
+        ]));
+        assert!(command_is_relay_briefs(&[
+            "buzz", "--format", "json", "briefs", "list"
+        ]));
+        assert!(!command_is_relay_briefs(&["buzz", "channels", "list"]));
+        assert!(!command_is_relay_briefs(&["buzz", "briefsx"]));
+        assert!(!command_is_relay_briefs(&[
+            "buzz", "--format", "compact", "messages", "get"
+        ]));
+        assert!(!command_is_relay_briefs(&["buzz"]));
+    }
+
+    #[test]
+    fn install_relay_send_allowlist_also_installs_briefs_rules() {
+        let dir =
+            std::env::temp_dir().join(format!("buzz-acp-relay-briefs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        install_codex_relay_send_allowlist(&dir).unwrap();
+        let briefs = dir
+            .join(".codex")
+            .join("rules")
+            .join(CODEX_RELAY_BRIEFS_RULES_FILE);
+        assert_eq!(
+            std::fs::read_to_string(&briefs).unwrap(),
+            codex_relay_briefs_execpolicy()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
