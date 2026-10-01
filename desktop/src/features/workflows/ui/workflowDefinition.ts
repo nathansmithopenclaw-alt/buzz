@@ -118,13 +118,16 @@ function getScheduleCardClause(trigger: Record<string, unknown>): string {
     interval: nonEmptyString(trigger.interval) ?? undefined,
   });
 
+  // The relay reads cron fields in `trigger.timezone` when set, else UTC.
+  const timezone = nonEmptyString(trigger.timezone) ?? "UTC";
+
   switch (schedule.frequency) {
     case "daily":
-      return `Every day at ${schedule.time} UTC`;
+      return `Every day at ${schedule.time} ${timezone}`;
     case "weekly":
-      return `Every week at ${schedule.time} UTC`;
+      return `Every week at ${schedule.time} ${timezone}`;
     case "monthly":
-      return `Every month at ${schedule.time} UTC`;
+      return `Every month at ${schedule.time} ${timezone}`;
     case "custom_interval":
       return schedule.customInterval
         ? `Every ${schedule.customInterval}`
