@@ -304,6 +304,31 @@ test("summarizes common and custom schedules", () => {
   );
   assert.equal(
     getWorkflowCardLabel({
+      trigger: {
+        on: "schedule",
+        cron: "0 9 * * *",
+        timezone: "America/New_York",
+      },
+      steps: [{ action: "send_message", text: "Daily check-in" }],
+    }),
+    "Every day at 09:00 America/New_York, send “Daily check-in”",
+  );
+  assert.equal(
+    getWorkflowCardLabel({
+      trigger: { on: "schedule", cron: "0 9 * * 1", timezone: "Europe/Berlin" },
+      steps: [],
+    }),
+    "Every week at 09:00 Europe/Berlin",
+  );
+  assert.equal(
+    getWorkflowCardLabel({
+      trigger: { on: "schedule", cron: "30 9 * * *", timezone: "  " },
+      steps: [],
+    }),
+    "Every day at 09:30 UTC",
+  );
+  assert.equal(
+    getWorkflowCardLabel({
       trigger: { on: "schedule", cron: "*/5 8-17 * * 1-5" },
       steps: [],
     }),
